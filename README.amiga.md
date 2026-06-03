@@ -56,6 +56,9 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
 - `--selftest-mulshift` compares the portable C `MULSHIFT32` reference with the
   optional 68020+ assembly helper over edge cases and 100,000 pseudo-random
   input pairs.
+- `--checksum` prints a 32-bit checksum of the decoded 16-bit PCM stream before
+  optional mixing, downsampling, or output-format conversion.  Use it to compare
+  the default polyphase path with optional optimized builds.
 - `--debug-argv` or `--show-argv` prints `argc` and `argv` after Amiga
   command-tail normalization.  The normalizer also handles Amiga C runtimes
   that pass the whole command tail as one argument, including CR/LF
@@ -80,24 +83,37 @@ bitrate when available, followed by decoded frame count and output sample count.
    amiga_mp3dec.asm --selftest-mulshift
    ```
 
-4. Compare the C and asm builds with identical inputs and output modes:
+4. `AMIGA_FAST_POLYPHASE` is an opt-in Amiga/m68k polyphase synthesis path
+   for 68020+ builds.  It keeps the original implementation available when the
+   flag is omitted, but replaces the 64-bit polyphase accumulator with 32-bit
+   fixed-point high-multiply terms to reduce 68030 inner-loop overhead:
+
+   ```sh
+   m68k-amigaos-gcc -m68020 -O2 -DAMIGA_FAST_POLYPHASE -Ipub -Ireal \
+     -o amiga_mp3dec.fastpoly amiga_mp3dec.c mp3dec.c mp3tabs.c real/*.c
+   ```
+
+5. Compare default and `AMIGA_FAST_POLYPHASE` builds with identical inputs,
+   output modes, and checksum reporting:
 
    ```sh
    m68k-amigaos-gcc -m68020 -O2 -Ipub -Ireal \
      -o amiga_mp3dec.c-ref amiga_mp3dec.c mp3dec.c mp3tabs.c real/*.c
-   amiga_mp3dec.c-ref --bench --decode-only song.mp3
-   amiga_mp3dec.asm --bench --decode-only song.mp3
-   amiga_mp3dec.c-ref --bench --no-output --fibdelta --rate 22050 song.mp3
-   amiga_mp3dec.asm --bench --no-output --fibdelta --rate 22050 song.mp3
+   m68k-amigaos-gcc -m68020 -O2 -DAMIGA_FAST_POLYPHASE -Ipub -Ireal \
+     -o amiga_mp3dec.fastpoly amiga_mp3dec.c mp3dec.c mp3tabs.c real/*.c
+   amiga_mp3dec.c-ref --bench --decode-only --checksum song.mp3
+   amiga_mp3dec.fastpoly --bench --decode-only --checksum song.mp3
+   amiga_mp3dec.c-ref --bench --no-output --fibdelta --rate 22050 --checksum song.mp3
+   amiga_mp3dec.fastpoly --bench --no-output --fibdelta --rate 22050 --checksum song.mp3
    ```
 
-5. Check final Amiga binaries for libgcc 64-bit helper calls before measuring:
+6. Check final Amiga binaries for libgcc 64-bit helper calls before measuring:
 
    ```sh
    m68k-amigaos-nm -u amiga_mp3dec.asm | egrep '__muldi3|__ashrdi3|__lshrdi3'
    ```
 
    `MULSHIFT32` should not add those calls when `AMIGA_M68K_ASM` is enabled.
-   `MADD64`, `SHL64`, and `SAR64` intentionally remain portable C in this step,
-   so any remaining helper symbols should be attributed to those paths before
-   investigating them one at a time.
+   `AMIGA_FAST_POLYPHASE` should remove the polyphase dependency on `MADD64` and
+   `SAR64`; any remaining helper symbols should be attributed to non-polyphase
+   paths before investigating them one at a time.

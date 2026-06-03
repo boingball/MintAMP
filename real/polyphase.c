@@ -56,6 +56,12 @@
 #define DEF_NFRACBITS	(DQ_FRACBITS_OUT - 2 - 2 - 15)	
 #define CSHIFT	12	/* coefficients have 12 leading sign bits for early-terminating mulitplies */
 
+#if defined(__GNUC__) && defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE)
+#define POLYPHASE_REF_UNUSED __attribute__((unused))
+#else
+#define POLYPHASE_REF_UNUSED
+#endif
+
 static __inline short ClipToShort(int x, int fracBits)
 {
 	int sign;
@@ -109,7 +115,7 @@ static __inline short ClipToShort(int x, int fracBits)
  * TODO:        add 32-bit version for platforms where 64-bit mul-acc is not supported
  *                (note max filter gain - see polyCoef[] comments)
  **************************************************************************************/
-void PolyphaseMono(short *pcm, int *vbuf, const int *coefBase)
+static POLYPHASE_REF_UNUSED void PolyphaseMonoReference(short *pcm, int *vbuf, const int *coefBase)
 {	
 	int i;
 	const int *coef;
@@ -222,7 +228,7 @@ void PolyphaseMono(short *pcm, int *vbuf, const int *coefBase)
  *
  * TODO:        add 32-bit version for platforms where 64-bit mul-acc is not supported
  **************************************************************************************/
-void PolyphaseStereo(short *pcm, int *vbuf, const int *coefBase)
+static POLYPHASE_REF_UNUSED void PolyphaseStereoReference(short *pcm, int *vbuf, const int *coefBase)
 {
 	int i;
 	const int *coef;
@@ -292,4 +298,223 @@ void PolyphaseStereo(short *pcm, int *vbuf, const int *coefBase)
 		*(pcm + 2*2*i + 1) = ClipToShort((int)SAR64(sum2R, (32-CSHIFT)), DEF_NFRACBITS);
 		pcm += 2;
 	}
+}
+
+#if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE)
+
+/*
+ * Optional Amiga/m68k fast polyphase path.
+ *
+ * The reference path above keeps a 64-bit accumulator and rounds once at the
+ * end of each convolution.  That is exact, but very expensive on 68030 C
+ * builds because every MADD64/SAR64 can become libgcc helper code.  This path
+ * trades a small, deterministic rounding difference for a much cheaper 32-bit
+ * accumulator: each product is scaled directly to the final PCM integer domain
+ * with a signed 32x32 high multiply using the existing coefficient headroom
+ * (polyCoef values are Q30 pre-shifted by CSHIFT).  Accumulation and clipping
+ * are then plain 32-bit operations.
+ *
+ * Build with -DAMIGA_FAST_POLYPHASE to opt in.  Omit it to retain the original
+ * bit-exact polyphase implementation.
+ */
+static __inline short ClipIntToShort(int x)
+{
+	int sign;
+
+	sign = x >> 31;
+	if (sign != (x >> 15))
+		x = sign ^ ((1 << 15) - 1);
+
+	return (short)x;
+}
+
+static __inline int PolyphaseMulShift26(int x, int coef)
+{
+	/* Need (x * coef) >> (32 - CSHIFT + DEF_NFRACBITS) == >> 26.
+	 * Shift the coefficient left by DEF_NFRACBITS and take the high word.
+	 */
+#if defined(__GNUC__) && \
+	(defined(__mc68020__) || defined(__mc68030__) || defined(__mc68040__) || \
+	 defined(__mc68060__) || defined(mc68020))
+	int hi;
+	int lo;
+	lo = x;
+	__asm__ volatile ("muls.l %2,%0:%1"
+		: "=d" (hi), "+d" (lo)
+		: "dmi" (coef << DEF_NFRACBITS));
+	(void)lo;
+	return hi;
+#else
+	return MULSHIFT32(x, coef << DEF_NFRACBITS);
+#endif
+}
+
+#define FAST_MC0(acc, v, c) do { \
+	const int *vLoP = (v); \
+	const int *vHiP = (v) + 23; \
+	const int *cP = (c); \
+	(acc) += PolyphaseMulShift26(vLoP[0], cP[0]); \
+	(acc) -= PolyphaseMulShift26(vHiP[0], cP[1]); \
+	(acc) += PolyphaseMulShift26(vLoP[1], cP[2]); \
+	(acc) -= PolyphaseMulShift26(vHiP[-1], cP[3]); \
+	(acc) += PolyphaseMulShift26(vLoP[2], cP[4]); \
+	(acc) -= PolyphaseMulShift26(vHiP[-2], cP[5]); \
+	(acc) += PolyphaseMulShift26(vLoP[3], cP[6]); \
+	(acc) -= PolyphaseMulShift26(vHiP[-3], cP[7]); \
+	(acc) += PolyphaseMulShift26(vLoP[4], cP[8]); \
+	(acc) -= PolyphaseMulShift26(vHiP[-4], cP[9]); \
+	(acc) += PolyphaseMulShift26(vLoP[5], cP[10]); \
+	(acc) -= PolyphaseMulShift26(vHiP[-5], cP[11]); \
+	(acc) += PolyphaseMulShift26(vLoP[6], cP[12]); \
+	(acc) -= PolyphaseMulShift26(vHiP[-6], cP[13]); \
+	(acc) += PolyphaseMulShift26(vLoP[7], cP[14]); \
+	(acc) -= PolyphaseMulShift26(vHiP[-7], cP[15]); \
+} while (0)
+
+#define FAST_MC1(acc, v, c) do { \
+	const int *vLoP = (v); \
+	const int *cP = (c); \
+	(acc) += PolyphaseMulShift26(vLoP[0], cP[0]); \
+	(acc) += PolyphaseMulShift26(vLoP[1], cP[1]); \
+	(acc) += PolyphaseMulShift26(vLoP[2], cP[2]); \
+	(acc) += PolyphaseMulShift26(vLoP[3], cP[3]); \
+	(acc) += PolyphaseMulShift26(vLoP[4], cP[4]); \
+	(acc) += PolyphaseMulShift26(vLoP[5], cP[5]); \
+	(acc) += PolyphaseMulShift26(vLoP[6], cP[6]); \
+	(acc) += PolyphaseMulShift26(vLoP[7], cP[7]); \
+} while (0)
+
+#define FAST_MC2(accLo, accHi, v, c) do { \
+	const int *vLoP = (v); \
+	const int *vHiP = (v) + 23; \
+	const int *cP = (c); \
+	int c1_, c2_; \
+	int lo_, hi_; \
+	c1_ = cP[0]; c2_ = cP[1]; lo_ = vLoP[0]; hi_ = vHiP[0]; \
+	(accLo) += PolyphaseMulShift26(lo_, c1_) - PolyphaseMulShift26(hi_, c2_); \
+	(accHi) += PolyphaseMulShift26(lo_, c2_) + PolyphaseMulShift26(hi_, c1_); \
+	c1_ = cP[2]; c2_ = cP[3]; lo_ = vLoP[1]; hi_ = vHiP[-1]; \
+	(accLo) += PolyphaseMulShift26(lo_, c1_) - PolyphaseMulShift26(hi_, c2_); \
+	(accHi) += PolyphaseMulShift26(lo_, c2_) + PolyphaseMulShift26(hi_, c1_); \
+	c1_ = cP[4]; c2_ = cP[5]; lo_ = vLoP[2]; hi_ = vHiP[-2]; \
+	(accLo) += PolyphaseMulShift26(lo_, c1_) - PolyphaseMulShift26(hi_, c2_); \
+	(accHi) += PolyphaseMulShift26(lo_, c2_) + PolyphaseMulShift26(hi_, c1_); \
+	c1_ = cP[6]; c2_ = cP[7]; lo_ = vLoP[3]; hi_ = vHiP[-3]; \
+	(accLo) += PolyphaseMulShift26(lo_, c1_) - PolyphaseMulShift26(hi_, c2_); \
+	(accHi) += PolyphaseMulShift26(lo_, c2_) + PolyphaseMulShift26(hi_, c1_); \
+	c1_ = cP[8]; c2_ = cP[9]; lo_ = vLoP[4]; hi_ = vHiP[-4]; \
+	(accLo) += PolyphaseMulShift26(lo_, c1_) - PolyphaseMulShift26(hi_, c2_); \
+	(accHi) += PolyphaseMulShift26(lo_, c2_) + PolyphaseMulShift26(hi_, c1_); \
+	c1_ = cP[10]; c2_ = cP[11]; lo_ = vLoP[5]; hi_ = vHiP[-5]; \
+	(accLo) += PolyphaseMulShift26(lo_, c1_) - PolyphaseMulShift26(hi_, c2_); \
+	(accHi) += PolyphaseMulShift26(lo_, c2_) + PolyphaseMulShift26(hi_, c1_); \
+	c1_ = cP[12]; c2_ = cP[13]; lo_ = vLoP[6]; hi_ = vHiP[-6]; \
+	(accLo) += PolyphaseMulShift26(lo_, c1_) - PolyphaseMulShift26(hi_, c2_); \
+	(accHi) += PolyphaseMulShift26(lo_, c2_) + PolyphaseMulShift26(hi_, c1_); \
+	c1_ = cP[14]; c2_ = cP[15]; lo_ = vLoP[7]; hi_ = vHiP[-7]; \
+	(accLo) += PolyphaseMulShift26(lo_, c1_) - PolyphaseMulShift26(hi_, c2_); \
+	(accHi) += PolyphaseMulShift26(lo_, c2_) + PolyphaseMulShift26(hi_, c1_); \
+} while (0)
+
+static void PolyphaseMonoFast(short *pcm, int *vbuf, const int *coefBase)
+{
+	int i;
+	const int *coef;
+	int *vb1;
+	int sum1;
+	int sum2;
+
+	coef = coefBase;
+	vb1 = vbuf;
+	sum1 = 0;
+	FAST_MC0(sum1, vb1, coef);
+	pcm[0] = ClipIntToShort(sum1);
+
+	coef = coefBase + 256;
+	vb1 = vbuf + 64 * 16;
+	sum1 = 0;
+	FAST_MC1(sum1, vb1, coef);
+	pcm[16] = ClipIntToShort(sum1);
+
+	coef = coefBase + 16;
+	vb1 = vbuf + 64;
+	pcm++;
+	for (i = 15; i > 0; i--) {
+		sum1 = 0;
+		sum2 = 0;
+		FAST_MC2(sum1, sum2, vb1, coef);
+		pcm[0] = ClipIntToShort(sum1);
+		pcm[2 * i] = ClipIntToShort(sum2);
+		vb1 += 64;
+		coef += 16;
+		pcm++;
+	}
+}
+
+static void PolyphaseStereoFast(short *pcm, int *vbuf, const int *coefBase)
+{
+	int i;
+	const int *coef;
+	int *vb1;
+	int sum1L;
+	int sum2L;
+	int sum1R;
+	int sum2R;
+
+	coef = coefBase;
+	vb1 = vbuf;
+	sum1L = 0;
+	sum1R = 0;
+	FAST_MC0(sum1L, vb1, coef);
+	FAST_MC0(sum1R, vb1 + 32, coef);
+	pcm[0] = ClipIntToShort(sum1L);
+	pcm[1] = ClipIntToShort(sum1R);
+
+	coef = coefBase + 256;
+	vb1 = vbuf + 64 * 16;
+	sum1L = 0;
+	sum1R = 0;
+	FAST_MC1(sum1L, vb1, coef);
+	FAST_MC1(sum1R, vb1 + 32, coef);
+	pcm[2 * 16 + 0] = ClipIntToShort(sum1L);
+	pcm[2 * 16 + 1] = ClipIntToShort(sum1R);
+
+	coef = coefBase + 16;
+	vb1 = vbuf + 64;
+	pcm += 2;
+	for (i = 15; i > 0; i--) {
+		sum1L = 0;
+		sum2L = 0;
+		sum1R = 0;
+		sum2R = 0;
+		FAST_MC2(sum1L, sum2L, vb1, coef);
+		FAST_MC2(sum1R, sum2R, vb1 + 32, coef);
+		pcm[0] = ClipIntToShort(sum1L);
+		pcm[1] = ClipIntToShort(sum1R);
+		pcm[2 * 2 * i + 0] = ClipIntToShort(sum2L);
+		pcm[2 * 2 * i + 1] = ClipIntToShort(sum2R);
+		vb1 += 64;
+		coef += 16;
+		pcm += 2;
+	}
+}
+
+#endif /* AMIGA_M68K && AMIGA_FAST_POLYPHASE */
+
+void PolyphaseMono(short *pcm, int *vbuf, const int *coefBase)
+{
+#if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE)
+	PolyphaseMonoFast(pcm, vbuf, coefBase);
+#else
+	PolyphaseMonoReference(pcm, vbuf, coefBase);
+#endif
+}
+
+void PolyphaseStereo(short *pcm, int *vbuf, const int *coefBase)
+{
+#if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE)
+	PolyphaseStereoFast(pcm, vbuf, coefBase);
+#else
+	PolyphaseStereoReference(pcm, vbuf, coefBase);
+#endif
 }

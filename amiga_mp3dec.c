@@ -33,6 +33,7 @@ typedef struct DecodeOptions {
 	int decodeOnly;
 	int noOutput;
 	int selftestMulshift;
+	int checksum;
 	int outputRate;
 	int help;
 	int debugArgv;
@@ -41,6 +42,7 @@ typedef struct DecodeOptions {
 typedef struct DecodeStats {
 	unsigned long decodedFrames;
 	unsigned long outputSamples;
+	unsigned long pcmChecksum;
 	int sampleRate;
 	int channels;
 	int bitrate;
@@ -327,6 +329,7 @@ static void PrintUsage(const char *prog)
 	printf("  --no-output  run conversion/compression paths but discard output bytes\n");
 	printf("  --rate HZ     output/downsample rate: 22050, 11025, or 8287 Hz\n");
 	printf("  --selftest-mulshift compare C and optional asm MULSHIFT32 helpers\n");
+	printf("  --checksum  print a 32-bit checksum of decoded PCM samples\n");
 	printf("  --debug-argv print argc/argv after Amiga argument normalization\n");
 	printf("  --show-argv  alias for --debug-argv\n");
 	printf("\n");
@@ -364,6 +367,8 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->noOutput = 1;
 		} else if (!strcmp(argv[i], "--selftest-mulshift")) {
 			opt->selftestMulshift = 1;
+		} else if (!strcmp(argv[i], "--checksum")) {
+			opt->checksum = 1;
 		} else if (!strcmp(argv[i], "--rate")) {
 			if (++i >= argc)
 				return -1;
@@ -741,6 +746,21 @@ static int SvxEnd(SvxWriter *svx)
 	return ferror(svx->fp) ? -1 : 0;
 }
 
+static unsigned long UpdatePcmChecksum(unsigned long checksum, const short *pcm, int nSamps)
+{
+	int i;
+
+	for (i = 0; i < nSamps; i++) {
+		unsigned int sample = (unsigned int)(unsigned short)pcm[i];
+		checksum ^= (unsigned long)(sample & 0xffU);
+		checksum = (checksum * 16777619UL) & 0xffffffffUL;
+		checksum ^= (unsigned long)((sample >> 8) & 0xffU);
+		checksum = (checksum * 16777619UL) & 0xffffffffUL;
+	}
+
+	return checksum;
+}
+
 static void UpdateFirstFrameStats(DecodeStats *stats, const MP3FrameInfo *info)
 {
 	if (!stats->sampleRate && info->samprate)
@@ -938,6 +958,8 @@ int main(int argc, char **argv)
 	}
 
 	memset(&stats, 0, sizeof(stats));
+	if (opt.checksum)
+		stats.pcmChecksum = 2166136261UL;
 	memset(&timing, 0, sizeof(timing));
 	memset(&rateState, 0, sizeof(rateState));
 	memset(&info, 0, sizeof(info));
@@ -1024,6 +1046,9 @@ int main(int argc, char **argv)
 
 		MP3GetLastFrameInfo(decoder, &info);
 		UpdateFirstFrameStats(&stats, &info);
+		if (opt.checksum)
+			stats.pcmChecksum = UpdatePcmChecksum(stats.pcmChecksum, decodeBuf,
+				info.outputSamps);
 		if (!effectiveRate)
 			effectiveRate = (opt.outputRate && info.samprate > opt.outputRate) ? opt.outputRate : info.samprate;
 
@@ -1103,6 +1128,8 @@ int main(int argc, char **argv)
 	printf("bitrate: %d bps\n", stats.bitrate);
 	printf("decoded frames: %lu\n", stats.decodedFrames);
 	printf("output samples: %lu\n", stats.outputSamples);
+	if (opt.checksum)
+		printf("decoded PCM checksum: %08lx\n", stats.pcmChecksum);
 
 	if (opt.bench) {
 		double elapsed = 0.0;
