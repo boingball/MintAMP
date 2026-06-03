@@ -269,16 +269,26 @@ static signed char FibDeltaApply(signed char prev, int nibble)
 	return (signed char)v;
 }
 
+static void SvxStartFibDelta(SvxWriter *svx, signed char predictor)
+{
+	/*
+	 * 8SVX Fibonacci Delta (D1) BODY data starts with two bytes before
+	 * the packed nibble stream.  The D1 unpacker seeds its predictor from
+	 * source[1], but it does not copy that byte to the output; every output
+	 * sample must still be represented by a following delta nibble.
+	 */
+	SvxWriteByte(svx, 0);
+	SvxWriteByte(svx, (unsigned char)predictor);
+	svx->fibPrev = predictor;
+	svx->fibStarted = 1;
+}
+
 static void SvxWriteFibSample(SvxWriter *svx, signed char sample)
 {
 	int nibble;
 
-	if (!svx->fibStarted) {
-		SvxWriteByte(svx, (unsigned char)sample);
-		svx->fibPrev = sample;
-		svx->fibStarted = 1;
-		return;
-	}
+	if (!svx->fibStarted)
+		SvxStartFibDelta(svx, sample);
 
 	nibble = FibDeltaNibble(svx->fibPrev, sample);
 	svx->fibPrev = FibDeltaApply(svx->fibPrev, nibble);
@@ -312,9 +322,13 @@ static int SvxEnd(SvxWriter *svx)
 	unsigned long formSize;
 	long endPos;
 
-	if (svx->compression == SVX_COMP_FIBDELTA && svx->fibHaveHighNibble) {
-		SvxWriteByte(svx, svx->fibPending);
-		svx->fibHaveHighNibble = 0;
+	if (svx->compression == SVX_COMP_FIBDELTA) {
+		if (!svx->fibStarted)
+			SvxStartFibDelta(svx, 0);
+		if (svx->fibHaveHighNibble) {
+			SvxWriteByte(svx, svx->fibPending);
+			svx->fibHaveHighNibble = 0;
+		}
 	}
 
 	if (svx->bodyBytes & 1)

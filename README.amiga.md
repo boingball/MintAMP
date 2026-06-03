@@ -34,7 +34,10 @@ Default output is raw signed 16-bit big-endian PCM. Options:
 - `--mono` mixes stereo input down to mono before writing.
 - `--s8` writes raw signed 8-bit PCM.
 - `--8svx` writes mono Amiga IFF-8SVX signed 8-bit output.
-- `--fibdelta` writes 8SVX with Fibonacci Delta compression.
+- `--fibdelta` writes 8SVX with Fibonacci Delta compression. The compressed
+  `BODY` contains the two D1 predictor bytes plus one packed delta nibble per
+  `oneShotHiSamples` output sample, so odd sample counts end with a padded low
+  nibble.
 - `--bench` prints elapsed time and realtime decode speed.
 
 The program prints the first decoded frame's sample rate, channel count, and
