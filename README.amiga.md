@@ -38,7 +38,20 @@ Default output is raw signed 16-bit big-endian PCM. Options:
   `BODY` contains the two D1 predictor bytes plus one packed delta nibble per
   `oneShotHiSamples` output sample, so odd sample counts end with a padded low
   nibble.
-- `--bench` prints elapsed time and realtime decode speed.
+- `--bench` prints elapsed time, realtime decode speed, and timing buckets for
+  frame decode, PCM conversion/downsampling, 8SVX writing, Fibonacci
+  compression, and low-level file writes.
+- `--decode-only` decodes MP3 frames and skips PCM conversion plus all output.
+  The output path argument is optional in this mode.
+- `--no-output` runs PCM conversion/downsampling and 8SVX/Fibonacci compression
+  paths but discards bytes instead of touching an output file.  The output path
+  argument is optional in this mode.
+- `--rate 22050`, `--rate 11025`, or `--rate 8287` post-decode downsamples the
+  output with a lightweight nearest-sample decimator when the MP3 sample rate is
+  higher than the requested output rate.
+- `--selftest-mulshift` compares the portable C `MULSHIFT32` reference with the
+  optional 68020+ assembly helper over edge cases and 100,000 pseudo-random
+  input pairs.
 
 The program prints the first decoded frame's sample rate, channel count, and
 bitrate when available, followed by decoded frame count and output sample count.
@@ -46,9 +59,37 @@ bitrate when available, followed by decoded frame count and output sample count.
 ## Optimization roadmap
 
 1. Keep the C helper block as the reference backend for 68000 and non-GCC builds.
-2. Benchmark with `--bench` on target hardware and profile helper use; the known
-   hottest fixed-point paths are `MULSHIFT32`, `MADD64`, and `SAR64` in the DCT,
-   IMDCT, stereo processing, dequantization, and polyphase synthesis code.
-3. Add 68020-specific inline assembly behind a dedicated opt-in macro (for
-   example `AMIGA_M68K_020_ASM`) and test every optimized helper against the C
-   fallback over edge cases before enabling it in release builds.
+2. Benchmark with `--bench --decode-only`, `--bench --no-output`, and normal
+   output on target hardware to separate frame decode, conversion/compression,
+   and filesystem cost.
+3. `AMIGA_M68K_ASM` currently optimizes only `MULSHIFT32` with optional 68020+
+   `muls.l` inline assembly.  Build and prove it before touching additional
+   helpers:
+
+   ```sh
+   m68k-amigaos-gcc -m68020 -O2 -DAMIGA_M68K_ASM -Ipub -Ireal \
+     -o amiga_mp3dec.asm amiga_mp3dec.c mp3dec.c mp3tabs.c real/*.c
+   amiga_mp3dec.asm --selftest-mulshift
+   ```
+
+4. Compare the C and asm builds with identical inputs and output modes:
+
+   ```sh
+   m68k-amigaos-gcc -m68020 -O2 -Ipub -Ireal \
+     -o amiga_mp3dec.c-ref amiga_mp3dec.c mp3dec.c mp3tabs.c real/*.c
+   amiga_mp3dec.c-ref --bench --decode-only song.mp3
+   amiga_mp3dec.asm --bench --decode-only song.mp3
+   amiga_mp3dec.c-ref --bench --no-output --fibdelta --rate 22050 song.mp3
+   amiga_mp3dec.asm --bench --no-output --fibdelta --rate 22050 song.mp3
+   ```
+
+5. Check final Amiga binaries for libgcc 64-bit helper calls before measuring:
+
+   ```sh
+   m68k-amigaos-nm -u amiga_mp3dec.asm | egrep '__muldi3|__ashrdi3|__lshrdi3'
+   ```
+
+   `MULSHIFT32` should not add those calls when `AMIGA_M68K_ASM` is enabled.
+   `MADD64`, `SHL64`, and `SAR64` intentionally remain portable C in this step,
+   so any remaining helper symbols should be attributed to those paths before
+   investigating them one at a time.

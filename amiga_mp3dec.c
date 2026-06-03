@@ -11,6 +11,7 @@
 #include <time.h>
 
 #include "mp3dec.h"
+#include "assembly.h"
 
 #define READBUF_SIZE (1024 * 16)
 #define OUTBUF_SAMPS (MAX_NCHAN * MAX_NGRAN * MAX_NSAMP)
@@ -29,6 +30,10 @@ typedef struct DecodeOptions {
 	int mono;
 	int compression;
 	int bench;
+	int decodeOnly;
+	int noOutput;
+	int selftestMulshift;
+	int outputRate;
 	int help;
 	int debugArgv;
 } DecodeOptions;
@@ -41,6 +46,21 @@ typedef struct DecodeStats {
 	int bitrate;
 } DecodeStats;
 
+typedef struct TimingStats {
+	clock_t frameDecode;
+	clock_t pcmConvert;
+	clock_t svxWrite;
+	clock_t fibCompress;
+	clock_t fileWrite;
+} TimingStats;
+
+typedef struct RateState {
+	int inRate;
+	int outRate;
+	int channels;
+	unsigned long phase;
+} RateState;
+
 typedef struct SvxWriter {
 	FILE *fp;
 	long formSizePos;
@@ -49,6 +69,7 @@ typedef struct SvxWriter {
 	unsigned long sourceSamples;
 	unsigned long bodyBytes;
 	int compression;
+	int noOutput;
 	int fibStarted;
 	signed char fibPrev;
 	int fibHaveHighNibble;
@@ -189,6 +210,10 @@ static void PrintUsage(const char *prog)
 	printf("  --8svx       write Amiga IFF-8SVX signed 8-bit output (implies mono)\n");
 	printf("  --fibdelta   use 8SVX Fibonacci Delta compression (implies --8svx)\n");
 	printf("  --bench      print elapsed decode/write time and realtime ratio\n");
+	printf("  --decode-only decode frames only; skip PCM conversion and output\n");
+	printf("  --no-output  run conversion/compression paths but discard output bytes\n");
+	printf("  --rate HZ     output/downsample rate: 22050, 11025, or 8287 Hz\n");
+	printf("  --selftest-mulshift compare C and optional asm MULSHIFT32 helpers\n");
 	printf("  --debug-argv print argc/argv after Amiga argument normalization\n");
 	printf("\n");
 	printf("default output is raw signed 16-bit big-endian PCM.\n");
@@ -201,6 +226,7 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 	memset(opt, 0, sizeof(*opt));
 	opt->outFormat = OUT_PCM16;
 	opt->compression = SVX_COMP_NONE;
+	opt->outputRate = 0;
 
 	for (i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--mono")) {
@@ -216,6 +242,20 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->compression = SVX_COMP_FIBDELTA;
 		} else if (!strcmp(argv[i], "--bench")) {
 			opt->bench = 1;
+		} else if (!strcmp(argv[i], "--decode-only")) {
+			opt->decodeOnly = 1;
+			opt->noOutput = 1;
+		} else if (!strcmp(argv[i], "--no-output")) {
+			opt->noOutput = 1;
+		} else if (!strcmp(argv[i], "--selftest-mulshift")) {
+			opt->selftestMulshift = 1;
+		} else if (!strcmp(argv[i], "--rate")) {
+			if (++i >= argc)
+				return -1;
+			opt->outputRate = atoi(argv[i]);
+			if (opt->outputRate != 22050 && opt->outputRate != 11025 &&
+				opt->outputRate != 8287)
+				return -1;
 		} else if (!strcmp(argv[i], "--debug-argv")) {
 			opt->debugArgv = 1;
 		} else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
@@ -235,7 +275,10 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 	if (opt->help)
 		return 0;
 
-	if (!opt->inName || !opt->outName)
+	if (opt->selftestMulshift)
+		return 0;
+
+	if (!opt->inName || (!opt->outName && !opt->noOutput))
 		return -1;
 
 	return 0;
@@ -256,18 +299,55 @@ static int FillReadBuffer(unsigned char *readBuf, unsigned char *readPtr, int bu
 	return nRead;
 }
 
+static TimingStats *gTiming;
+
+static double ClocksToSeconds(clock_t c)
+{
+	if (CLOCKS_PER_SEC <= 0)
+		return 0.0;
+	return (double)c / (double)CLOCKS_PER_SEC;
+}
+
+static int TimedFputc(int c, FILE *fp)
+{
+	clock_t t0;
+	int r;
+
+	if (!fp)
+		return c;
+	t0 = clock();
+	r = fputc(c, fp);
+	if (gTiming)
+		gTiming->fileWrite += clock() - t0;
+	return r;
+}
+
+static size_t TimedFwrite(const void *ptr, size_t size, size_t nmemb, FILE *fp)
+{
+	clock_t t0;
+	size_t r;
+
+	if (!fp)
+		return nmemb;
+	t0 = clock();
+	r = fwrite(ptr, size, nmemb, fp);
+	if (gTiming)
+		gTiming->fileWrite += clock() - t0;
+	return r;
+}
+
 static void WriteU16BE(FILE *fp, unsigned int v)
 {
-	fputc((int)((v >> 8) & 0xff), fp);
-	fputc((int)(v & 0xff), fp);
+	TimedFputc((int)((v >> 8) & 0xff), fp);
+	TimedFputc((int)(v & 0xff), fp);
 }
 
 static void WriteU32BE(FILE *fp, unsigned long v)
 {
-	fputc((int)((v >> 24) & 0xff), fp);
-	fputc((int)((v >> 16) & 0xff), fp);
-	fputc((int)((v >> 8) & 0xff), fp);
-	fputc((int)(v & 0xff), fp);
+	TimedFputc((int)((v >> 24) & 0xff), fp);
+	TimedFputc((int)((v >> 16) & 0xff), fp);
+	TimedFputc((int)((v >> 8) & 0xff), fp);
+	TimedFputc((int)(v & 0xff), fp);
 }
 
 static void PatchU32BE(FILE *fp, long pos, unsigned long v)
@@ -309,13 +389,13 @@ static int WriteRawSamples(FILE *fp, const short *pcm, int nSamps, int format)
 
 	if (format == OUT_S8) {
 		for (i = 0; i < nSamps; i++)
-			fputc((int)(unsigned char)Sample16ToS8(pcm[i]), fp);
+			TimedFputc((int)(unsigned char)Sample16ToS8(pcm[i]), fp);
 	} else {
 		for (i = 0; i < nSamps; i++)
 			WriteU16BE(fp, (unsigned int)(unsigned short)pcm[i]);
 	}
 
-	return ferror(fp) ? -1 : 0;
+	return (fp && ferror(fp)) ? -1 : 0;
 }
 
 static int SvxBegin(SvxWriter *svx, FILE *fp, int sampleRate, int compression)
@@ -324,23 +404,23 @@ static int SvxBegin(SvxWriter *svx, FILE *fp, int sampleRate, int compression)
 	svx->fp = fp;
 	svx->compression = compression;
 
-	fwrite("FORM", 1, 4, fp);
+	TimedFwrite("FORM", 1, 4, fp);
 	svx->formSizePos = ftell(fp);
 	WriteU32BE(fp, 0);
-	fwrite("8SVX", 1, 4, fp);
+	TimedFwrite("8SVX", 1, 4, fp);
 
-	fwrite("VHDR", 1, 4, fp);
+	TimedFwrite("VHDR", 1, 4, fp);
 	WriteU32BE(fp, 20);
 	svx->oneShotPos = ftell(fp);
 	WriteU32BE(fp, 0);              /* oneShotHiSamples */
 	WriteU32BE(fp, 0);              /* repeatHiSamples */
 	WriteU32BE(fp, 0);              /* samplesPerHiCycle */
 	WriteU16BE(fp, (unsigned int)sampleRate);
-	fputc(1, fp);                   /* ctOctave */
-	fputc(compression, fp);         /* sCompression */
+	TimedFputc(1, fp);                   /* ctOctave */
+	TimedFputc(compression, fp);         /* sCompression */
 	WriteU32BE(fp, 0x00010000UL);   /* volume */
 
-	fwrite("BODY", 1, 4, fp);
+	TimedFwrite("BODY", 1, 4, fp);
 	svx->bodySizePos = ftell(fp);
 	WriteU32BE(fp, 0);
 
@@ -349,7 +429,7 @@ static int SvxBegin(SvxWriter *svx, FILE *fp, int sampleRate, int compression)
 
 static void SvxWriteByte(SvxWriter *svx, unsigned char b)
 {
-	fputc((int)b, svx->fp);
+	TimedFputc((int)b, svx->noOutput ? NULL : svx->fp);
 	svx->bodyBytes++;
 }
 
@@ -416,13 +496,17 @@ static void SvxStartFibDelta(SvxWriter *svx, signed char predictor)
 
 static void SvxWriteFibSample(SvxWriter *svx, signed char sample)
 {
+	clock_t t0;
 	int nibble;
 
 	if (!svx->fibStarted)
 		SvxStartFibDelta(svx, sample);
 
+	t0 = clock();
 	nibble = FibDeltaNibble(svx->fibPrev, sample);
 	svx->fibPrev = FibDeltaApply(svx->fibPrev, nibble);
+	if (gTiming)
+		gTiming->fibCompress += clock() - t0;
 	if (!svx->fibHaveHighNibble) {
 		svx->fibPending = (unsigned char)((nibble & 15) << 4);
 		svx->fibHaveHighNibble = 1;
@@ -445,7 +529,7 @@ static int SvxWriteSamples(SvxWriter *svx, const short *pcm, int nSamps)
 		svx->sourceSamples++;
 	}
 
-	return ferror(svx->fp) ? -1 : 0;
+	return (!svx->noOutput && ferror(svx->fp)) ? -1 : 0;
 }
 
 static int SvxEnd(SvxWriter *svx)
@@ -463,7 +547,10 @@ static int SvxEnd(SvxWriter *svx)
 	}
 
 	if (svx->bodyBytes & 1)
-		fputc(0, svx->fp);
+		TimedFputc(0, svx->noOutput ? NULL : svx->fp);
+
+	if (svx->noOutput)
+		return 0;
 
 	endPos = ftell(svx->fp);
 	formSize = (unsigned long)(endPos - 8);
@@ -484,6 +571,116 @@ static void UpdateFirstFrameStats(DecodeStats *stats, const MP3FrameInfo *info)
 		stats->bitrate = info->bitrate;
 }
 
+static int DownsampleFrame(RateState *rate, const short *in, short *out, int nSamps,
+	int inRate, int outRate, int channels)
+{
+	unsigned long inFrames;
+	unsigned long produced;
+	unsigned long consume;
+
+	if (outRate <= 0 || outRate >= inRate || channels <= 0) {
+		if (out != in)
+			memmove(out, in, nSamps * sizeof(short));
+		return nSamps;
+	}
+
+	if (rate->inRate != inRate || rate->outRate != outRate ||
+		rate->channels != channels) {
+		rate->inRate = inRate;
+		rate->outRate = outRate;
+		rate->channels = channels;
+		rate->phase = 0;
+	}
+
+	inFrames = (unsigned long)(nSamps / channels);
+	produced = 0;
+	while (rate->phase / (unsigned long)outRate < inFrames) {
+		unsigned long srcFrame = rate->phase / (unsigned long)outRate;
+		int ch;
+		for (ch = 0; ch < channels; ch++)
+			out[produced * (unsigned long)channels + (unsigned long)ch] =
+				in[srcFrame * (unsigned long)channels + (unsigned long)ch];
+		produced++;
+		rate->phase += (unsigned long)inRate;
+	}
+	consume = inFrames * (unsigned long)outRate;
+	if (rate->phase >= consume)
+		rate->phase -= consume;
+	else
+		rate->phase = 0;
+
+	return (int)(produced * (unsigned long)channels);
+}
+
+static void InitNoOutputSvx(SvxWriter *svx, int compression)
+{
+	memset(svx, 0, sizeof(*svx));
+	svx->compression = compression;
+	svx->noOutput = 1;
+}
+
+static unsigned long NextRand32(unsigned long *state)
+{
+	*state = (*state * 1664525UL) + 1013904223UL;
+	return *state;
+}
+
+static int TestMulshiftPair(int x, int y, unsigned long index)
+{
+	int c = MULSHIFT32_C_REFERENCE(x, y);
+#if MULSHIFT32_HAS_AMIGA_M68K_ASM
+	int a = MULSHIFT32_AMIGA_M68K_ASM(x, y);
+#else
+	int a = c;
+#endif
+	if (a != c) {
+		printf("MULSHIFT32 mismatch %lu: x=%ld y=%ld C=%ld asm=%ld\n",
+			index, (long)x, (long)y, (long)c, (long)a);
+		return -1;
+	}
+	return 0;
+}
+
+static int SelftestMulshift(void)
+{
+	static const int edges[] = {
+		0, 1, -1, 2, -2, 0x7fffffffL, (int)0x80000000UL,
+		0x40000000L, (int)0xc0000000UL, 0x12345678L, (int)0x87654321UL
+	};
+	unsigned long i;
+	unsigned long failures = 0;
+	unsigned long tested = 0;
+	unsigned long seed = 0x1234abcdUL;
+
+	for (i = 0; i < sizeof(edges) / sizeof(edges[0]); i++) {
+		unsigned long j;
+		for (j = 0; j < sizeof(edges) / sizeof(edges[0]); j++) {
+			if (TestMulshiftPair(edges[i], edges[j], tested) != 0)
+				failures++;
+			tested++;
+		}
+	}
+
+	for (i = 0; i < 100000UL; i++) {
+		int x = (int)NextRand32(&seed);
+		int y = (int)NextRand32(&seed);
+		if (TestMulshiftPair(x, y, tested) != 0)
+			failures++;
+		tested++;
+	}
+
+	printf("MULSHIFT32 asm available: %s\n",
+#if MULSHIFT32_HAS_AMIGA_M68K_ASM
+		"yes"
+#else
+		"no (C reference path only in this build)"
+#endif
+	);
+	printf("MULSHIFT32 selftest cases: %lu\n", tested);
+	printf("MULSHIFT32 selftest failures: %lu\n", failures);
+	return failures ? 1 : 0;
+}
+
 int main(int argc, char **argv)
 {
 	DecodeOptions opt;
@@ -492,11 +689,14 @@ int main(int argc, char **argv)
 	unsigned char *readPtr;
 	short decodeBuf[OUTBUF_SAMPS];
 	short writeBuf[OUTBUF_SAMPS];
+	short rateBuf[OUTBUF_SAMPS];
 	FILE *infile;
 	FILE *outfile;
 	HMP3Decoder decoder;
 	MP3FrameInfo info;
 	SvxWriter svx;
+	TimingStats timing;
+	RateState rateState;
 	int bytesLeft;
 	int eofReached;
 	int outOfData;
@@ -505,6 +705,7 @@ int main(int argc, char **argv)
 	clock_t endClock;
 	NormalizedArgs normalized;
 	int debugArgv;
+	int effectiveRate;
 
 	if (AmigaNormalizeArgs(argc, argv, &normalized) != 0) {
 		fprintf(stderr, "cannot normalize command arguments\n");
@@ -536,8 +737,15 @@ int main(int argc, char **argv)
 		AmigaFreeNormalizedArgs(&normalized);
 		return 0;
 	}
+	if (opt.selftestMulshift) {
+		int selftestErr = SelftestMulshift();
+		AmigaFreeNormalizedArgs(&normalized);
+		return selftestErr;
+	}
 
 	memset(&stats, 0, sizeof(stats));
+	memset(&timing, 0, sizeof(timing));
+	memset(&rateState, 0, sizeof(rateState));
 	memset(&info, 0, sizeof(info));
 
 	infile = fopen(opt.inName, "rb");
@@ -547,19 +755,23 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	outfile = fopen(opt.outName, "wb+");
-	if (!outfile) {
-		fprintf(stderr, "cannot open output: %s\n", opt.outName);
-		fclose(infile);
-		AmigaFreeNormalizedArgs(&normalized);
-		return 1;
+	outfile = NULL;
+	if (!opt.noOutput) {
+		outfile = fopen(opt.outName, "wb+");
+		if (!outfile) {
+			fprintf(stderr, "cannot open output: %s\n", opt.outName);
+			fclose(infile);
+			AmigaFreeNormalizedArgs(&normalized);
+			return 1;
+		}
 	}
 
 	decoder = MP3InitDecoder();
 	if (!decoder) {
 		fprintf(stderr, "MP3InitDecoder failed\n");
 		fclose(infile);
-		fclose(outfile);
+		if (outfile)
+			fclose(outfile);
 		AmigaFreeNormalizedArgs(&normalized);
 		return 1;
 	}
@@ -569,6 +781,8 @@ int main(int argc, char **argv)
 	outOfData = 0;
 	svxOpen = 0;
 	readPtr = readBuf;
+	gTiming = &timing;
+	effectiveRate = 0;
 	startClock = clock();
 
 	while (!outOfData) {
@@ -592,7 +806,11 @@ int main(int argc, char **argv)
 		readPtr += offset;
 		bytesLeft -= offset;
 
-		err = MP3Decode(decoder, &readPtr, &bytesLeft, decodeBuf, 0);
+		{
+			clock_t t0 = clock();
+			err = MP3Decode(decoder, &readPtr, &bytesLeft, decodeBuf, 0);
+			timing.frameDecode += clock() - t0;
+		}
 		if (err) {
 			if (err == ERR_MP3_INDATA_UNDERFLOW) {
 				outOfData = 1;
@@ -608,31 +826,57 @@ int main(int argc, char **argv)
 
 		MP3GetLastFrameInfo(decoder, &info);
 		UpdateFirstFrameStats(&stats, &info);
+		if (!effectiveRate)
+			effectiveRate = (opt.outputRate && info.samprate > opt.outputRate) ? opt.outputRate : info.samprate;
 
-		if (opt.outFormat == OUT_8SVX && !svxOpen) {
+		if (!opt.decodeOnly && opt.outFormat == OUT_8SVX && !svxOpen) {
 			if (!info.samprate) {
 				fprintf(stderr, "cannot write 8SVX before sample rate is known\n");
 				outOfData = 1;
 				break;
 			}
-			if (SvxBegin(&svx, outfile, info.samprate, opt.compression) != 0) {
-				fprintf(stderr, "cannot write 8SVX header\n");
-				outOfData = 1;
-				break;
+			if (opt.noOutput) {
+				InitNoOutputSvx(&svx, opt.compression);
+			} else {
+				clock_t t0 = clock();
+				int beginErr = SvxBegin(&svx, outfile, effectiveRate, opt.compression);
+				timing.svxWrite += clock() - t0;
+				if (beginErr != 0) {
+					fprintf(stderr, "cannot write 8SVX header\n");
+					outOfData = 1;
+					break;
+				}
 			}
 			svxOpen = 1;
 		}
 
-		{
-			int outSamps = MixFrame(decodeBuf, writeBuf, info.outputSamps,
-				info.nChans, opt.mono);
+		if (opt.decodeOnly) {
+			stats.outputSamples += (unsigned long)info.outputSamps;
+		} else {
+			int outSamps;
+			int outChannels;
 			int writeErr;
+			clock_t t0;
 
-			if (opt.outFormat == OUT_8SVX)
+			t0 = clock();
+			outSamps = MixFrame(decodeBuf, writeBuf, info.outputSamps,
+				info.nChans, opt.mono);
+			outChannels = (opt.mono || info.nChans <= 1) ? 1 : info.nChans;
+			if (opt.outputRate && info.samprate > opt.outputRate) {
+				outSamps = DownsampleFrame(&rateState, writeBuf, rateBuf, outSamps,
+					info.samprate, opt.outputRate, outChannels);
+				memmove(writeBuf, rateBuf, outSamps * sizeof(short));
+			}
+			timing.pcmConvert += clock() - t0;
+
+			if (opt.outFormat == OUT_8SVX) {
+				t0 = clock();
 				writeErr = SvxWriteSamples(&svx, writeBuf, outSamps);
-			else
-				writeErr = WriteRawSamples(outfile, writeBuf, outSamps,
-					opt.outFormat);
+				timing.svxWrite += clock() - t0;
+			} else {
+				writeErr = WriteRawSamples(opt.noOutput ? NULL : outfile, writeBuf,
+					outSamps, opt.outFormat);
+			}
 
 			if (writeErr != 0) {
 				fprintf(stderr, "output write error\n");
@@ -645,12 +889,18 @@ int main(int argc, char **argv)
 		stats.decodedFrames++;
 	}
 
-	if (svxOpen && SvxEnd(&svx) != 0)
-		fprintf(stderr, "error finalizing 8SVX file\n");
+	if (svxOpen) {
+		clock_t t0 = clock();
+		if (SvxEnd(&svx) != 0)
+			fprintf(stderr, "error finalizing 8SVX file\n");
+		timing.svxWrite += clock() - t0;
+	}
 
 	endClock = clock();
 
 	printf("sample rate: %d Hz\n", stats.sampleRate);
+	if (opt.outputRate)
+		printf("output rate: %d Hz\n", effectiveRate ? effectiveRate : opt.outputRate);
 	printf("channels: %d%s\n", stats.channels, opt.mono ? " (mono output)" : "");
 	printf("bitrate: %d bps\n", stats.bitrate);
 	printf("decoded frames: %lu\n", stats.decodedFrames);
@@ -661,21 +911,30 @@ int main(int argc, char **argv)
 		double audioSeconds = 0.0;
 		if (CLOCKS_PER_SEC > 0)
 			elapsed = (double)(endClock - startClock) / (double)CLOCKS_PER_SEC;
-		if (stats.sampleRate > 0) {
+		if ((opt.decodeOnly ? stats.sampleRate : (effectiveRate ? effectiveRate : stats.sampleRate)) > 0) {
 			int outputChannels = opt.mono ? 1 : stats.channels;
 			if (outputChannels <= 0)
 				outputChannels = 1;
 			audioSeconds = (double)stats.outputSamples /
-				((double)stats.sampleRate * (double)outputChannels);
+				((double)(opt.decodeOnly ? stats.sampleRate :
+				(effectiveRate ? effectiveRate : stats.sampleRate)) *
+				(double)outputChannels);
 		}
 		printf("elapsed seconds: %.3f\n", elapsed);
 		if (elapsed > 0.0 && audioSeconds > 0.0)
 			printf("decode speed: %.2fx realtime\n", audioSeconds / elapsed);
+		printf("timing frame decode: %.3f s\n", ClocksToSeconds(timing.frameDecode));
+		printf("timing PCM conversion: %.3f s\n", ClocksToSeconds(timing.pcmConvert));
+		printf("timing 8SVX write: %.3f s\n", ClocksToSeconds(timing.svxWrite));
+		printf("timing Fibonacci compression: %.3f s\n", ClocksToSeconds(timing.fibCompress));
+		printf("timing file writing: %.3f s\n", ClocksToSeconds(timing.fileWrite));
 	}
 
 	MP3FreeDecoder(decoder);
 	fclose(infile);
-	fclose(outfile);
+	if (outfile)
+		fclose(outfile);
+	gTiming = NULL;
 	AmigaFreeNormalizedArgs(&normalized);
 
 	return 0;

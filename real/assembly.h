@@ -236,10 +236,41 @@ static __inline int CLZ(int x)
 
 typedef long long Word64;
 
-static __inline int MULSHIFT32(int x, int y)
+/*
+ * Keep the portable C implementation named and callable so Amiga benchmark
+ * builds can verify every optimized helper against the reference semantics.
+ */
+static __inline int MULSHIFT32_C_REFERENCE(int x, int y)
 {
 	return (int)(((Word64)x * (Word64)y) >> 32);
 }
+
+#if defined(AMIGA_M68K_ASM) && defined(__GNUC__) && \
+	(defined(__mc68020__) || defined(__mc68030__) || defined(__mc68040__) || \
+	 defined(__mc68060__) || defined(mc68020))
+/*
+ * Optional 68020+ signed 32x32 -> 64 multiply.  The two-operand m68k GNU as
+ * form writes the high 32 bits to the first output register and the low 32
+ * bits to the second output register.  This is the only helper optimized by
+ * AMIGA_M68K_ASM for now; MADD64/SHL64/SAR64 deliberately remain C below.
+ */
+static __inline int MULSHIFT32_AMIGA_M68K_ASM(int x, int y)
+{
+	int hi;
+	int lo;
+	lo = x;
+	__asm__ volatile ("muls.l %2,%0:%1"
+		: "=d" (hi), "+d" (lo)
+		: "dmi" (y));
+	(void)lo;
+	return hi;
+}
+#define MULSHIFT32_HAS_AMIGA_M68K_ASM 1
+#define MULSHIFT32(x, y) MULSHIFT32_AMIGA_M68K_ASM((x), (y))
+#else
+#define MULSHIFT32_HAS_AMIGA_M68K_ASM 0
+#define MULSHIFT32(x, y) MULSHIFT32_C_REFERENCE((x), (y))
+#endif
 
 static __inline int FASTABS(int x)
 {
