@@ -291,6 +291,8 @@ extern "C" {
 #endif
 void PolyphaseMono(short *pcm, int *vbuf, const int *coefBase);
 void PolyphaseStereo(short *pcm, int *vbuf, const int *coefBase);
+int PolyphaseMonoFastLowrate(short *pcm, int *vbuf, const int *coefBase, int stride, int *phase);
+int PolyphaseStereoFastLowrate(short *pcm, int *vbuf, const int *coefBase, int stride, int *phase);
 #ifdef __cplusplus
 }
 #endif

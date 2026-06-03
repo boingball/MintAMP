@@ -499,7 +499,179 @@ static void PolyphaseStereoFast(short *pcm, int *vbuf, const int *coefBase)
 	}
 }
 
+
+static void PolyphaseMonoFastSample(short *pcm, int sample, int *vbuf, const int *coefBase)
+{
+	const int *coef;
+	int *vb1;
+	int sum1;
+	int sum2;
+	int pair;
+
+	if (sample == 0) {
+		coef = coefBase;
+		vb1 = vbuf;
+		sum1 = 0;
+		FAST_MC0(sum1, vb1, coef);
+		pcm[0] = ClipIntToShort(sum1);
+	} else if (sample == 16) {
+		coef = coefBase + 256;
+		vb1 = vbuf + 64 * 16;
+		sum1 = 0;
+		FAST_MC1(sum1, vb1, coef);
+		pcm[0] = ClipIntToShort(sum1);
+	} else {
+		pair = sample < 16 ? sample : 32 - sample;
+		coef = coefBase + 16 * pair;
+		vb1 = vbuf + 64 * pair;
+		sum1 = 0;
+		sum2 = 0;
+		FAST_MC2(sum1, sum2, vb1, coef);
+		pcm[0] = ClipIntToShort(sample < 16 ? sum1 : sum2);
+	}
+}
+
+static void PolyphaseStereoFastSample(short *pcm, int sample, int *vbuf, const int *coefBase)
+{
+	const int *coef;
+	int *vb1;
+	int sum1L;
+	int sum2L;
+	int sum1R;
+	int sum2R;
+	int pair;
+
+	if (sample == 0) {
+		coef = coefBase;
+		vb1 = vbuf;
+		sum1L = 0;
+		sum1R = 0;
+		FAST_MC0(sum1L, vb1, coef);
+		FAST_MC0(sum1R, vb1 + 32, coef);
+		pcm[0] = ClipIntToShort(sum1L);
+		pcm[1] = ClipIntToShort(sum1R);
+	} else if (sample == 16) {
+		coef = coefBase + 256;
+		vb1 = vbuf + 64 * 16;
+		sum1L = 0;
+		sum1R = 0;
+		FAST_MC1(sum1L, vb1, coef);
+		FAST_MC1(sum1R, vb1 + 32, coef);
+		pcm[0] = ClipIntToShort(sum1L);
+		pcm[1] = ClipIntToShort(sum1R);
+	} else {
+		pair = sample < 16 ? sample : 32 - sample;
+		coef = coefBase + 16 * pair;
+		vb1 = vbuf + 64 * pair;
+		sum1L = 0;
+		sum2L = 0;
+		sum1R = 0;
+		sum2R = 0;
+		FAST_MC2(sum1L, sum2L, vb1, coef);
+		FAST_MC2(sum1R, sum2R, vb1 + 32, coef);
+		pcm[0] = ClipIntToShort(sample < 16 ? sum1L : sum2L);
+		pcm[1] = ClipIntToShort(sample < 16 ? sum1R : sum2R);
+	}
+}
+
 #endif /* AMIGA_M68K && AMIGA_FAST_POLYPHASE */
+
+int PolyphaseMonoFastLowrate(short *pcm, int *vbuf, const int *coefBase, int stride, int *phase)
+{
+#if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE)
+	int sample;
+	int produced;
+
+	if (stride < 2) {
+		PolyphaseMono(pcm, vbuf, coefBase);
+		return NBANDS;
+	}
+
+	produced = 0;
+	for (sample = 0; sample < NBANDS; sample++) {
+		if (*phase == 0) {
+			PolyphaseMonoFastSample(pcm + produced, sample, vbuf, coefBase);
+			produced++;
+		}
+		(*phase)++;
+		if (*phase >= stride)
+			*phase = 0;
+	}
+	return produced;
+#else
+	int fullPhase;
+	int sample;
+	int produced;
+	short full[NBANDS];
+
+	if (stride < 2) {
+		PolyphaseMono(pcm, vbuf, coefBase);
+		return NBANDS;
+	}
+	fullPhase = *phase;
+	PolyphaseMono(full, vbuf, coefBase);
+	produced = 0;
+	for (sample = 0; sample < NBANDS; sample++) {
+		if (fullPhase == 0)
+			pcm[produced++] = full[sample];
+		fullPhase++;
+		if (fullPhase >= stride)
+			fullPhase = 0;
+	}
+	*phase = fullPhase;
+	return produced;
+#endif
+}
+
+int PolyphaseStereoFastLowrate(short *pcm, int *vbuf, const int *coefBase, int stride, int *phase)
+{
+#if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE)
+	int sample;
+	int produced;
+
+	if (stride < 2) {
+		PolyphaseStereo(pcm, vbuf, coefBase);
+		return NBANDS * 2;
+	}
+
+	produced = 0;
+	for (sample = 0; sample < NBANDS; sample++) {
+		if (*phase == 0) {
+			PolyphaseStereoFastSample(pcm + produced * 2, sample, vbuf, coefBase);
+			produced++;
+		}
+		(*phase)++;
+		if (*phase >= stride)
+			*phase = 0;
+	}
+	return produced * 2;
+#else
+	int fullPhase;
+	int sample;
+	int produced;
+	short full[NBANDS * 2];
+
+	if (stride < 2) {
+		PolyphaseStereo(pcm, vbuf, coefBase);
+		return NBANDS * 2;
+	}
+	fullPhase = *phase;
+	PolyphaseStereo(full, vbuf, coefBase);
+	produced = 0;
+	for (sample = 0; sample < NBANDS; sample++) {
+		if (fullPhase == 0) {
+			pcm[produced * 2] = full[sample * 2];
+			pcm[produced * 2 + 1] = full[sample * 2 + 1];
+			produced++;
+		}
+		fullPhase++;
+		if (fullPhase >= stride)
+			fullPhase = 0;
+	}
+	*phase = fullPhase;
+	return produced * 2;
+#endif
+}
 
 void PolyphaseMono(short *pcm, int *vbuf, const int *coefBase)
 {

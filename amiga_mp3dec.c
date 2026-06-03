@@ -35,6 +35,7 @@ typedef struct DecodeOptions {
 	int selftestMulshift;
 	int checksum;
 	int outputRate;
+	int fastLowrate;
 	int help;
 	int debugArgv;
 } DecodeOptions;
@@ -328,6 +329,8 @@ static void PrintUsage(const char *prog)
 	printf("  --decode-only decode frames only; skip PCM conversion and output\n");
 	printf("  --no-output  run conversion/compression paths but discard output bytes\n");
 	printf("  --rate HZ     output/downsample rate: 22050, 11025, or 8287 Hz\n");
+	printf("  --fast-lowrate experimental lower-quality Amiga conversion; requires --rate\n");
+	printf("                 22050, 11025, or 8287 and can skip discarded synthesis samples\n");
 	printf("  --selftest-mulshift compare C and optional asm MULSHIFT32 helpers\n");
 	printf("  --checksum  print a 32-bit checksum of decoded PCM samples\n");
 	printf("  --debug-argv print argc/argv after Amiga argument normalization\n");
@@ -369,6 +372,8 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->selftestMulshift = 1;
 		} else if (!strcmp(argv[i], "--checksum")) {
 			opt->checksum = 1;
+		} else if (!strcmp(argv[i], "--fast-lowrate")) {
+			opt->fastLowrate = 1;
 		} else if (!strcmp(argv[i], "--rate")) {
 			if (++i >= argc)
 				return -1;
@@ -399,6 +404,12 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 
 	if (opt->selftestMulshift)
 		return 0;
+
+	if (opt->fastLowrate && (opt->outputRate != 22050 &&
+		opt->outputRate != 11025 && opt->outputRate != 8287)) {
+		fprintf(stderr, "--fast-lowrate requires --rate 22050, 11025, or 8287\n");
+		return -1;
+	}
 
 	if (!opt->inName || (!opt->outName && !opt->noOutput))
 		return -1;
@@ -995,6 +1006,19 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
+	if (opt.fastLowrate) {
+		int stride = (opt.outputRate == 22050) ? 2 :
+			(opt.outputRate == 11025 ? 4 : 5);
+		MP3SetFastLowrate(decoder, stride);
+#if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE)
+		fprintf(stderr, "warning: --fast-lowrate is experimental, lower quality, "
+			"and only skips polyphase output samples; IMDCT/DCT32 still run full-rate\n");
+#else
+		fprintf(stderr, "warning: --fast-lowrate is experimental and lower quality; "
+			"this build still generates full polyphase output before decimation\n");
+#endif
+	}
+
 	bytesLeft = 0;
 	eofReached = 0;
 	outOfData = 0;
@@ -1046,7 +1070,7 @@ int main(int argc, char **argv)
 
 		MP3GetLastFrameInfo(decoder, &info);
 		UpdateFirstFrameStats(&stats, &info);
-		if (opt.checksum)
+		if (opt.checksum && !opt.fastLowrate)
 			stats.pcmChecksum = UpdatePcmChecksum(stats.pcmChecksum, decodeBuf,
 				info.outputSamps);
 		if (!effectiveRate)
@@ -1074,6 +1098,9 @@ int main(int argc, char **argv)
 		}
 
 		if (opt.decodeOnly) {
+			if (opt.checksum && opt.fastLowrate)
+				stats.pcmChecksum = UpdatePcmChecksum(stats.pcmChecksum, decodeBuf,
+					info.outputSamps);
 			stats.outputSamples += (unsigned long)info.outputSamps;
 		} else {
 			int outSamps;
@@ -1085,11 +1112,14 @@ int main(int argc, char **argv)
 			outSamps = MixFrame(decodeBuf, writeBuf, info.outputSamps,
 				info.nChans, opt.mono);
 			outChannels = (opt.mono || info.nChans <= 1) ? 1 : info.nChans;
-			if (opt.outputRate && info.samprate > opt.outputRate) {
+			if (!opt.fastLowrate && opt.outputRate && info.samprate > opt.outputRate) {
 				outSamps = DownsampleFrame(&rateState, writeBuf, rateBuf, outSamps,
 					info.samprate, opt.outputRate, outChannels);
 				memmove(writeBuf, rateBuf, outSamps * sizeof(short));
 			}
+			if (opt.checksum && opt.fastLowrate)
+				stats.pcmChecksum = UpdatePcmChecksum(stats.pcmChecksum, writeBuf,
+					outSamps);
 			timing.pcmConvert += clock() - t0;
 
 			if (opt.outFormat == OUT_8SVX) {
@@ -1129,7 +1159,12 @@ int main(int argc, char **argv)
 	printf("decoded frames: %lu\n", stats.decodedFrames);
 	printf("output samples: %lu\n", stats.outputSamples);
 	if (opt.checksum)
-		printf("decoded PCM checksum: %08lx\n", stats.pcmChecksum);
+		printf("%s PCM checksum: %08lx\n",
+			opt.fastLowrate ? "fast-lowrate output" : "decoded",
+			stats.pcmChecksum);
+	if (opt.fastLowrate)
+		printf("fast-lowrate stride: %d (experimental; IMDCT/DCT32 still full-rate)\n",
+			MP3GetFastLowrateStride(decoder));
 
 	if (opt.bench) {
 		double elapsed = 0.0;

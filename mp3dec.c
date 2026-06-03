@@ -178,6 +178,30 @@ int MP3FindSyncWord(unsigned char *buf, int nBytes)
 	return -1;
 }
 
+void MP3SetFastLowrate(HMP3Decoder hMP3Decoder, int stride)
+{
+	MP3DecInfo *mp3DecInfo = (MP3DecInfo *)hMP3Decoder;
+
+	if (!mp3DecInfo)
+		return;
+	if (stride < 2)
+		stride = 1;
+	mp3DecInfo->fastLowrateStride = stride;
+	mp3DecInfo->fastLowratePhase = 0;
+	mp3DecInfo->fastLowrateOutputSamps = 0;
+}
+
+int MP3GetFastLowrateStride(HMP3Decoder hMP3Decoder)
+{
+	MP3DecInfo *mp3DecInfo = (MP3DecInfo *)hMP3Decoder;
+
+	if (!mp3DecInfo)
+		return 1;
+	return mp3DecInfo->fastLowrateStride > 1 ?
+		mp3DecInfo->fastLowrateStride : 1;
+}
+
+
 /**************************************************************************************
  * Function:    MP3FindFreeSync
  *
@@ -262,7 +286,10 @@ void MP3GetLastFrameInfo(HMP3Decoder hMP3Decoder, MP3FrameInfo *mp3FrameInfo)
 		mp3FrameInfo->nChans = mp3DecInfo->nChans;
 		mp3FrameInfo->samprate = mp3DecInfo->samprate;
 		mp3FrameInfo->bitsPerSample = 16;
-		mp3FrameInfo->outputSamps = mp3DecInfo->nChans * (int)samplesPerFrameTab[mp3DecInfo->version][mp3DecInfo->layer - 1];
+		if (mp3DecInfo->fastLowrateStride > 1 && mp3DecInfo->fastLowrateOutputSamps > 0)
+			mp3FrameInfo->outputSamps = mp3DecInfo->fastLowrateOutputSamps;
+		else
+			mp3FrameInfo->outputSamps = mp3DecInfo->nChans * (int)samplesPerFrameTab[mp3DecInfo->version][mp3DecInfo->layer - 1];
 		mp3FrameInfo->layer = mp3DecInfo->layer;
 		mp3FrameInfo->version = mp3DecInfo->version;
 	}
@@ -460,6 +487,7 @@ int MP3Decode(HMP3Decoder hMP3Decoder, unsigned char **inbuf, int *bytesLeft, sh
 	}
 	bitOffset = 0;
 	mainBits = mp3DecInfo->mainDataBytes * 8;
+	mp3DecInfo->fastLowrateOutputSamps = 0;
 
 	/* decode one complete frame */
 	for (gr = 0; gr < mp3DecInfo->nGrans; gr++) {
@@ -545,7 +573,9 @@ int MP3Decode(HMP3Decoder hMP3Decoder, unsigned char **inbuf, int *bytesLeft, sh
 			time = systime_get();
 		#endif
 		/* subband transform - if stereo, interleaves pcm LRLRLR */
-		if (Subband(mp3DecInfo, outbuf + gr*mp3DecInfo->nGranSamps*mp3DecInfo->nChans) < 0) {
+		if (Subband(mp3DecInfo, outbuf +
+			(mp3DecInfo->fastLowrateStride > 1 ? 0 :
+			gr*mp3DecInfo->nGranSamps*mp3DecInfo->nChans)) < 0) {
 			MP3ClearBadFrame(mp3DecInfo, outbuf);
 			return ERR_MP3_INVALID_SUBBAND;			
 		}

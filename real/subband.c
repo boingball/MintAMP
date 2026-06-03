@@ -77,27 +77,47 @@ int Subband(MP3DecInfo *mp3DecInfo, short *pcmBuf)
 	if (mp3DecInfo->nChans == 2) {
 		/* stereo */
 		for (b = 0; b < BLOCK_SIZE; b++) {
+			int produced;
 			AMIGA_PROFILE_START(amigaProfileStart);
 			FDCT32(mi->outBuf[0][b], sbi->vbuf + 0*32, sbi->vindex, (b & 0x01), mi->gb[0]);
 			FDCT32(mi->outBuf[1][b], sbi->vbuf + 1*32, sbi->vindex, (b & 0x01), mi->gb[1]);
 			AMIGA_PROFILE_STOP(MP3_DECODE_CORE_PROFILE_SUBBAND_DCT32, amigaProfileStart);
 			AMIGA_PROFILE_START(amigaProfileStart);
-			PolyphaseStereo(pcmBuf, sbi->vbuf + sbi->vindex + VBUF_LENGTH * (b & 0x01), polyCoef);
+			if (mp3DecInfo->fastLowrateStride > 1) {
+				produced = PolyphaseStereoFastLowrate(pcmBuf,
+					sbi->vbuf + sbi->vindex + VBUF_LENGTH * (b & 0x01),
+					polyCoef, mp3DecInfo->fastLowrateStride,
+					&mp3DecInfo->fastLowratePhase);
+				mp3DecInfo->fastLowrateOutputSamps += produced;
+				pcmBuf += produced;
+			} else {
+				PolyphaseStereo(pcmBuf, sbi->vbuf + sbi->vindex + VBUF_LENGTH * (b & 0x01), polyCoef);
+				pcmBuf += (2 * NBANDS);
+			}
 			AMIGA_PROFILE_STOP(MP3_DECODE_CORE_PROFILE_POLYPHASE, amigaProfileStart);
 			sbi->vindex = (sbi->vindex - (b & 0x01)) & 7;
-			pcmBuf += (2 * NBANDS);
 		}
 	} else {
 		/* mono */
 		for (b = 0; b < BLOCK_SIZE; b++) {
+			int produced;
 			AMIGA_PROFILE_START(amigaProfileStart);
 			FDCT32(mi->outBuf[0][b], sbi->vbuf + 0*32, sbi->vindex, (b & 0x01), mi->gb[0]);
 			AMIGA_PROFILE_STOP(MP3_DECODE_CORE_PROFILE_SUBBAND_DCT32, amigaProfileStart);
 			AMIGA_PROFILE_START(amigaProfileStart);
-			PolyphaseMono(pcmBuf, sbi->vbuf + sbi->vindex + VBUF_LENGTH * (b & 0x01), polyCoef);
+			if (mp3DecInfo->fastLowrateStride > 1) {
+				produced = PolyphaseMonoFastLowrate(pcmBuf,
+					sbi->vbuf + sbi->vindex + VBUF_LENGTH * (b & 0x01),
+					polyCoef, mp3DecInfo->fastLowrateStride,
+					&mp3DecInfo->fastLowratePhase);
+				mp3DecInfo->fastLowrateOutputSamps += produced;
+				pcmBuf += produced;
+			} else {
+				PolyphaseMono(pcmBuf, sbi->vbuf + sbi->vindex + VBUF_LENGTH * (b & 0x01), polyCoef);
+				pcmBuf += NBANDS;
+			}
 			AMIGA_PROFILE_STOP(MP3_DECODE_CORE_PROFILE_POLYPHASE, amigaProfileStart);
 			sbi->vindex = (sbi->vindex - (b & 0x01)) & 7;
-			pcmBuf += NBANDS;
 		}
 	}
 

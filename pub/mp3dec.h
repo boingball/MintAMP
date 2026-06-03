@@ -149,6 +149,8 @@ int MP3Decode(HMP3Decoder hMP3Decoder, unsigned char **inbuf, int *bytesLeft, sh
 void MP3GetLastFrameInfo(HMP3Decoder hMP3Decoder, MP3FrameInfo *mp3FrameInfo);
 int MP3GetNextFrameInfo(HMP3Decoder hMP3Decoder, MP3FrameInfo *mp3FrameInfo, unsigned char *buf);
 int MP3FindSyncWord(unsigned char *buf, int nBytes);
+void MP3SetFastLowrate(HMP3Decoder hMP3Decoder, int stride);
+int MP3GetFastLowrateStride(HMP3Decoder hMP3Decoder);
 
 void MP3ResetDecodeCoreProfile(void);
 void MP3GetDecodeCoreProfile(MP3DecodeCoreProfile *profile);

@@ -53,12 +53,21 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
 - `--rate 22050`, `--rate 11025`, or `--rate 8287` post-decode downsamples the
   output with a lightweight nearest-sample decimator when the MP3 sample rate is
   higher than the requested output rate.
+- `--fast-lowrate` is an experimental, lower-quality Amiga conversion mode for
+  speed experiments, not hi-fi playback. It requires one of the `--rate` values
+  above. In `AMIGA_M68K` + `AMIGA_FAST_POLYPHASE` builds it writes only every
+  second polyphase output sample for 22050 Hz, every fourth for 11025 Hz, and
+  roughly every fifth for 8287 Hz. This skips discarded polyphase sample work,
+  but Huffman/dequant, IMDCT, and FDCT32 still run at full MP3 rate; `--bench`
+  reports those unchanged buckets.
 - `--selftest-mulshift` compares the portable C `MULSHIFT32` reference with the
   optional 68020+ assembly helper over edge cases and 100,000 pseudo-random
   input pairs.
 - `--checksum` prints a 32-bit checksum of the decoded 16-bit PCM stream before
-  optional mixing, downsampling, or output-format conversion.  Use it to compare
-  the default polyphase path with optional optimized builds.
+  optional mixing, downsampling, or output-format conversion. With
+  `--fast-lowrate`, it instead covers the low-rate output samples so experiments
+  can verify deterministic fast-lowrate output. Use it to compare the default
+  polyphase path with optional optimized builds.
 - `--debug-argv` or `--show-argv` prints `argc` and `argv` after Amiga
   command-tail normalization.  The normalizer also handles Amiga C runtimes
   that pass the whole command tail as one argument, including CR/LF

@@ -93,6 +93,12 @@ typedef struct _MP3DecInfo {
 
 	int part23Length[MAX_NGRAN][MAX_NCHAN];
 
+	/* Experimental Amiga low-rate synthesis decimation.  A stride of 1 keeps
+	 * the normal full-rate output path. */
+	int fastLowrateStride;
+	int fastLowratePhase;
+	int fastLowrateOutputSamps;
+
 } MP3DecInfo;
 
 typedef struct _SFBandTable {
