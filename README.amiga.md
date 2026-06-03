@@ -58,11 +58,22 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   above. In `AMIGA_M68K` + `AMIGA_FAST_POLYPHASE` builds it writes only every
   second polyphase output sample for 22050 Hz, every fourth for 11025 Hz, and
   roughly every fifth for 8287 Hz. This skips discarded polyphase sample work,
-  but Huffman/dequant, IMDCT, and FDCT32 still run at full MP3 rate; `--bench`
-  reports those unchanged buckets.
+  appends emitted samples through one cumulative low-rate output counter, and
+  keeps the low-rate phase/stride state alive across granules and MP3 frames.
+  For exact integer strides such as 44100 -> 11025, fast-lowrate selects the
+  same source positions as normal `--rate` decimation. The 8287 Hz mode uses a
+  fixed stride of 5 for Amiga-rate experiments, so it intentionally differs
+  from rational 44100 -> 8287 `--rate` positions. Huffman/dequant, IMDCT, and
+  FDCT32 still run at full MP3 rate; `--bench` reports those unchanged buckets.
+- `--debug-fastlowrate` prints one line per decoded frame/granule with the
+  full-rate sample count, low-rate samples emitted, cumulative low-rate samples,
+  and destination offset range used for contiguous placement.
 - `--selftest-mulshift` compares the portable C `MULSHIFT32` reference with the
   optional 68020+ assembly helper over edge cases and 100,000 pseudo-random
   input pairs.
+- `--selftest-fastlowrate` compares a synthetic ramp/impulse-like PCM sequence
+  through normal 44100 -> 11025 `--rate` decimation and the stride-4
+  fast-lowrate selector across chunk boundaries.
 - `--checksum` prints a 32-bit checksum of the decoded 16-bit PCM stream before
   optional mixing, downsampling, or output-format conversion. With
   `--fast-lowrate`, it instead covers the low-rate output samples so experiments

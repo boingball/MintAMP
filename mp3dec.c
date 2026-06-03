@@ -189,6 +189,7 @@ void MP3SetFastLowrate(HMP3Decoder hMP3Decoder, int stride)
 	mp3DecInfo->fastLowrateStride = stride;
 	mp3DecInfo->fastLowratePhase = 0;
 	mp3DecInfo->fastLowrateOutputSamps = 0;
+	mp3DecInfo->fastLowrateDebugCount = 0;
 }
 
 int MP3GetFastLowrateStride(HMP3Decoder hMP3Decoder)
@@ -199,6 +200,24 @@ int MP3GetFastLowrateStride(HMP3Decoder hMP3Decoder)
 		return 1;
 	return mp3DecInfo->fastLowrateStride > 1 ?
 		mp3DecInfo->fastLowrateStride : 1;
+}
+
+int MP3GetFastLowrateDebug(HMP3Decoder hMP3Decoder,
+	MP3FastLowrateGranuleDebug *debug, int maxDebug)
+{
+	MP3DecInfo *mp3DecInfo = (MP3DecInfo *)hMP3Decoder;
+	int count;
+	int copyCount;
+
+	if (!mp3DecInfo)
+		return 0;
+	count = mp3DecInfo->fastLowrateDebugCount;
+	if (debug && maxDebug > 0) {
+		copyCount = count < maxDebug ? count : maxDebug;
+		memcpy(debug, mp3DecInfo->fastLowrateDebug,
+			copyCount * sizeof(debug[0]));
+	}
+	return count;
 }
 
 
@@ -488,6 +507,7 @@ int MP3Decode(HMP3Decoder hMP3Decoder, unsigned char **inbuf, int *bytesLeft, sh
 	bitOffset = 0;
 	mainBits = mp3DecInfo->mainDataBytes * 8;
 	mp3DecInfo->fastLowrateOutputSamps = 0;
+	mp3DecInfo->fastLowrateDebugCount = 0;
 
 	/* decode one complete frame */
 	for (gr = 0; gr < mp3DecInfo->nGrans; gr++) {
@@ -573,11 +593,32 @@ int MP3Decode(HMP3Decoder hMP3Decoder, unsigned char **inbuf, int *bytesLeft, sh
 			time = systime_get();
 		#endif
 		/* subband transform - if stereo, interleaves pcm LRLRLR */
-		if (Subband(mp3DecInfo, outbuf +
-			(mp3DecInfo->fastLowrateStride > 1 ? 0 :
-			gr*mp3DecInfo->nGranSamps*mp3DecInfo->nChans)) < 0) {
-			MP3ClearBadFrame(mp3DecInfo, outbuf);
-			return ERR_MP3_INVALID_SUBBAND;			
+		{
+			int dstStart;
+			int dstEnd;
+
+			if (mp3DecInfo->fastLowrateStride > 1)
+				dstStart = mp3DecInfo->fastLowrateOutputSamps;
+			else
+				dstStart = gr * mp3DecInfo->nGranSamps * mp3DecInfo->nChans;
+
+			if (Subband(mp3DecInfo, outbuf + dstStart) < 0) {
+				MP3ClearBadFrame(mp3DecInfo, outbuf);
+				return ERR_MP3_INVALID_SUBBAND;
+			}
+
+			if (mp3DecInfo->fastLowrateStride > 1 &&
+				mp3DecInfo->fastLowrateDebugCount < MAX_NGRAN) {
+				MP3FastLowrateGranuleDebug *dbg =
+					&mp3DecInfo->fastLowrateDebug[mp3DecInfo->fastLowrateDebugCount++];
+				dstEnd = mp3DecInfo->fastLowrateOutputSamps;
+				dbg->granule = gr;
+				dbg->fullRateSamps = mp3DecInfo->nGranSamps * mp3DecInfo->nChans;
+				dbg->lowrateSamps = dstEnd - dstStart;
+				dbg->cumulativeLowrateSamps = dstEnd;
+				dbg->destOffsetStart = dstStart;
+				dbg->destOffsetEnd = dstEnd;
+			}
 		}
 		#ifdef PROFILE
 			time = systime_get() - time;

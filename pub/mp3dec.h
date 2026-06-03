@@ -131,6 +131,15 @@ typedef struct _MP3DecodeCoreProfile {
 	clock_t polyphase;
 } MP3DecodeCoreProfile;
 
+typedef struct _MP3FastLowrateGranuleDebug {
+	int granule;
+	int fullRateSamps;
+	int lowrateSamps;
+	int cumulativeLowrateSamps;
+	int destOffsetStart;
+	int destOffsetEnd;
+} MP3FastLowrateGranuleDebug;
+
 enum {
 	MP3_DECODE_CORE_PROFILE_BITSTREAM_FRAME_PARSING = 0,
 	MP3_DECODE_CORE_PROFILE_HUFFMAN,
@@ -151,6 +160,8 @@ int MP3GetNextFrameInfo(HMP3Decoder hMP3Decoder, MP3FrameInfo *mp3FrameInfo, uns
 int MP3FindSyncWord(unsigned char *buf, int nBytes);
 void MP3SetFastLowrate(HMP3Decoder hMP3Decoder, int stride);
 int MP3GetFastLowrateStride(HMP3Decoder hMP3Decoder);
+int MP3GetFastLowrateDebug(HMP3Decoder hMP3Decoder,
+	MP3FastLowrateGranuleDebug *debug, int maxDebug);
 
 void MP3ResetDecodeCoreProfile(void);
 void MP3GetDecodeCoreProfile(MP3DecodeCoreProfile *profile);

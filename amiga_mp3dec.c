@@ -33,11 +33,13 @@ typedef struct DecodeOptions {
 	int decodeOnly;
 	int noOutput;
 	int selftestMulshift;
+	int selftestFastLowrate;
 	int checksum;
 	int outputRate;
 	int fastLowrate;
 	int help;
 	int debugArgv;
+	int debugFastLowrate;
 } DecodeOptions;
 
 typedef struct DecodeStats {
@@ -333,7 +335,9 @@ static void PrintUsage(const char *prog)
 	printf("  --fast-lowrate experimental lower-quality Amiga conversion; requires --rate\n");
 	printf("                 22050, 11025, or 8287 and can skip discarded synthesis samples\n");
 	printf("  --selftest-mulshift compare C and optional asm MULSHIFT32 helpers\n");
+	printf("  --selftest-fastlowrate compare synthetic stride decimation paths\n");
 	printf("  --checksum  print a 32-bit checksum of decoded PCM samples\n");
+	printf("  --debug-fastlowrate print per-frame/granule fast-lowrate placement\n");
 	printf("  --debug-argv print argc/argv after Amiga argument normalization\n");
 	printf("  --show-argv  alias for --debug-argv\n");
 	printf("\n");
@@ -371,6 +375,8 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->noOutput = 1;
 		} else if (!strcmp(argv[i], "--selftest-mulshift")) {
 			opt->selftestMulshift = 1;
+		} else if (!strcmp(argv[i], "--selftest-fastlowrate")) {
+			opt->selftestFastLowrate = 1;
 		} else if (!strcmp(argv[i], "--checksum")) {
 			opt->checksum = 1;
 		} else if (!strcmp(argv[i], "--fast-lowrate")) {
@@ -382,6 +388,8 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			if (opt->outputRate != 22050 && opt->outputRate != 11025 &&
 				opt->outputRate != 8287)
 				return -1;
+		} else if (!strcmp(argv[i], "--debug-fastlowrate")) {
+			opt->debugFastLowrate = 1;
 		} else if (!strcmp(argv[i], "--debug-argv") ||
 			!strcmp(argv[i], "--show-argv")) {
 			opt->debugArgv = 1;
@@ -403,7 +411,7 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 	if (opt->help)
 		return 0;
 
-	if (opt->selftestMulshift)
+	if (opt->selftestMulshift || opt->selftestFastLowrate)
 		return 0;
 
 	if (opt->fastLowrate && (opt->outputRate != 22050 &&
@@ -865,6 +873,93 @@ static int DownsampleFrame(RateState *rate, const short *in, short *out, int nSa
 	return (int)(produced * (unsigned long)channels);
 }
 
+
+static int FastLowrateSelectFrame(int *phase, const short *in, short *out,
+	int nSamps, int stride, int channels)
+{
+	int inFrames;
+	int frame;
+	int produced;
+
+	if (stride < 2 || channels <= 0) {
+		if (out != in)
+			memmove(out, in, nSamps * sizeof(short));
+		return nSamps;
+	}
+
+	inFrames = nSamps / channels;
+	produced = 0;
+	for (frame = 0; frame < inFrames; frame++) {
+		if (*phase == 0) {
+			int ch;
+			for (ch = 0; ch < channels; ch++)
+				out[produced * channels + ch] = in[frame * channels + ch];
+			produced++;
+		}
+		(*phase)++;
+		if (*phase >= stride)
+			*phase = 0;
+	}
+	return produced * channels;
+}
+
+static int SelftestFastLowrate(void)
+{
+	enum { CHANNELS = 1, TOTAL_FRAMES = 2304, CHUNK_FRAMES = 576 };
+	short input[TOTAL_FRAMES * CHANNELS];
+	short normal[TOTAL_FRAMES * CHANNELS];
+	short fast[TOTAL_FRAMES * CHANNELS];
+	RateState rateState;
+	int fastPhase;
+	int normalCount;
+	int fastCount;
+	int offset;
+	int i;
+	int failures;
+	int inSamps;
+
+	for (i = 0; i < TOTAL_FRAMES; i++) {
+		input[i] = (short)((i % 257) * 127 - 16384);
+		if ((i % 509) == 0)
+			input[i] = 30000;
+	}
+
+	memset(&rateState, 0, sizeof(rateState));
+	fastPhase = 0;
+	normalCount = 0;
+	fastCount = 0;
+	for (offset = 0; offset < TOTAL_FRAMES; offset += CHUNK_FRAMES) {
+		inSamps = CHUNK_FRAMES * CHANNELS;
+		normalCount += DownsampleFrame(&rateState, input + offset * CHANNELS,
+			normal + normalCount, inSamps, 44100, 11025, CHANNELS);
+		fastCount += FastLowrateSelectFrame(&fastPhase, input + offset * CHANNELS,
+			fast + fastCount, inSamps, 4, CHANNELS);
+	}
+
+	failures = 0;
+	if (normalCount != fastCount) {
+		fprintf(stderr, "fast-lowrate selftest count mismatch: normal=%d fast=%d\n",
+			normalCount, fastCount);
+		failures++;
+	}
+	for (i = 0; i < normalCount && i < fastCount; i++) {
+		if (normal[i] != fast[i]) {
+			fprintf(stderr, "fast-lowrate selftest mismatch at %d: normal=%d fast=%d\n",
+				i, normal[i], fast[i]);
+			failures++;
+			break;
+		}
+	}
+	if (!failures) {
+		printf("fast-lowrate selftest passed: stride 4 selects the same positions "
+			"as 44100->11025 normal decimation across chunk boundaries (%d samples)\n",
+			normalCount);
+		printf("note: --rate 8287 uses fixed stride 5, so it intentionally differs "
+			"from rational 44100->8287 normal --rate positions.\n");
+	}
+	return failures ? 1 : 0;
+}
+
 static void InitNoOutputSvx(SvxWriter *svx, int compression)
 {
 	memset(svx, 0, sizeof(*svx));
@@ -954,6 +1049,7 @@ int main(int argc, char **argv)
 	int eofReached;
 	int outOfData;
 	int svxOpen;
+	int verifyError;
 	clock_t startClock;
 	clock_t endClock;
 	NormalizedArgs normalized;
@@ -996,6 +1092,11 @@ int main(int argc, char **argv)
 	}
 	if (opt.selftestMulshift) {
 		int selftestErr = SelftestMulshift();
+		AmigaFreeNormalizedArgs(&normalized);
+		return selftestErr;
+	}
+	if (opt.selftestFastLowrate) {
+		int selftestErr = SelftestFastLowrate();
 		AmigaFreeNormalizedArgs(&normalized);
 		return selftestErr;
 	}
@@ -1065,6 +1166,7 @@ int main(int argc, char **argv)
 	eofReached = 0;
 	outOfData = 0;
 	svxOpen = 0;
+	verifyError = 0;
 	readPtr = readBuf;
 	gTiming = &timing;
 	MP3ResetDecodeCoreProfile();
@@ -1111,6 +1213,23 @@ int main(int argc, char **argv)
 		}
 
 		MP3GetLastFrameInfo(decoder, &info);
+		if (opt.debugFastLowrate) {
+			MP3FastLowrateGranuleDebug fastDbg[MAX_NGRAN];
+			int dbgCount = MP3GetFastLowrateDebug(decoder, fastDbg, MAX_NGRAN);
+			int dbgIndex;
+			for (dbgIndex = 0; dbgIndex < dbgCount && dbgIndex < MAX_NGRAN; dbgIndex++) {
+				fprintf(stderr,
+					"fast-lowrate frame=%lu granule=%d full-rate-samps=%d "
+					"lowrate-samps=%d cumulative-lowrate-samps=%d "
+					"dest-offset=%d..%d\n",
+					stats.decodedFrames, fastDbg[dbgIndex].granule,
+					fastDbg[dbgIndex].fullRateSamps,
+					fastDbg[dbgIndex].lowrateSamps,
+					fastDbg[dbgIndex].cumulativeLowrateSamps,
+					fastDbg[dbgIndex].destOffsetStart,
+					fastDbg[dbgIndex].destOffsetEnd);
+			}
+		}
 		UpdateFirstFrameStats(&stats, &info);
 		if (opt.checksum && !opt.fastLowrate)
 			stats.pcmChecksum = UpdatePcmChecksum(stats.pcmChecksum, decodeBuf,
@@ -1188,8 +1307,22 @@ int main(int argc, char **argv)
 
 	if (svxOpen) {
 		clock_t t0 = clock();
-		if (SvxEnd(&svx) != 0)
+		if (SvxEnd(&svx) != 0) {
 			fprintf(stderr, "error finalizing 8SVX file\n");
+			verifyError = 1;
+		}
+		if (svx.sourceSamples != stats.outputSamples) {
+			fprintf(stderr,
+				"8SVX VHDR sample count mismatch: vhdr=%lu output=%lu\n",
+				svx.sourceSamples, stats.outputSamples);
+			verifyError = 1;
+		}
+		if (svx.compression == SVX_COMP_NONE && svx.bodyBytes != svx.sourceSamples) {
+			fprintf(stderr,
+				"8SVX BODY/sample count mismatch: body=%lu samples=%lu\n",
+				svx.bodyBytes, svx.sourceSamples);
+			verifyError = 1;
+		}
 		timing.svxWrite += clock() - t0;
 	}
 
@@ -1259,5 +1392,5 @@ int main(int argc, char **argv)
 	free(resolvedOutName);
 	AmigaFreeNormalizedArgs(&normalized);
 
-	return 0;
+	return verifyError ? 1 : 0;
 }
