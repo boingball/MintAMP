@@ -416,6 +416,54 @@ static __inline int PolyphaseMulShift26(int x, int coef)
 	(accHi) += PolyphaseMulShift26(lo_, c2_) + PolyphaseMulShift26(hi_, c1_); \
 } while (0)
 
+#define FAST_MC2_LO(accLo, v, c) do { \
+	const int *vLoP = (v); \
+	const int *vHiP = (v) + 23; \
+	const int *cP = (c); \
+	int c1_, c2_; \
+	int lo_, hi_; \
+	c1_ = cP[0]; c2_ = cP[1]; lo_ = vLoP[0]; hi_ = vHiP[0]; \
+	(accLo) += PolyphaseMulShift26(lo_, c1_) - PolyphaseMulShift26(hi_, c2_); \
+	c1_ = cP[2]; c2_ = cP[3]; lo_ = vLoP[1]; hi_ = vHiP[-1]; \
+	(accLo) += PolyphaseMulShift26(lo_, c1_) - PolyphaseMulShift26(hi_, c2_); \
+	c1_ = cP[4]; c2_ = cP[5]; lo_ = vLoP[2]; hi_ = vHiP[-2]; \
+	(accLo) += PolyphaseMulShift26(lo_, c1_) - PolyphaseMulShift26(hi_, c2_); \
+	c1_ = cP[6]; c2_ = cP[7]; lo_ = vLoP[3]; hi_ = vHiP[-3]; \
+	(accLo) += PolyphaseMulShift26(lo_, c1_) - PolyphaseMulShift26(hi_, c2_); \
+	c1_ = cP[8]; c2_ = cP[9]; lo_ = vLoP[4]; hi_ = vHiP[-4]; \
+	(accLo) += PolyphaseMulShift26(lo_, c1_) - PolyphaseMulShift26(hi_, c2_); \
+	c1_ = cP[10]; c2_ = cP[11]; lo_ = vLoP[5]; hi_ = vHiP[-5]; \
+	(accLo) += PolyphaseMulShift26(lo_, c1_) - PolyphaseMulShift26(hi_, c2_); \
+	c1_ = cP[12]; c2_ = cP[13]; lo_ = vLoP[6]; hi_ = vHiP[-6]; \
+	(accLo) += PolyphaseMulShift26(lo_, c1_) - PolyphaseMulShift26(hi_, c2_); \
+	c1_ = cP[14]; c2_ = cP[15]; lo_ = vLoP[7]; hi_ = vHiP[-7]; \
+	(accLo) += PolyphaseMulShift26(lo_, c1_) - PolyphaseMulShift26(hi_, c2_); \
+} while (0)
+
+#define FAST_MC2_HI(accHi, v, c) do { \
+	const int *vLoP = (v); \
+	const int *vHiP = (v) + 23; \
+	const int *cP = (c); \
+	int c1_, c2_; \
+	int lo_, hi_; \
+	c1_ = cP[0]; c2_ = cP[1]; lo_ = vLoP[0]; hi_ = vHiP[0]; \
+	(accHi) += PolyphaseMulShift26(lo_, c2_) + PolyphaseMulShift26(hi_, c1_); \
+	c1_ = cP[2]; c2_ = cP[3]; lo_ = vLoP[1]; hi_ = vHiP[-1]; \
+	(accHi) += PolyphaseMulShift26(lo_, c2_) + PolyphaseMulShift26(hi_, c1_); \
+	c1_ = cP[4]; c2_ = cP[5]; lo_ = vLoP[2]; hi_ = vHiP[-2]; \
+	(accHi) += PolyphaseMulShift26(lo_, c2_) + PolyphaseMulShift26(hi_, c1_); \
+	c1_ = cP[6]; c2_ = cP[7]; lo_ = vLoP[3]; hi_ = vHiP[-3]; \
+	(accHi) += PolyphaseMulShift26(lo_, c2_) + PolyphaseMulShift26(hi_, c1_); \
+	c1_ = cP[8]; c2_ = cP[9]; lo_ = vLoP[4]; hi_ = vHiP[-4]; \
+	(accHi) += PolyphaseMulShift26(lo_, c2_) + PolyphaseMulShift26(hi_, c1_); \
+	c1_ = cP[10]; c2_ = cP[11]; lo_ = vLoP[5]; hi_ = vHiP[-5]; \
+	(accHi) += PolyphaseMulShift26(lo_, c2_) + PolyphaseMulShift26(hi_, c1_); \
+	c1_ = cP[12]; c2_ = cP[13]; lo_ = vLoP[6]; hi_ = vHiP[-6]; \
+	(accHi) += PolyphaseMulShift26(lo_, c2_) + PolyphaseMulShift26(hi_, c1_); \
+	c1_ = cP[14]; c2_ = cP[15]; lo_ = vLoP[7]; hi_ = vHiP[-7]; \
+	(accHi) += PolyphaseMulShift26(lo_, c2_) + PolyphaseMulShift26(hi_, c1_); \
+} while (0)
+
 static void PolyphaseMonoFast(short *pcm, int *vbuf, const int *coefBase)
 {
 	int i;
@@ -524,10 +572,15 @@ static __inline void PolyphaseMonoFastSample(short *pcm, int sample, int *vbuf, 
 		pair = sample < 16 ? sample : 32 - sample;
 		coef = coefBase + 16 * pair;
 		vb1 = vbuf + 64 * pair;
-		sum1 = 0;
-		sum2 = 0;
-		FAST_MC2(sum1, sum2, vb1, coef);
-		pcm[0] = ClipIntToShort(sample < 16 ? sum1 : sum2);
+		if (sample < 16) {
+			sum1 = 0;
+			FAST_MC2_LO(sum1, vb1, coef);
+			pcm[0] = ClipIntToShort(sum1);
+		} else {
+			sum2 = 0;
+			FAST_MC2_HI(sum2, vb1, coef);
+			pcm[0] = ClipIntToShort(sum2);
+		}
 	}
 }
 

@@ -1,4 +1,4 @@
-# Amiga fast-lowrate loop-overhead pass notes
+# Amiga fast-lowrate optimization notes
 
 ## Target command
 
@@ -6,10 +6,11 @@
 amiga_mp3dec_fastpoly --decode-only --bench --checksum --fast-lowrate --rate 11025 gs-16b-1c-44100hz.mp3
 ```
 
-The pass is deliberately output-neutral: it changes only loop control, phase
-selection, pointer movement, and invariant setup in the fast-lowrate synthesis
-path.  The convolution helpers, coefficient tables, clipping, and emitted sample
-order are unchanged.
+These passes are deliberately output-neutral: they change only fast-lowrate
+selection, pointer movement, invariant setup, and avoided paired-side work for
+samples that emit only one side of an existing polyphase pair. Coefficient
+tables, clipping, emitted sample order, and the multiply/accumulator order for
+each emitted sample are unchanged.
 
 ## Before profile supplied for this pass
 
@@ -23,7 +24,7 @@ Build/profile: `AMIGA_PROFILE_DECODE + AMIGA_FAST_POLYPHASE + --fast-lowrate --r
 | huffman | ~2.10 s |
 | dequant | ~1.96 s |
 
-## Changes made
+## Loop-overhead changes made
 
 - Fast-lowrate stride 4 and stride 5 now use precomputed phase-to-sample tables.
   This removes the per-output-block sample loop's phase test/modulo-style wrap
@@ -36,16 +37,32 @@ Build/profile: `AMIGA_PROFILE_DECODE + AMIGA_FAST_POLYPHASE + --fast-lowrate --r
 - The DCT/polyphase block loop now computes the odd-block flag and active vbuf
   base once per block instead of repeating those expressions in each call site.
 
+
+## One-sided paired-convolution pass
+
+- The mono fast-lowrate sample helper now uses checksum-preserving one-sided
+  variants of the paired `FAST_MC2` convolution when the selected low-rate
+  sample is only one side of a pair. Samples below 16 compute only the low-side
+  accumulator; samples above 16 compute only the high-side accumulator.
+- The one-sided helpers copy the emitted side's coefficient loads, vbuf loads,
+  multiply calls, and accumulator expression order from `FAST_MC2`; they only
+  omit the paired accumulator whose PCM value is not emitted.
+- Full-rate mono/stereo synthesis and normal `--rate` downsampling remain on the
+  existing paths. Stereo fast-lowrate still uses the paired helper until mono
+  target checksums have been verified on the Amiga benchmark machine.
+
 ## Checksum/benchmark log
 
 The required MP3 fixture (`gs-16b-1c-44100hz.mp3`) was not present in this
-workspace, so the exact before/after checksum lines must be filled in on the
-Amiga benchmark machine that has the fixture.
+workspace, so the exact before/after checksum and target timing lines must be
+filled in on the Amiga benchmark machine that has the fixture. Local synthetic
+verification compared mono fast-lowrate stride-4/stride-5 output against the
+full fast-polyphase output selected at the same sample positions.
 
-| Rate | Before checksum | After checksum | Before elapsed | After elapsed |
-| --- | --- | --- | ---: | ---: |
-| 11025 | _record from pre-pass binary_ | _must match before_ | polyphase ~9.34 s | _record on target_ |
-| 8287 | _record from pre-pass binary_ | _must match before_ | _record on target_ | _record on target_ |
+| Rate | Before checksum | After checksum | Before decode-only elapsed | After decode-only elapsed | Notes |
+| --- | --- | --- | ---: | ---: | --- |
+| 11025 | _record from pre-pass binary_ | _must match before_ | polyphase ~9.34 s from loop-overhead baseline | _record on target_ | stride-4 mono now avoids the unused side for paired samples 4, 8, 12, 20, 24, and 28 in phase 0 |
+| 8287 | _record from pre-pass binary_ | _must match before_ | _record on target_ | _record on target_ | stride-5 mono now avoids unused paired sides for selected non-0/16 samples |
 
 Suggested commands:
 
