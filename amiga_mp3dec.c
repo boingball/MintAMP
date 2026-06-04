@@ -47,6 +47,7 @@ typedef struct DecodeOptions {
 	int noOutput;
 	int selftestMulshift;
 	int selftestFastLowrate;
+	int selftestMonoFastLowrateStereo;
 	int checksum;
 	int outputRate;
 	int fastLowrate;
@@ -66,6 +67,7 @@ typedef struct DecodeStats {
 	int sampleRate;
 	int outputSampleRate;
 	int channels;
+	int outputChannels;
 	int bitrate;
 	unsigned long underruns;
 	unsigned long underrunBuffers[2];
@@ -363,6 +365,7 @@ static void PrintUsage(const char *prog)
 	printf("                 22050, 11025, 8820, or 8287 and can skip discarded synthesis samples\n");
 	printf("  --selftest-mulshift compare C and optional asm MULSHIFT32 helpers\n");
 	printf("  --selftest-fastlowrate compare synthetic stride decimation paths\n");
+	printf("  --selftest-mono-fastlowrate-stereo verify stereo-to-mono low-rate accounting\n");
 	printf("  --checksum  print a 32-bit checksum of decoded PCM samples\n");
 	printf("  --debug-fastlowrate print per-frame/granule fast-lowrate placement\n");
 	printf("  --debug-argv print argc/argv after Amiga argument normalization\n");
@@ -426,6 +429,8 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->selftestMulshift = 1;
 		} else if (!strcmp(argv[i], "--selftest-fastlowrate")) {
 			opt->selftestFastLowrate = 1;
+		} else if (!strcmp(argv[i], "--selftest-mono-fastlowrate-stereo")) {
+			opt->selftestMonoFastLowrateStereo = 1;
 		} else if (!strcmp(argv[i], "--checksum")) {
 			opt->checksum = 1;
 		} else if (!strcmp(argv[i], "--fast-lowrate")) {
@@ -460,7 +465,8 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 	if (opt->help)
 		return 0;
 
-	if (opt->selftestMulshift || opt->selftestFastLowrate)
+	if (opt->selftestMulshift || opt->selftestFastLowrate ||
+		opt->selftestMonoFastLowrateStereo)
 		return 0;
 
 	if (opt->stereo && !opt->play) {
@@ -924,34 +930,73 @@ static void PrintFastLowrateOutputRateDifference(const DecodeOptions *opt,
 	}
 }
 
+static int OutputChannelCount(const DecodeOptions *opt, const DecodeStats *stats)
+{
+	int outputChannels;
+
+	if (stats->outputChannels > 0)
+		return stats->outputChannels;
+
+	if (opt->stereo)
+		outputChannels = 2;
+	else if (opt->mono)
+		outputChannels = 1;
+	else
+		outputChannels = stats->channels;
+
+	if (outputChannels <= 0)
+		outputChannels = 1;
+
+	return outputChannels;
+}
+
+static unsigned long PerChannelEmittedSamples(const DecodeOptions *opt,
+	const DecodeStats *stats)
+{
+	int outputChannels;
+
+	outputChannels = OutputChannelCount(opt, stats);
+	return outputChannels > 1 ?
+		stats->outputSamples / (unsigned long)outputChannels : stats->outputSamples;
+}
+
 static double DecodedAudioSeconds(const DecodeOptions *opt,
 	const DecodeStats *stats)
 {
 	int sampleRate;
-	int outputChannels;
+	unsigned long perChannelSamples;
 
 	if (stats->outputSamples == 0)
 		return 0.0;
 
-	if (opt->fastLowrate) {
+	if (opt->fastLowrate)
 		sampleRate = PlaybackOutputSampleRate(opt, stats);
-		outputChannels = opt->stereo ? 2 : 1;
-		return sampleRate > 0 ?
-			(double)stats->outputSamples /
-			((double)sampleRate * (double)outputChannels) : 0.0;
-	}
+	else
+		sampleRate = stats->outputSampleRate ?
+			stats->outputSampleRate : stats->sampleRate;
 
-	sampleRate = stats->outputSampleRate ?
-		stats->outputSampleRate : stats->sampleRate;
 	if (sampleRate <= 0)
 		return 0.0;
 
-	outputChannels = opt->mono ? 1 : stats->channels;
-	if (outputChannels <= 0)
-		outputChannels = 1;
+	perChannelSamples = PerChannelEmittedSamples(opt, stats);
+	return (double)perChannelSamples / (double)sampleRate;
+}
 
-	return (double)stats->outputSamples /
-		((double)sampleRate * (double)outputChannels);
+static void PrintOutputStats(const DecodeOptions *opt, const DecodeStats *stats)
+{
+	unsigned long perChannelSamples;
+	int outputChannels;
+	double audioSeconds;
+
+	outputChannels = OutputChannelCount(opt, stats);
+	perChannelSamples = PerChannelEmittedSamples(opt, stats);
+	audioSeconds = DecodedAudioSeconds(opt, stats);
+
+	printf("input channels: %d\n", stats->channels);
+	printf("output channels: %d\n", outputChannels);
+	printf("total emitted samples: %lu\n", stats->outputSamples);
+	printf("per-channel emitted samples: %lu\n", perChannelSamples);
+	printf("decoded audio seconds used for realtime calculation: %.6f\n", audioSeconds);
 }
 
 static int DownsampleFrame(RateState *rate, const short *in, short *out, int nSamps,
@@ -1079,6 +1124,83 @@ static int SelftestFastLowrate(void)
 		printf("note: --rate 8820/8287 uses fixed stride 5; 8287 intentionally differs "
 			"from rational 44100->8287 normal --rate positions.\n");
 	}
+	return failures ? 1 : 0;
+}
+
+
+static int SelftestMonoFastLowrateStereo(void)
+{
+	enum {
+		IN_CHANNELS = 2,
+		OUT_CHANNELS = 1,
+		TOTAL_FRAMES = 44100,
+		CHUNK_FRAMES = 1152,
+		STRIDE = 4,
+		EXPECTED = TOTAL_FRAMES / STRIDE
+	};
+	short input[CHUNK_FRAMES * IN_CHANNELS];
+	short lowrate[CHUNK_FRAMES * IN_CHANNELS];
+	short mono[CHUNK_FRAMES];
+	DecodeOptions opt;
+	DecodeStats stats;
+	int phase;
+	int offset;
+	int failures;
+
+	memset(&opt, 0, sizeof(opt));
+	memset(&stats, 0, sizeof(stats));
+	opt.mono = 1;
+	opt.fastLowrate = 1;
+	opt.outputRate = 11025;
+	stats.sampleRate = 44100;
+	stats.outputSampleRate = 11025;
+	stats.channels = IN_CHANNELS;
+	stats.outputChannels = OUT_CHANNELS;
+	phase = 0;
+	failures = 0;
+
+	for (offset = 0; offset < TOTAL_FRAMES; offset += CHUNK_FRAMES) {
+		int frames;
+		int i;
+		int selected;
+		int mixed;
+
+		frames = TOTAL_FRAMES - offset;
+		if (frames > CHUNK_FRAMES)
+			frames = CHUNK_FRAMES;
+		for (i = 0; i < frames; i++) {
+			int frame = offset + i;
+			input[2 * i] = (short)((frame % 251) * 101 - 12000);
+			input[2 * i + 1] = (short)(12000 - (frame % 197) * 97);
+		}
+		selected = FastLowrateSelectFrame(&phase, input, lowrate,
+			frames * IN_CHANNELS, STRIDE, IN_CHANNELS);
+		mixed = MixFrame(lowrate, mono, selected, IN_CHANNELS, 1);
+		stats.outputSamples += (unsigned long)mixed;
+	}
+
+	if (stats.outputSamples != EXPECTED) {
+		fprintf(stderr,
+			"mono fast-lowrate stereo selftest count mismatch: got=%lu expected=%d\n",
+			stats.outputSamples, EXPECTED);
+		failures++;
+	}
+	if (PerChannelEmittedSamples(&opt, &stats) != EXPECTED) {
+		fprintf(stderr,
+			"mono fast-lowrate stereo selftest per-channel mismatch: got=%lu expected=%d\n",
+			PerChannelEmittedSamples(&opt, &stats), EXPECTED);
+		failures++;
+	}
+	if (DecodedAudioSeconds(&opt, &stats) < 0.999 ||
+		DecodedAudioSeconds(&opt, &stats) > 1.001) {
+		fprintf(stderr,
+			"mono fast-lowrate stereo selftest seconds mismatch: got=%.6f expected=1.000000\n",
+			DecodedAudioSeconds(&opt, &stats));
+		failures++;
+	}
+	if (!failures)
+		printf("mono fast-lowrate stereo selftest passed: 44100 Hz stereo -> 11025 Hz mono emitted %lu samples\n",
+			stats.outputSamples);
 	return failures ? 1 : 0;
 }
 
@@ -1764,6 +1886,11 @@ int main(int argc, char **argv)
 		AmigaFreeNormalizedArgs(&normalized);
 		return selftestErr;
 	}
+	if (opt.selftestMonoFastLowrateStereo) {
+		int selftestErr = SelftestMonoFastLowrateStereo();
+		AmigaFreeNormalizedArgs(&normalized);
+		return selftestErr;
+	}
 
 	if (opt.outName && OutputNameIsDirectory(opt.outName)) {
 		resolvedOutName = BuildDirectoryOutputName(opt.outName, opt.inName, &opt);
@@ -1857,6 +1984,7 @@ int main(int argc, char **argv)
 		printf("bitrate: %d bps\n", stats.bitrate);
 		printf("decoded frames: %lu\n", stats.decodedFrames);
 		printf("output samples: %lu\n", stats.outputSamples);
+		PrintOutputStats(&opt, &stats);
 		if (opt.checksum)
 			printf("playback PCM checksum: %08lx\n", stats.pcmChecksum);
 		printf("playback underruns: %lu\n", stats.underruns);
@@ -1969,6 +2097,8 @@ int main(int argc, char **argv)
 			effectiveRate = EffectiveOutputSampleRate(&opt, info.samprate);
 			stats.outputSampleRate = effectiveRate;
 		}
+		if (!stats.outputChannels)
+			stats.outputChannels = (opt.mono || info.nChans <= 1) ? 1 : info.nChans;
 
 		if (!opt.decodeOnly && opt.outFormat == OUT_8SVX && !svxOpen) {
 			if (!info.samprate) {
@@ -1997,10 +2127,20 @@ int main(int argc, char **argv)
 		}
 
 		if (opt.decodeOnly) {
+			const short *accountBuf;
+			int accountSamps;
+
+			accountBuf = decodeBuf;
+			accountSamps = info.outputSamps;
+			if (opt.mono && info.nChans > 1) {
+				accountSamps = MixFrame(decodeBuf, writeBuf, info.outputSamps,
+					info.nChans, 1);
+				accountBuf = writeBuf;
+			}
 			if (opt.checksum && opt.fastLowrate)
-				stats.pcmChecksum = UpdatePcmChecksum(stats.pcmChecksum, decodeBuf,
-					info.outputSamps);
-			stats.outputSamples += (unsigned long)info.outputSamps;
+				stats.pcmChecksum = UpdatePcmChecksum(stats.pcmChecksum, accountBuf,
+					accountSamps);
+			stats.outputSamples += (unsigned long)accountSamps;
 		} else {
 			int outSamps;
 			int outChannels;
@@ -2012,6 +2152,7 @@ int main(int argc, char **argv)
 			outSamps = MixFrame(decodeBuf, writeBuf, info.outputSamps,
 				info.nChans, opt.mono);
 			outChannels = (opt.mono || info.nChans <= 1) ? 1 : info.nChans;
+			stats.outputChannels = outChannels;
 			if (!opt.fastLowrate && opt.outputRate && info.samprate > opt.outputRate) {
 				outSamps = DownsampleFrame(&rateState, writeBuf, rateBuf, outSamps,
 					info.samprate, opt.outputRate, outChannels);
@@ -2084,6 +2225,7 @@ int main(int argc, char **argv)
 	printf("bitrate: %d bps\n", stats.bitrate);
 	printf("decoded frames: %lu\n", stats.decodedFrames);
 	printf("output samples: %lu\n", stats.outputSamples);
+	PrintOutputStats(&opt, &stats);
 	if (opt.checksum)
 		printf("%s PCM checksum: %08lx\n",
 			opt.fastLowrate ? "fast-lowrate output" : "decoded",
