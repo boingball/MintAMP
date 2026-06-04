@@ -30,12 +30,20 @@
 void STATNAME(FDCT32)(int *x, int *d, int offset, int oddBlock, int gb);
 void STATNAME(FDCT32_C_REFERENCE)(int *x, int *d, int offset, int oddBlock, int gb);
 int STATNAME(FDCT32_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
+int STATNAME(IMDCT36_C_REFERENCE)(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb);
+int STATNAME(IMDCT36_TEST_ACTIVE)(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb);
+int STATNAME(IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
 #define AMIGA_FDCT32 STATNAME(FDCT32)
 #define AMIGA_FDCT32_C_REFERENCE STATNAME(FDCT32_C_REFERENCE)
 #define AMIGA_FDCT32_HAS_ASM STATNAME(FDCT32_HAS_AMIGA_M68K_ASM_RUNTIME)
+#define AMIGA_IMDCT36_C_REFERENCE STATNAME(IMDCT36_C_REFERENCE)
+#define AMIGA_IMDCT36_TEST_ACTIVE STATNAME(IMDCT36_TEST_ACTIVE)
+#define AMIGA_IMDCT36_HAS_ASM STATNAME(IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME)
 
 #define READBUF_SIZE (1024 * 16)
 #define OUTBUF_SAMPS (MAX_NCHAN * MAX_NGRAN * MAX_NSAMP)
+#define AMIGA_IMDCT_BLOCK_SIZE 18
+#define AMIGA_IMDCT_NBANDS 32
 
 #define OUT_PCM16 0
 #define OUT_S8    1
@@ -55,6 +63,7 @@ typedef struct DecodeOptions {
 	int noOutput;
 	int selftestMulshift;
 	int selftestFdct32;
+	int selftestImdct;
 	int selftestFastLowrate;
 	int selftestMonoFastLowrateStereo;
 	int checksum;
@@ -375,6 +384,7 @@ static void PrintUsage(const char *prog)
 	printf("                 22050, 11025, 8820, or 8287 and can skip discarded synthesis samples\n");
 	printf("  --selftest-mulshift compare C and optional asm MULSHIFT32 helpers\n");
 	printf("  --selftest-fdct32 compare C reference and optional m68k asm FDCT32 path\n");
+	printf("  --selftest-imdct compare C reference and optional m68k asm long IMDCT path\n");
 	printf("  --selftest-fastlowrate compare synthetic stride decimation paths\n");
 	printf("  --selftest-mono-fastlowrate-stereo verify stereo-to-mono low-rate accounting\n");
 	printf("  --checksum  print a 32-bit checksum of decoded PCM samples\n");
@@ -441,6 +451,8 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->selftestMulshift = 1;
 		} else if (!strcmp(argv[i], "--selftest-fdct32")) {
 			opt->selftestFdct32 = 1;
+		} else if (!strcmp(argv[i], "--selftest-imdct")) {
+			opt->selftestImdct = 1;
 		} else if (!strcmp(argv[i], "--selftest-fastlowrate")) {
 			opt->selftestFastLowrate = 1;
 		} else if (!strcmp(argv[i], "--selftest-mono-fastlowrate-stereo")) {
@@ -481,7 +493,7 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 	if (opt->help)
 		return 0;
 
-	if (opt->selftestMulshift || opt->selftestFdct32 ||
+	if (opt->selftestMulshift || opt->selftestFdct32 || opt->selftestImdct ||
 		opt->selftestFastLowrate || opt->selftestMonoFastLowrateStereo)
 		return 0;
 
@@ -1209,6 +1221,138 @@ static int SelftestFdct32(void)
 	printf("FDCT32 asm active: %s\n", AMIGA_FDCT32_HAS_ASM() ? "yes" : "no");
 	printf("FDCT32 selftest cases: %lu\n", i);
 	printf("FDCT32 selftest failures: %lu\n", failures);
+	return failures ? 1 : 0;
+}
+
+
+static void FillImdctSentinel(int *y)
+{
+	int i;
+	for (i = 0; i < AMIGA_IMDCT_BLOCK_SIZE * AMIGA_IMDCT_NBANDS; i++)
+		y[i] = (int)(0x13570000UL ^ (unsigned long)i);
+}
+
+static int TestImdctCase(unsigned long index, int pattern, unsigned long seed,
+	int btCurr, int btPrev, int blockIdx, int gb)
+{
+	static int cx[18];
+	static int ax[18];
+	static int cp[9];
+	static int ap[9];
+	static int cy[AMIGA_IMDCT_BLOCK_SIZE * AMIGA_IMDCT_NBANDS];
+	static int ay[AMIGA_IMDCT_BLOCK_SIZE * AMIGA_IMDCT_NBANDS];
+	int i;
+	int cm;
+	int am;
+
+	for (i = 0; i < 18; i++) {
+		seed = seed * 1664525UL + 1013904223UL;
+		if (pattern == 0)
+			cx[i] = 0;
+		else if (pattern == 1)
+			cx[i] = ((int)seed) >> 10;
+		else
+			cx[i] = (i & 1) ? 0x03ffffff : (int)0xfc000000UL;
+		ax[i] = cx[i];
+	}
+	for (i = 0; i < 9; i++) {
+		seed = seed * 1664525UL + 1013904223UL;
+		if (pattern == 0)
+			cp[i] = 0;
+		else if (pattern == 1)
+			cp[i] = ((int)seed) >> 12;
+		else
+			cp[i] = (i & 1) ? 0x01ffffff : (int)0xfe000000UL;
+		ap[i] = cp[i];
+	}
+	FillImdctSentinel(cy);
+	FillImdctSentinel(ay);
+
+	cm = AMIGA_IMDCT36_C_REFERENCE(cx, cp, cy + blockIdx, btCurr, btPrev, blockIdx, gb);
+	am = AMIGA_IMDCT36_TEST_ACTIVE(ax, ap, ay + blockIdx, btCurr, btPrev, blockIdx, gb);
+	if (am != cm) {
+		printf("IMDCT36 mOut mismatch %lu: C=%ld active=%ld btCurr=%d btPrev=%d block=%d gb=%d\n",
+			index, (long)cm, (long)am, btCurr, btPrev, blockIdx, gb);
+		return -1;
+	}
+	for (i = 0; i < 18; i++) {
+		if (ax[i] != cx[i]) {
+			printf("IMDCT36 input mismatch %lu[%d]: C=%ld active=%ld btCurr=%d btPrev=%d block=%d gb=%d\n",
+				index, i, (long)cx[i], (long)ax[i], btCurr, btPrev, blockIdx, gb);
+			return -1;
+		}
+	}
+	for (i = 0; i < 9; i++) {
+		if (ap[i] != cp[i]) {
+			printf("IMDCT36 overlap mismatch %lu[%d]: C=%ld active=%ld btCurr=%d btPrev=%d block=%d gb=%d\n",
+				index, i, (long)cp[i], (long)ap[i], btCurr, btPrev, blockIdx, gb);
+			return -1;
+		}
+	}
+	for (i = 0; i < AMIGA_IMDCT_BLOCK_SIZE * AMIGA_IMDCT_NBANDS; i++) {
+		if (ay[i] != cy[i]) {
+			printf("IMDCT36 output mismatch %lu[%d]: C=%ld active=%ld btCurr=%d btPrev=%d block=%d gb=%d\n",
+				index, i, (long)cy[i], (long)ay[i], btCurr, btPrev, blockIdx, gb);
+			return -1;
+		}
+	}
+	return 0;
+}
+
+static int SelftestImdct(void)
+{
+	unsigned long i;
+	unsigned long failures;
+	unsigned long seed;
+	unsigned long fallbackCases;
+	int pattern;
+	int btCurr;
+	int btPrev;
+	int blockIdx;
+	int gb;
+
+	failures = 0;
+	fallbackCases = 0;
+	seed = 0x27182818UL;
+
+	/* Zero, edge-value, and deterministic random long-block cases. */
+	for (i = 0; i < 4096UL; i++) {
+		seed = seed * 1664525UL + 1013904223UL;
+		pattern = (i < 16UL) ? 0 : ((i < 32UL) ? 2 : 1);
+		btCurr = 0;
+		btPrev = 0;
+		blockIdx = (int)((seed >> 8) & 31);
+		gb = (int)((seed >> 13) % 8);
+		if (TestImdctCase(i, pattern, seed, btCurr, btPrev, blockIdx, gb) != 0)
+			failures++;
+	}
+
+	/* Non-common long windows, and the block types used around mixed/short transitions,
+	 * must route through the C fallback and remain bit-identical.
+	 */
+	for (i = 0; i < 256UL; i++) {
+		seed = seed * 1664525UL + 1013904223UL;
+		pattern = (int)(seed % 3UL);
+		btCurr = 1 + (int)((seed >> 4) % 3UL);
+		btPrev = (int)((seed >> 7) % 4UL);
+		blockIdx = (int)((seed >> 10) & 31);
+		gb = (int)((seed >> 15) % 8);
+		if (TestImdctCase(4096UL + i, pattern, seed, btCurr, btPrev, blockIdx, gb) != 0)
+			failures++;
+		fallbackCases++;
+	}
+
+	printf("IMDCT asm requested: %s\n",
+#ifdef AMIGA_M68K_ASM_IMDCT
+		"yes"
+#else
+		"no"
+#endif
+	);
+	printf("IMDCT asm active: %s\n", AMIGA_IMDCT36_HAS_ASM() ? "yes" : "no");
+	printf("IMDCT selftest long cases: %lu\n", 4096UL);
+	printf("IMDCT selftest fallback cases: %lu\n", fallbackCases);
+	printf("IMDCT selftest failures: %lu\n", failures);
 	return failures ? 1 : 0;
 }
 
@@ -2166,6 +2310,11 @@ int main(int argc, char **argv)
 	}
 	if (opt.selftestFdct32) {
 		int selftestErr = SelftestFdct32();
+		AmigaFreeNormalizedArgs(&normalized);
+		return selftestErr;
+	}
+	if (opt.selftestImdct) {
+		int selftestErr = SelftestImdct();
 		AmigaFreeNormalizedArgs(&normalized);
 		return selftestErr;
 	}

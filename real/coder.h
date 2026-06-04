@@ -102,6 +102,9 @@
 #define FDCT32				STATNAME(FDCT32)
 #define FDCT32_C_REFERENCE	STATNAME(FDCT32_C_REFERENCE)
 #define FDCT32_HAS_AMIGA_M68K_ASM_RUNTIME STATNAME(FDCT32_HAS_AMIGA_M68K_ASM_RUNTIME)
+#define IMDCT36_C_REFERENCE STATNAME(IMDCT36_C_REFERENCE)
+#define IMDCT36_TEST_ACTIVE STATNAME(IMDCT36_TEST_ACTIVE)
+#define IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME STATNAME(IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME)
 
 #define	ISFMpeg1			STATNAME(ISFMpeg1)
 #define	ISFMpeg2			STATNAME(ISFMpeg2)
@@ -276,6 +279,11 @@ void IntensityProcMPEG2(int x[MAX_NCHAN][MAX_NSAMP], int nSamps, FrameHeader *fh
 void FDCT32(int *x, int *d, int offset, int oddBlock, int gb);
 void FDCT32_C_REFERENCE(int *x, int *d, int offset, int oddBlock, int gb);
 int FDCT32_HAS_AMIGA_M68K_ASM_RUNTIME(void);
+
+/* imdct.c selftest hooks */
+int IMDCT36_C_REFERENCE(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb);
+int IMDCT36_TEST_ACTIVE(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb);
+int IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME(void);
 
 /* hufftabs.c */
 extern const HuffTabLookup huffTabLookup[HUFF_PAIRTABS];

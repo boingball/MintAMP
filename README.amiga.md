@@ -130,6 +130,9 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
 - `--selftest-fdct32` compares `FDCT32_C_REFERENCE` against the normal `FDCT32`
   entry point, so `AMIGA_M68K_ASM_FDCT32` builds can prove the optional asm
   multiply path preserves the C operation order and fixed-point outputs.
+- `--selftest-imdct` compares the C IMDCT36 reference with the active IMDCT
+  entry point over zero, random, edge-value, common long-window, and fallback
+  window cases.
 - `--selftest-fastlowrate` compares a synthetic ramp/impulse-like PCM sequence
   through normal 44100 -> 11025 `--rate` decimation and the stride-4
   fast-lowrate selector across chunk boundaries.
@@ -176,7 +179,23 @@ decoded frame count and output sample count.
    amiga_mp3dec.fdct32asm --selftest-fdct32
    ```
 
-5. Checksum the C and ASM FDCT32 builds with identical inputs and output modes
+
+5. `AMIGA_M68K_ASM_IMDCT` is an opt-in exact long-block IMDCT36 path for
+   68020+ GNU m68k builds.  The C IMDCT remains the reference; the active
+   entry point uses the asm path only for the common long-window case and
+   falls back to C for short blocks, mixed/transition windows, start/stop
+   windows, and anything else uncommon.  This flag is disabled by default;
+   keep it disabled if `--selftest-imdct` or any required checksum differs.
+
+   ```sh
+   m68k-amigaos-gcc -m68030 -O3 -fomit-frame-pointer \
+     -DAMIGA_M68K -DAMIGA_M68K_ASM -DAMIGA_FAST_POLYPHASE \
+     -DAMIGA_M68K_ASM_FDCT32 -DAMIGA_M68K_ASM_IMDCT -Ipub -Ireal \
+     -o amiga_mp3dec.imdctasm amiga_mp3dec.c mp3dec.c mp3tabs.c real/*.c
+   amiga_mp3dec.imdctasm --selftest-imdct
+   ```
+
+6. Checksum the C and ASM FDCT32 builds with identical inputs and output modes
    before enabling the ASM binary in a release or local deployment.  The
    required regression set is: mono 56 kbps, stereo 160 kbps, stereo 256 kbps,
    fast-lowrate 11025 Hz, and fast-lowrate 8820 Hz.
@@ -204,7 +223,7 @@ decoded frame count and output sample count.
    and ASM binaries.  If any PCM checksum differs, do not define
    `AMIGA_M68K_ASM_FDCT32` for the default build.
 
-6. `AMIGA_FAST_POLYPHASE` is an opt-in Amiga/m68k polyphase synthesis path
+7. `AMIGA_FAST_POLYPHASE` is an opt-in Amiga/m68k polyphase synthesis path
    for 68020+ builds.  It keeps the original implementation available when the
    flag is omitted, but replaces the 64-bit polyphase accumulator with 32-bit
    fixed-point high-multiply terms to reduce 68030 inner-loop overhead:
@@ -214,7 +233,7 @@ decoded frame count and output sample count.
      -o amiga_mp3dec.fastpoly amiga_mp3dec.c mp3dec.c mp3tabs.c real/*.c
    ```
 
-7. Compare default and `AMIGA_FAST_POLYPHASE` builds with identical inputs,
+8. Compare default and `AMIGA_FAST_POLYPHASE` builds with identical inputs,
    output modes, and checksum reporting:
 
    ```sh

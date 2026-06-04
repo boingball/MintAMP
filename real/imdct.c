@@ -334,6 +334,27 @@ int fastWin36[18] = {
 	0x4a868feb, 0xef7a6275, 0x47311c28, 0xf6a09e67, 0x42aace8b, 0xfd16d8dd,
 };
 
+
+#if defined(AMIGA_M68K) && defined(AMIGA_M68K_ASM_IMDCT) && defined(__GNUC__) && \
+	(defined(__mc68020__) || defined(__mc68030__) || defined(__mc68040__) || \
+	 defined(__mc68060__) || defined(mc68020))
+#define IMDCT36_HAS_AMIGA_M68K_ASM 1
+static __inline int IMDCT36_AMIGA_M68K_MULSHIFT32(int x, int y)
+{
+	int hi;
+	int lo;
+
+	lo = x;
+	__asm__ volatile ("muls.l %2,%0:%1"
+		: "=d" (hi), "+d" (lo)
+		: "dmi" (y));
+	(void)lo;
+	return hi;
+}
+#else
+#define IMDCT36_HAS_AMIGA_M68K_ASM 0
+#endif
+
 /**************************************************************************************
  * Function:    IMDCT36
  *
@@ -367,7 +388,7 @@ int fastWin36[18] = {
  *                inline asm may or may not be helpful)
  **************************************************************************************/
 // barely faster in RAM
-static int IMDCT36(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb)
+int IMDCT36_C_REFERENCE(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb)
 {
 	int i, es, xBuf[18], xPrevWin[18];
 	int acc1, acc2, s, d, t, mOut;
@@ -471,6 +492,163 @@ static int IMDCT36(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int b
 		FreqInvertOdd(y);
 
 	return mOut;
+}
+
+
+#if IMDCT36_HAS_AMIGA_M68K_ASM
+static __inline void idct9_amiga_m68k_asm(int *x)
+{
+	int a1, a2, a3, a4, a5, a6, a7, a8, a9;
+	int a10, a11, a12, a13, a14, a15, a16, a17, a18;
+	int a19, a20, a21, a22, a23, a24, a25, a26, a27;
+	int m1, m3, m5, m6, m7, m8, m9, m10, m11, m12;
+	int x0, x1, x2, x3, x4, x5, x6, x7, x8;
+
+	x0 = x[0]; x1 = x[1]; x2 = x[2]; x3 = x[3]; x4 = x[4];
+	x5 = x[5]; x6 = x[6]; x7 = x[7]; x8 = x[8];
+
+	a1 = x0 - x6;
+	a2 = x1 - x5;
+	a3 = x1 + x5;
+	a4 = x2 - x4;
+	a5 = x2 + x4;
+	a6 = x2 + x8;
+	a7 = x1 + x7;
+
+	a8 = a6 - a5;
+	a9 = a3 - a7;
+	a10 = a2 - x7;
+	a11 = a4 - x8;
+
+	m1 =  IMDCT36_AMIGA_M68K_MULSHIFT32(c9_0, x3);
+	m3 =  IMDCT36_AMIGA_M68K_MULSHIFT32(c9_0, a10);
+	m5 =  IMDCT36_AMIGA_M68K_MULSHIFT32(c9_1, a5);
+	m6 =  IMDCT36_AMIGA_M68K_MULSHIFT32(c9_2, a6);
+	m7 =  IMDCT36_AMIGA_M68K_MULSHIFT32(c9_1, a8);
+	m8 =  IMDCT36_AMIGA_M68K_MULSHIFT32(c9_2, a5);
+	m9 =  IMDCT36_AMIGA_M68K_MULSHIFT32(c9_3, a9);
+	m10 = IMDCT36_AMIGA_M68K_MULSHIFT32(c9_4, a7);
+	m11 = IMDCT36_AMIGA_M68K_MULSHIFT32(c9_3, a3);
+	m12 = IMDCT36_AMIGA_M68K_MULSHIFT32(c9_4, a9);
+
+	a12 = x[0] +  (x[6] >> 1);
+	a13 = a12  +  (  m1 << 1);
+	a14 = a12  -  (  m1 << 1);
+	a15 = a1   +  ( a11 >> 1);
+	a16 = ( m5 << 1) + (m6 << 1);
+	a17 = ( m7 << 1) - (m8 << 1);
+	a18 = a16 + a17;
+	a19 = ( m9 << 1) + (m10 << 1);
+	a20 = (m11 << 1) - (m12 << 1);
+
+	a21 = a20 - a19;
+	a22 = a13 + a16;
+	a23 = a14 + a16;
+	a24 = a14 + a17;
+	a25 = a13 + a17;
+	a26 = a14 - a18;
+	a27 = a13 - a18;
+
+	x0 = a22 + a19;			x[0] = x0;
+	x1 = a15 + (m3 << 1);	x[1] = x1;
+	x2 = a24 + a20;			x[2] = x2;
+	x3 = a26 - a21;			x[3] = x3;
+	x4 = a1 - a11;			x[4] = x4;
+	x5 = a27 + a21;			x[5] = x5;
+	x6 = a25 - a20;			x[6] = x6;
+	x7 = a15 - (m3 << 1);	x[7] = x7;
+	x8 = a23 - a19;			x[8] = x8;
+}
+
+static int IMDCT36_AMIGA_M68K_ASM(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb)
+{
+	int i, es, xBuf[18];
+	int acc1, acc2, s, d, t, mOut;
+	int xo, xe, c, *xp, *ypLo, *ypHi, yLo, yHi;
+	const int *cp, *wp;
+
+	if (btCurr != 0 || btPrev != 0)
+		return IMDCT36_C_REFERENCE(xCurr, xPrev, y, btCurr, btPrev, blockIdx, gb);
+
+	acc1 = acc2 = 0;
+	xCurr += 17;
+	if (gb < 7) {
+		es = 7 - gb;
+		for (i = 8; i >= 0; i--) {
+			acc1 = ((*xCurr--) >> es) - acc1;
+			acc2 = acc1 - acc2;
+			acc1 = ((*xCurr--) >> es) - acc1;
+			xBuf[i+9] = acc2;
+			xBuf[i+0] = acc1;
+			xPrev[i] >>= es;
+		}
+	} else {
+		es = 0;
+		for (i = 8; i >= 0; i--) {
+			acc1 = (*xCurr--) - acc1;
+			acc2 = acc1 - acc2;
+			acc1 = (*xCurr--) - acc1;
+			xBuf[i+9] = acc2;
+			xBuf[i+0] = acc1;
+		}
+	}
+	xBuf[9] >>= 1;
+	xBuf[0] >>= 1;
+
+	idct9_amiga_m68k_asm(xBuf+0);
+	idct9_amiga_m68k_asm(xBuf+9);
+
+	xp = xBuf + 8;
+	cp = c18 + 8;
+	wp = fastWin36;
+	ypLo = y;
+	ypHi = y + 17*NBANDS;
+	mOut = 0;
+	for (i = 9; i > 0; i--) {
+		c = *cp--;	xo = *(xp + 9);		xe = *xp--;
+		xo = IMDCT36_AMIGA_M68K_MULSHIFT32(c, xo);
+		xe >>= 2;
+
+		s = -(*xPrev);
+		d = -(xe - xo);
+		(*xPrev++) = xe + xo;
+		t = s - d;
+
+		yLo = (d + (IMDCT36_AMIGA_M68K_MULSHIFT32(t, *wp++) << 2));
+		yHi = (s + (IMDCT36_AMIGA_M68K_MULSHIFT32(t, *wp++) << 2));
+		*ypLo = yLo;		ypLo += NBANDS;
+		*ypHi = yHi;		ypHi -= NBANDS;
+		mOut |= FASTABS(yLo);
+		mOut |= FASTABS(yHi);
+	}
+
+	xPrev -= 9;
+	if (es)
+		mOut |= FreqInvertRescale(y, xPrev, blockIdx, es);
+	else if (blockIdx & 0x01)
+		FreqInvertOdd(y);
+
+	return mOut;
+}
+#endif
+
+int IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME(void)
+{
+	return IMDCT36_HAS_AMIGA_M68K_ASM;
+}
+
+int IMDCT36_TEST_ACTIVE(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb)
+{
+#if IMDCT36_HAS_AMIGA_M68K_ASM
+	if (btCurr == 0 && btPrev == 0)
+		return IMDCT36_AMIGA_M68K_ASM(xCurr, xPrev, y, btCurr, btPrev, blockIdx, gb);
+#endif
+	return IMDCT36_C_REFERENCE(xCurr, xPrev, y, btCurr, btPrev, blockIdx, gb);
+}
+
+static int IMDCT36(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb)
+{
+	return IMDCT36_TEST_ACTIVE(xCurr, xPrev, y, btCurr, btPrev, blockIdx, gb);
 }
 
 static int c3_0 = 0x6ed9eba1;	/* format = Q31, cos(pi/6) */
@@ -669,8 +847,10 @@ static int HybridTransform(int *xCurr, int *xPrev, int y[BLOCK_SIZE][NBANDS], Si
 			if (i < prevWinSwitch)
 				 prevWinIdx = 0;
 
-			/* do 36-point IMDCT, including windowing and overlap-add */
-			mOut |= IMDCT36(xCurr, xPrev, &(y[0][i]), currWinIdx, prevWinIdx, i, bc->gbIn);
+			/* do 36-point IMDCT, including windowing and overlap-add.
+			 * Mixed/transition-window long blocks deliberately stay on the C reference path.
+			 */
+			mOut |= IMDCT36_C_REFERENCE(xCurr, xPrev, &(y[0][i]), currWinIdx, prevWinIdx, i, bc->gbIn);
 			xCurr += 18;
 			xPrev += 9;
 		}

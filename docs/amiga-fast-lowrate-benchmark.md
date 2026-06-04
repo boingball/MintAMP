@@ -158,3 +158,37 @@ Validation command for the same fixture:
 ```sh
 mp3dec_O3 --decode-only --bench --checksum --fast-lowrate --rate 11025 --mono "tougher-256k-stereo.mp3"
 ```
+
+## Optional exact long-block IMDCT m68k ASM pass
+
+`AMIGA_M68K_ASM_IMDCT` is an opt-in experiment for 68020+ GNU m68k builds.  It
+keeps the C IMDCT as the reference and only routes the common long-block
+`btCurr == 0 && btPrev == 0` IMDCT36 path through an operation-order-preserving
+copy that swaps the fixed-point high multiply for `muls.l`.  Short blocks,
+mixed-block transition windows, start/stop windows, and any non-common block
+configuration continue to use the C path.
+
+Before recording speedups, run the synthetic guard test and checksum the existing
+fast-lowrate fixtures against the safe build and the already-confirmed FDCT32 ASM
+build.  If any checksum differs, leave `AMIGA_M68K_ASM_IMDCT` disabled in your
+default build.
+
+| Build | Suggested flags | Selftest | Required checksum status | Benchmark notes |
+| --- | --- | --- | --- | --- |
+| Safe build | `-DAMIGA_M68K -DAMIGA_FAST_POLYPHASE` | `--selftest-imdct` should pass with asm inactive | baseline | Record elapsed, realtime speed, and `timing core imdct` |
+| FDCT32 ASM build | previous plus `-DAMIGA_M68K_ASM -DAMIGA_M68K_ASM_FDCT32` | `--selftest-fdct32 --selftest-imdct` should pass | must match safe build | Current confirmed fast build; use as the comparison point |
+| FDCT32 + IMDCT ASM build | previous plus `-DAMIGA_M68K_ASM_IMDCT` | `--selftest-imdct` must pass with asm active on m68k | must match safe and FDCT32-only builds | Record any change in `timing core imdct` and overall realtime speed |
+
+Checksum the following modes for each build:
+
+```sh
+amiga_mp3dec.safe --bench --no-output --checksum --fast-lowrate --rate 11025 --mono mono-56k-44100.mp3
+amiga_mp3dec.safe --bench --no-output --checksum --fast-lowrate --rate 11025 --mono stereo-160k-44100.mp3
+amiga_mp3dec.safe --bench --no-output --checksum --fast-lowrate --rate 11025 --mono stereo-256k-44100.mp3
+amiga_mp3dec.safe --bench --no-output --8svx --rate 11025 --checksum mono-56k-44100.mp3
+```
+
+Repeat the same commands with the FDCT32 ASM binary and with the
+FDCT32+IMDCT ASM binary.  The mono 56 kbps 44.1 kHz -> 11025 fast-lowrate,
+stereo 160/256 kbps 44.1 kHz -> mono 11025 fast-lowrate, and 11025 Hz 8SVX
+export checksums must remain identical across all three builds.
