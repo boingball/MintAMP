@@ -123,3 +123,38 @@ mp3dec_O3 --decode-only --bench --checksum --fast-lowrate --rate 11025 --mono "Z
 | --- | ---: | ---: | ---: | ---: | --- | --- | --- |
 | Before | 89.66 s | 0.45x | 86.40 s | 441504 | _record from mono fixture_ | _record from stereo fixture_ | Stereo synthesis plus CLI downmix still ran for mono output |
 | After | _record on target_ | _record on target_ | _record on target_ | 441504 expected | _must match current mono test_ | _record new optimized checksum_ | Right-channel IMDCT/DCT32/polyphase and stereo PCM downmix skipped for `--mono` |
+
+### Tougher 256 kbps stereo-to-mono profile
+
+Supplied target profile for the tougher 44.1 kHz stereo, 256 kbps fixture
+(duration used for realtime: 40.724898 s, 1559 decoded frames) is recorded as
+the baseline for this pass.  The corrected mono fast-lowrate accounting target
+is 448,992 emitted samples at one output channel.
+
+The current decoder has already moved mono-output stereo fixtures onto a
+one-channel IMDCT/DCT32/polyphase path: `MP3Decode()` limits the IMDCT loop to
+one synthesis channel when `outputMono` is set, and `Subband()` selects the mono
+synthesis branch for stereo input with mono output.  Therefore the main remaining
+safe duplicate-work case in this pass is pure mid/side joint stereo: Huffman must
+still decode both channels for bitstream accounting, but mono output can skip the
+side-channel dequant because `(L + R) / 2` is represented by the coded mid
+channel after the existing scale adjustment.
+
+| Metric | Before supplied profile | After this patch | Checksum/sample-count expectation |
+| --- | ---: | ---: | --- |
+| Elapsed | 92.160 s | _record on target_ | must preserve checksum |
+| Decode speed | 0.44x realtime | _record on target_ | duration basis remains 40.724898 s |
+| Output samples | 448,992 | 448,992 expected | one mono output channel |
+| Huffman | 14.580 s | _record on target_ | bitstream position unchanged; table-0 regions now zero via `memset()` |
+| Dequant | 9.340 s | _record on target_ | pure M/S mono skips side-channel dequant; other stereo modes unchanged |
+| Stereo/post | 1.140 s | _record on target_ | pure M/S mono keeps the existing mid-channel shortcut |
+| IMDCT | 11.820 s | _already one channel for mono output_ | no right-channel synthesis for stereo-to-mono |
+| Subband/DCT32 | 15.060 s | _already one channel for mono output_ | no right-channel DCT32 for stereo-to-mono |
+| Polyphase | 15.820 s | _already mono fast-lowrate branch_ | cumulative mono sample accounting unchanged |
+| Bitstream/frame parsing | 3.500 s | _record on target_ | unchanged |
+
+Validation command for the same fixture:
+
+```sh
+mp3dec_O3 --decode-only --bench --checksum --fast-lowrate --rate 11025 --mono "tougher-256k-stereo.mp3"
+```

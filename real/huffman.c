@@ -42,6 +42,7 @@
  **************************************************************************************/
 
 #include "coder.h"
+#include "string.h"
 
 /* helper macros - see comments in hufftabs.c about the format of the huffman tables */
 #define GetMaxbits(x)   ((int)( (((unsigned short)(x)) >>  0) & 0x000f))
@@ -82,7 +83,7 @@
 // no improvement with section=data
 static int DecodeHuffmanPairs(int *xy, int nVals, int tabIdx, int bitsLeft, unsigned char *buf, int bitOffset)
 {
-	int i, x, y;
+	int x, y;
 	int cachedBits, padBits, len, startBits, linBits, maxBits, minBits;
 	HuffTabType tabType;
 	unsigned short cw, *tBase, *tCurr;
@@ -112,11 +113,8 @@ static int DecodeHuffmanPairs(int *xy, int nVals, int tabIdx, int bitsLeft, unsi
 	bitsLeft -= cachedBits;
 
 	if (tabType == noBits) {
-		/* table 0, no data, x = y = 0 */
-		for (i = 0; i < nVals; i+=2) {
-			xy[i+0] = 0;
-			xy[i+1] = 0;
-		}
+		/* table 0 consumes no data and produces only zero coefficients. */
+		memset(xy, 0, nVals * sizeof(*xy));
 		return 0;
 	} else if (tabType == oneShot) {
 		/* single lookup, no escapes */

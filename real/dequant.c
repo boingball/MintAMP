@@ -116,9 +116,17 @@ int Dequantize(MP3DecInfo *mp3DecInfo, int gr)
 	cbi = di->cbi;
 	mOut[0] = mOut[1] = 0;
 
-	/* dequantize all the samples in each channel */
+	/* Pure mid/side joint stereo is special for mono output: after MPEG
+	 * reconstruction, (L + R) / 2 is exactly the coded mid channel with the
+	 * same 1/sqrt(2) scale already applied by DequantChannel().  Huffman still
+	 * decodes both channels to keep the bitstream position exact, but the side
+	 * channel does not affect mono PCM and can skip dequant/IMDCT/synthesis. */
+	ch = (mp3DecInfo->outputMono && mp3DecInfo->nChans == 2 &&
+		fh->modeExt == 0x02) ? 1 : mp3DecInfo->nChans;
+
+	/* dequantize all samples needed by the synthesis path */
 	AMIGA_PROFILE_START(amigaProfileStart);
-	for (ch = 0; ch < mp3DecInfo->nChans; ch++) {
+	while (ch-- > 0) {
 		hi->gb[ch] = DequantChannel(hi->huffDecBuf[ch], di->workBuf, &hi->nonZeroBound[ch], fh,
 			&si->sis[gr][ch], &sfi->sfis[gr][ch], &cbi[ch]);
 	}
@@ -131,7 +139,8 @@ int Dequantize(MP3DecInfo *mp3DecInfo, int gr)
 	 *   just make a pass over the data and clip to [-2^30+1, 2^30-1]
 	 * in practice this may never happen
 	 */
-	if (fh->modeExt && (hi->gb[0] < 1 || hi->gb[1] < 1)) {
+	if (!(mp3DecInfo->outputMono && mp3DecInfo->nChans == 2 && fh->modeExt == 0x02) &&
+		fh->modeExt && (hi->gb[0] < 1 || hi->gb[1] < 1)) {
 		for (i = 0; i < hi->nonZeroBound[0]; i++) {
 			if (hi->huffDecBuf[0][i] < -0x3fffffff)	 hi->huffDecBuf[0][i] = -0x3fffffff;
 			if (hi->huffDecBuf[0][i] >  0x3fffffff)	 hi->huffDecBuf[0][i] =  0x3fffffff;
