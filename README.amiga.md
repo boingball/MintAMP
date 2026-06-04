@@ -28,6 +28,7 @@ fallback.
 ```sh
 amiga_mp3dec [options] infile.mp3 outfile
 amiga_mp3dec --play [--stereo] [--rate 8287|8820|11025|22050] [--buffer-seconds N] infile.mp3
+amiga_mp3dec --play-lifecycle-test [--debug-play] [--buffer-seconds N]
 ```
 
 Default output is raw signed 16-bit big-endian PCM. If `outfile` names an
@@ -75,8 +76,9 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
 - `--play-fast-path` is accepted as an explicit alias for `--play`; the normal
   `--play` mode already uses this reduced-overhead streaming path.
 - `--buffer-seconds N` chooses the requested playback depth for each half of the
-  `--play` double buffer; the default is 4 seconds for safer 030 playback. Mono
-  playback submits its double buffers
+  `--play` double buffer; the default is 4 seconds for safer 030 playback. Values
+  must be positive integers; values above 10 seconds are clamped to 10 seconds.
+  Mono playback submits its double buffers
   directly to `audio.device`, so those buffers must be chip memory. Stereo
   playback keeps the interleaved decode work buffers in normal RAM where
   possible and uses chip memory only for the deinterleaved Paula left/right
@@ -90,7 +92,9 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   actual output rate, PAL period, requested buffer depth, selected half-buffer
   samples/bytes, chip submission buffer addresses/sizes, optional stereo work
   buffer addresses/sizes, buffer A/B fill samples/bytes, every A/B `CMD_WRITE`
-  submit/complete milestone, and underrun detections. The streaming startup path
+  submit/complete milestone, underrun detections, and final cleanup counts for
+  completed/aborted outstanding I/O, freed buffers, and closed audio devices. The
+  streaming startup path
   allocates the playback buffers before pre-filling both A and B by decoded
   sample count (not amplitude), queues both non-empty buffers before rotation,
   refills the completed half while the queued half is playing, and never waits on
@@ -103,6 +107,11 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   RAM as signed 8-bit PCM first (mono by default, or stereo with `--stereo`), then plays the resulting buffer via
   `audio.device`, which helps separate decoder/streaming issues from playback
   issues.
+- `--play-lifecycle-test` opens playback, allocates the playback buffers, submits
+  a short silent `CMD_WRITE`, cleans up, and repeats the sequence three times.
+  Use it on real hardware with `--debug-play` to verify that repeated
+  `audio.device` open/submit/abort-or-wait/close and buffer free cycles leave no
+  stale requests or reply messages before testing longer MP3 streams.
 - `--decode-only` decodes MP3 frames and skips PCM conversion plus all output.
   The output path argument is optional in this mode.
 - `--no-output` runs PCM conversion/downsampling and 8SVX/Fibonacci compression
