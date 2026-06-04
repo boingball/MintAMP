@@ -27,6 +27,7 @@ fallback.
 
 ```sh
 amiga_mp3dec [options] infile.mp3 outfile
+amiga_mp3dec --play [--rate 8287|11025] [--buffer-seconds N] infile.mp3
 ```
 
 Default output is raw signed 16-bit big-endian PCM. If `outfile` names an
@@ -44,7 +45,21 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   nibble.
 - `--bench` prints elapsed time, realtime decode speed, and timing buckets for
   frame decode, PCM conversion/downsampling, 8SVX writing, Fibonacci
-  compression, and low-level file writes.
+  compression, and low-level file writes. In `--play` mode it also prints the
+  audio-device underrun count.
+- `--play` is an experimental AmigaOS Paula streaming mode for CD32/TF330-style
+  68030 testing. It opens `audio.device`, decodes to mono signed 8-bit PCM, and
+  streams with two chip-memory buffers. The default playback rate is 8287 Hz for
+  030 safety; `--rate 11025` is also accepted. Playback rates imply
+  `--fast-lowrate`, print the selected output rate, and calculate the PAL audio
+  period as `3546895 / output_rate`.
+- `--buffer-seconds N` chooses the per-buffer playback depth for `--play`; the
+  default is 2 seconds, so the player allocates two buffers of
+  `output_rate * N` bytes and tries to prefill both before starting playback.
+- `--decode-then-play` is a `--play` debug mode that decodes the whole MP3 to
+  RAM as mono signed 8-bit PCM first, then plays the resulting buffer via
+  `audio.device`, which helps separate decoder/streaming issues from playback
+  issues.
 - `--decode-only` decodes MP3 frames and skips PCM conversion plus all output.
   The output path argument is optional in this mode.
 - `--no-output` runs PCM conversion/downsampling and 8SVX/Fibonacci compression

@@ -10,6 +10,19 @@
 #include <string.h>
 #include <time.h>
 
+#if defined(AMIGA_M68K) && (defined(__amigaos__) || defined(__AMIGA__) || defined(__MORPHOS__))
+#define HAVE_AMIGA_AUDIO_DEVICE 1
+#include <exec/types.h>
+#include <exec/memory.h>
+#include <exec/io.h>
+#include <exec/ports.h>
+#include <devices/audio.h>
+#include <proto/exec.h>
+#ifndef AUDIONAME
+#define AUDIONAME "audio.device"
+#endif
+#endif
+
 #include "mp3dec.h"
 #include "assembly.h"
 
@@ -40,6 +53,9 @@ typedef struct DecodeOptions {
 	int help;
 	int debugArgv;
 	int debugFastLowrate;
+	int play;
+	int decodeThenPlay;
+	int bufferSeconds;
 } DecodeOptions;
 
 typedef struct DecodeStats {
@@ -50,6 +66,7 @@ typedef struct DecodeStats {
 	int outputSampleRate;
 	int channels;
 	int bitrate;
+	unsigned long underruns;
 } DecodeStats;
 
 typedef struct TimingStats {
@@ -329,6 +346,9 @@ static void PrintUsage(const char *prog)
 	printf("  --8svx       write Amiga IFF-8SVX signed 8-bit output (implies mono)\n");
 	printf("  --fibdelta   use 8SVX Fibonacci Delta compression (implies --8svx)\n");
 	printf("  --bench      print elapsed decode/write time and realtime ratio\n");
+	printf("  --play       AmigaOS experimental audio.device Paula playback (mono s8)\n");
+	printf("  --decode-then-play decode whole MP3 to RAM, then play (debug for --play)\n");
+	printf("  --buffer-seconds N playback buffer seconds per double buffer (default 2)\n");
 	printf("  --decode-only decode frames only; skip PCM conversion and output\n");
 	printf("  --no-output  run conversion/compression paths but discard output bytes\n");
 	printf("  --rate HZ     output/downsample rate: 22050, 11025, or 8287 Hz\n");
@@ -353,6 +373,7 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 	opt->outFormat = OUT_PCM16;
 	opt->compression = SVX_COMP_NONE;
 	opt->outputRate = 0;
+	opt->bufferSeconds = 2;
 
 	for (i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--mono")) {
@@ -368,6 +389,21 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->compression = SVX_COMP_FIBDELTA;
 		} else if (!strcmp(argv[i], "--bench")) {
 			opt->bench = 1;
+		} else if (!strcmp(argv[i], "--play")) {
+			opt->play = 1;
+			opt->outFormat = OUT_S8;
+			opt->mono = 1;
+		} else if (!strcmp(argv[i], "--decode-then-play")) {
+			opt->play = 1;
+			opt->decodeThenPlay = 1;
+			opt->outFormat = OUT_S8;
+			opt->mono = 1;
+		} else if (!strcmp(argv[i], "--buffer-seconds")) {
+			if (++i >= argc)
+				return -1;
+			opt->bufferSeconds = atoi(argv[i]);
+			if (opt->bufferSeconds <= 0 || opt->bufferSeconds > 60)
+				return -1;
 		} else if (!strcmp(argv[i], "--decode-only")) {
 			opt->decodeOnly = 1;
 			opt->noOutput = 1;
@@ -414,13 +450,27 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 	if (opt->selftestMulshift || opt->selftestFastLowrate)
 		return 0;
 
+	if (opt->play && !opt->outputRate)
+		opt->outputRate = 8287;
+
+	if (opt->play && opt->outputRate != 8287 && opt->outputRate != 11025) {
+		fprintf(stderr, "--play supports --rate 8287 or --rate 11025 only\n");
+		return -1;
+	}
+	if (opt->play) {
+		opt->mono = 1;
+		opt->outFormat = OUT_S8;
+		opt->fastLowrate = 1;
+		opt->noOutput = 1;
+	}
+
 	if (opt->fastLowrate && (opt->outputRate != 22050 &&
 		opt->outputRate != 11025 && opt->outputRate != 8287)) {
 		fprintf(stderr, "--fast-lowrate requires --rate 22050, 11025, or 8287\n");
 		return -1;
 	}
 
-	if (!opt->inName || (!opt->outName && !opt->noOutput))
+	if (!opt->inName || (!opt->outName && !opt->noOutput && !opt->play))
 		return -1;
 
 	return 0;
@@ -1029,6 +1079,445 @@ static int SelftestMulshift(void)
 	return failures ? 1 : 0;
 }
 
+
+typedef struct DecodeStream {
+	FILE *infile;
+	HMP3Decoder decoder;
+	unsigned char readBuf[READBUF_SIZE];
+	unsigned char *readPtr;
+	short decodeBuf[OUTBUF_SAMPS];
+	short writeBuf[OUTBUF_SAMPS];
+	short rateBuf[OUTBUF_SAMPS];
+	signed char spillBuf[OUTBUF_SAMPS];
+	int spillPos;
+	int spillCount;
+	int bytesLeft;
+	int eofReached;
+	int outOfData;
+	int effectiveRate;
+	DecodeStats *stats;
+	TimingStats *timing;
+	RateState rateState;
+} DecodeStream;
+
+static void DecodeStreamInit(DecodeStream *stream, FILE *infile,
+	HMP3Decoder decoder, DecodeStats *stats, TimingStats *timing)
+{
+	memset(stream, 0, sizeof(*stream));
+	stream->infile = infile;
+	stream->decoder = decoder;
+	stream->readPtr = stream->readBuf;
+	stream->stats = stats;
+	stream->timing = timing;
+}
+
+static int DecodeStreamCopySpill(DecodeStream *stream, signed char *dest,
+	int maxBytes, int *outBytes)
+{
+	int n;
+
+	if (stream->spillPos >= stream->spillCount) {
+		stream->spillPos = 0;
+		stream->spillCount = 0;
+		return 0;
+	}
+	n = stream->spillCount - stream->spillPos;
+	if (n > maxBytes)
+		n = maxBytes;
+	memcpy(dest + *outBytes, stream->spillBuf + stream->spillPos, n);
+	stream->spillPos += n;
+	*outBytes += n;
+	if (stream->spillPos >= stream->spillCount) {
+		stream->spillPos = 0;
+		stream->spillCount = 0;
+	}
+	return n;
+}
+
+static int DecodeStreamFillS8(DecodeStream *stream, const DecodeOptions *opt,
+	signed char *dest, int maxBytes)
+{
+	MP3FrameInfo info;
+	int produced;
+
+	produced = 0;
+	DecodeStreamCopySpill(stream, dest, maxBytes, &produced);
+	while (produced < maxBytes && !stream->outOfData) {
+		int nRead;
+		int offset;
+		int err;
+
+		if (stream->bytesLeft < 2 * MAINBUF_SIZE && !stream->eofReached) {
+			nRead = FillReadBuffer(stream->readBuf, stream->readPtr,
+				READBUF_SIZE, stream->bytesLeft, stream->infile);
+			stream->bytesLeft += nRead;
+			stream->readPtr = stream->readBuf;
+			if (nRead == 0)
+				stream->eofReached = 1;
+		}
+
+		offset = MP3FindSyncWord(stream->readPtr, stream->bytesLeft);
+		if (offset < 0)
+			break;
+		stream->readPtr += offset;
+		stream->bytesLeft -= offset;
+
+		{
+			clock_t t0 = clock();
+			err = MP3Decode(stream->decoder, &stream->readPtr,
+				&stream->bytesLeft, stream->decodeBuf, 0);
+			if (stream->timing)
+				stream->timing->frameDecode += clock() - t0;
+		}
+		if (err) {
+			if (err == ERR_MP3_INDATA_UNDERFLOW) {
+				stream->outOfData = 1;
+			} else if (err == ERR_MP3_MAINDATA_UNDERFLOW) {
+				/* Need more main data from later frames; keep decoding. */
+			} else {
+				fprintf(stderr, "decode error %d after %lu frames\n",
+					err, stream->stats->decodedFrames);
+				stream->outOfData = 1;
+			}
+			continue;
+		}
+
+		MP3GetLastFrameInfo(stream->decoder, &info);
+		UpdateFirstFrameStats(stream->stats, &info);
+		if (!stream->effectiveRate) {
+			stream->effectiveRate = EffectiveOutputSampleRate(opt, info.samprate);
+			stream->stats->outputSampleRate = stream->effectiveRate;
+		}
+
+		{
+			int outSamps;
+			int outChannels;
+			int i;
+			clock_t t0;
+
+			t0 = clock();
+			outSamps = MixFrame(stream->decodeBuf, stream->writeBuf,
+				info.outputSamps, info.nChans, 1);
+			outChannels = 1;
+			if (!opt->fastLowrate && opt->outputRate &&
+				info.samprate > opt->outputRate) {
+				outSamps = DownsampleFrame(&stream->rateState,
+					stream->writeBuf, stream->rateBuf, outSamps,
+					info.samprate, opt->outputRate, outChannels);
+				memmove(stream->writeBuf, stream->rateBuf,
+					outSamps * sizeof(short));
+			}
+			if (opt->checksum)
+				stream->stats->pcmChecksum = UpdatePcmChecksum(
+					stream->stats->pcmChecksum, stream->writeBuf, outSamps);
+			if (stream->timing)
+				stream->timing->pcmConvert += clock() - t0;
+
+			for (i = 0; i < outSamps; i++)
+				stream->spillBuf[i] = Sample16ToS8(stream->writeBuf[i]);
+			stream->spillPos = 0;
+			stream->spillCount = outSamps;
+			stream->stats->outputSamples += (unsigned long)outSamps;
+			stream->stats->decodedFrames++;
+			DecodeStreamCopySpill(stream, dest, maxBytes, &produced);
+		}
+	}
+
+	return produced;
+}
+
+static unsigned int AmigaPalAudioPeriod(int outputRate)
+{
+	return (unsigned int)(3546895UL / (unsigned long)outputRate);
+}
+
+#ifdef HAVE_AMIGA_AUDIO_DEVICE
+typedef struct AmigaAudioPlayer {
+	struct MsgPort *port;
+	struct IOAudio *req[2];
+	int deviceOpen;
+	unsigned int period;
+} AmigaAudioPlayer;
+
+static void AmigaAudioClose(AmigaAudioPlayer *player)
+{
+	int i;
+
+	for (i = 0; i < 2; i++) {
+		if (player->req[i]) {
+			if (!CheckIO((struct IORequest *)player->req[i])) {
+				AbortIO((struct IORequest *)player->req[i]);
+				WaitIO((struct IORequest *)player->req[i]);
+			}
+		}
+	}
+	if (player->deviceOpen && player->req[0])
+		CloseDevice((struct IORequest *)player->req[0]);
+	for (i = 0; i < 2; i++) {
+		if (player->req[i])
+			DeleteIORequest((struct IORequest *)player->req[i]);
+	}
+	if (player->port)
+		DeleteMsgPort(player->port);
+	memset(player, 0, sizeof(*player));
+}
+
+static int AmigaAudioOpen(AmigaAudioPlayer *player, unsigned int period)
+{
+	UBYTE channels[] = { 1, 2, 4, 8 };
+
+	memset(player, 0, sizeof(*player));
+	player->period = period;
+	player->port = CreateMsgPort();
+	if (!player->port)
+		return -1;
+	player->req[0] = (struct IOAudio *)CreateIORequest(player->port,
+		sizeof(struct IOAudio));
+	player->req[1] = (struct IOAudio *)CreateIORequest(player->port,
+		sizeof(struct IOAudio));
+	if (!player->req[0] || !player->req[1]) {
+		AmigaAudioClose(player);
+		return -1;
+	}
+	player->req[0]->ioa_Request.io_Message.mn_Node.ln_Pri = ADALLOC_MINPREC;
+	player->req[0]->ioa_Data = channels;
+	player->req[0]->ioa_Length = sizeof(channels);
+	if (OpenDevice(AUDIONAME, 0, (struct IORequest *)player->req[0], 0) != 0) {
+		AmigaAudioClose(player);
+		return -1;
+	}
+	player->deviceOpen = 1;
+	memcpy(player->req[1], player->req[0], sizeof(struct IOAudio));
+	player->req[1]->ioa_Request.io_Message.mn_ReplyPort = player->port;
+	return 0;
+}
+
+static void AmigaAudioSubmit(AmigaAudioPlayer *player, int index,
+	signed char *buf, unsigned long len)
+{
+	struct IOAudio *req = player->req[index];
+
+	req->ioa_Request.io_Command = CMD_WRITE;
+	req->ioa_Request.io_Flags = ADIOF_PERVOL;
+	req->ioa_Data = (UBYTE *)buf;
+	req->ioa_Length = len;
+	req->ioa_Period = player->period;
+	req->ioa_Volume = 64;
+	req->ioa_Cycles = 1;
+	BeginIO((struct IORequest *)req);
+}
+
+static int AmigaAudioDone(AmigaAudioPlayer *player, int index)
+{
+	return CheckIO((struct IORequest *)player->req[index]) != 0;
+}
+
+static void AmigaAudioWait(AmigaAudioPlayer *player, int index)
+{
+	WaitIO((struct IORequest *)player->req[index]);
+}
+
+static signed char *AmigaAllocAudioBuffer(unsigned long bytes)
+{
+	return (signed char *)AllocMem(bytes, MEMF_CHIP | MEMF_CLEAR);
+}
+
+static void AmigaFreeAudioBuffer(signed char *buf, unsigned long bytes)
+{
+	if (buf)
+		FreeMem(buf, bytes);
+}
+#else
+typedef struct AmigaAudioPlayer { int dummy; } AmigaAudioPlayer;
+static void AmigaAudioClose(AmigaAudioPlayer *player) { (void)player; }
+static int AmigaAudioOpen(AmigaAudioPlayer *player, unsigned int period)
+{
+	(void)player;
+	(void)period;
+	fprintf(stderr, "--play requires an AmigaOS audio.device build\n");
+	return -1;
+}
+static void AmigaAudioSubmit(AmigaAudioPlayer *player, int index,
+	signed char *buf, unsigned long len)
+{ (void)player; (void)index; (void)buf; (void)len; }
+static int AmigaAudioDone(AmigaAudioPlayer *player, int index)
+{ (void)player; (void)index; return 1; }
+static void AmigaAudioWait(AmigaAudioPlayer *player, int index)
+{ (void)player; (void)index; }
+static signed char *AmigaAllocAudioBuffer(unsigned long bytes)
+{ return (signed char *)malloc(bytes); }
+static void AmigaFreeAudioBuffer(signed char *buf, unsigned long bytes)
+{ (void)bytes; free(buf); }
+#endif
+
+static int AmigaPlayWholeBuffer(const signed char *pcm, unsigned long totalBytes,
+	const DecodeOptions *opt, DecodeStats *stats)
+{
+	AmigaAudioPlayer player;
+	unsigned int period;
+	unsigned long pos;
+	unsigned long chunkBytes;
+	signed char *buf[2];
+	unsigned long len[2];
+	int cur;
+	int pending;
+	int first;
+
+	period = AmigaPalAudioPeriod(opt->outputRate);
+	printf("play output rate: %d Hz\n", opt->outputRate);
+	printf("PAL audio period: %u\n", period);
+	if (AmigaAudioOpen(&player, period) != 0)
+		return -1;
+
+	chunkBytes = (unsigned long)opt->outputRate * (unsigned long)opt->bufferSeconds;
+	buf[0] = AmigaAllocAudioBuffer(chunkBytes);
+	buf[1] = AmigaAllocAudioBuffer(chunkBytes);
+	if (!buf[0] || !buf[1]) {
+		fprintf(stderr, "cannot allocate audio buffers\n");
+		AmigaFreeAudioBuffer(buf[0], chunkBytes);
+		AmigaFreeAudioBuffer(buf[1], chunkBytes);
+		AmigaAudioClose(&player);
+		return -1;
+	}
+	pos = 0;
+	for (cur = 0; cur < 2; cur++) {
+		len[cur] = totalBytes - pos;
+		if (len[cur] > chunkBytes)
+			len[cur] = chunkBytes;
+		memcpy(buf[cur], pcm + pos, len[cur]);
+		pos += len[cur];
+	}
+	cur = 0;
+	pending = 0;
+	first = 1;
+	while (len[cur] > 0) {
+		AmigaAudioSubmit(&player, cur, buf[cur], len[cur]);
+		pending = 1;
+		if (!first) {
+			AmigaAudioWait(&player, 1 - cur);
+			len[1 - cur] = totalBytes - pos;
+			if (len[1 - cur] > chunkBytes)
+				len[1 - cur] = chunkBytes;
+			if (len[1 - cur] > 0) {
+				memcpy(buf[1 - cur], pcm + pos, len[1 - cur]);
+				pos += len[1 - cur];
+			}
+		} else {
+			first = 0;
+		}
+		cur = 1 - cur;
+	}
+	if (pending)
+		AmigaAudioWait(&player, 1 - cur);
+	AmigaFreeAudioBuffer(buf[0], chunkBytes);
+	AmigaFreeAudioBuffer(buf[1], chunkBytes);
+	AmigaAudioClose(&player);
+	(void)stats;
+	return 0;
+}
+
+static int AmigaPlayDecodeThenPlay(FILE *infile, HMP3Decoder decoder,
+	const DecodeOptions *opt, DecodeStats *stats, TimingStats *timing)
+{
+	DecodeStream stream;
+	signed char temp[4096];
+	signed char *all;
+	unsigned long used;
+	unsigned long cap;
+	int n;
+
+	DecodeStreamInit(&stream, infile, decoder, stats, timing);
+	all = NULL;
+	used = 0;
+	cap = 0;
+	while ((n = DecodeStreamFillS8(&stream, opt, temp, sizeof(temp))) > 0) {
+		if (used + (unsigned long)n > cap) {
+			unsigned long newCap = cap ? cap * 2UL : 65536UL;
+			signed char *newAll;
+			while (newCap < used + (unsigned long)n)
+				newCap *= 2UL;
+			newAll = (signed char *)realloc(all, newCap);
+			if (!newAll) {
+				free(all);
+				fprintf(stderr, "cannot allocate decode-then-play RAM\n");
+				return -1;
+			}
+			all = newAll;
+			cap = newCap;
+		}
+		memcpy(all + used, temp, n);
+		used += (unsigned long)n;
+	}
+	printf("decode-then-play bytes: %lu\n", used);
+	n = AmigaPlayWholeBuffer(all, used, opt, stats);
+	free(all);
+	return n;
+}
+
+static int AmigaPlayStreaming(FILE *infile, HMP3Decoder decoder,
+	const DecodeOptions *opt, DecodeStats *stats, TimingStats *timing)
+{
+	DecodeStream stream;
+	AmigaAudioPlayer player;
+	unsigned int period;
+	unsigned long bufBytes;
+	signed char *buf[2];
+	unsigned long len[2];
+	int cur;
+	int first;
+	int prev;
+	int pending;
+	int err;
+
+	period = AmigaPalAudioPeriod(opt->outputRate);
+	printf("play output rate: %d Hz\n", opt->outputRate);
+	printf("PAL audio period: %u\n", period);
+	bufBytes = (unsigned long)opt->outputRate * (unsigned long)opt->bufferSeconds;
+	buf[0] = AmigaAllocAudioBuffer(bufBytes);
+	buf[1] = AmigaAllocAudioBuffer(bufBytes);
+	if (!buf[0] || !buf[1]) {
+		fprintf(stderr, "cannot allocate audio buffers\n");
+		AmigaFreeAudioBuffer(buf[0], bufBytes);
+		AmigaFreeAudioBuffer(buf[1], bufBytes);
+		return -1;
+	}
+	DecodeStreamInit(&stream, infile, decoder, stats, timing);
+	len[0] = (unsigned long)DecodeStreamFillS8(&stream, opt, buf[0], (int)bufBytes);
+	len[1] = (unsigned long)DecodeStreamFillS8(&stream, opt, buf[1], (int)bufBytes);
+	if (AmigaAudioOpen(&player, period) != 0) {
+		AmigaFreeAudioBuffer(buf[0], bufBytes);
+		AmigaFreeAudioBuffer(buf[1], bufBytes);
+		return -1;
+	}
+	cur = 0;
+	first = 1;
+	pending = 0;
+	err = 0;
+	while (len[cur] > 0) {
+		AmigaAudioSubmit(&player, cur, buf[cur], len[cur]);
+		pending = 1;
+		prev = 1 - cur;
+		if (!first) {
+			if (AmigaAudioDone(&player, prev))
+				stats->underruns++;
+			AmigaAudioWait(&player, prev);
+		}
+		if (first) {
+			first = 0;
+		} else {
+			len[prev] = (unsigned long)DecodeStreamFillS8(&stream, opt,
+				buf[prev], (int)bufBytes);
+		}
+		cur = prev;
+	}
+	if (pending)
+		AmigaAudioWait(&player, 1 - cur);
+	AmigaAudioClose(&player);
+	AmigaFreeAudioBuffer(buf[0], bufBytes);
+	AmigaFreeAudioBuffer(buf[1], bufBytes);
+	return err;
+}
+
 int main(int argc, char **argv)
 {
 	DecodeOptions opt;
@@ -1160,6 +1649,49 @@ int main(int argc, char **argv)
 		fprintf(stderr, "warning: --fast-lowrate is experimental and lower quality; "
 			"this build still generates full polyphase output before decimation\n");
 #endif
+	}
+
+	if (opt.play) {
+		int playErr;
+		gTiming = &timing;
+		MP3ResetDecodeCoreProfile();
+		startClock = clock();
+		if (opt.decodeThenPlay)
+			playErr = AmigaPlayDecodeThenPlay(infile, decoder, &opt, &stats, &timing);
+		else
+			playErr = AmigaPlayStreaming(infile, decoder, &opt, &stats, &timing);
+		endClock = clock();
+		if (!stats.outputSampleRate)
+			stats.outputSampleRate = opt.outputRate;
+		printf("input sample rate: %d Hz\n", stats.sampleRate);
+		printf("output sample rate: %d Hz\n", stats.outputSampleRate);
+		printf("channels: %d (mono output)\n", stats.channels);
+		printf("bitrate: %d bps\n", stats.bitrate);
+		printf("decoded frames: %lu\n", stats.decodedFrames);
+		printf("output samples: %lu\n", stats.outputSamples);
+		if (opt.checksum)
+			printf("playback PCM checksum: %08lx\n", stats.pcmChecksum);
+		printf("fast-lowrate stride: %d (experimental; IMDCT/DCT32 still full-rate)\n",
+			MP3GetFastLowrateStride(decoder));
+		if (opt.bench) {
+			double elapsed = 0.0;
+			double audioSeconds;
+			if (CLOCKS_PER_SEC > 0)
+				elapsed = (double)(endClock - startClock) / (double)CLOCKS_PER_SEC;
+			audioSeconds = DecodedAudioSeconds(&opt, &stats);
+			printf("elapsed seconds: %.3f\n", elapsed);
+			if (elapsed > 0.0 && audioSeconds > 0.0)
+				printf("decode speed: %.2fx realtime\n", audioSeconds / elapsed);
+			printf("playback underruns: %lu\n", stats.underruns);
+			printf("timing frame decode: %.3f s\n", ClocksToSeconds(timing.frameDecode));
+			printf("timing PCM conversion: %.3f s\n", ClocksToSeconds(timing.pcmConvert));
+		}
+		MP3FreeDecoder(decoder);
+		fclose(infile);
+		gTiming = NULL;
+		free(resolvedOutName);
+		AmigaFreeNormalizedArgs(&normalized);
+		return playErr == 0 ? 0 : 1;
 	}
 
 	bytesLeft = 0;
