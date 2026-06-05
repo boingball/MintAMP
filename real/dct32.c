@@ -120,6 +120,61 @@ static __inline int FDCT32_AMIGA_M68K_MULSHIFT32(int x, int y)
 	(void)lo;
 	return hi;
 }
+
+/*
+ * The first radix-4 pass is deliberately one extended-asm scheduling region.
+ * Keeping all four live butterfly values in data registers avoids the spills
+ * and reloads GCC introduces around 32 separate inline multiply regions on a
+ * register-starved 68030.  Coefficients stream once through an address
+ * register, and each signed 32x32 multiply consumes its high word directly.
+ */
+#define FDCT32_M68K_FIRST_BUTTERFLY(in0, in3, in1, in2, out0, out1, out2, out3, s0, s1, s2) \
+	"\tmove.l " in0 "(%0),%%d0\n\t" \
+	"move.l " in3 "(%0),%%d3\n\t" \
+	"move.l %%d0,%%d4\n\t" \
+	"add.l %%d3,%%d0\n\t" \
+	"sub.l %%d3,%%d4\n\t" \
+	"muls.l (%1)+,%%d3:%%d4\n\t" \
+	"lsl.l #" s0 ",%%d3\n\t" \
+	"move.l " in1 "(%0),%%d1\n\t" \
+	"move.l " in2 "(%0),%%d2\n\t" \
+	"move.l %%d1,%%d4\n\t" \
+	"add.l %%d2,%%d1\n\t" \
+	"sub.l %%d2,%%d4\n\t" \
+	"muls.l (%1)+,%%d2:%%d4\n\t" \
+	"lsl.l #" s1 ",%%d2\n\t" \
+	"move.l %%d0,%%d4\n\t" \
+	"add.l %%d1,%%d0\n\t" \
+	"sub.l %%d1,%%d4\n\t" \
+	"muls.l (%1),%%d5:%%d4\n\t" \
+	"lsl.l #" s2 ",%%d5\n\t" \
+	"move.l %%d3,%%d4\n\t" \
+	"sub.l %%d2,%%d4\n\t" \
+	"muls.l (%1)+,%%d6:%%d4\n\t" \
+	"lsl.l #" s2 ",%%d6\n\t" \
+	"add.l %%d3,%%d2\n\t" \
+	"move.l %%d0," out0 "(%0)\n\t" \
+	"move.l %%d5," out1 "(%0)\n\t" \
+	"move.l %%d2," out2 "(%0)\n\t" \
+	"move.l %%d6," out3 "(%0)\n\t"
+
+static __inline const int *FDCT32_AMIGA_M68K_FIRST_PASS(int *buf, const int *cptr)
+{
+	__asm__ volatile (
+		FDCT32_M68K_FIRST_BUTTERFLY("",   "124", "60", "64", "",   "60", "64", "124", "1", "5", "1")
+		FDCT32_M68K_FIRST_BUTTERFLY("4",  "120", "56", "68", "4",  "56", "68", "120", "1", "3", "1")
+		FDCT32_M68K_FIRST_BUTTERFLY("8",  "116", "52", "72", "8",  "52", "72", "116", "1", "3", "1")
+		FDCT32_M68K_FIRST_BUTTERFLY("12", "112", "48", "76", "12", "48", "76", "112", "1", "2", "1")
+		FDCT32_M68K_FIRST_BUTTERFLY("16", "108", "44", "80", "16", "44", "80", "108", "1", "2", "1")
+		FDCT32_M68K_FIRST_BUTTERFLY("20", "104", "40", "84", "20", "40", "84", "104", "1", "1", "2")
+		FDCT32_M68K_FIRST_BUTTERFLY("24", "100", "36", "88", "24", "36", "88", "100", "1", "1", "2")
+		FDCT32_M68K_FIRST_BUTTERFLY("28", "96",  "32", "92", "28", "32", "92", "96",  "1", "1", "4")
+		: "+a" (buf), "+a" (cptr)
+		:
+		: "d0", "d1", "d2", "d3", "d4", "d5", "d6", "cc", "memory");
+	return cptr;
+}
+#undef FDCT32_M68K_FIRST_BUTTERFLY
 #else
 #define FDCT32_HAS_AMIGA_M68K_ASM 0
 #endif
@@ -334,15 +389,8 @@ static void FDCT32_AMIGA_M68K_ASM(int *buf, int *dest, int offset, int oddBlock,
 			buf[i] >>= es;
 	}
 
-	/* first pass */
-	D32FP(0, 1, 5, 1);
-	D32FP(1, 1, 3, 1);
-	D32FP(2, 1, 3, 1);
-	D32FP(3, 1, 2, 1);
-	D32FP(4, 1, 2, 1);
-	D32FP(5, 1, 1, 2);
-	D32FP(6, 1, 1, 2);
-	D32FP(7, 1, 1, 4);
+	/* first pass: register-scheduled 68030 assembly kernel */
+	cptr = FDCT32_AMIGA_M68K_FIRST_PASS(buf, cptr);
 
 	/* second pass */
 	for (i = 4; i > 0; i--) {

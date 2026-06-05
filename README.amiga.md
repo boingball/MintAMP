@@ -183,11 +183,16 @@ decoded frame count and output sample count.
    ```
 
 4. `AMIGA_M68K_ASM_FDCT32` is an opt-in, exact FDCT32 arithmetic path for
-   68020+ GNU m68k builds.  It keeps `FDCT32_C_REFERENCE` callable and routes
-   the normal `FDCT32` entry point through an operation-order-preserving copy of
-   the C transform that replaces only the 32x32 high multiply with `muls.l`.
-   This flag is deliberately disabled by default; leave it disabled if any
-   checksum or `--selftest-fdct32` comparison differs from the C reference.
+   68020+ GNU m68k builds, tuned for the 68030.  It keeps `FDCT32_C_REFERENCE`
+   callable and routes the normal `FDCT32` entry point through an
+   operation-order-preserving transform.  The fully unrolled first radix-4
+   pass is one register-scheduled machine-code region: butterfly values remain
+   in data registers, coefficients stream through an address register, and
+   `muls.l` high words feed the next operation without C compiler spill/reload
+   boundaries.  The second pass continues to use exact inline `muls.l`, and
+   the original shuffle/scaling logic remains unchanged.  This flag is
+   deliberately disabled by default; leave it disabled if any checksum or
+   `--selftest-fdct32` comparison differs from the C reference.
 
    ```sh
    m68k-amigaos-gcc -m68020 -O2 -DAMIGA_M68K_ASM_FDCT32 -Ipub -Ireal \
