@@ -601,8 +601,10 @@ static __inline int IMDCT36_AMIGA_M68K_LONG_WINDOW(int *xp, const int *cp,
 		"add.l %%d5,%%d4\n\t"
 		"move.l %%d4,(%5)\n\t"
 		"adda.l #128,%5\n\t"
+		/* 68k immediate shifts only encode counts 1..8; ADD/SUBX makes the sign mask. */
 		"move.l %%d4,%%d0\n\t"
-		"asr.l #31,%%d0\n\t"
+		"add.l %%d0,%%d0\n\t"
+		"subx.l %%d0,%%d0\n\t"
 		"eor.l %%d0,%%d4\n\t"
 		"sub.l %%d0,%%d4\n\t"
 		"or.l %%d4,%0\n\t"
@@ -615,8 +617,10 @@ static __inline int IMDCT36_AMIGA_M68K_LONG_WINDOW(int *xp, const int *cp,
 		"add.l %%d3,%%d4\n\t"
 		"move.l %%d4,(%6)\n\t"
 		"suba.l #128,%6\n\t"
+		/* 68k immediate shifts only encode counts 1..8; ADD/SUBX makes the sign mask. */
 		"move.l %%d4,%%d0\n\t"
-		"asr.l #31,%%d0\n\t"
+		"add.l %%d0,%%d0\n\t"
+		"subx.l %%d0,%%d0\n\t"
 		"eor.l %%d0,%%d4\n\t"
 		"sub.l %%d0,%%d4\n\t"
 		"or.l %%d4,%0\n\t"
