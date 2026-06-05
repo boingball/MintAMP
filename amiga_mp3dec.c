@@ -85,12 +85,27 @@ typedef struct DecodeOptions {
 	int info;
 } DecodeOptions;
 
+typedef struct Mp3InputInfo {
+	int id3v2Detected;
+	int id3v2Major;
+	int id3v2Revision;
+	int id3v2Flags;
+	unsigned long id3v2SkipBytes;
+	int firstFrameFound;
+	unsigned long firstFrameOffset;
+	MP3FrameInfo firstFrameInfo;
+} Mp3InputInfo;
+
 typedef struct InputSource {
 	FILE *file;
 	unsigned char *memory;
 	unsigned long memorySize;
 	unsigned long memoryPos;
+	Mp3InputInfo info;
 } InputSource;
+
+static void InputSourceInit(InputSource *input, FILE *file);
+static int InputSourcePrepareMp3(InputSource *input);
 
 typedef struct DecodeStats {
 	unsigned long decodedFrames;
@@ -796,41 +811,29 @@ static void PrintId3v1(FILE *fp, long fileSize)
 	printf("ID3v1 genre index: %u\n", (unsigned int)tag[127]);
 }
 
-static int PrintFirstFrameInfo(FILE *fp, unsigned long audioOffset)
+static void PrintFirstFrameInfo(const Mp3InputInfo *inputInfo)
 {
-	unsigned char probe[READBUF_SIZE];
-	HMP3Decoder decoder;
-	MP3FrameInfo info;
-	size_t nRead;
-	int offset;
-	int err;
+	const MP3FrameInfo *info;
 	const char *version;
 
-	if (fseek(fp, (long)audioOffset, SEEK_SET) != 0)
-		return 0;
-	nRead = fread(probe, 1, sizeof(probe), fp);
-	offset = MP3FindSyncWord(probe, (int)nRead);
-	if (offset < 0)
-		return 0;
-	decoder = MP3InitDecoder();
-	if (!decoder)
-		return 0;
-	err = MP3GetNextFrameInfo(decoder, &info, probe + offset);
-	MP3FreeDecoder(decoder);
-	if (err != ERR_MP3_NONE)
-		return 0;
-	version = info.version == MPEG1 ? "1" : (info.version == MPEG2 ? "2" : "2.5");
-	printf("MPEG audio: version %s, layer %d\n", version, info.layer);
-	printf("sample rate: %d Hz\n", info.samprate);
-	printf("channels: %d\n", info.nChans);
-	printf("bitrate: %d bps\n", info.bitrate);
-	return 1;
+	if (!inputInfo->firstFrameFound) {
+		printf("first MPEG frame offset: not found\n");
+		printf("MPEG audio: no valid frame found after tags\n");
+		return;
+	}
+	info = &inputInfo->firstFrameInfo;
+	version = info->version == MPEG1 ? "1" : (info->version == MPEG2 ? "2" : "2.5");
+	printf("first MPEG frame offset: %lu\n", inputInfo->firstFrameOffset);
+	printf("MPEG audio: version %s, layer %d\n", version, info->layer);
+	printf("sample rate: %d Hz\n", info->samprate);
+	printf("channels: %d\n", info->nChans);
+	printf("bitrate: %d bps\n", info->bitrate);
 }
 
 static void PrintMp3Info(FILE *fp, const char *name)
 {
 	long fileSize;
-	unsigned long audioOffset;
+	InputSource input;
 
 	fileSize = -1;
 	if (fseek(fp, 0, SEEK_END) == 0)
@@ -838,9 +841,15 @@ static void PrintMp3Info(FILE *fp, const char *name)
 	printf("file: %s\n", name);
 	if (fileSize >= 0)
 		printf("file size: %lu bytes\n", (unsigned long)fileSize);
-	audioOffset = PrintId3v2(fp);
-	if (!PrintFirstFrameInfo(fp, audioOffset))
-		printf("MPEG audio: no frame found in first %d bytes after tags\n", READBUF_SIZE);
+	InputSourceInit(&input, fp);
+	InputSourcePrepareMp3(&input);
+	printf("ID3v2 detected: %s\n", input.info.id3v2Detected ? "yes" : "no");
+	if (input.info.id3v2Detected)
+		printf("ID3v2 version: 2.%d.%d\n", input.info.id3v2Major,
+			input.info.id3v2Revision);
+	printf("ID3v2 size skipped: %lu bytes\n", input.info.id3v2SkipBytes);
+	PrintId3v2(fp);
+	PrintFirstFrameInfo(&input.info);
 	if (fileSize >= 0)
 		PrintId3v1(fp, fileSize);
 	fseek(fp, 0, SEEK_SET);
@@ -1007,6 +1016,99 @@ static int InputSourcePreloadFastMemory(InputSource *input)
 	input->memorySize = (unsigned long)fileSize;
 	input->memoryPos = 0;
 	printf("fast-mem input preload: %lu bytes\n", input->memorySize);
+	return 0;
+}
+
+static int MpegHeaderLooksValid(const unsigned char *header)
+{
+	if (header[0] != 0xff || (header[1] & 0xe0) != 0xe0)
+		return 0;
+	/* Reject reserved MPEG version, anything other than Layer III, the reserved
+	 * bitrate index, and the reserved sample-rate index. */
+	if ((header[1] & 0x18) == 0x08 || (header[1] & 0x06) != 0x02)
+		return 0;
+	if ((header[2] & 0xf0) == 0xf0 || (header[2] & 0x0c) == 0x0c)
+		return 0;
+	return 1;
+}
+
+static int FindValidatedMpegSync(const unsigned char *buf, int nBytes)
+{
+	int i;
+
+	for (i = 0; i <= nBytes - 4; i++) {
+		if (MpegHeaderLooksValid(buf + i))
+			return i;
+	}
+	return -1;
+}
+
+static int InputSourcePrepareMp3(InputSource *input)
+{
+	unsigned char header[10];
+	unsigned char scan[READBUF_SIZE];
+	unsigned long scanBase;
+	unsigned long tagBytes;
+	size_t nRead;
+	int keep;
+	HMP3Decoder decoder;
+
+	memset(&input->info, 0, sizeof(input->info));
+	InputSourceSeek(input, 0);
+	nRead = InputSourceRead(input, header, sizeof(header));
+	if (nRead == sizeof(header) && memcmp(header, "ID3", 3) == 0) {
+		input->info.id3v2Detected = 1;
+		input->info.id3v2Major = header[3];
+		input->info.id3v2Revision = header[4];
+		input->info.id3v2Flags = header[5];
+		if (!(header[6] & 0x80) && !(header[7] & 0x80) &&
+			!(header[8] & 0x80) && !(header[9] & 0x80)) {
+			tagBytes = SynchsafeSize(header + 6);
+			input->info.id3v2SkipBytes = 10UL + tagBytes;
+			if (header[5] & 0x10)
+				input->info.id3v2SkipBytes += 10UL;
+		}
+	}
+
+	InputSourceSeek(input, input->info.id3v2SkipBytes);
+	scanBase = input->info.id3v2SkipBytes;
+	keep = 0;
+	decoder = MP3InitDecoder();
+	if (!decoder)
+		return -1;
+	for (;;) {
+		int offset;
+		int available;
+
+		nRead = InputSourceRead(input, scan + keep, sizeof(scan) - (size_t)keep);
+		available = keep + (int)nRead;
+		offset = FindValidatedMpegSync(scan, available);
+		while (offset >= 0) {
+			MP3FrameInfo frameInfo;
+			if (MP3GetNextFrameInfo(decoder, &frameInfo, scan + offset) == ERR_MP3_NONE) {
+				input->info.firstFrameFound = 1;
+				input->info.firstFrameOffset = scanBase + (unsigned long)offset;
+				input->info.firstFrameInfo = frameInfo;
+				MP3FreeDecoder(decoder);
+				InputSourceSeek(input, input->info.firstFrameOffset);
+				return 0;
+			}
+			offset++;
+			if (offset > available - 4)
+				break;
+			{
+				int next = FindValidatedMpegSync(scan + offset, available - offset);
+				offset = next < 0 ? -1 : offset + next;
+			}
+		}
+		if (nRead == 0)
+			break;
+		keep = available < 3 ? available : 3;
+		memmove(scan, scan + available - keep, (size_t)keep);
+		scanBase += (unsigned long)(available - keep);
+	}
+	MP3FreeDecoder(decoder);
+	InputSourceSeek(input, input->info.id3v2SkipBytes);
 	return 0;
 }
 
@@ -1986,6 +2088,8 @@ static int DecodeStreamFillS8(DecodeStream *stream, const DecodeOptions *opt,
 		int nRead;
 		int offset;
 		int err;
+		unsigned char *frameStart;
+		int frameBytes;
 
 		if (stream->bytesLeft < 2 * MAINBUF_SIZE && !stream->eofReached) {
 			nRead = FillReadBuffer(stream->readBuf, stream->readPtr,
@@ -1996,11 +2100,20 @@ static int DecodeStreamFillS8(DecodeStream *stream, const DecodeOptions *opt,
 				stream->eofReached = 1;
 		}
 
-		offset = MP3FindSyncWord(stream->readPtr, stream->bytesLeft);
-		if (offset < 0)
-			break;
+		offset = FindValidatedMpegSync(stream->readPtr, stream->bytesLeft);
+		if (offset < 0) {
+			if (stream->eofReached)
+				break;
+			if (stream->bytesLeft > 3) {
+				stream->readPtr += stream->bytesLeft - 3;
+				stream->bytesLeft = 3;
+			}
+			continue;
+		}
 		stream->readPtr += offset;
 		stream->bytesLeft -= offset;
+		frameStart = stream->readPtr;
+		frameBytes = stream->bytesLeft;
 
 		if (stream->timing) {
 			clock_t t0 = clock();
@@ -2012,13 +2125,22 @@ static int DecodeStreamFillS8(DecodeStream *stream, const DecodeOptions *opt,
 				&stream->bytesLeft, stream->decodeBuf, 0);
 		}
 		if (err) {
-			if (err == ERR_MP3_INDATA_UNDERFLOW) {
+			if (err == ERR_MP3_INDATA_UNDERFLOW &&
+				stream->stats->decodedFrames == 0 && frameBytes > 1) {
+				stream->readPtr = frameStart + 1;
+				stream->bytesLeft = frameBytes - 1;
+			} else if (err == ERR_MP3_INDATA_UNDERFLOW) {
 				stream->outOfData = 1;
 			} else if (err == ERR_MP3_MAINDATA_UNDERFLOW) {
 				/* Need more main data from later frames; keep decoding. */
+			} else if (stream->stats->decodedFrames == 0 && frameBytes > 1) {
+				/* A false-positive first header must not make the whole file fail. */
+				stream->readPtr = frameStart + 1;
+				stream->bytesLeft = frameBytes - 1;
 			} else {
 				fprintf(stderr, "decode error %d after %lu frames\n",
 					err, stream->stats->decodedFrames);
+				stream->decodeError = 1;
 				stream->outOfData = 1;
 			}
 			continue;
@@ -2480,17 +2602,6 @@ static void PrintPlaybackFillDebug(const DecodeOptions *opt, int index,
 		PlaybackBufferName(index), bytes / channels, bytes);
 }
 
-static unsigned long PlaybackStartupPrefillSamples(const DecodeOptions *opt,
-	unsigned long chunkBytes)
-{
-	unsigned long samples;
-
-	samples = (unsigned long)PlaybackHalfBufferSamples(opt, chunkBytes);
-	if (samples == 0)
-		return 0;
-	return samples;
-}
-
 static int PlaybackBufferPeakS8(const signed char *buf, unsigned long len)
 {
 	int peak;
@@ -2559,7 +2670,7 @@ static int ProbeInputSampleRate(InputSource *input, HMP3Decoder decoder,
 	InputSourceSeek(input, pos);
 	if (nRead == 0)
 		return 0;
-	offset = MP3FindSyncWord(probe, (int)nRead);
+	offset = FindValidatedMpegSync(probe, (int)nRead);
 	if (offset < 0)
 		return 0;
 	probeDecoder = MP3InitDecoder();
@@ -2690,6 +2801,10 @@ static int AmigaPlayWholeBuffer(const signed char *pcm, unsigned long totalBytes
 	int pending;
 	int first;
 
+	if (totalBytes == 0) {
+		fprintf(stderr, "no decoded samples; audio.device playback not started\n");
+		return -1;
+	}
 	PlaybackCleanupStatusInit(&cleanupStatus);
 	{
 		int playbackRate = PlaybackOutputSampleRate(opt, stats);
@@ -2833,6 +2948,8 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 	unsigned long bufBytes;
 	unsigned long requestedBytes;
 	signed char *buf[2];
+	signed char startupBuf[OUTBUF_SAMPS];
+	unsigned long startupLen;
 	unsigned long len[2];
 	unsigned long playbackChannels;
 	unsigned long halfMilliseconds;
@@ -2854,8 +2971,15 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 	printf("play output rate: %d Hz\n", playbackRate);
 	requestedBytes = PlaybackRequestedChunkBytes(opt, playbackRate);
 	printf("PAL audio period: %u\n", period);
+	/* Decode before opening audio.device so invalid inputs never start playback. */
+	startupLen = DecodeStreamFillPlaybackPrefill(&stream, opt, startupBuf,
+		OUTBUF_SAMPS, 1UL);
+	if (stream.decodeError || startupLen == 0) {
+		fprintf(stderr, "no decoded samples; audio.device playback not started\n");
+		return -1;
+	}
 	if (AmigaSetupPlaybackBuffers(&player, opt, period, requestedBytes,
-		opt->stereo ? 2UL : 1UL, buf, &bufBytes, &cleanupStatus) != 0) {
+		startupLen, buf, &bufBytes, &cleanupStatus) != 0) {
 		PrintPlaybackCleanupStatus(opt, &cleanupStatus);
 		return -1;
 	}
@@ -2868,8 +2992,11 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 
 	/* Fill both halves before the first CMD_WRITE starts playback. */
 	playbackChannels = opt->stereo ? 2UL : 1UL;
-	len[0] = DecodeStreamFillPlaybackPrefill(&stream, opt, buf[0],
-		bufBytes, PlaybackStartupPrefillSamples(opt, bufBytes));
+	memcpy(buf[0], startupBuf, (size_t)startupLen);
+	len[0] = startupLen;
+	if (len[0] < bufBytes)
+		len[0] += (unsigned long)DecodeStreamFillS8(&stream, opt,
+			buf[0] + len[0], (int)(bufBytes - len[0]));
 	PrintPlaybackFillDebug(opt, 0, len[0]);
 	if (stream.decodeError) {
 		AmigaAudioClose(&player, &cleanupStatus);
@@ -3201,6 +3328,14 @@ int main(int argc, char **argv)
 		AmigaFreeNormalizedArgs(&normalized);
 		return 1;
 	}
+	if (InputSourcePrepareMp3(&input) != 0) {
+		fprintf(stderr, "cannot inspect MP3 input: %s\n", opt.inName);
+		InputSourceClose(&input);
+		fclose(infile);
+		free(resolvedOutName);
+		AmigaFreeNormalizedArgs(&normalized);
+		return 1;
+	}
 
 	outfile = NULL;
 	if (!opt.noOutput) {
@@ -3343,6 +3478,8 @@ int main(int argc, char **argv)
 		int nRead;
 		int offset;
 		int err;
+		unsigned char *frameStart;
+		int frameBytes;
 
 		if (bytesLeft < 2 * MAINBUF_SIZE && !eofReached) {
 			nRead = FillReadBuffer(readBuf, readPtr, READBUF_SIZE,
@@ -3353,12 +3490,21 @@ int main(int argc, char **argv)
 				eofReached = 1;
 		}
 
-		offset = MP3FindSyncWord(readPtr, bytesLeft);
-		if (offset < 0)
-			break;
+		offset = FindValidatedMpegSync(readPtr, bytesLeft);
+		if (offset < 0) {
+			if (eofReached)
+				break;
+			if (bytesLeft > 3) {
+				readPtr += bytesLeft - 3;
+				bytesLeft = 3;
+			}
+			continue;
+		}
 
 		readPtr += offset;
 		bytesLeft -= offset;
+		frameStart = readPtr;
+		frameBytes = bytesLeft;
 
 		if (opt.bench) {
 			clock_t t0 = clock();
@@ -3368,10 +3514,18 @@ int main(int argc, char **argv)
 			err = MP3Decode(decoder, &readPtr, &bytesLeft, decodeBuf, 0);
 		}
 		if (err) {
-			if (err == ERR_MP3_INDATA_UNDERFLOW) {
+			if (err == ERR_MP3_INDATA_UNDERFLOW &&
+				stats.decodedFrames == 0 && frameBytes > 1) {
+				readPtr = frameStart + 1;
+				bytesLeft = frameBytes - 1;
+			} else if (err == ERR_MP3_INDATA_UNDERFLOW) {
 				outOfData = 1;
 			} else if (err == ERR_MP3_MAINDATA_UNDERFLOW) {
 				/* Need more main data from later frames; keep decoding. */
+			} else if (stats.decodedFrames == 0 && frameBytes > 1) {
+				/* Rescan after a bad first candidate before giving up. */
+				readPtr = frameStart + 1;
+				bytesLeft = frameBytes - 1;
 			} else {
 				fprintf(stderr, "decode error %d after %lu frames\n",
 					err, stats.decodedFrames);

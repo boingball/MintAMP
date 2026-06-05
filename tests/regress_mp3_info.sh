@@ -29,7 +29,11 @@ PY
 
 out=$($MP3DEC --info "$tmp/tagged.mp3")
 printf '%s\n' "$out"
+printf '%s\n' "$out" | grep '^ID3v2 detected: yes$' >/dev/null
+printf '%s\n' "$out" | grep '^ID3v2 version: 2.3.0$' >/dev/null
+printf '%s\n' "$out" | grep '^ID3v2 size skipped: ' >/dev/null
 printf '%s\n' "$out" | grep '^ID3v2: 2.3.0 ' >/dev/null
+printf '%s\n' "$out" | grep '^first MPEG frame offset: ' >/dev/null
 printf '%s\n' "$out" | grep '^title: Info Test$' >/dev/null
 printf '%s\n' "$out" | grep '^artist: Helix Artist$' >/dev/null
 printf '%s\n' "$out" | grep '^album: Test Album$' >/dev/null
@@ -41,4 +45,12 @@ if [ -e "$tmp/tagged.pcm" ]; then
 	printf '%s\n' 'FAIL: standalone --info created an output file' >&2
 	exit 1
 fi
+python3 - "$tmp/untagged.mp3" <<'PY'
+import sys
+open(sys.argv[1], "wb").write(b"\xff\xfb\x90\x00" + bytes(1024))
+PY
+plain=$($MP3DEC --info "$tmp/untagged.mp3")
+printf '%s\n' "$plain" | grep '^ID3v2 detected: no$' >/dev/null
+printf '%s\n' "$plain" | grep '^ID3v2 size skipped: 0 bytes$' >/dev/null
+printf '%s\n' "$plain" | grep '^first MPEG frame offset: 0$' >/dev/null
 printf '%s\n' 'MP3 info regression passed'
