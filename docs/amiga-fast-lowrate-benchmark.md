@@ -256,9 +256,11 @@ mp3dec_O3 --decode-only --bench --checksum --fast-lowrate --rate 11025 --mono "t
 `AMIGA_M68K_ASM_IMDCT` is an opt-in experiment for 68020+ GNU m68k builds.  It
 keeps the C IMDCT as the reference and only routes the common long-block
 `btCurr == 0 && btPrev == 0` IMDCT36 path through an operation-order-preserving
-copy that swaps the fixed-point high multiply for `muls.l`.  Short blocks,
-mixed-block transition windows, start/stop windows, and any non-common block
-configuration continue to use the C path.
+implementation.  Its common long-window/overlap stage is one compact
+nine-iteration asm kernel, avoiding compiler spill/reload boundaries around
+the three `muls.l` operations per iteration.  Short blocks, mixed-block
+transition windows, start/stop windows, and any non-common block configuration
+continue to use the C path.
 
 Before recording speedups, run the synthetic guard test and checksum the existing
 fast-lowrate fixtures against the safe build and the already-confirmed FDCT32 ASM
@@ -284,3 +286,8 @@ Repeat the same commands with the FDCT32 ASM binary and with the
 FDCT32+IMDCT ASM binary.  The mono 56 kbps 44.1 kHz -> 11025 fast-lowrate,
 stereo 160/256 kbps 44.1 kHz -> mono 11025 fast-lowrate, and 11025 Hz 8SVX
 export checksums must remain identical across all three builds.
+
+Do not add `AMIGA_M68K_ASM_IMDCT` to default build flags based on synthetic
+selftests or host timings.  First demonstrate a repeatable improvement on real
+68020+ hardware in both the mono fixture and the stereo/high-bitrate 160/256
+kbps fixtures above; otherwise leave the option disabled.

@@ -226,10 +226,12 @@ decoded frame count and output sample count.
 
 5. `AMIGA_M68K_ASM_IMDCT` is an opt-in exact long-block IMDCT36 path for
    68020+ GNU m68k builds.  The C IMDCT remains the reference; the active
-   entry point uses the asm path only for the common long-window case and
-   falls back to C for short blocks, mixed/transition windows, start/stop
-   windows, and anything else uncommon.  This flag is disabled by default;
-   keep it disabled if `--selftest-imdct` or any required checksum differs.
+   entry point uses a compact nine-iteration asm window/overlap kernel only
+   for the common long-window case and falls back to C for short blocks,
+   mixed/transition windows, start/stop windows, and anything else uncommon.
+   This flag is disabled by default; do not enable it by default unless real
+   mono plus stereo/high-bitrate target benchmarks improve and
+   `--selftest-imdct` plus every required checksum remain identical.
 
    ```sh
    m68k-amigaos-gcc -m68030 -O3 -fomit-frame-pointer \

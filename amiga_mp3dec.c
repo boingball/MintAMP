@@ -1747,8 +1747,11 @@ static int SelftestImdct(void)
 	for (i = 0; i < 256UL; i++) {
 		seed = seed * 1664525UL + 1013904223UL;
 		pattern = (int)(seed % 3UL);
-		btCurr = 1 + (int)((seed >> 4) % 3UL);
-		btPrev = (int)((seed >> 7) % 4UL);
+		/* Cycle through every non-common current/previous window pair. */
+		btCurr = (int)((i >> 2) & 3UL);
+		btPrev = (int)(i & 3UL);
+		if (btCurr == 0 && btPrev == 0)
+			btPrev = 1;
 		blockIdx = (int)((seed >> 10) & 31);
 		gb = (int)((seed >> 15) % 8);
 		if (TestImdctCase(4096UL + i, pattern, seed, btCurr, btPrev, blockIdx, gb) != 0)

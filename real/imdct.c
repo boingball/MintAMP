@@ -560,11 +560,80 @@ static __inline void idct9_amiga_m68k_asm(int *x)
 	x8 = a23 - a19;			x[8] = x8;
 }
 
+/*
+ * Compact common-long-window kernel.  Keep the nine iterations in one asm
+ * region so the 68030 does not pay C spill/reload overhead around the three
+ * high-word multiplies in every iteration.  The instruction order mirrors the
+ * C reference exactly; in particular, stores happen before FASTABS so INT_MIN
+ * retains the reference result.
+ */
+static __inline int IMDCT36_AMIGA_M68K_LONG_WINDOW(int *xp, const int *cp,
+	const int *wp, int *xPrev, int *ypLo, int *ypHi)
+{
+	int mOut;
+
+	__asm__ volatile (
+		"\tmoveq #0,%0\n\t"
+		"moveq #8,%%d7\n"
+		"1:\n\t"
+		/* xo = MULSHIFT32(*cp--, xp[9]); xe = *xp-- >> 2 */
+		"move.l 36(%1),%%d1\n\t"
+		"move.l (%2),%%d0\n\t"
+		"subq.l #4,%2\n\t"
+		"muls.l %%d0,%%d2:%%d1\n\t"
+		"move.l (%1),%%d0\n\t"
+		"subq.l #4,%1\n\t"
+		"asr.l #2,%%d0\n\t"
+		/* s = -*xPrev; d = xo - xe; *xPrev++ = xe + xo */
+		"move.l (%4),%%d3\n\t"
+		"neg.l %%d3\n\t"
+		"move.l %%d0,%%d4\n\t"
+		"add.l %%d2,%%d4\n\t"
+		"move.l %%d4,(%4)+\n\t"
+		"move.l %%d2,%%d5\n\t"
+		"sub.l %%d0,%%d5\n\t"
+		/* yLo = d + (MULSHIFT32(s - d, *wp++) << 2) */
+		"move.l %%d3,%%d1\n\t"
+		"sub.l %%d5,%%d1\n\t"
+		"move.l (%3)+,%%d0\n\t"
+		"muls.l %%d0,%%d4:%%d1\n\t"
+		"lsl.l #2,%%d4\n\t"
+		"add.l %%d5,%%d4\n\t"
+		"move.l %%d4,(%5)\n\t"
+		"adda.l #128,%5\n\t"
+		"move.l %%d4,%%d0\n\t"
+		"asr.l #31,%%d0\n\t"
+		"eor.l %%d0,%%d4\n\t"
+		"sub.l %%d0,%%d4\n\t"
+		"or.l %%d4,%0\n\t"
+		/* yHi = s + (MULSHIFT32(s - d, *wp++) << 2) */
+		"move.l %%d3,%%d1\n\t"
+		"sub.l %%d5,%%d1\n\t"
+		"move.l (%3)+,%%d0\n\t"
+		"muls.l %%d0,%%d4:%%d1\n\t"
+		"lsl.l #2,%%d4\n\t"
+		"add.l %%d3,%%d4\n\t"
+		"move.l %%d4,(%6)\n\t"
+		"suba.l #128,%6\n\t"
+		"move.l %%d4,%%d0\n\t"
+		"asr.l #31,%%d0\n\t"
+		"eor.l %%d0,%%d4\n\t"
+		"sub.l %%d0,%%d4\n\t"
+		"or.l %%d4,%0\n\t"
+		"dbra %%d7,1b"
+		: "=&d" (mOut), "+a" (xp), "+a" (cp), "+a" (wp),
+		  "+a" (xPrev), "+a" (ypLo), "+a" (ypHi)
+		:
+		: "d0", "d1", "d2", "d3", "d4", "d5", "d7", "cc", "memory");
+
+	return mOut;
+}
+
 static int IMDCT36_AMIGA_M68K_ASM(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb)
 {
 	int i, es, xBuf[18];
-	int acc1, acc2, s, d, t, mOut;
-	int xo, xe, c, *xp, *ypLo, *ypHi, yLo, yHi;
+	int acc1, acc2, mOut;
+	int *xp, *ypLo, *ypHi;
 	const int *cp, *wp;
 
 	if (btCurr != 0 || btPrev != 0)
@@ -603,26 +672,8 @@ static int IMDCT36_AMIGA_M68K_ASM(int *xCurr, int *xPrev, int *y, int btCurr, in
 	wp = fastWin36;
 	ypLo = y;
 	ypHi = y + 17*NBANDS;
-	mOut = 0;
-	for (i = 9; i > 0; i--) {
-		c = *cp--;	xo = *(xp + 9);		xe = *xp--;
-		xo = IMDCT36_AMIGA_M68K_MULSHIFT32(c, xo);
-		xe >>= 2;
+	mOut = IMDCT36_AMIGA_M68K_LONG_WINDOW(xp, cp, wp, xPrev, ypLo, ypHi);
 
-		s = -(*xPrev);
-		d = -(xe - xo);
-		(*xPrev++) = xe + xo;
-		t = s - d;
-
-		yLo = (d + (IMDCT36_AMIGA_M68K_MULSHIFT32(t, *wp++) << 2));
-		yHi = (s + (IMDCT36_AMIGA_M68K_MULSHIFT32(t, *wp++) << 2));
-		*ypLo = yLo;		ypLo += NBANDS;
-		*ypHi = yHi;		ypHi -= NBANDS;
-		mOut |= FASTABS(yLo);
-		mOut |= FASTABS(yHi);
-	}
-
-	xPrev -= 9;
 	if (es)
 		mOut |= FreqInvertRescale(y, xPrev, blockIdx, es);
 	else if (blockIdx & 0x01)
