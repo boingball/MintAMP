@@ -23,13 +23,26 @@ as `-D__riscv` only if your compiler supports the helper assembly for that
 architecture; otherwise build with `-DAMIGA_M68K` to exercise the plain-C
 fallback.
 
+### Playback cleanup diagnostics
+
+Playback resources are owned by one audio-player lifecycle and released through a
+single cleanup path. `--debug-cleanup` reports reaped/aborted writes, device and
+Exec object deletion, Chip/work-buffer release, debug-build canary checks, and
+input-file closure. `--selftest-play-cleanup` repeats a tiny silent
+`audio.device` submission and complete teardown five times; the older
+`--play-lifecycle-test` spelling remains as an alias.
+
+The playback implementation does not call `CurrentDir()`, `Lock()`, `Forbid()`,
+`Permit()`, `Disable()`, or `Enable()`, so playback cleanup does not own a current
+directory lock or interrupt/task-switch nesting state.
+
 ## Usage
 
 ```sh
 amiga_mp3dec [options] infile.mp3 outfile
 amiga_mp3dec --info infile.mp3
 amiga_mp3dec --play [--stereo] [--rate 8287|8820|11025|22050] [--buffer-seconds N] [--fast-mem] infile.mp3
-amiga_mp3dec --play-lifecycle-test [--debug-play] [--buffer-seconds N]
+amiga_mp3dec --selftest-play-cleanup [--debug-cleanup] [--buffer-seconds N]
 ```
 
 Default output is raw signed 16-bit big-endian PCM. If `outfile` names an
