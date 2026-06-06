@@ -240,6 +240,9 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
 - `--selftest-imdct` compares the C IMDCT36 reference with the active IMDCT
   entry point over zero, random, edge-value, common long-window, and fallback
   window cases.
+- `--selftest-polyphase` compares the C fast mono polyphase path with the active
+  mono polyphase entry point, so `AMIGA_M68K_ASM_POLYPHASE` builds can prove the
+  optional 68030 assembly kernel before selecting it with `--exp-poly`.
 - `--selftest-fastlowrate` compares a synthetic ramp/impulse-like PCM sequence
   through normal 44100 -> 11025 `--rate` decimation and the stride-4
   fast-lowrate selector across chunk boundaries.
@@ -315,7 +318,21 @@ decoded frame count and output sample count.
    amiga_mp3dec.imdctasm --selftest-imdct
    ```
 
-6. `AMIGA_M68K_ASM_MIDSIDE` is an opt-in 68020+ GNU m68k implementation of
+6. `AMIGA_M68K_ASM_POLYPHASE` is an opt-in, experimental 68030 mono fast
+   polyphase kernel.  The C fast mono path remains callable as the reference;
+   `--selftest-polyphase` compares it against the active asm hook before
+   playback selects the assembly path with `--exp-poly`.
+
+   ```sh
+   m68k-amigaos-gcc -m68030 -std=gnu89 -O3 -fomit-frame-pointer \
+     -DAMIGA_M68K -DAMIGA_M68K_ASM -DAMIGA_FAST_POLYPHASE \
+     -DAMIGA_M68K_ASM_POLYPHASE -Ipub -Ireal \
+     -o amiga_mp3dec.polyasm amiga_mp3dec.c mp3dec.c mp3tabs.c real/*.c \
+     real/amiga_m68k_polyphase.S
+   amiga_mp3dec.polyasm --selftest-polyphase
+   ```
+
+7. `AMIGA_M68K_ASM_MIDSIDE` is an opt-in 68020+ GNU m68k implementation of
    the joint-stereo mid/side reconstruction loop.  It keeps both channel
    pointers and guard-bit masks in registers, uses `dbf` for the bounded
    sample loop, and performs each absolute value with a branchless

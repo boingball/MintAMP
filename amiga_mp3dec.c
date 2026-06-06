@@ -42,6 +42,10 @@ int STATNAME(FDCT32_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
 int STATNAME(IMDCT36_C_REFERENCE)(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb);
 int STATNAME(IMDCT36_TEST_ACTIVE)(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb);
 int STATNAME(IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
+void STATNAME(PolyphaseMonoFast_C_REFERENCE)(short *pcm, int *vbuf, const int *coefBase);
+void STATNAME(PolyphaseMonoFast_TEST_ACTIVE)(short *pcm, int *vbuf, const int *coefBase);
+int STATNAME(PolyphaseMonoFast_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
+extern const int STATNAME(polyCoef)[264];
 #define AMIGA_FDCT32 STATNAME(FDCT32)
 #define AMIGA_FDCT32_C_REFERENCE STATNAME(FDCT32_C_REFERENCE)
 #define AMIGA_FDCT32_HALF STATNAME(FDCT32Half)
@@ -49,11 +53,17 @@ int STATNAME(IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
 #define AMIGA_IMDCT36_C_REFERENCE STATNAME(IMDCT36_C_REFERENCE)
 #define AMIGA_IMDCT36_TEST_ACTIVE STATNAME(IMDCT36_TEST_ACTIVE)
 #define AMIGA_IMDCT36_HAS_ASM STATNAME(IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME)
+#define AMIGA_POLYPHASE_MONO_FAST_C_REFERENCE STATNAME(PolyphaseMonoFast_C_REFERENCE)
+#define AMIGA_POLYPHASE_MONO_FAST_TEST_ACTIVE STATNAME(PolyphaseMonoFast_TEST_ACTIVE)
+#define AMIGA_POLYPHASE_MONO_FAST_HAS_ASM STATNAME(PolyphaseMonoFast_HAS_AMIGA_M68K_ASM_RUNTIME)
+#define AMIGA_POLY_COEF STATNAME(polyCoef)
 
 #define READBUF_SIZE (1024 * 16)
 #define OUTBUF_SAMPS (MAX_NCHAN * MAX_NGRAN * MAX_NSAMP)
 #define AMIGA_IMDCT_BLOCK_SIZE 18
 #define AMIGA_IMDCT_NBANDS 32
+#define AMIGA_POLYPHASE_NBANDS 32
+#define AMIGA_POLYPHASE_VBUF_LENGTH (17 * 2 * AMIGA_POLYPHASE_NBANDS)
 
 #define OUT_PCM16 0
 #define OUT_S8    1
@@ -74,6 +84,7 @@ typedef struct DecodeOptions {
 	int selftestMulshift;
 	int selftestFdct32;
 	int selftestImdct;
+	int selftestPolyphase;
 	int selftestFastLowrate;
 	int selftestMonoFastLowrateStereo;
 	int checksum;
@@ -430,6 +441,7 @@ static void PrintUsage(const char *prog)
 	printf("  --selftest-mulshift compare C and optional asm MULSHIFT32 helpers\n");
 	printf("  --selftest-fdct32 compare C reference and optional m68k asm FDCT32 path\n");
 	printf("  --selftest-imdct compare C reference and optional m68k asm long IMDCT path\n");
+	printf("  --selftest-polyphase compare C fast mono polyphase and optional m68k asm path\n");
 	printf("  --selftest-fastlowrate compare synthetic stride decimation paths\n");
 	printf("  --selftest-mono-fastlowrate-stereo verify stereo-to-mono low-rate accounting\n");
 	printf("  --checksum  print a 32-bit checksum of decoded PCM samples\n");
@@ -526,6 +538,8 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->selftestFdct32 = 1;
 		} else if (!strcmp(argv[i], "--selftest-imdct")) {
 			opt->selftestImdct = 1;
+		} else if (!strcmp(argv[i], "--selftest-polyphase")) {
+			opt->selftestPolyphase = 1;
 		} else if (!strcmp(argv[i], "--selftest-fastlowrate")) {
 			opt->selftestFastLowrate = 1;
 		} else if (!strcmp(argv[i], "--selftest-mono-fastlowrate-stereo")) {
@@ -571,7 +585,8 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 		return 0;
 
 	if (opt->selftestMulshift || opt->selftestFdct32 || opt->selftestImdct ||
-		opt->selftestFastLowrate || opt->selftestMonoFastLowrateStereo)
+		opt->selftestPolyphase || opt->selftestFastLowrate ||
+		opt->selftestMonoFastLowrateStereo)
 		return 0;
 
 	if (opt->stereo && !opt->play) {
@@ -1921,6 +1936,79 @@ static int SelftestImdct(void)
 	printf("IMDCT selftest long cases: %lu\n", 4096UL);
 	printf("IMDCT selftest fallback cases: %lu\n", fallbackCases);
 	printf("IMDCT selftest failures: %lu\n", failures);
+	return failures ? 1 : 0;
+}
+
+
+static int TestPolyphaseCase(unsigned long index, unsigned long seed, int pattern)
+{
+	static int cvbuf[AMIGA_POLYPHASE_VBUF_LENGTH];
+	static int avbuf[AMIGA_POLYPHASE_VBUF_LENGTH];
+	static short cpcm[AMIGA_POLYPHASE_NBANDS];
+	static short apcm[AMIGA_POLYPHASE_NBANDS];
+	int i;
+
+	for (i = 0; i < AMIGA_POLYPHASE_VBUF_LENGTH; i++) {
+		seed = seed * 1664525UL + 1013904223UL;
+		if (pattern == 0)
+			cvbuf[i] = 0;
+		else if (pattern == 1)
+			cvbuf[i] = ((int)seed) >> 9;
+		else
+			cvbuf[i] = (i & 1) ? 0x03ffffff : (int)0xfc000000UL;
+		avbuf[i] = cvbuf[i];
+	}
+	for (i = 0; i < AMIGA_POLYPHASE_NBANDS; i++) {
+		cpcm[i] = (short)(0x6000 + i);
+		apcm[i] = (short)(0x6000 + i);
+	}
+
+	AMIGA_POLYPHASE_MONO_FAST_C_REFERENCE(cpcm, cvbuf, AMIGA_POLY_COEF);
+	AMIGA_POLYPHASE_MONO_FAST_TEST_ACTIVE(apcm, avbuf, AMIGA_POLY_COEF);
+
+	for (i = 0; i < AMIGA_POLYPHASE_VBUF_LENGTH; i++) {
+		if (avbuf[i] != cvbuf[i]) {
+			printf("PolyphaseMonoFast vbuf mismatch %lu[%d]: C=%ld active=%ld pattern=%d\n",
+				index, i, (long)cvbuf[i], (long)avbuf[i], pattern);
+			return -1;
+		}
+	}
+	for (i = 0; i < AMIGA_POLYPHASE_NBANDS; i++) {
+		if (apcm[i] != cpcm[i]) {
+			printf("PolyphaseMonoFast output mismatch %lu[%d]: C=%ld active=%ld pattern=%d\n",
+				index, i, (long)cpcm[i], (long)apcm[i], pattern);
+			return -1;
+		}
+	}
+	return 0;
+}
+
+static int SelftestPolyphase(void)
+{
+	unsigned long i;
+	unsigned long failures;
+	unsigned long seed;
+	int pattern;
+
+	failures = 0;
+	seed = 0x16180339UL;
+	for (i = 0; i < 4096UL; i++) {
+		seed = seed * 1664525UL + 1013904223UL;
+		pattern = (i < 16UL) ? 0 : ((i < 32UL) ? 2 : 1);
+		if (TestPolyphaseCase(i, seed, pattern) != 0)
+			failures++;
+	}
+
+	printf("Polyphase asm requested: %s\n",
+#ifdef AMIGA_M68K_ASM_POLYPHASE
+		"yes"
+#else
+		"no"
+#endif
+	);
+	printf("Polyphase asm active: %s\n", AMIGA_POLYPHASE_MONO_FAST_HAS_ASM() ? "yes" : "no");
+	printf("Polyphase selftest cases: %lu\n", i);
+	printf("Polyphase selftest failures: %lu\n", failures);
 	return failures ? 1 : 0;
 }
 
@@ -3798,6 +3886,11 @@ int main(int argc, char **argv)
 	}
 	if (opt.selftestImdct) {
 		int selftestErr = SelftestImdct();
+		AmigaFreeNormalizedArgs(&normalized);
+		return selftestErr;
+	}
+	if (opt.selftestPolyphase) {
+		int selftestErr = SelftestPolyphase();
 		AmigaFreeNormalizedArgs(&normalized);
 		return selftestErr;
 	}

@@ -860,6 +860,35 @@ static int PolyphaseStereoFastLowrateList(short *pcm, int *vbuf, const int *coef
 
 #endif /* AMIGA_M68K && AMIGA_FAST_POLYPHASE */
 
+void PolyphaseMonoFast_C_REFERENCE(short *pcm, int *vbuf, const int *coefBase)
+{
+#if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE)
+	PolyphaseMonoFast(pcm, vbuf, coefBase);
+#else
+	PolyphaseMonoReference(pcm, vbuf, coefBase);
+#endif
+}
+
+int PolyphaseMonoFast_HAS_AMIGA_M68K_ASM_RUNTIME(void)
+{
+#if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_M68K_ASM_POLYPHASE)
+	return AmigaM68KPolyphaseMonoFast ? 1 : 0;
+#else
+	return 0;
+#endif
+}
+
+void PolyphaseMonoFast_TEST_ACTIVE(short *pcm, int *vbuf, const int *coefBase)
+{
+#if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_M68K_ASM_POLYPHASE)
+	if (AmigaM68KPolyphaseMonoFast) {
+		AmigaM68KPolyphaseMonoFast(pcm, vbuf, coefBase);
+		return;
+	}
+#endif
+	PolyphaseMonoFast_C_REFERENCE(pcm, vbuf, coefBase);
+}
+
 int PolyphaseMonoFastLowrate(short *pcm, int *vbuf, const int *coefBase, int stride, int *phase)
 {
 #if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE)
@@ -1003,13 +1032,14 @@ int PolyphaseStereoFastLowrate(short *pcm, int *vbuf, const int *coefBase, int s
 void PolyphaseMono(short *pcm, int *vbuf, const int *coefBase)
 {
 #if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_M68K_ASM_POLYPHASE)
-	if (MP3ExperimentalPolyphaseEnabled() && AmigaM68KPolyphaseMonoFast) {
-		AmigaM68KPolyphaseMonoFast(pcm, vbuf, coefBase);
+	if (MP3ExperimentalPolyphaseEnabled() &&
+		PolyphaseMonoFast_HAS_AMIGA_M68K_ASM_RUNTIME()) {
+		PolyphaseMonoFast_TEST_ACTIVE(pcm, vbuf, coefBase);
 		return;
 	}
-	PolyphaseMonoFast(pcm, vbuf, coefBase);
+	PolyphaseMonoFast_C_REFERENCE(pcm, vbuf, coefBase);
 #elif defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE)
-	PolyphaseMonoFast(pcm, vbuf, coefBase);
+	PolyphaseMonoFast_C_REFERENCE(pcm, vbuf, coefBase);
 #else
 	PolyphaseMonoReference(pcm, vbuf, coefBase);
 #endif

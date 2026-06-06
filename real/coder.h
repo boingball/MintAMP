@@ -99,6 +99,9 @@
 #define	IntensityProcMPEG2	STATNAME(IntensityProcMPEG2)
 #define PolyphaseMono		STATNAME(PolyphaseMono)
 #define PolyphaseStereo		STATNAME(PolyphaseStereo)
+#define PolyphaseMonoFast_C_REFERENCE STATNAME(PolyphaseMonoFast_C_REFERENCE)
+#define PolyphaseMonoFast_TEST_ACTIVE STATNAME(PolyphaseMonoFast_TEST_ACTIVE)
+#define PolyphaseMonoFast_HAS_AMIGA_M68K_ASM_RUNTIME STATNAME(PolyphaseMonoFast_HAS_AMIGA_M68K_ASM_RUNTIME)
 #define FDCT32				STATNAME(FDCT32)
 #define FDCT32Half			STATNAME(FDCT32Half)
 #define FDCT32_C_REFERENCE	STATNAME(FDCT32_C_REFERENCE)
@@ -286,6 +289,11 @@ int FDCT32_HAS_AMIGA_M68K_ASM_RUNTIME(void);
 int IMDCT36_C_REFERENCE(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb);
 int IMDCT36_TEST_ACTIVE(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb);
 int IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME(void);
+
+/* polyphase.c selftest hooks */
+void PolyphaseMonoFast_C_REFERENCE(short *pcm, int *vbuf, const int *coefBase);
+void PolyphaseMonoFast_TEST_ACTIVE(short *pcm, int *vbuf, const int *coefBase);
+int PolyphaseMonoFast_HAS_AMIGA_M68K_ASM_RUNTIME(void);
 
 /* hufftabs.c */
 extern const HuffTabLookup huffTabLookup[HUFF_PAIRTABS];
