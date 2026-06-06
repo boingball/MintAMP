@@ -520,8 +520,8 @@ int DecodeHuffman(MP3DecInfo *mp3DecInfo, unsigned char *buf, int *bitOffset, in
 	hi->nonZeroBound[ch] += DecodeHuffmanQuads(hi->huffDecBuf[ch] + rEnd[3], MAX_NSAMP - rEnd[3], sis->count1TableSelect, bitsLeft, buf, *bitOffset);
 
 	ASSERT(hi->nonZeroBound[ch] <= MAX_NSAMP);
-	for (i = hi->nonZeroBound[ch]; i < MAX_NSAMP; i++)
-		hi->huffDecBuf[ch][i] = 0;
+	memset(hi->huffDecBuf[ch] + hi->nonZeroBound[ch], 0,
+		(MAX_NSAMP - hi->nonZeroBound[ch]) * sizeof(hi->huffDecBuf[ch][0]));
 	
 	/* If bits used for 576 samples < huffBlockBits, then the extras are considered
 	 *  to be stuffing bits (throw away, but need to return correct bitstream position) 
