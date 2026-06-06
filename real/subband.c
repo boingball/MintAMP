@@ -46,6 +46,21 @@
 #include "amiga_profile_decode.h"
 #include "assembly.h"
 
+static void FDCT32FastLowrate(int *x, int *d, int offset, int oddBlock, int gb,
+	int stride, int phase)
+{
+#if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE)
+	if (stride == 2 && phase == 0) {
+		FDCT32Half(x, d, offset, oddBlock, gb);
+		return;
+	}
+#else
+	(void)stride;
+	(void)phase;
+#endif
+	FDCT32(x, d, offset, oddBlock, gb);
+}
+
 /**************************************************************************************
  * Function:    Subband
  *
@@ -96,8 +111,10 @@ int Subband(MP3DecInfo *mp3DecInfo, short *pcmBuf)
 				int *vbase;
 
 				AMIGA_PROFILE_START(amigaProfileStart);
-				FDCT32(mi->outBuf[0][b], vbuf + 0*32, vindex, 0, mi->gb[0]);
-				FDCT32(mi->outBuf[1][b], vbuf + 1*32, vindex, 0, mi->gb[1]);
+				FDCT32FastLowrate(mi->outBuf[0][b], vbuf + 0*32, vindex, 0,
+					mi->gb[0], stride, phase);
+				FDCT32FastLowrate(mi->outBuf[1][b], vbuf + 1*32, vindex, 0,
+					mi->gb[1], stride, phase);
 				AMIGA_PROFILE_STOP(MP3_DECODE_CORE_PROFILE_SUBBAND_DCT32, amigaProfileStart);
 				AMIGA_PROFILE_START(amigaProfileStart);
 				vbase = vbuf + vindex;
@@ -108,8 +125,10 @@ int Subband(MP3DecInfo *mp3DecInfo, short *pcmBuf)
 				AMIGA_PROFILE_STOP(MP3_DECODE_CORE_PROFILE_POLYPHASE, amigaProfileStart);
 
 				AMIGA_PROFILE_START(amigaProfileStart);
-				FDCT32(mi->outBuf[0][b + 1], vbuf + 0*32, vindex, 1, mi->gb[0]);
-				FDCT32(mi->outBuf[1][b + 1], vbuf + 1*32, vindex, 1, mi->gb[1]);
+				FDCT32FastLowrate(mi->outBuf[0][b + 1], vbuf + 0*32, vindex, 1,
+					mi->gb[0], stride, phase);
+				FDCT32FastLowrate(mi->outBuf[1][b + 1], vbuf + 1*32, vindex, 1,
+					mi->gb[1], stride, phase);
 				AMIGA_PROFILE_STOP(MP3_DECODE_CORE_PROFILE_SUBBAND_DCT32, amigaProfileStart);
 				AMIGA_PROFILE_START(amigaProfileStart);
 				vbase = vbuf + vindex + VBUF_LENGTH;
@@ -161,7 +180,8 @@ int Subband(MP3DecInfo *mp3DecInfo, short *pcmBuf)
 				int *vbase;
 
 				AMIGA_PROFILE_START(amigaProfileStart);
-				FDCT32(mi->outBuf[0][b], vbuf + 0*32, vindex, 0, mi->gb[0]);
+				FDCT32FastLowrate(mi->outBuf[0][b], vbuf + 0*32, vindex, 0,
+					mi->gb[0], stride, phase);
 				AMIGA_PROFILE_STOP(MP3_DECODE_CORE_PROFILE_SUBBAND_DCT32, amigaProfileStart);
 				AMIGA_PROFILE_START(amigaProfileStart);
 				vbase = vbuf + vindex;
@@ -172,7 +192,8 @@ int Subband(MP3DecInfo *mp3DecInfo, short *pcmBuf)
 				AMIGA_PROFILE_STOP(MP3_DECODE_CORE_PROFILE_POLYPHASE, amigaProfileStart);
 
 				AMIGA_PROFILE_START(amigaProfileStart);
-				FDCT32(mi->outBuf[0][b + 1], vbuf + 0*32, vindex, 1, mi->gb[0]);
+				FDCT32FastLowrate(mi->outBuf[0][b + 1], vbuf + 0*32, vindex, 1,
+					mi->gb[0], stride, phase);
 				AMIGA_PROFILE_STOP(MP3_DECODE_CORE_PROFILE_SUBBAND_DCT32, amigaProfileStart);
 				AMIGA_PROFILE_START(amigaProfileStart);
 				vbase = vbuf + vindex + VBUF_LENGTH;

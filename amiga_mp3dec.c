@@ -37,12 +37,14 @@ static const char amigaStackCookie[] __attribute__((used)) = "$STACK:250000";
 
 void STATNAME(FDCT32)(int *x, int *d, int offset, int oddBlock, int gb);
 void STATNAME(FDCT32_C_REFERENCE)(int *x, int *d, int offset, int oddBlock, int gb);
+void STATNAME(FDCT32Half)(int *x, int *d, int offset, int oddBlock, int gb);
 int STATNAME(FDCT32_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
 int STATNAME(IMDCT36_C_REFERENCE)(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb);
 int STATNAME(IMDCT36_TEST_ACTIVE)(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb);
 int STATNAME(IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
 #define AMIGA_FDCT32 STATNAME(FDCT32)
 #define AMIGA_FDCT32_C_REFERENCE STATNAME(FDCT32_C_REFERENCE)
+#define AMIGA_FDCT32_HALF STATNAME(FDCT32Half)
 #define AMIGA_FDCT32_HAS_ASM STATNAME(FDCT32_HAS_AMIGA_M68K_ASM_RUNTIME)
 #define AMIGA_IMDCT36_C_REFERENCE STATNAME(IMDCT36_C_REFERENCE)
 #define AMIGA_IMDCT36_TEST_ACTIVE STATNAME(IMDCT36_TEST_ACTIVE)
@@ -1699,22 +1701,28 @@ static int TestFdct32Case(unsigned long index, unsigned long seed, int offset,
 {
 	static int cbuf[32];
 	static int abuf[32];
+	static int hbuf[32];
 	static int cdest[4096];
 	static int adest[4096];
+	static int hdest[4096];
 	int i;
+	int halfWrites;
 
 	for (i = 0; i < 32; i++) {
 		seed = seed * 1664525UL + 1013904223UL;
 		cbuf[i] = ((int)seed) >> 8;
 		abuf[i] = cbuf[i];
+		hbuf[i] = cbuf[i];
 	}
 	for (i = 0; i < 4096; i++) {
 		cdest[i] = (int)(0x55aa0000UL ^ (unsigned long)i);
 		adest[i] = cdest[i];
+		hdest[i] = cdest[i];
 	}
 
 	AMIGA_FDCT32_C_REFERENCE(cbuf, cdest, offset, oddBlock, gb);
 	AMIGA_FDCT32(abuf, adest, offset, oddBlock, gb);
+	AMIGA_FDCT32_HALF(hbuf, hdest, offset, oddBlock, gb);
 
 	for (i = 0; i < 32; i++) {
 		if (abuf[i] != cbuf[i]) {
@@ -1729,6 +1737,22 @@ static int TestFdct32Case(unsigned long index, unsigned long seed, int offset,
 				index, i, (long)cdest[i], (long)adest[i], offset, oddBlock, gb);
 			return -1;
 		}
+	}
+	halfWrites = 0;
+	for (i = 0; i < 4096; i++) {
+		if (hdest[i] != (int)(0x55aa0000UL ^ (unsigned long)i)) {
+			halfWrites++;
+			if (hdest[i] != cdest[i]) {
+				printf("FDCT32 half dest mismatch %lu[%d]: full=%ld half=%ld offset=%d odd=%d gb=%d\n",
+					index, i, (long)cdest[i], (long)hdest[i], offset, oddBlock, gb);
+				return -1;
+			}
+		}
+	}
+	if (halfWrites != 34) {
+		printf("FDCT32 half write count mismatch %lu: got=%d expected=34 offset=%d odd=%d gb=%d\n",
+			index, halfWrites, offset, oddBlock, gb);
+		return -1;
 	}
 	return 0;
 }

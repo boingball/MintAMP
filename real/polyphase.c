@@ -704,6 +704,10 @@ static short PolyphaseMonoFastCompactSample(int sample, int *vbuf,
 	return ClipIntToShort(sum);
 }
 
+static const unsigned char fastLowrateStride2Samples[16] = {
+	0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30
+};
+
 static const unsigned char fastLowrateStride4Samples[4][8] = {
 	{ 0, 4, 8, 12, 16, 20, 24, 28 },
 	{ 3, 7, 11, 15, 19, 23, 27, 31 },
@@ -746,6 +750,19 @@ static int PolyphaseMonoFastLowrateStride5(short *pcm, int *vbuf,
 		fastLowrateStride5Samples[phase], fastLowrateStride5Count[phase]);
 }
 
+static int PolyphaseMonoFastLowrateList(short *pcm, int *vbuf,
+	const int *coefBase, const unsigned char *samples, int count)
+{
+	short *out;
+	int remaining;
+
+	out = pcm;
+	remaining = count;
+	while (remaining-- > 0)
+		PolyphaseMonoFastSample(out++, *samples++, vbuf, coefBase);
+	return count;
+}
+
 static int PolyphaseStereoFastLowrateList(short *pcm, int *vbuf, const int *coefBase, const unsigned char *samples, int count)
 {
 	short *out;
@@ -778,6 +795,9 @@ int PolyphaseMonoFastLowrate(short *pcm, int *vbuf, const int *coefBase, int str
 	}
 
 	localPhase = *phase;
+	if (stride == 2 && localPhase == 0)
+		return PolyphaseMonoFastLowrateList(pcm, vbuf, coefBase,
+			fastLowrateStride2Samples, 16);
 	if (stride == 4)
 		return PolyphaseMonoFastLowrateStride4(pcm, vbuf, coefBase, localPhase);
 	if (stride == 5) {
@@ -842,6 +862,9 @@ int PolyphaseStereoFastLowrate(short *pcm, int *vbuf, const int *coefBase, int s
 	}
 
 	localPhase = *phase;
+	if (stride == 2 && localPhase == 0)
+		return PolyphaseStereoFastLowrateList(pcm, vbuf, coefBase,
+			fastLowrateStride2Samples, 16);
 	if (stride == 4)
 		return PolyphaseStereoFastLowrateList(pcm, vbuf, coefBase,
 			fastLowrateStride4Samples[localPhase], 8);

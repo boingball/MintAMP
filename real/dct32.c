@@ -493,6 +493,118 @@ void FDCT32_C_REFERENCE(int *buf, int *dest, int offset, int oddBlock, int gb)
 	}
 }
 
+/**************************************************************************************
+ * Function:    FDCT32Half
+ *
+ * Description: compute only the 16 synthesis rows consumed by stride-2 output
+ *
+ * Notes:       the even PCM samples depend only on the even polyphase rows.  Those
+ *              rows are built entirely from the low 16 values of the factored DCT,
+ *              so the high half and two of the four first-pass multiplies per group
+ *              can be skipped while remaining bit-identical to FDCT32.
+ **************************************************************************************/
+#if FDCT32_HAS_AMIGA_M68K_ASM
+#define FDCT32_HALF_MULSHIFT32(x, y) FDCT32_AMIGA_M68K_MULSHIFT32((x), (y))
+#else
+#define FDCT32_HALF_MULSHIFT32(x, y) FDCT32_MULSHIFT32((x), (y))
+#endif
+
+void FDCT32Half(int *buf, int *dest, int offset, int oddBlock, int gb)
+{
+	int i, s, es, oddBase, evenBase, delayOff, clipBits;
+	const int *cptr = dcttab;
+	int a0, a1, a2, a3, a4, a5, a6, a7;
+	int b0, b1, b2, b3, b4, b5, b6, b7;
+	int *d;
+	static const unsigned char firstPassShift[8] = { 1, 1, 1, 1, 1, 2, 2, 4 };
+
+	es = 0;
+	if (gb < 6) {
+		es = 6 - gb;
+		for (i = 0; i < 32; i++)
+			buf[i] >>= es;
+	}
+
+	/* The low half needs only symmetric sums from the 32 input subbands. */
+	for (i = 0; i < 8; i++) {
+		a0 = buf[i];
+		a3 = buf[31 - i];
+		a1 = buf[15 - i];
+		a2 = buf[16 + i];
+		b0 = a0 + a3;
+		b1 = a1 + a2;
+		buf[i] = b0 + b1;
+		buf[15 - i] = FDCT32_HALF_MULSHIFT32(cptr[2], b0 - b1) << firstPassShift[i];
+		cptr += 3;
+	}
+
+	/* Only the first two radix-8 groups feed even polyphase rows. */
+	for (i = 2; i > 0; i--) {
+		a0 = buf[0];		a7 = buf[7];		a3 = buf[3];		a4 = buf[4];
+		b0 = a0 + a7;		b7 = FDCT32_HALF_MULSHIFT32(*cptr++, a0 - a7) << 1;
+		b3 = a3 + a4;		b4 = FDCT32_HALF_MULSHIFT32(*cptr++, a3 - a4) << 3;
+		a0 = b0 + b3;		a3 = FDCT32_HALF_MULSHIFT32(*cptr, b0 - b3) << 1;
+		a4 = b4 + b7;		a7 = FDCT32_HALF_MULSHIFT32(*cptr++, b7 - b4) << 1;
+
+		a1 = buf[1];		a6 = buf[6];		a2 = buf[2];		a5 = buf[5];
+		b1 = a1 + a6;		b6 = FDCT32_HALF_MULSHIFT32(*cptr++, a1 - a6) << 1;
+		b2 = a2 + a5;		b5 = FDCT32_HALF_MULSHIFT32(*cptr++, a2 - a5) << 1;
+		a1 = b1 + b2;		a2 = FDCT32_HALF_MULSHIFT32(*cptr, b1 - b2) << 2;
+		a5 = b5 + b6;		a6 = FDCT32_HALF_MULSHIFT32(*cptr++, b6 - b5) << 2;
+
+		b0 = a0 + a1;		b1 = FDCT32_HALF_MULSHIFT32(COS4_0, a0 - a1) << 1;
+		b2 = a2 + a3;		b3 = FDCT32_HALF_MULSHIFT32(COS4_0, a3 - a2) << 1;
+		buf[0] = b0;		buf[1] = b1;
+		buf[2] = b2 + b3;	buf[3] = b3;
+
+		b4 = a4 + a5;		b5 = FDCT32_HALF_MULSHIFT32(COS4_0, a4 - a5) << 1;
+		b6 = a6 + a7;		b7 = FDCT32_HALF_MULSHIFT32(COS4_0, a7 - a6) << 1;
+		b6 += b7;
+		buf[4] = b4 + b6;	buf[5] = b5 + b7;
+		buf[6] = b5 + b6;	buf[7] = b7;
+		buf += 8;
+	}
+	buf -= 16;
+
+	oddBase = oddBlock ? VBUF_LENGTH : 0;
+	evenBase = oddBlock ? 0 : VBUF_LENGTH;
+	delayOff = (offset - oddBlock) & 7;
+
+#define FDCT32_HALF_STORE(value) do { \
+	s = (value); \
+	if (es) { clipBits = 31 - es; CLIP_2N(s, clipBits); s <<= es; } \
+	d[0] = d[8] = s; \
+} while (0)
+
+	/* Even sample 0, then even samples 16..30. */
+	d = dest + 64 * 16 + delayOff + evenBase;
+	FDCT32_HALF_STORE(buf[0]);
+	d = dest + offset + oddBase;
+	FDCT32_HALF_STORE(buf[1]); d += 128;
+	FDCT32_HALF_STORE(buf[9] + buf[13]); d += 128;
+	FDCT32_HALF_STORE(buf[5]); d += 128;
+	FDCT32_HALF_STORE(buf[13] + buf[11]); d += 128;
+	FDCT32_HALF_STORE(buf[3]); d += 128;
+	FDCT32_HALF_STORE(buf[11] + buf[15]); d += 128;
+	FDCT32_HALF_STORE(buf[7]); d += 128;
+	FDCT32_HALF_STORE(buf[15]);
+
+	/* Even samples 16..2; sample 16 is reused on this side of the FIFO. */
+	d = dest + 16 + delayOff + evenBase;
+	FDCT32_HALF_STORE(buf[1]); d += 128;
+	FDCT32_HALF_STORE(buf[14] + buf[9]); d += 128;
+	FDCT32_HALF_STORE(buf[6]); d += 128;
+	FDCT32_HALF_STORE(buf[10] + buf[14]); d += 128;
+	FDCT32_HALF_STORE(buf[2]); d += 128;
+	FDCT32_HALF_STORE(buf[12] + buf[10]); d += 128;
+	FDCT32_HALF_STORE(buf[4]); d += 128;
+	FDCT32_HALF_STORE(buf[8] + buf[12]);
+
+#undef FDCT32_HALF_STORE
+}
+
+#undef FDCT32_HALF_MULSHIFT32
+
 #if FDCT32_HAS_AMIGA_M68K_ASM
 #undef FDCT32_MULSHIFT32
 #define FDCT32_MULSHIFT32(x, y) FDCT32_AMIGA_M68K_MULSHIFT32((x), (y))

@@ -172,9 +172,14 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   same source positions as normal `--rate` decimation. The 8287 Hz mode uses a
   fixed stride of 5 for Amiga-rate experiments, so 44100 Hz input emits at
   8820 Hz and reports/plays/writes metadata at that actual emitted rate instead
-  of labeling it as the requested 8287 Hz. Huffman/dequant, IMDCT, and FDCT32
-  still run at full MP3 rate for mono input; stereo input with `--mono` is
-  collapsed in the decoder after required MPEG stereo reconstruction, so the
+  of labeling it as the requested 8287 Hz. For stride-2 22050 Hz output, the
+  fast-polyphase build computes only the 16 even synthesis rows: a half-width
+  FDCT path skips the unused factored-DCT half and polyphase evaluates only those
+  16 output samples. The emitted PCM remains bit-identical to selecting every
+  second sample from the full synthesis path. Huffman/dequant and IMDCT still
+  run at full MP3 rate; stride-4/5 output still uses full FDCT32. Stereo input
+  with `--mono` is collapsed in the decoder after required MPEG stereo
+  reconstruction, so the
   right-channel IMDCT/FDCT32/polyphase work and full stereo PCM copy are skipped.
   Pure mid/side joint-stereo mono output also advances over the unused coded
   side-channel Huffman payload, removing a bitrate-sensitive decode cost.

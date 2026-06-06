@@ -294,3 +294,22 @@ Do not add `AMIGA_M68K_ASM_IMDCT` to default build flags based on synthetic
 selftests or host timings.  First demonstrate a repeatable improvement on real
 68020+ hardware in both the mono fixture and the stereo/high-bitrate 160/256
 kbps fixtures above; otherwise leave the option disabled.
+
+## 22050 Hz half-width synthesis
+
+For `AMIGA_M68K` + `AMIGA_FAST_POLYPHASE` stride-2 output, the synthesis stage
+now computes only the 16 even polyphase rows consumed by 22050 Hz output.
+`FDCT32Half()` factors those rows from the low half of the normal FDCT result,
+skipping the unused high-half transform and stores, while the stride-2
+polyphase path walks a fixed list of the 16 emitted samples. This preserves the
+existing fast-lowrate checksum: it is bit-identical to selecting every second
+sample after full-rate synthesis.
+
+The half FDCT uses 32 multiplies instead of FDCT32's 80 multiplies per time
+slot. Huffman, dequantization, and IMDCT remain full-rate. Record target timing
+with:
+
+```sh
+amiga_mp3dec.before --decode-only --bench --checksum --fast-lowrate --rate 22050 song.mp3
+amiga_mp3dec.after  --decode-only --bench --checksum --fast-lowrate --rate 22050 song.mp3
+```
