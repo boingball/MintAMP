@@ -37,9 +37,10 @@ The equivalent expanded command is:
 m68k-amigaos-gcc -m68030 -std=gnu89 -O3 -fomit-frame-pointer \
   -Ipub -Ireal \
   -DAMIGA_M68K -DAMIGA_M68K_ASM -DAMIGA_M68K_ASM_FDCT32 \
-  -DAMIGA_FAST_POLYPHASE -DAMIGA_M68K_ASM_IMDCT \
-  -DAMIGA_M68K_ASM_MIDSIDE \
-  -o amiga_mp3dec.fastexp amiga_mp3dec.c mp3dec.c mp3tabs.c real/*.c
+  -DAMIGA_FAST_POLYPHASE -DAMIGA_M68K_ASM_POLYPHASE \
+  -DAMIGA_M68K_ASM_IMDCT -DAMIGA_M68K_ASM_MIDSIDE \
+  -o amiga_mp3dec.fastexp amiga_mp3dec.c mp3dec.c mp3tabs.c real/*.c \
+  real/amiga_m68k_polyphase.S
 ```
 
 Keep a space between every `-D...` define and every `-I...` include path.  For
@@ -48,6 +49,13 @@ definition, so the compiler never receives the `pub` include path and then fails
 with missing `mp3dec.h`/`mp3common.h` errors.  Likewise,
 `DAMIGA_M68K_ASM_IMDCT` without the leading `-D` is treated as an input file name
 instead of a preprocessor define.
+
+
+`--exp-poly` selects the additional experimental 68030 mono polyphase
+assembly path in `AMIGA_M68K_ASM_POLYPHASE` builds.  Without that runtime
+argument, the existing `AMIGA_FAST_POLYPHASE` C path remains in use, so the
+older experimental polyphase can coexist with the hand-written unrolled
+`muls.l` routine while target profiling compares both variants.
 
 The command-line decoder embeds an AmigaOS `$STACK:250000` cookie, requesting a
 minimum 250,000-byte stack without requiring users to run the `Stack` command

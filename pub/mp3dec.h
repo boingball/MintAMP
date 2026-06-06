@@ -160,6 +160,8 @@ int MP3GetNextFrameInfo(HMP3Decoder hMP3Decoder, MP3FrameInfo *mp3FrameInfo, uns
 int MP3FindSyncWord(unsigned char *buf, int nBytes);
 void MP3SetFastLowrate(HMP3Decoder hMP3Decoder, int stride);
 int MP3GetFastLowrateStride(HMP3Decoder hMP3Decoder);
+void MP3SetExperimentalPolyphase(int enabled);
+int MP3ExperimentalPolyphaseEnabled(void);
 void MP3SetOutputMono(HMP3Decoder hMP3Decoder, int enabled);
 int MP3GetOutputChannels(HMP3Decoder hMP3Decoder);
 int MP3GetFastLowrateDebug(HMP3Decoder hMP3Decoder,

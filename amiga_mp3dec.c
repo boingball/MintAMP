@@ -79,6 +79,7 @@ typedef struct DecodeOptions {
 	int checksum;
 	int outputRate;
 	int fastLowrate;
+	int expPoly;
 	int help;
 	int debugArgv;
 	int debugFastLowrate;
@@ -425,6 +426,7 @@ static void PrintUsage(const char *prog)
 	printf("               22050 playback is experimental/high CPU and may underrun\n");
 	printf("  --fast-lowrate experimental lower-quality Amiga conversion; requires --rate\n");
 	printf("                 22050, 11025, 8820, or 8287 and can skip discarded synthesis samples\n");
+	printf("  --exp-poly  use experimental 68030 asm mono polyphase when compiled in\n");
 	printf("  --selftest-mulshift compare C and optional asm MULSHIFT32 helpers\n");
 	printf("  --selftest-fdct32 compare C reference and optional m68k asm FDCT32 path\n");
 	printf("  --selftest-imdct compare C reference and optional m68k asm long IMDCT path\n");
@@ -532,6 +534,8 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->checksum = 1;
 		} else if (!strcmp(argv[i], "--fast-lowrate")) {
 			opt->fastLowrate = 1;
+		} else if (!strcmp(argv[i], "--exp-poly")) {
+			opt->expPoly = 1;
 		} else if (!strcmp(argv[i], "--rate")) {
 			if (++i >= argc)
 				return -1;
@@ -3900,6 +3904,14 @@ int main(int argc, char **argv)
 		fprintf(stderr, "Stereo playback needs significantly more CPU and may underrun on 030.\n");
 
 	MP3SetOutputMono(decoder, opt.mono && !opt.stereo);
+	MP3SetExperimentalPolyphase(opt.expPoly);
+	if (opt.expPoly) {
+#if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_M68K_ASM_POLYPHASE)
+		fprintf(stderr, "warning: --exp-poly enables experimental 68030 asm mono polyphase; stereo uses the existing fast path\n");
+#else
+		fprintf(stderr, "warning: --exp-poly requested, but this build has no 68030 asm polyphase; using existing polyphase\n");
+#endif
+	}
 
 	if (opt.fastLowrate) {
 		int stride = FastLowrateStrideForOutputRate(opt.outputRate);
