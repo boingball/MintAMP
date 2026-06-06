@@ -5,6 +5,7 @@
  * products; there are no per-sample C calls or inner tap loops in the object.
  */
 
+#if defined(AMIGA_M68K_ASM_POLYPHASE)
 	.text
 	.even
 	.globl	AmigaM68KPolyphaseMonoFast
@@ -38,16 +39,16 @@ AmigaM68KPolyphaseMonoFast:
 .macro CLIP_STORE acc, poff
 	move.l	\acc,%d0
 	move.l	%d0,%d1
-	tst.l	%d1
-	smi	%d1
-	ext.w	%d1
-	ext.l	%d1
+	asr.l	#8,%d1
+	asr.l	#7,%d1		| d1 = acc >> 15
 	move.l	%d0,%d2
 	asr.l	#8,%d2
-	asr.l	#7,%d2
-	cmp.l	%d2,%d1
+	asr.l	#8,%d2
+	asr.l	#8,%d2
+	asr.l	#7,%d2		| d2 = acc >> 31 (sign)
+	cmp.l	%d1,%d2		| if sign == x>>15, no clip needed
 	beq.s	990f
-	move.l	%d1,%d0
+	move.l	%d2,%d0
 	eori.l	#0x00007fff,%d0
 990:
 	move.w	%d0,\poff(%a0)
@@ -148,3 +149,4 @@ AmigaM68KPolyphaseMonoFast:
 
 	movem.l	(%sp)+,%d2-%d7/%a2-%a6
 	rts
+#endif /* AMIGA_M68K_ASM_POLYPHASE */
