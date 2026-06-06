@@ -7,11 +7,12 @@ ifeq ($(origin CC),default)
 CC := m68k-amigaos-gcc
 endif
 CPU ?= -m68020
+STD ?= -std=gnu89
 OPTFLAGS ?= -O2 -fomit-frame-pointer
 TARGET ?= amiga_mp3dec
 
 CPPFLAGS_COMMON := -Ipub -Ireal -DAMIGA_M68K
-CFLAGS_COMMON := $(CPU) $(OPTFLAGS)
+CFLAGS_COMMON := $(CPU) $(STD) $(OPTFLAGS)
 SOURCES := amiga_mp3dec.c mp3dec.c mp3tabs.c $(wildcard real/*.c)
 
 FAST030_CPPFLAGS := \
@@ -20,7 +21,7 @@ FAST030_CPPFLAGS := \
 	-DAMIGA_FAST_POLYPHASE \
 	-DAMIGA_M68K_ASM_IMDCT \
 	-DAMIGA_M68K_ASM_MIDSIDE
-FAST030_CFLAGS := -m68030 -O3 -fomit-frame-pointer
+FAST030_CFLAGS := -m68030 $(STD) -O3 -fomit-frame-pointer
 FAST030_TARGET := amiga_mp3dec.fastexp
 
 .PHONY: all fast030 clean print-command print-fast030-command
