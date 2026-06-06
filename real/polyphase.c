@@ -566,7 +566,7 @@ static short PolyphaseMonoFastSample16(int *vbuf, const int *coefBase)
 	return ClipIntToShort(sum);
 }
 
-static short PolyphaseMonoFastSampleLo(int pair, int *vbuf, const int *coefBase)
+static __inline short PolyphaseMonoFastSampleLo(int pair, int *vbuf, const int *coefBase)
 {
 	int sum;
 
@@ -575,7 +575,7 @@ static short PolyphaseMonoFastSampleLo(int pair, int *vbuf, const int *coefBase)
 	return ClipIntToShort(sum);
 }
 
-static short PolyphaseMonoFastSampleHi(int pair, int *vbuf, const int *coefBase)
+static __inline short PolyphaseMonoFastSampleHi(int pair, int *vbuf, const int *coefBase)
 {
 	int sum;
 
