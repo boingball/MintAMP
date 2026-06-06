@@ -163,7 +163,61 @@ static int DecodeHuffmanPairs(int *xy, int nVals, int tabIdx, int bitsLeft, unsi
 		}
 		bitsLeft += (cachedBits - padBits);
 		return (startBits - bitsLeft);
-	} else if (tabType == loopLinbits || tabType == loopNoLinbits) {
+	} else if (tabType == loopNoLinbits) {
+		/*
+		 * The no-linbits tables never carry escape values.  Keep their common decode
+		 * loop free of the two per-pair tabType/escape tests needed by the
+		 * linbits tables; those branches are comparatively expensive on m68k.
+		 */
+		tCurr = tBase;
+		padBits = 0;
+		while (nVals > 0) {
+			/* refill cache - assumes cachedBits <= 16 */
+			if (bitsLeft >= 16) {
+				cache |= (unsigned int)(*buf++) << (24 - cachedBits);
+				cache |= (unsigned int)(*buf++) << (16 - cachedBits);
+				cachedBits += 16;
+				bitsLeft -= 16;
+			} else {
+				if (cachedBits + bitsLeft <= 0)	return -1;
+				if (bitsLeft > 0)	cache |= (unsigned int)(*buf++) << (24 - cachedBits);
+				if (bitsLeft > 8)	cache |= (unsigned int)(*buf++) << (16 - cachedBits);
+				cachedBits += bitsLeft;
+				bitsLeft = 0;
+
+				cache &= (signed int)0x80000000 >> (cachedBits - 1);
+				padBits = 11;
+				cachedBits += padBits;
+			}
+
+			while (nVals > 0 && cachedBits >= 11) {
+				maxBits = GetMaxbits(tCurr[0]);
+				cw = tCurr[(cache >> (32 - maxBits)) + 1];
+				len = GetHLen(cw);
+				if (!len) {
+					cachedBits -= maxBits;
+					cache <<= maxBits;
+					tCurr += cw;
+					continue;
+				}
+				cachedBits -= len;
+				cache <<= len;
+
+				x = GetCWX(cw);		if (x)	{ApplySign(x, cache); cache <<= 1; cachedBits--;}
+				y = GetCWY(cw);		if (y)	{ApplySign(y, cache); cache <<= 1; cachedBits--;}
+
+				if (cachedBits < padBits)
+					return -1;
+
+				*xy++ = x;
+				*xy++ = y;
+				nVals -= 2;
+				tCurr = tBase;
+			}
+		}
+		bitsLeft += (cachedBits - padBits);
+		return (startBits - bitsLeft);
+	} else if (tabType == loopLinbits) {
 		tCurr = tBase;
 		padBits = 0;
 		while (nVals > 0) {
@@ -204,7 +258,7 @@ static int DecodeHuffmanPairs(int *xy, int nVals, int tabIdx, int bitsLeft, unsi
 				x = GetCWX(cw);
 				y = GetCWY(cw);
 
-				if (x == 15 && tabType == loopLinbits) {
+				if (x == 15) {
 					minBits = linBits + 1 + (y ? 1 : 0);
 					if (cachedBits + bitsLeft < minBits)
 						return -1;
@@ -224,7 +278,7 @@ static int DecodeHuffmanPairs(int *xy, int nVals, int tabIdx, int bitsLeft, unsi
 				}
 				if (x)	{ApplySign(x, cache); cache <<= 1; cachedBits--;}
 
-				if (y == 15 && tabType == loopLinbits) {
+				if (y == 15) {
 					minBits = linBits + 1;
 					if (cachedBits + bitsLeft < minBits)
 						return -1;

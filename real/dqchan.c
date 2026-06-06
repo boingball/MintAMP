@@ -154,6 +154,12 @@ static int DequantBlock(int *inbuf, int *outbuf, int num, int scale)
 		sx = *inbuf++;
 		x = sx & 0x7fffffff;	/* sx = sign|mag */
 
+		/* Zero is the dominant sparse-spectrum case; avoid scale/sign work. */
+		if (!x) {
+			*outbuf++ = 0;
+			continue;
+		}
+
 		if (x < 4) {
 
 			y = tab4[x];

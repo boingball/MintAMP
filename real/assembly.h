@@ -290,13 +290,15 @@ static __inline int CLZ(int x)
 
 	ux = (unsigned int)x;
 	if (!ux)
-		return (sizeof(int) * 8);
+		return 32;
 
+	/* Fixed-depth search avoids up to 31 loop/back-branch iterations on m68k. */
 	numZeros = 0;
-	while (!(ux & 0x80000000UL)) {
-		numZeros++;
-		ux <<= 1;
-	}
+	if (!(ux & 0xffff0000UL)) { numZeros += 16; ux <<= 16; }
+	if (!(ux & 0xff000000UL)) { numZeros += 8;  ux <<= 8;  }
+	if (!(ux & 0xf0000000UL)) { numZeros += 4;  ux <<= 4;  }
+	if (!(ux & 0xc0000000UL)) { numZeros += 2;  ux <<= 2;  }
+	if (!(ux & 0x80000000UL)) { numZeros += 1; }
 
 	return numZeros;
 }
