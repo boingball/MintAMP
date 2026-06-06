@@ -180,8 +180,9 @@ static __inline const int *FDCT32_AMIGA_M68K_FIRST_PASS(int *buf, const int *cpt
 /*
  * Keep the four radix-8 groups in one small loop.  Each half-butterfly uses
  * d0-d6 with the same roles, writes its four intermediates back to buf, then
- * the final stage reuses those slots.  This avoids compiler spills without
- * cloning the kernel four times into the 68030 instruction cache.
+ * the final stage reuses those slots.  This avoids compiler spills while
+ * keeping code size down.  A four-copy unrolled variant may still be faster on
+ * a 68030 by avoiding loop and branch overhead, so compare both on the target.
  */
 static __inline void FDCT32_AMIGA_M68K_SECOND_PASS(int *buf, const int *cptr)
 {

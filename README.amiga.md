@@ -223,8 +223,11 @@ decoded frame count and output sample count.
    pass is one register-scheduled machine-code region: butterfly values remain
    in data registers, coefficients stream through an address register, and
    `muls.l` high words feed the next operation without C compiler spill/reload
-   boundaries.  The second pass is a compact four-iteration assembly kernel
-   with stable data-register roles rather than four unrolled copies, and the
+   boundaries.  The second pass currently uses a compact four-iteration
+   assembly kernel with stable data-register roles rather than four unrolled
+   copies.  That keeps code size down, but it is not assumed to be fastest on
+   a 68030: benchmark a fully unrolled variant on the target too, because
+   eliminating loop and branch overhead may outweigh the extra code size.  The
    two output-shuffle halves use bounded assembly regions that retain each
    reused sum while issuing the paired stores directly.  The rare guard-bit
    clipping/scaling pass remains in C.  This flag is

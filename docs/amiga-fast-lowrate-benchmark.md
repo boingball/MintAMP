@@ -15,11 +15,13 @@ each emitted sample are unchanged.
 ## FDCT32 second-pass and output-shuffle profile
 
 This pass uses the already-confirmed first-pass `AMIGA_M68K_ASM_FDCT32` build
-as its before baseline.  The transform's second pass is kept as one compact
+as its before baseline.  The transform's second pass currently uses one compact
 four-iteration kernel instead of being unrolled four times, while the two
-16-sample shuffle/store halves are separate bounded kernels.  This limits hot
-code growth for the 68030 instruction cache and keeps the rare clipping pass
-outside the assembly fast path.
+16-sample shuffle/store halves are separate bounded kernels.  The compact form
+keeps code growth down, but a fully unrolled second pass must also be measured
+on the 68030: avoiding the loop and branch overhead may be faster despite the
+larger code footprint.  The rare clipping pass remains outside the assembly
+fast path in either variant.
 
 Use the same calibrated WinUAE configuration, fixture, and build flags for both
 rows.  The workspace does not contain the required MP3 fixtures or a working
