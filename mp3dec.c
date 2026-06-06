@@ -180,8 +180,15 @@ int MP3FindSyncWord(unsigned char *buf, int nBytes)
 {
 	int i;
 
+	/* A successful decode advances the input pointer to the expected start of
+	 * the next frame.  Keep that clean-stream path out of the byte scan, but
+	 * retain the scan for tags, corruption, and callers starting mid-stream. */
+	if (nBytes >= 2 && (buf[0] & SYNCWORDH) == SYNCWORDH &&
+		(buf[1] & SYNCWORDL) == SYNCWORDL)
+		return 0;
+
 	/* find byte-aligned syncword - need 12 (MPEG 1,2) or 11 (MPEG 2.5) matching bits */
-	for (i = 0; i < nBytes - 1; i++) {
+	for (i = 1; i < nBytes - 1; i++) {
 		if ( (buf[i+0] & SYNCWORDH) == SYNCWORDH && (buf[i+1] & SYNCWORDL) == SYNCWORDL )
 			return i;
 	}
