@@ -50,6 +50,9 @@ int STATNAME(PolyphaseMonoFastLowrateStride2_TEST_ACTIVE)(short *pcm, int *vbuf,
 int STATNAME(PolyphaseMonoFastLowrateStride2_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
 int STATNAME(AmigaM68KPolyphaseMonoFast_IsActive)(void);
 int STATNAME(AmigaM68KPolyphaseMonoFastStride2_IsActive)(void);
+int STATNAME(DecodeHuffmanPairs_C_REFERENCE)(int *xy, int nVals, int tabIdx, int bitsLeft, unsigned char *buf, int bitOffset);
+int STATNAME(DecodeHuffmanPairs_TEST_ACTIVE)(int *xy, int nVals, int tabIdx, int bitsLeft, unsigned char *buf, int bitOffset);
+int STATNAME(DecodeHuffmanPairs_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
 extern const int STATNAME(polyCoef)[264];
 #define AMIGA_FDCT32 STATNAME(FDCT32)
 #define AMIGA_FDCT32_C_REFERENCE STATNAME(FDCT32_C_REFERENCE)
@@ -66,6 +69,9 @@ extern const int STATNAME(polyCoef)[264];
 #define AMIGA_POLYPHASE_MONO_FAST_STRIDE2_HAS_ASM STATNAME(PolyphaseMonoFastLowrateStride2_HAS_AMIGA_M68K_ASM_RUNTIME)
 #define AMIGA_M68K_POLYPHASE_MONO_FAST_IS_ACTIVE STATNAME(AmigaM68KPolyphaseMonoFast_IsActive)
 #define AMIGA_M68K_POLYPHASE_MONO_FAST_STRIDE2_IS_ACTIVE STATNAME(AmigaM68KPolyphaseMonoFastStride2_IsActive)
+#define AMIGA_HUFFMAN_PAIRS_C_REFERENCE STATNAME(DecodeHuffmanPairs_C_REFERENCE)
+#define AMIGA_HUFFMAN_PAIRS_TEST_ACTIVE STATNAME(DecodeHuffmanPairs_TEST_ACTIVE)
+#define AMIGA_HUFFMAN_PAIRS_HAS_ASM STATNAME(DecodeHuffmanPairs_HAS_AMIGA_M68K_ASM_RUNTIME)
 #define AMIGA_POLY_COEF STATNAME(polyCoef)
 
 #define READBUF_SIZE (1024 * 16)
@@ -97,6 +103,7 @@ typedef struct DecodeOptions {
 	int selftestPolyphase;
 	int selftestPolyphaseStride2;
 	int selftestFastLowrate;
+	int selftestHuffman;
 	int selftestMonoFastLowrateStereo;
 	int checksum;
 	int outputRate;
@@ -455,6 +462,7 @@ static void PrintUsage(const char *prog)
 	printf("  --selftest-polyphase compare C fast mono polyphase and optional m68k asm path\n");
 	printf("  --selftest-polyphase-stride2 compare C and optional asm stride-2 mono polyphase paths\n");
 	printf("  --selftest-fastlowrate compare synthetic stride decimation paths\n");
+	printf("  --selftest-huffman compare C and optional m68k bfextu Huffman pair paths\n");
 	printf("  --selftest-mono-fastlowrate-stereo verify stereo-to-mono low-rate accounting\n");
 	printf("  --checksum  print a 32-bit checksum of decoded PCM samples\n");
 	printf("  --debug-fastlowrate print per-frame/granule fast-lowrate placement\n");
@@ -556,6 +564,8 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->selftestPolyphaseStride2 = 1;
 		} else if (!strcmp(argv[i], "--selftest-fastlowrate")) {
 			opt->selftestFastLowrate = 1;
+		} else if (!strcmp(argv[i], "--selftest-huffman")) {
+			opt->selftestHuffman = 1;
 		} else if (!strcmp(argv[i], "--selftest-mono-fastlowrate-stereo")) {
 			opt->selftestMonoFastLowrateStereo = 1;
 		} else if (!strcmp(argv[i], "--checksum")) {
@@ -600,7 +610,7 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 
 	if (opt->selftestMulshift || opt->selftestFdct32 || opt->selftestImdct ||
 		opt->selftestPolyphase || opt->selftestPolyphaseStride2 ||
-		opt->selftestFastLowrate ||
+		opt->selftestFastLowrate || opt->selftestHuffman ||
 		opt->selftestMonoFastLowrateStereo)
 		return 0;
 
@@ -2194,6 +2204,74 @@ static unsigned long NextRand32(unsigned long *state)
 {
 	*state = (*state * 1664525UL) + 1013904223UL;
 	return *state;
+}
+
+static int SelftestHuffman(void)
+{
+	enum { HUFFMAN_SELFTEST_CASES = 1000, HUFFMAN_PAIR_TABS = 32 };
+	static unsigned char buf[128];
+	static int cxy[MAX_NSAMP];
+	static int axy[MAX_NSAMP];
+	unsigned long seed;
+	unsigned long failures;
+	unsigned long i;
+	int j;
+
+	seed = 0x68756666UL;
+	failures = 0;
+	for (i = 0; i < HUFFMAN_SELFTEST_CASES; i++) {
+		int nVals;
+		int tabIdx;
+		int bitsLeft;
+		int bitOffset;
+		int cret;
+		int aret;
+
+		for (j = 0; j < (int)sizeof(buf); j++) {
+			if (j < (int)sizeof(buf) - 8)
+				buf[j] = (unsigned char)(NextRand32(&seed) >> 24);
+			else
+				buf[j] = 0;
+		}
+		for (j = 0; j < MAX_NSAMP; j++) {
+			cxy[j] = (int)(0x5a5a0000UL ^ (unsigned long)j);
+			axy[j] = cxy[j];
+		}
+
+		tabIdx = (int)(NextRand32(&seed) % HUFFMAN_PAIR_TABS);
+		nVals = (int)(NextRand32(&seed) % ((MAX_NSAMP / 2) + 1)) * 2;
+		bitsLeft = (int)(NextRand32(&seed) % 769UL);
+		bitOffset = (int)(NextRand32(&seed) & 7UL);
+
+		cret = AMIGA_HUFFMAN_PAIRS_C_REFERENCE(cxy, nVals, tabIdx, bitsLeft, buf, bitOffset);
+		aret = AMIGA_HUFFMAN_PAIRS_TEST_ACTIVE(axy, nVals, tabIdx, bitsLeft, buf, bitOffset);
+		if (aret != cret) {
+			printf("Huffman selftest bitsUsed mismatch %lu: tab=%d nVals=%d bitsLeft=%d bitOffset=%d C=%d active=%d\n",
+				i, tabIdx, nVals, bitsLeft, bitOffset, cret, aret);
+			failures++;
+			continue;
+		}
+		for (j = 0; j < nVals; j++) {
+			if (axy[j] != cxy[j]) {
+				printf("Huffman selftest xy mismatch %lu[%d]: tab=%d nVals=%d bitsLeft=%d bitOffset=%d C=%ld active=%ld bitsUsed=%d\n",
+					i, j, tabIdx, nVals, bitsLeft, bitOffset, (long)cxy[j], (long)axy[j], cret);
+				failures++;
+				break;
+			}
+		}
+	}
+
+	printf("Huffman asm requested: %s\n",
+#ifdef AMIGA_M68K_ASM_HUFFMAN
+		"yes"
+#else
+		"no"
+#endif
+	);
+	printf("Huffman bfextu asm active: %s\n", AMIGA_HUFFMAN_PAIRS_HAS_ASM() ? "yes" : "no");
+	printf("Huffman selftest cases: %lu\n", i);
+	printf("Huffman selftest failures: %lu\n", failures);
+	return failures ? 1 : 0;
 }
 
 static int TestMulshiftPair(int x, int y, unsigned long index)
@@ -3996,6 +4074,11 @@ int main(int argc, char **argv)
 	}
 	if (opt.selftestFastLowrate) {
 		int selftestErr = SelftestFastLowrate();
+		AmigaFreeNormalizedArgs(&normalized);
+		return selftestErr;
+	}
+	if (opt.selftestHuffman) {
+		int selftestErr = SelftestHuffman();
 		AmigaFreeNormalizedArgs(&normalized);
 		return selftestErr;
 	}

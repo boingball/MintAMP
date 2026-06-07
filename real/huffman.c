@@ -69,6 +69,34 @@ static __inline unsigned int LOADBE16(const unsigned char *buf)
 /* apply sign of s to the positive number x (save in MSB, will do two's complement in dequant) */
 #define ApplySign(x, s)	{ (x) |= ((s) & 0x80000000); }
 
+#if defined(AMIGA_M68K) && defined(AMIGA_M68K_ASM_HUFFMAN) && defined(__GNUC__) && \
+	(defined(__mc68020__) || defined(__mc68030__) || defined(__mc68040__) || defined(__mc68060__) || \
+	 defined(mc68020) || defined(mc68030) || defined(mc68040) || defined(mc68060))
+#define AMIGA_M68K_HUFFMAN_BFEXTU 1
+#endif
+
+#if defined(AMIGA_M68K_HUFFMAN_BFEXTU)
+static __inline unsigned int HuffmanBFExtU(const unsigned char *buf, int bitPos, int nBits)
+{
+	unsigned int bits;
+	__asm__ volatile ("bfextu %1{%2:%3},%0"
+		: "=d" (bits)
+		: "o" (*buf), "d" (bitPos), "d" (nBits)
+		: );
+	return bits;
+}
+
+static __inline unsigned int HuffmanBFExtUPadded(const unsigned char *buf, int bitPos, int nBits, int validBits)
+{
+	unsigned int bits;
+
+	bits = HuffmanBFExtU(buf, bitPos, nBits);
+	if (validBits < nBits)
+		bits &= ~((1U << (nBits - validBits)) - 1U);
+	return bits;
+}
+#endif
+
 /**************************************************************************************
  * Function:    DecodeHuffmanPairs
  *
@@ -90,7 +118,7 @@ static __inline unsigned int LOADBE16(const unsigned char *buf)
  *                necessarily all linBits outputs for x,y > 15)
  **************************************************************************************/
 // no improvement with section=data
-static int DecodeHuffmanPairs(int *xy, int nVals, int tabIdx, int bitsLeft, unsigned char *buf, int bitOffset)
+int DecodeHuffmanPairs_C_REFERENCE(int *xy, int nVals, int tabIdx, int bitsLeft, unsigned char *buf, int bitOffset)
 {
 	int x, y;
 	int cachedBits, padBits, len, startBits, linBits, maxBits, minBits;
@@ -325,6 +353,123 @@ static int DecodeHuffmanPairs(int *xy, int nVals, int tabIdx, int bitsLeft, unsi
 	return -1;
 }
 
+#if defined(AMIGA_M68K_HUFFMAN_BFEXTU)
+static int DecodeHuffmanPairs_BFEXTU(int *xy, int nVals, int tabIdx, int bitsLeft, unsigned char *buf, int bitOffset)
+{
+	int x, y;
+	int len, startBits, linBits, maxBits;
+	int bitPos, remaining;
+	HuffTabType tabType;
+	unsigned short cw, *tBase, *tCurr;
+	unsigned int bits;
+
+	if(nVals <= 0)
+		return 0;
+
+	if (bitsLeft < 0)
+		return -1;
+	startBits = bitsLeft;
+
+	tBase = (unsigned short *)(huffTable + huffTabOffset[tabIdx]);
+	linBits = huffTabLookup[tabIdx].linBits;
+	tabType = huffTabLookup[tabIdx].tabType;
+
+	ASSERT(!(nVals & 0x01));
+	ASSERT(tabIdx < HUFF_PAIRTABS);
+	ASSERT(tabIdx >= 0);
+	ASSERT(tabType != invalidTab);
+
+	if (tabType != loopLinbits)
+		return DecodeHuffmanPairs_C_REFERENCE(xy, nVals, tabIdx, bitsLeft, buf, bitOffset);
+
+	bitPos = bitOffset;
+	remaining = bitsLeft;
+	while (nVals > 0) {
+		tCurr = tBase;
+		for (;;) {
+			if (remaining <= 0)
+				return -1;
+			maxBits = GetMaxbits(tCurr[0]);
+			bits = HuffmanBFExtUPadded(buf, bitPos, maxBits, remaining);
+			cw = tCurr[bits + 1];
+			len = GetHLen(cw);
+			if (!len) {
+				if (remaining < maxBits)
+					return -1;
+				bitPos += maxBits;
+				remaining -= maxBits;
+				tCurr += cw;
+				continue;
+			}
+			if (remaining < len)
+				return -1;
+			bitPos += len;
+			remaining -= len;
+			break;
+		}
+
+		x = GetCWX(cw);
+		y = GetCWY(cw);
+
+		if (x == 15) {
+			if (remaining < linBits)
+				return -1;
+			x += (int)HuffmanBFExtU(buf, bitPos, linBits);
+			bitPos += linBits;
+			remaining -= linBits;
+		}
+		if (x) {
+			if (remaining < 1)
+				return -1;
+			if (HuffmanBFExtU(buf, bitPos, 1))
+				x |= (int)0x80000000;
+			bitPos++;
+			remaining--;
+		}
+
+		if (y == 15) {
+			if (remaining < linBits)
+				return -1;
+			y += (int)HuffmanBFExtU(buf, bitPos, linBits);
+			bitPos += linBits;
+			remaining -= linBits;
+		}
+		if (y) {
+			if (remaining < 1)
+				return -1;
+			if (HuffmanBFExtU(buf, bitPos, 1))
+				y |= (int)0x80000000;
+			bitPos++;
+			remaining--;
+		}
+
+		*xy++ = x;
+		*xy++ = y;
+		nVals -= 2;
+	}
+
+	return (startBits - remaining);
+}
+#endif
+
+int DecodeHuffmanPairs_TEST_ACTIVE(int *xy, int nVals, int tabIdx, int bitsLeft, unsigned char *buf, int bitOffset)
+{
+#if defined(AMIGA_M68K_HUFFMAN_BFEXTU)
+	return DecodeHuffmanPairs_BFEXTU(xy, nVals, tabIdx, bitsLeft, buf, bitOffset);
+#else
+	return DecodeHuffmanPairs_C_REFERENCE(xy, nVals, tabIdx, bitsLeft, buf, bitOffset);
+#endif
+}
+
+int DecodeHuffmanPairs_HAS_AMIGA_M68K_ASM_RUNTIME(void)
+{
+#if defined(AMIGA_M68K_HUFFMAN_BFEXTU)
+	return 1;
+#else
+	return 0;
+#endif
+}
+
 /**************************************************************************************
  * Function:    DecodeHuffmanQuads
  *
@@ -506,7 +651,7 @@ int DecodeHuffman(MP3DecInfo *mp3DecInfo, unsigned char *buf, int *bitOffset, in
 	/* decode Huffman pairs (rEnd[i] are always even numbers) */
 	bitsLeft = huffBlockBits;
 	for (i = 0; i < 3; i++) {
-		bitsUsed = DecodeHuffmanPairs(hi->huffDecBuf[ch] + rEnd[i], rEnd[i+1] - rEnd[i], sis->tableSelect[i], bitsLeft, buf, *bitOffset);
+		bitsUsed = DecodeHuffmanPairs_TEST_ACTIVE(hi->huffDecBuf[ch] + rEnd[i], rEnd[i+1] - rEnd[i], sis->tableSelect[i], bitsLeft, buf, *bitOffset);
 		if (bitsUsed < 0 || bitsUsed > bitsLeft)	/* error - overran end of bitstream */
 			return -1;
 

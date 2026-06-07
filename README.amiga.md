@@ -257,6 +257,10 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
 - `--selftest-fastlowrate` compares a synthetic ramp/impulse-like PCM sequence
   through normal 44100 -> 11025 `--rate` decimation and the stride-4
   fast-lowrate selector across chunk boundaries.
+- `--selftest-huffman` runs 1000 pseudo-random Huffman pair decode cases
+  through the portable C reference and the active pair decoder, so
+  `AMIGA_M68K_ASM_HUFFMAN` builds can verify the optional 68020+ `bfextu`
+  path returns identical bit counts and coefficients.
 - `--checksum` prints a 32-bit checksum of the decoded 16-bit PCM stream before
   optional mixing, downsampling, or output-format conversion. With
   `--fast-lowrate`, it instead covers the low-rate output samples so experiments
@@ -360,7 +364,21 @@ decoded frame count and output sample count.
    amiga_mp3dec.midsideasm --bench --decode-only --checksum stereo-joint.mp3
    ```
 
-7. Checksum the C and ASM FDCT32 builds with identical inputs and output modes
+8. `AMIGA_M68K_ASM_HUFFMAN` is an opt-in 68020+ GNU m68k Huffman pair
+   decoder path for linbits pair tables.  It uses `bfextu` with an offsettable
+   memory operand to read the lookup field directly from the bitstream instead
+   of maintaining the byte-refilled software cache.  The portable C pair
+   decoder remains available as the selftest reference; do not enable this path
+   on 68000/68010 builds.
+
+   ```sh
+   m68k-amigaos-gcc -m68030 -std=gnu89 -O3 -fomit-frame-pointer \
+     -DAMIGA_M68K -DAMIGA_M68K_ASM_HUFFMAN -Ipub -Ireal \
+     -o amiga_mp3dec.huffasm amiga_mp3dec.c mp3dec.c mp3tabs.c real/*.c
+   amiga_mp3dec.huffasm --selftest-huffman
+   ```
+
+9. Checksum the C and ASM FDCT32 builds with identical inputs and output modes
    before enabling the ASM binary in a release or local deployment.  The
    required regression set is: mono 56 kbps, stereo 160 kbps, stereo 256 kbps,
    fast-lowrate 11025 Hz, and fast-lowrate 8820 Hz.
