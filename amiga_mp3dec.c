@@ -4071,7 +4071,7 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 	}
 
 	active = 0;
-	refill = 0;
+	refill = 1;
 	if (err == 0 && player.sent[0][0] && !player.sent[1][0]) {
 		if (AmigaAudioWait(&player, active) != 0) {
 			fprintf(stderr, "audio.device write failed\n");
@@ -4080,33 +4080,38 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 			printf("debug-play: CMD_WRITE completed %s\n",
 				PlaybackBufferName(active));
 		}
-	} else if (err == 0 && player.sent[0][0] && player.sent[1][0]) {
-		/* Wait only for the initial oldest buffer to finish.  The second
-		 * prefilled CMD_WRITE is already queued, so playback can continue while
-		 * the completed buffer becomes the first streaming refill target. */
-		if (AmigaAudioWait(&player, active) != 0) {
-			fprintf(stderr, "audio.device write failed\n");
-			err = -1;
-		} else {
-			if (opt->debugPlay)
-				printf("debug-play: CMD_WRITE completed %s\n",
-					PlaybackBufferName(active));
-			refill = active;
-			active = 1 - active;
-		}
 	}
-	while (err == 0 && !gPlaybackInterrupted && player.sent[active][0]) {
+	while (err == 0 && !gPlaybackInterrupted &&
+		player.sent[active][0] && player.sent[1 - active][0]) {
 		clock_t activeStarted;
 		clock_t submittedAt;
 		unsigned long elapsedMilliseconds;
 		unsigned long activeMilliseconds;
 		long spareMilliseconds;
+		int completed;
 		int underrun;
 		int late;
 
-		/* Detect whether the queued/playing buffer has already run dry before
-		 * spending more time decoding the next refill buffer. */
+		/* Detect whether the oldest queued/playing buffer has already run dry
+		 * before WaitIO reaps it; after WaitIO the buffer is always done. */
 		underrun = AmigaAudioDone(&player, active);
+		if (AmigaAudioWait(&player, active) != 0) {
+			fprintf(stderr, "audio.device write failed\n");
+			err = -1;
+			break;
+		}
+		if (opt->debugPlay)
+			printf("debug-play: CMD_WRITE completed %s\n",
+				PlaybackBufferName(active));
+
+		completed = active;
+		active = 1 - active;
+		refill = completed;
+
+		/* The completed Fast RAM work buffer is refilled while audio.device plays
+		 * the other request. AmigaAudioSubmitPlayback copies that work buffer into
+		 * the separate chip RAM splitBuf before BeginIO, restoring the two-request
+		 * queue before this loop waits for the current active buffer. */
 		activeStarted = clock();
 		len[refill] = DecodeStreamFillPlaybackBuffer(&stream, opt, &player, refill,
 			buf[refill], bufBytes);
@@ -4126,6 +4131,17 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 					PlaybackBufferName(active));
 			break;
 		}
+
+		if (AmigaAudioSubmitPlayback(&player, refill, buf[refill], len[refill]) != 0) {
+			fprintf(stderr, "playback buffer %s CMD_WRITE byte length is invalid\n",
+				PlaybackBufferName(refill));
+			err = -1;
+			break;
+		}
+		if (opt->debugPlay)
+			printf("debug-play: CMD_WRITE submitted %s: %lu bytes\n",
+				PlaybackBufferName(refill), len[refill]);
+
 		submittedAt = clock();
 		elapsedMilliseconds = PlaybackElapsedMilliseconds(activeStarted, submittedAt);
 		activeMilliseconds = PlaybackBufferDurationMilliseconds(opt, len[active],
@@ -4140,32 +4156,11 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 			stats->lateBuffers++;
 		if (underrun) {
 			stats->underruns++;
-			stats->underrunBuffers[active]++;
+			stats->underrunBuffers[completed]++;
 			if (opt->debugPlay)
 				printf("debug-play: underrun detected before buffer %s refill submit\n",
 					PlaybackBufferName(refill));
 		}
-
-		if (AmigaAudioWait(&player, active) != 0) {
-			fprintf(stderr, "audio.device write failed\n");
-			err = -1;
-			break;
-		}
-		if (opt->debugPlay)
-			printf("debug-play: CMD_WRITE completed %s\n",
-				PlaybackBufferName(active));
-
-		if (AmigaAudioSubmitPlayback(&player, refill, buf[refill], len[refill]) != 0) {
-			fprintf(stderr, "playback buffer %s CMD_WRITE byte length is invalid\n",
-				PlaybackBufferName(refill));
-			err = -1;
-			break;
-		}
-		if (opt->debugPlay)
-			printf("debug-play: CMD_WRITE submitted %s: %lu bytes\n",
-				PlaybackBufferName(refill), len[refill]);
-		active = refill;
-		refill = 1 - active;
 	}
 
 	if (err == 0 && !gPlaybackInterrupted && player.sent[active][0]) {
