@@ -258,8 +258,8 @@ static __inline int MULSHIFT32_C_REFERENCE(int x, int y)
 /*
  * Optional 68020+ signed 32x32 -> 64 multiply.  The two-operand m68k GNU as
  * form writes the high 32 bits to the first output register and the low 32
- * bits to the second output register.  This is the only helper optimized by
- * AMIGA_M68K_ASM for now; MADD64/SHL64/SAR64 deliberately remain C below.
+ * bits to the second output register.  MADD64/SHL64/SAR64 deliberately
+ * remain C below.
  */
 static __inline int MULSHIFT32_AMIGA_M68K_ASM(int x, int y)
 {
@@ -290,7 +290,7 @@ static __inline int FASTABS(int x)
 	return x;
 }
 
-static __inline int CLZ(int x)
+static __inline int CLZ_C_REFERENCE(int x)
 {
 	unsigned int ux;
 	int numZeros;
@@ -309,6 +309,25 @@ static __inline int CLZ(int x)
 
 	return numZeros;
 }
+
+#if defined(AMIGA_M68K_ASM) && defined(__GNUC__) && \
+	(defined(__mc68020__) || defined(__mc68030__) || defined(__mc68040__) || \
+	 defined(__mc68060__) || defined(mc68020))
+static __inline int CLZ_AMIGA_M68K_ASM(int x)
+{
+	int result;
+
+	if (!x)
+		return 32;
+	__asm__("bfffo %1{#0:#32},%0" : "=d" (result) : "d" (x) : "cc");
+	return result;
+}
+#define CLZ_HAS_AMIGA_M68K_ASM 1
+#define CLZ(x) CLZ_AMIGA_M68K_ASM((x))
+#else
+#define CLZ_HAS_AMIGA_M68K_ASM 0
+#define CLZ(x) CLZ_C_REFERENCE((x))
+#endif
 
 static __inline Word64 MADD64(Word64 sum, int x, int y)
 {

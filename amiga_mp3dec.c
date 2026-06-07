@@ -104,6 +104,7 @@ typedef struct DecodeOptions {
 	int decodeOnly;
 	int noOutput;
 	int selftestMulshift;
+	int selftestClz;
 	int selftestFdct32;
 	int selftestImdct;
 	int selftestPolyphase;
@@ -464,6 +465,7 @@ static void PrintUsage(const char *prog)
 	printf("                 22050, 11025, 8820, or 8287 and can skip discarded synthesis samples\n");
 	printf("  --exp-poly  use experimental 68030 asm mono polyphase when compiled in\n");
 	printf("  --selftest-mulshift compare C and optional asm MULSHIFT32 helpers\n");
+	printf("  --selftest-clz compare C and optional m68k bfffo CLZ helpers\n");
 	printf("  --selftest-fdct32 compare C reference and optional m68k asm FDCT32 path\n");
 	printf("  --selftest-imdct compare C reference and optional m68k asm long IMDCT path\n");
 	printf("  --selftest-polyphase compare C fast mono polyphase and optional m68k asm path\n");
@@ -562,6 +564,8 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->noOutput = 1;
 		} else if (!strcmp(argv[i], "--selftest-mulshift")) {
 			opt->selftestMulshift = 1;
+		} else if (!strcmp(argv[i], "--selftest-clz")) {
+			opt->selftestClz = 1;
 		} else if (!strcmp(argv[i], "--selftest-fdct32")) {
 			opt->selftestFdct32 = 1;
 		} else if (!strcmp(argv[i], "--selftest-imdct")) {
@@ -618,7 +622,7 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 	if (opt->help)
 		return 0;
 
-	if (opt->selftestMulshift || opt->selftestFdct32 || opt->selftestImdct ||
+	if (opt->selftestMulshift || opt->selftestClz || opt->selftestFdct32 || opt->selftestImdct ||
 		opt->selftestPolyphase || opt->selftestPolyphaseStride2 ||
 		opt->selftestPolyphaseStride4 || opt->selftestFastLowrate ||
 		opt->selftestHuffman ||
@@ -2362,6 +2366,86 @@ static int SelftestHuffman(void)
 	printf("Huffman bfextu asm active: %s\n", AMIGA_HUFFMAN_PAIRS_HAS_ASM() ? "yes" : "no");
 	printf("Huffman selftest cases: %lu\n", i);
 	printf("Huffman selftest failures: %lu\n", failures);
+	return failures ? 1 : 0;
+}
+
+static int SelftestCLZReference(int x)
+{
+	unsigned int ux;
+	int numZeros;
+
+	ux = (unsigned int)x;
+	if (!ux)
+		return 32;
+	numZeros = 0;
+	while (!(ux & 0x80000000UL)) {
+		numZeros++;
+		ux <<= 1;
+	}
+	return numZeros;
+}
+
+static int TestCLZValue(int x, unsigned long index)
+{
+	int c;
+	int a;
+
+	c = SelftestCLZReference(x);
+	a = CLZ(x);
+	if (a != c) {
+		printf("CLZ mismatch %lu: x=0x%08lx C=%ld active=%ld\n",
+			index, (unsigned long)(unsigned int)x, (long)c, (long)a);
+		return -1;
+	}
+	return 0;
+}
+
+static int SelftestClz(void)
+{
+	static const int edges[] = {
+		0,
+		1,
+		0x7fffffffL,
+		(int)0xffffffffUL
+	};
+	unsigned long failures;
+	unsigned long tested;
+	unsigned long seed;
+	unsigned long i;
+
+	failures = 0;
+	tested = 0;
+	seed = 0x636c7a21UL;
+
+	for (i = 0; i < sizeof(edges) / sizeof(edges[0]); i++) {
+		if (TestCLZValue(edges[i], tested) != 0)
+			failures++;
+		tested++;
+	}
+
+	for (i = 0; i < 32UL; i++) {
+		int x = (int)(1UL << i);
+		if (TestCLZValue(x, tested) != 0)
+			failures++;
+		tested++;
+	}
+
+	for (i = 0; i < 10000UL; i++) {
+		int x = (int)NextRand32(&seed);
+		if (TestCLZValue(x, tested) != 0)
+			failures++;
+		tested++;
+	}
+
+	printf("CLZ bfffo asm available: %s\n",
+#if defined(CLZ_HAS_AMIGA_M68K_ASM) && CLZ_HAS_AMIGA_M68K_ASM
+		"yes"
+#else
+		"no (C reference path only in this build)"
+#endif
+	);
+	printf("CLZ selftest cases: %lu\n", tested);
+	printf("CLZ selftest failures: %lu\n", failures);
 	return failures ? 1 : 0;
 }
 
@@ -4140,6 +4224,11 @@ int main(int argc, char **argv)
 	}
 	if (opt.selftestMulshift) {
 		int selftestErr = SelftestMulshift();
+		AmigaFreeNormalizedArgs(&normalized);
+		return selftestErr;
+	}
+	if (opt.selftestClz) {
+		int selftestErr = SelftestClz();
 		AmigaFreeNormalizedArgs(&normalized);
 		return selftestErr;
 	}

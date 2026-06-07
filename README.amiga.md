@@ -241,6 +241,10 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
 - `--selftest-mulshift` compares the portable C `MULSHIFT32` reference with the
   optional 68020+ assembly helper over edge cases and 100,000 pseudo-random
   input pairs.
+- `--selftest-clz` compares the portable C `CLZ` reference with the active
+  helper over zero, one, every power of two, `0x7fffffff`, `0xffffffff`, and
+  10,000 pseudo-random inputs.  In `AMIGA_M68K_ASM` 68020+ builds this proves
+  the inline `bfffo` helper against the C reference.
 - `--selftest-fdct32` compares `FDCT32_C_REFERENCE` against the normal `FDCT32`
   entry point, so `AMIGA_M68K_ASM_FDCT32` builds can prove the optional asm
   multiply path preserves the C operation order and fixed-point outputs.
@@ -285,14 +289,31 @@ decoded frame count and output sample count.
    output on target hardware to separate frame decode, conversion/compression,
    and filesystem cost.
 3. `AMIGA_M68K_ASM` currently optimizes `MULSHIFT32` with optional 68020+
-   `muls.l` inline assembly.  Build and prove it before touching additional
-   helpers:
+   `muls.l` inline assembly and `CLZ` with optional 68020+ `bfffo` inline
+   assembly.  Build and prove both helpers before enabling deeper asm paths:
 
    ```sh
    m68k-amigaos-gcc -m68020 -std=gnu89 -O2 -DAMIGA_M68K_ASM -Ipub -Ireal \
      -o amiga_mp3dec.asm amiga_mp3dec.c mp3dec.c mp3tabs.c real/*.c
    amiga_mp3dec.asm --selftest-mulshift
+   amiga_mp3dec.asm --selftest-clz
    ```
+
+   Upstream GCC's m68k backend has a `clzsi2` pattern that emits `bfffo` when
+   targeting 68020+ bit-field instructions, and marks CLZ-at-zero as 32 because
+   `bfffo`/ColdFire `ff1` return 32 for zero.  This workspace did not include
+   `m68k-amigaos-gcc`, so the local command-line selftest keeps the inline asm
+   explicit until the exact Amiga cross-compiler build is disassembled.  Verify
+   the installed compiler with:
+
+   ```sh
+   printf 'int f(unsigned x){return x?__builtin_clz(x):32;}\n' | \
+     m68k-amigaos-gcc -m68020 -O2 -S -xc - -o - | grep bfffo
+   ```
+
+   If that command emits `bfffo`, a future pass can remove the handwritten
+   `CLZ_AMIGA_M68K_ASM` wrapper and rely on the builtin guarded by the same zero
+   check.
 
 4. `AMIGA_M68K_ASM_FDCT32` is an opt-in, exact FDCT32 arithmetic path for
    68020+ GNU m68k builds, tuned for the 68030.  It keeps `FDCT32_C_REFERENCE`
