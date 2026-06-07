@@ -212,6 +212,9 @@ int DecodeHuffmanPairs_C_REFERENCE(int *xy, int nVals, int tabIdx, int bitsLeft,
 				bitsLeft -= 16;
 			} else {
 				/* last time through, pad cache with zeros and drain cache */
+				if (gHuffmanTrace)
+					printf("T%d END-DRAIN entry: nVals=%d bitsLeft=%d cachedBits=%d padBits=%d\n",
+						gHuffmanTrace, nVals, bitsLeft, cachedBits, padBits);
 				if (cachedBits + bitsLeft <= 0)	return -1;
 				if (bitsLeft > 0)	cache |= (unsigned int)(*buf++) << (24 - cachedBits);
 				if (bitsLeft > 8)	cache |= (unsigned int)(*buf++) << (16 - cachedBits);
@@ -221,9 +224,6 @@ int DecodeHuffmanPairs_C_REFERENCE(int *xy, int nVals, int tabIdx, int bitsLeft,
 				cache &= (signed int)0x80000000 >> (cachedBits - 1);
 				padBits = 11;
 				cachedBits += padBits;	/* okay if this is > 32 (0's automatically shifted in from right) */
-				if (gHuffmanTrace)
-					printf("T%d END-DRAIN: nVals=%d bitsLeft=%d cachedBits=%d\n",
-						gHuffmanTrace, nVals, bitsLeft, cachedBits);
 			}
 
 			/* largest maxBits = 9, plus 2 for sign bits, so make sure cache has at least 11 bits */
@@ -259,9 +259,6 @@ int DecodeHuffmanPairs_C_REFERENCE(int *xy, int nVals, int tabIdx, int bitsLeft,
 		tCurr = tBase;
 		padBits = 0;
 		while (nVals > 0) {
-			if (gHuffmanTrace)
-				printf("CREF: nVals=%d bitsLeft=%d cachedBits=%d padBits=%d\n",
-					nVals, bitsLeft, cachedBits, padBits);
 			/* refill cache - assumes cachedBits <= 16 */
 			if (bitsLeft >= 16) {
 				cache |= LOADBE16(buf) << (16 - cachedBits);
@@ -269,6 +266,9 @@ int DecodeHuffmanPairs_C_REFERENCE(int *xy, int nVals, int tabIdx, int bitsLeft,
 				cachedBits += 16;
 				bitsLeft -= 16;
 			} else {
+				if (gHuffmanTrace)
+					printf("T%d END-DRAIN entry: nVals=%d bitsLeft=%d cachedBits=%d padBits=%d\n",
+						gHuffmanTrace, nVals, bitsLeft, cachedBits, padBits);
 				if (cachedBits + bitsLeft <= 0)	return -1;
 				if (bitsLeft > 0)	cache |= (unsigned int)(*buf++) << (24 - cachedBits);
 				if (bitsLeft > 8)	cache |= (unsigned int)(*buf++) << (16 - cachedBits);
@@ -278,9 +278,6 @@ int DecodeHuffmanPairs_C_REFERENCE(int *xy, int nVals, int tabIdx, int bitsLeft,
 				cache &= (signed int)0x80000000 >> (cachedBits - 1);
 				padBits = 11;
 				cachedBits += padBits;
-				if (gHuffmanTrace)
-					printf("T%d END-DRAIN: nVals=%d bitsLeft=%d cachedBits=%d\n",
-						gHuffmanTrace, nVals, bitsLeft, cachedBits);
 			}
 
 			while (nVals > 0 && cachedBits >= 11) {
@@ -326,6 +323,9 @@ int DecodeHuffmanPairs_C_REFERENCE(int *xy, int nVals, int tabIdx, int bitsLeft,
 				bitsLeft -= 16;
 			} else {
 				/* last time through, pad cache with zeros and drain cache */
+				if (gHuffmanTrace)
+					printf("T%d END-DRAIN entry: nVals=%d bitsLeft=%d cachedBits=%d padBits=%d\n",
+						gHuffmanTrace, nVals, bitsLeft, cachedBits, padBits);
 				if (cachedBits + bitsLeft <= 0)	return -1;
 				if (bitsLeft > 0)	cache |= (unsigned int)(*buf++) << (24 - cachedBits);
 				if (bitsLeft > 8)	cache |= (unsigned int)(*buf++) << (16 - cachedBits);
@@ -335,9 +335,6 @@ int DecodeHuffmanPairs_C_REFERENCE(int *xy, int nVals, int tabIdx, int bitsLeft,
 				cache &= (signed int)0x80000000 >> (cachedBits - 1);
 				padBits = 11;
 				cachedBits += padBits;	/* okay if this is > 32 (0's automatically shifted in from right) */
-				if (gHuffmanTrace)
-					printf("T%d END-DRAIN: nVals=%d bitsLeft=%d cachedBits=%d\n",
-						gHuffmanTrace, nVals, bitsLeft, cachedBits);
 			}
 
 			/* largest maxBits = 9, plus 2 for sign bits, so make sure cache has at least 11 bits */
@@ -463,23 +460,20 @@ static int DecodeHuffmanPairs_BFEXTU(int *xy, int nVals, int tabIdx, int bitsLef
 	tCurr = tBase;
 	padBits = 0;
 	while (nVals > 0) {
-		if (gHuffmanTrace)
-			printf("BFEXTU: nVals=%d bitsLeft=%d cachedBits=%d padBits=%d bitPos=%d\n",
-				nVals, bitsLeft, cachedBits, padBits, bitPos);
 		/* refill cache - assumes cachedBits <= 16 */
 		if (bitsLeft >= 16) {
 			cachedBits += 16;
 			bitsLeft -= 16;
 		} else {
+			if (gHuffmanTrace)
+				printf("T%d END-DRAIN entry: nVals=%d bitsLeft=%d cachedBits=%d padBits=%d bitPos=%d\n",
+					gHuffmanTrace, nVals, bitsLeft, cachedBits, padBits, bitPos);
 			if (cachedBits + bitsLeft <= 0)	return -1;
 			cachedBits += bitsLeft;
 			bitsLeft = 0;
 
 			padBits = 11;
 			cachedBits += padBits;
-			if (gHuffmanTrace)
-				printf("T%d END-DRAIN: nVals=%d bitsLeft=%d cachedBits=%d\n",
-					gHuffmanTrace, nVals, bitsLeft, cachedBits);
 		}
 
 		while (nVals > 0 && cachedBits >= 11) {
