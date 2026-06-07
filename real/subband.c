@@ -49,14 +49,14 @@
 static void FDCT32FastLowrate(int *x, int *d, int offset, int oddBlock, int gb,
 	int stride, int phase)
 {
+	(void)phase;
 #if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE)
-	if (stride == 2 && phase == 0) {
+	if (stride == 2) {
 		FDCT32Half(x, d, offset, oddBlock, gb);
 		return;
 	}
 #else
 	(void)stride;
-	(void)phase;
 #endif
 	FDCT32(x, d, offset, oddBlock, gb);
 }
