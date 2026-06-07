@@ -372,7 +372,7 @@ int DecodeHuffmanPairs_C_REFERENCE(int *xy, int nVals, int tabIdx, int bitsLeft,
 static int DecodeHuffmanPairs_BFEXTU(int *xy, int nVals, int tabIdx, int bitsLeft, unsigned char *buf, int bitOffset)
 {
 	int x, y;
-	int len, startBits, linBits, maxBits;
+	int len, startBits, maxBits;
 	int bitPos, remaining, validBits;
 	HuffTabType tabType;
 	unsigned short cw, *tBase, *tCurr;
@@ -386,7 +386,6 @@ static int DecodeHuffmanPairs_BFEXTU(int *xy, int nVals, int tabIdx, int bitsLef
 	startBits = bitsLeft;
 
 	tBase = (unsigned short *)(huffTable + huffTabOffset[tabIdx]);
-	linBits = huffTabLookup[tabIdx].linBits;
 	tabType = huffTabLookup[tabIdx].tabType;
 
 	ASSERT(!(nVals & 0x01));
@@ -394,7 +393,13 @@ static int DecodeHuffmanPairs_BFEXTU(int *xy, int nVals, int tabIdx, int bitsLef
 	ASSERT(tabIdx >= 0);
 	ASSERT(tabType != invalidTab);
 
-	if (tabType != loopLinbits)
+	/*
+	 * bfextu maps cleanly to the no-linbits tables: lookup a codeword,
+	 * consume the optional x/y sign bits, then emit the pair.  The linbits
+	 * tables have escape values plus C-reference padBits/cachedBits end-drain
+	 * accounting, so keep them on the portable path for correctness.
+	 */
+	if (tabType != loopNoLinbits)
 		return DecodeHuffmanPairs_C_REFERENCE(xy, nVals, tabIdx, bitsLeft, buf, bitOffset);
 
 	bitPos = bitOffset;
@@ -402,6 +407,7 @@ static int DecodeHuffmanPairs_BFEXTU(int *xy, int nVals, int tabIdx, int bitsLef
 	while (nVals > 0) {
 		if (remaining <= 0)
 			return -1;
+
 		tCurr = tBase;
 		for (;;) {
 			maxBits = GetMaxbits(tCurr[0]);
@@ -412,59 +418,39 @@ static int DecodeHuffmanPairs_BFEXTU(int *xy, int nVals, int tabIdx, int bitsLef
 			if (!len) {
 				bitPos += maxBits;
 				remaining -= maxBits;
-				if (remaining < 0)
-					return -1;
 				tCurr += cw;
 				continue;
 			}
 			bitPos += len;
 			remaining -= len;
-			if (remaining <= 0)
-				goto done;
 			break;
 		}
 
 		x = GetCWX(cw);
-		y = GetCWY(cw);
-
-		if (x == 15) {
-			if (remaining < linBits)
-				goto done;
-			x += (int)HuffmanBFExtU(buf, bitPos, linBits);
-			bitPos += linBits;
-			remaining -= linBits;
-		}
 		if (x) {
-			if (remaining < 1)
-				goto done;
 			if (HuffmanBFExtU(buf, bitPos, 1))
 				x |= (int)0x80000000;
 			bitPos++;
 			remaining--;
 		}
 
-		if (y == 15) {
-			if (remaining < linBits)
-				goto done;
-			y += (int)HuffmanBFExtU(buf, bitPos, linBits);
-			bitPos += linBits;
-			remaining -= linBits;
-		}
+		y = GetCWY(cw);
 		if (y) {
-			if (remaining < 1)
-				goto done;
 			if (HuffmanBFExtU(buf, bitPos, 1))
 				y |= (int)0x80000000;
 			bitPos++;
 			remaining--;
 		}
 
+		/* Equivalent to the C reference cachedBits < padBits drain check. */
+		if (remaining < 0)
+			return -1;
+
 		*xy++ = x;
 		*xy++ = y;
 		nVals -= 2;
 	}
 
- done:
 	return (startBits - remaining);
 }
 #endif
