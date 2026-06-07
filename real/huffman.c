@@ -52,6 +52,7 @@ static __inline unsigned int LOADBE16(const unsigned char *buf)
 }
 #endif
 #include "string.h"
+#include <stdio.h>
 
 /* helper macros - see comments in hufftabs.c about the format of the huffman tables */
 #define GetMaxbits(x)   ((int)( (((unsigned short)(x)) >>  0) & 0x000f))
@@ -165,6 +166,9 @@ int DecodeHuffmanPairs_C_REFERENCE(int *xy, int nVals, int tabIdx, int bitsLeft,
 	HuffTabType tabType;
 	unsigned short cw, *tBase, *tCurr;
 	unsigned int cache;
+	int debug;
+
+	debug = (nVals == 318 && bitsLeft == 665 && bitOffset == 6 && tabIdx == 9);
 
 	if(nVals <= 0) 
 		return 0;
@@ -249,6 +253,9 @@ int DecodeHuffmanPairs_C_REFERENCE(int *xy, int nVals, int tabIdx, int bitsLeft,
 		tCurr = tBase;
 		padBits = 0;
 		while (nVals > 0) {
+			if (debug)
+				printf("CREF: nVals=%d bitsLeft=%d cachedBits=%d padBits=%d\n",
+					nVals, bitsLeft, cachedBits, padBits);
 			/* refill cache - assumes cachedBits <= 16 */
 			if (bitsLeft >= 16) {
 				cache |= LOADBE16(buf) << (16 - cachedBits);
@@ -402,6 +409,9 @@ static int DecodeHuffmanPairs_BFEXTU(int *xy, int nVals, int tabIdx, int bitsLef
 	HuffTabType tabType;
 	unsigned short cw, *tBase, *tCurr;
 	unsigned int bits;
+	int debug;
+
+	debug = (nVals == 318 && bitsLeft == 665 && bitOffset == 6 && tabIdx == 9);
 
 	if(nVals <= 0)
 		return 0;
@@ -435,6 +445,9 @@ static int DecodeHuffmanPairs_BFEXTU(int *xy, int nVals, int tabIdx, int bitsLef
 	tCurr = tBase;
 	padBits = 0;
 	while (nVals > 0) {
+		if (debug)
+			printf("BFEXTU: nVals=%d bitsLeft=%d cachedBits=%d padBits=%d bitPos=%d\n",
+				nVals, bitsLeft, cachedBits, padBits, bitPos);
 		/* refill cache - assumes cachedBits <= 16 */
 		if (bitsLeft >= 16) {
 			cachedBits += 16;
