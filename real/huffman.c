@@ -89,10 +89,24 @@ static __inline unsigned int HuffmanBFExtU(const unsigned char *buf, int bitPos,
 static __inline unsigned int HuffmanBFExtUPadded(const unsigned char *buf, int bitPos, int nBits, int validBits)
 {
 	unsigned int bits;
+	int padBits;
 
 	bits = HuffmanBFExtU(buf, bitPos, nBits);
-	if (validBits < nBits)
-		bits &= ~((1U << (nBits - validBits)) - 1U);
+	if (validBits <= 0)
+		return 0;
+	if (validBits < nBits) {
+		/*
+		 * bfextu returns the maxBits-wide field right-justified with the
+		 * earliest bit in bit (nBits - 1).  The portable cache pads the
+		 * tail of a short field with zeroes, so clear the invalid low-order
+		 * bits explicitly.  Keep this as shifts rather than a complemented
+		 * low-bit mask so the direction of the zero padding is unambiguous on
+		 * the 68020+ bitfield path.
+		 */
+		padBits = nBits - validBits;
+		bits >>= padBits;
+		bits <<= padBits;
+	}
 	return bits;
 }
 #endif
@@ -358,7 +372,7 @@ static int DecodeHuffmanPairs_BFEXTU(int *xy, int nVals, int tabIdx, int bitsLef
 {
 	int x, y;
 	int len, startBits, linBits, maxBits;
-	int bitPos, remaining;
+	int bitPos, remaining, validBits;
 	HuffTabType tabType;
 	unsigned short cw, *tBase, *tCurr;
 	unsigned int bits;
@@ -390,7 +404,8 @@ static int DecodeHuffmanPairs_BFEXTU(int *xy, int nVals, int tabIdx, int bitsLef
 			if (remaining <= 0)
 				return -1;
 			maxBits = GetMaxbits(tCurr[0]);
-			bits = HuffmanBFExtUPadded(buf, bitPos, maxBits, remaining);
+			validBits = (remaining < maxBits) ? remaining : maxBits;
+			bits = HuffmanBFExtUPadded(buf, bitPos, maxBits, validBits);
 			cw = tCurr[bits + 1];
 			len = GetHLen(cw);
 			if (!len) {
