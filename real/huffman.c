@@ -166,9 +166,9 @@ int DecodeHuffmanPairs_C_REFERENCE(int *xy, int nVals, int tabIdx, int bitsLeft,
 	HuffTabType tabType;
 	unsigned short cw, *tBase, *tCurr;
 	unsigned int cache;
-	int debug;
+	int gHuffmanTrace;
 
-	debug = (nVals == 318 && bitsLeft == 665 && bitOffset == 6 && tabIdx == 9);
+	gHuffmanTrace = (nVals == 318 && bitsLeft == 665 && bitOffset == 6 && tabIdx == 9) ? 1 : 0;
 
 	if(nVals <= 0) 
 		return 0;
@@ -221,6 +221,9 @@ int DecodeHuffmanPairs_C_REFERENCE(int *xy, int nVals, int tabIdx, int bitsLeft,
 				cache &= (signed int)0x80000000 >> (cachedBits - 1);
 				padBits = 11;
 				cachedBits += padBits;	/* okay if this is > 32 (0's automatically shifted in from right) */
+				if (gHuffmanTrace)
+					printf("T%d END-DRAIN: nVals=%d bitsLeft=%d cachedBits=%d\n",
+						gHuffmanTrace, nVals, bitsLeft, cachedBits);
 			}
 
 			/* largest maxBits = 9, plus 2 for sign bits, so make sure cache has at least 11 bits */
@@ -243,6 +246,9 @@ int DecodeHuffmanPairs_C_REFERENCE(int *xy, int nVals, int tabIdx, int bitsLeft,
 			}
 		}
 		bitsLeft += (cachedBits - padBits);
+		if (gHuffmanTrace)
+			printf("T%d RETURN: startBits=%d bitsLeft=%d result=%d\n",
+				gHuffmanTrace, startBits, bitsLeft, startBits - bitsLeft);
 		return (startBits - bitsLeft);
 	} else if (tabType == loopNoLinbits) {
 		/*
@@ -253,7 +259,7 @@ int DecodeHuffmanPairs_C_REFERENCE(int *xy, int nVals, int tabIdx, int bitsLeft,
 		tCurr = tBase;
 		padBits = 0;
 		while (nVals > 0) {
-			if (debug)
+			if (gHuffmanTrace)
 				printf("CREF: nVals=%d bitsLeft=%d cachedBits=%d padBits=%d\n",
 					nVals, bitsLeft, cachedBits, padBits);
 			/* refill cache - assumes cachedBits <= 16 */
@@ -272,6 +278,9 @@ int DecodeHuffmanPairs_C_REFERENCE(int *xy, int nVals, int tabIdx, int bitsLeft,
 				cache &= (signed int)0x80000000 >> (cachedBits - 1);
 				padBits = 11;
 				cachedBits += padBits;
+				if (gHuffmanTrace)
+					printf("T%d END-DRAIN: nVals=%d bitsLeft=%d cachedBits=%d\n",
+						gHuffmanTrace, nVals, bitsLeft, cachedBits);
 			}
 
 			while (nVals > 0 && cachedBits >= 11) {
@@ -300,6 +309,9 @@ int DecodeHuffmanPairs_C_REFERENCE(int *xy, int nVals, int tabIdx, int bitsLeft,
 			}
 		}
 		bitsLeft += (cachedBits - padBits);
+		if (gHuffmanTrace)
+			printf("T%d RETURN: startBits=%d bitsLeft=%d result=%d\n",
+				gHuffmanTrace, startBits, bitsLeft, startBits - bitsLeft);
 		return (startBits - bitsLeft);
 	} else if (tabType == loopLinbits) {
 		tCurr = tBase;
@@ -323,6 +335,9 @@ int DecodeHuffmanPairs_C_REFERENCE(int *xy, int nVals, int tabIdx, int bitsLeft,
 				cache &= (signed int)0x80000000 >> (cachedBits - 1);
 				padBits = 11;
 				cachedBits += padBits;	/* okay if this is > 32 (0's automatically shifted in from right) */
+				if (gHuffmanTrace)
+					printf("T%d END-DRAIN: nVals=%d bitsLeft=%d cachedBits=%d\n",
+						gHuffmanTrace, nVals, bitsLeft, cachedBits);
 			}
 
 			/* largest maxBits = 9, plus 2 for sign bits, so make sure cache has at least 11 bits */
@@ -393,6 +408,9 @@ int DecodeHuffmanPairs_C_REFERENCE(int *xy, int nVals, int tabIdx, int bitsLeft,
 			}
 		}
 		bitsLeft += (cachedBits - padBits);
+		if (gHuffmanTrace)
+			printf("T%d RETURN: startBits=%d bitsLeft=%d result=%d\n",
+				gHuffmanTrace, startBits, bitsLeft, startBits - bitsLeft);
 		return (startBits - bitsLeft);
 	}
 
@@ -409,9 +427,9 @@ static int DecodeHuffmanPairs_BFEXTU(int *xy, int nVals, int tabIdx, int bitsLef
 	HuffTabType tabType;
 	unsigned short cw, *tBase, *tCurr;
 	unsigned int bits;
-	int debug;
+	int gHuffmanTrace;
 
-	debug = (nVals == 318 && bitsLeft == 665 && bitOffset == 6 && tabIdx == 9);
+	gHuffmanTrace = (nVals == 318 && bitsLeft == 665 && bitOffset == 6 && tabIdx == 9) ? 2 : 0;
 
 	if(nVals <= 0)
 		return 0;
@@ -445,7 +463,7 @@ static int DecodeHuffmanPairs_BFEXTU(int *xy, int nVals, int tabIdx, int bitsLef
 	tCurr = tBase;
 	padBits = 0;
 	while (nVals > 0) {
-		if (debug)
+		if (gHuffmanTrace)
 			printf("BFEXTU: nVals=%d bitsLeft=%d cachedBits=%d padBits=%d bitPos=%d\n",
 				nVals, bitsLeft, cachedBits, padBits, bitPos);
 		/* refill cache - assumes cachedBits <= 16 */
@@ -459,6 +477,9 @@ static int DecodeHuffmanPairs_BFEXTU(int *xy, int nVals, int tabIdx, int bitsLef
 
 			padBits = 11;
 			cachedBits += padBits;
+			if (gHuffmanTrace)
+				printf("T%d END-DRAIN: nVals=%d bitsLeft=%d cachedBits=%d\n",
+					gHuffmanTrace, nVals, bitsLeft, cachedBits);
 		}
 
 		while (nVals > 0 && cachedBits >= 11) {
@@ -504,6 +525,9 @@ static int DecodeHuffmanPairs_BFEXTU(int *xy, int nVals, int tabIdx, int bitsLef
 		}
 	}
 	bitsLeft += (cachedBits - padBits);
+	if (gHuffmanTrace)
+		printf("T%d RETURN: startBits=%d bitsLeft=%d result=%d\n",
+			gHuffmanTrace, startBits, bitsLeft, startBits - bitsLeft);
 	return (startBits - bitsLeft);
 }
 #endif
