@@ -178,68 +178,92 @@ static __inline const int *FDCT32_AMIGA_M68K_FIRST_PASS(int *buf, const int *cpt
 #undef FDCT32_M68K_FIRST_BUTTERFLY
 
 /*
- * Keep the four radix-8 groups in one small loop.  Each half-butterfly uses
- * d0-d6 with the same roles, writes its four intermediates back to buf, then
- * the final stage reuses those slots.  This avoids compiler spills while
- * keeping code size down.  A four-copy unrolled variant may still be faster on
- * a 68030 by avoiding loop and branch overhead, so compare both on the target.
+ * Keep the four radix-8 groups in one small loop by default.  Each
+ * half-butterfly uses d0-d6 with the same roles, writes its four
+ * intermediates back to buf, then the final stage reuses those slots.  This
+ * avoids compiler spills while keeping code size down.
  */
+#define FDCT32_M68K_SECOND_GROUP(p0, p1, p2, p3, p4, p5, p6, p7) \
+	/* even half: a0/a3/a4/a7 */ \
+	"\tmove.l " p0 "(%0),%%d0\n\tmove.l " p7 "(%0),%%d1\n" \
+	"\tmove.l %%d0,%%d2\n\tadd.l %%d1,%%d0\n\tsub.l %%d1,%%d2\n" \
+	"\tmuls.l (%1)+,%%d3:%%d2\n\tlsl.l #1,%%d3\n" \
+	"\tmove.l " p3 "(%0),%%d1\n\tmove.l " p4 "(%0),%%d2\n" \
+	"\tmove.l %%d1,%%d4\n\tadd.l %%d2,%%d1\n\tsub.l %%d2,%%d4\n" \
+	"\tmuls.l (%1)+,%%d2:%%d4\n\tlsl.l #3,%%d2\n" \
+	"\tmove.l %%d0,%%d4\n\tsub.l %%d1,%%d4\n" \
+	"\tmuls.l (%1),%%d5:%%d4\n\tlsl.l #1,%%d5\n\tadd.l %%d1,%%d0\n" \
+	"\tmove.l %%d3,%%d4\n\tsub.l %%d2,%%d4\n" \
+	"\tmuls.l (%1)+,%%d6:%%d4\n\tlsl.l #1,%%d6\n\tadd.l %%d3,%%d2\n" \
+	"\tmove.l %%d0," p0 "(%0)\n\tmove.l %%d5," p3 "(%0)\n" \
+	"\tmove.l %%d2," p4 "(%0)\n\tmove.l %%d6," p7 "(%0)\n" \
+	/* odd half: a1/a2/a5/a6 */ \
+	"\tmove.l " p1 "(%0),%%d0\n\tmove.l " p6 "(%0),%%d1\n" \
+	"\tmove.l %%d0,%%d2\n\tadd.l %%d1,%%d0\n\tsub.l %%d1,%%d2\n" \
+	"\tmuls.l (%1)+,%%d3:%%d2\n\tlsl.l #1,%%d3\n" \
+	"\tmove.l " p2 "(%0),%%d1\n\tmove.l " p5 "(%0),%%d2\n" \
+	"\tmove.l %%d1,%%d4\n\tadd.l %%d2,%%d1\n\tsub.l %%d2,%%d4\n" \
+	"\tmuls.l (%1)+,%%d2:%%d4\n\tlsl.l #1,%%d2\n" \
+	"\tmove.l %%d0,%%d4\n\tsub.l %%d1,%%d4\n" \
+	"\tmuls.l (%1),%%d5:%%d4\n\tlsl.l #2,%%d5\n\tadd.l %%d1,%%d0\n" \
+	"\tmove.l %%d3,%%d4\n\tsub.l %%d2,%%d4\n" \
+	"\tmuls.l (%1)+,%%d6:%%d4\n\tlsl.l #2,%%d6\n\tadd.l %%d3,%%d2\n" \
+	"\tmove.l %%d0," p1 "(%0)\n\tmove.l %%d5," p2 "(%0)\n" \
+	"\tmove.l %%d2," p5 "(%0)\n\tmove.l %%d6," p6 "(%0)\n" \
+	/* final radix-2 stage */ \
+	"\tmove.l " p0 "(%0),%%d0\n\tmove.l " p1 "(%0),%%d1\n" \
+	"\tmove.l %%d0,%%d2\n\tsub.l %%d1,%%d2\n\tadd.l %%d1,%%d0\n" \
+	"\tmuls.l (%2),%%d3:%%d2\n\tlsl.l #1,%%d3\n" \
+	"\tmove.l %%d0," p0 "(%0)\n\tmove.l %%d3," p1 "(%0)\n" \
+	"\tmove.l " p2 "(%0),%%d0\n\tmove.l " p3 "(%0),%%d1\n" \
+	"\tmove.l %%d1,%%d2\n\tsub.l %%d0,%%d2\n\tadd.l %%d1,%%d0\n" \
+	"\tmuls.l (%2),%%d3:%%d2\n\tlsl.l #1,%%d3\n\tadd.l %%d3,%%d0\n" \
+	"\tmove.l %%d0," p2 "(%0)\n\tmove.l %%d3," p3 "(%0)\n" \
+	"\tmove.l " p4 "(%0),%%d0\n\tmove.l " p5 "(%0),%%d1\n" \
+	"\tmove.l %%d0,%%d2\n\tsub.l %%d1,%%d2\n\tadd.l %%d1,%%d0\n" \
+	"\tmuls.l (%2),%%d3:%%d2\n\tlsl.l #1,%%d3\n" \
+	"\tmove.l %%d0," p4 "(%0)\n\tmove.l %%d3,%%d4\n" \
+	"\tmove.l " p6 "(%0),%%d0\n\tmove.l " p7 "(%0),%%d1\n" \
+	"\tmove.l %%d1,%%d2\n\tsub.l %%d0,%%d2\n\tadd.l %%d1,%%d0\n" \
+	"\tmuls.l (%2),%%d3:%%d2\n\tlsl.l #1,%%d3\n\tadd.l %%d3,%%d0\n" \
+	"\tmove.l " p4 "(%0),%%d1\n\tadd.l %%d0,%%d1\n\tmove.l %%d1," p4 "(%0)\n" \
+	"\tmove.l %%d4,%%d1\n\tadd.l %%d3,%%d1\n\tmove.l %%d1," p5 "(%0)\n" \
+	"\tmove.l %%d4,%%d1\n\tadd.l %%d0,%%d1\n\tmove.l %%d1," p6 "(%0)\n" \
+	"\tmove.l %%d3," p7 "(%0)\n"
+
+#if defined(AMIGA_M68K) && defined(AMIGA_M68K_ASM_FDCT32_UNROLL)
+/*
+ * 68030 speed variant: emit all four second-pass butterfly groups as
+ * straight-line code, then fall through to the already-unrolled two-half output
+ * shuffle/store path below.  This removes one lea/dbra pair per group and the
+ * ~10-cycle taken branch cost.  The tradeoff is roughly +900 bytes of .text
+ * versus the compact loop, so check the 68030 I-cache impact on target builds.
+ */
+static __inline void FDCT32_AMIGA_M68K_SECOND_PASS(int *buf, const int *cptr)
+{
+	__asm__ volatile (
+		FDCT32_M68K_SECOND_GROUP("",   "4",  "8",  "12",  "16",  "20",  "24",  "28")
+		FDCT32_M68K_SECOND_GROUP("32", "36", "40", "44",  "48",  "52",  "56",  "60")
+		FDCT32_M68K_SECOND_GROUP("64", "68", "72", "76",  "80",  "84",  "88",  "92")
+		FDCT32_M68K_SECOND_GROUP("96", "100","104","108", "112", "116", "120", "124")
+		: "+a" (buf), "+a" (cptr)
+		: "a" (&dct4)
+		: "d0", "d1", "d2", "d3", "d4", "d5", "d6", "cc", "memory");
+}
+#else
 static __inline void FDCT32_AMIGA_M68K_SECOND_PASS(int *buf, const int *cptr)
 {
 	__asm__ volatile (
 		"\tmoveq #3,%%d7\n"
 		"1:\n"
-		/* even half: a0/a3/a4/a7 */
-		"\tmove.l (%0),%%d0\n\tmove.l 28(%0),%%d1\n"
-		"\tmove.l %%d0,%%d2\n\tadd.l %%d1,%%d0\n\tsub.l %%d1,%%d2\n"
-		"\tmuls.l (%1)+,%%d3:%%d2\n\tlsl.l #1,%%d3\n"
-		"\tmove.l 12(%0),%%d1\n\tmove.l 16(%0),%%d2\n"
-		"\tmove.l %%d1,%%d4\n\tadd.l %%d2,%%d1\n\tsub.l %%d2,%%d4\n"
-		"\tmuls.l (%1)+,%%d2:%%d4\n\tlsl.l #3,%%d2\n"
-		"\tmove.l %%d0,%%d4\n\tsub.l %%d1,%%d4\n"
-		"\tmuls.l (%1),%%d5:%%d4\n\tlsl.l #1,%%d5\n\tadd.l %%d1,%%d0\n"
-		"\tmove.l %%d3,%%d4\n\tsub.l %%d2,%%d4\n"
-		"\tmuls.l (%1)+,%%d6:%%d4\n\tlsl.l #1,%%d6\n\tadd.l %%d3,%%d2\n"
-		"\tmove.l %%d0,(%0)\n\tmove.l %%d5,12(%0)\n"
-		"\tmove.l %%d2,16(%0)\n\tmove.l %%d6,28(%0)\n"
-		/* odd half: a1/a2/a5/a6 */
-		"\tmove.l 4(%0),%%d0\n\tmove.l 24(%0),%%d1\n"
-		"\tmove.l %%d0,%%d2\n\tadd.l %%d1,%%d0\n\tsub.l %%d1,%%d2\n"
-		"\tmuls.l (%1)+,%%d3:%%d2\n\tlsl.l #1,%%d3\n"
-		"\tmove.l 8(%0),%%d1\n\tmove.l 20(%0),%%d2\n"
-		"\tmove.l %%d1,%%d4\n\tadd.l %%d2,%%d1\n\tsub.l %%d2,%%d4\n"
-		"\tmuls.l (%1)+,%%d2:%%d4\n\tlsl.l #1,%%d2\n"
-		"\tmove.l %%d0,%%d4\n\tsub.l %%d1,%%d4\n"
-		"\tmuls.l (%1),%%d5:%%d4\n\tlsl.l #2,%%d5\n\tadd.l %%d1,%%d0\n"
-		"\tmove.l %%d3,%%d4\n\tsub.l %%d2,%%d4\n"
-		"\tmuls.l (%1)+,%%d6:%%d4\n\tlsl.l #2,%%d6\n\tadd.l %%d3,%%d2\n"
-		"\tmove.l %%d0,4(%0)\n\tmove.l %%d5,8(%0)\n"
-		"\tmove.l %%d2,20(%0)\n\tmove.l %%d6,24(%0)\n"
-		/* final radix-2 stage */
-		"\tmove.l (%0),%%d0\n\tmove.l 4(%0),%%d1\n"
-		"\tmove.l %%d0,%%d2\n\tsub.l %%d1,%%d2\n\tadd.l %%d1,%%d0\n"
-		"\tmuls.l (%2),%%d3:%%d2\n\tlsl.l #1,%%d3\n"
-		"\tmove.l %%d0,(%0)\n\tmove.l %%d3,4(%0)\n"
-		"\tmove.l 8(%0),%%d0\n\tmove.l 12(%0),%%d1\n"
-		"\tmove.l %%d1,%%d2\n\tsub.l %%d0,%%d2\n\tadd.l %%d1,%%d0\n"
-		"\tmuls.l (%2),%%d3:%%d2\n\tlsl.l #1,%%d3\n\tadd.l %%d3,%%d0\n"
-		"\tmove.l %%d0,8(%0)\n\tmove.l %%d3,12(%0)\n"
-		"\tmove.l 16(%0),%%d0\n\tmove.l 20(%0),%%d1\n"
-		"\tmove.l %%d0,%%d2\n\tsub.l %%d1,%%d2\n\tadd.l %%d1,%%d0\n"
-		"\tmuls.l (%2),%%d3:%%d2\n\tlsl.l #1,%%d3\n"
-		"\tmove.l %%d0,16(%0)\n\tmove.l %%d3,%%d4\n"
-		"\tmove.l 24(%0),%%d0\n\tmove.l 28(%0),%%d1\n"
-		"\tmove.l %%d1,%%d2\n\tsub.l %%d0,%%d2\n\tadd.l %%d1,%%d0\n"
-		"\tmuls.l (%2),%%d3:%%d2\n\tlsl.l #1,%%d3\n\tadd.l %%d3,%%d0\n"
-		"\tmove.l 16(%0),%%d1\n\tadd.l %%d0,%%d1\n\tmove.l %%d1,16(%0)\n"
-		"\tmove.l %%d4,%%d1\n\tadd.l %%d3,%%d1\n\tmove.l %%d1,20(%0)\n"
-		"\tmove.l %%d4,%%d1\n\tadd.l %%d0,%%d1\n\tmove.l %%d1,24(%0)\n"
-		"\tmove.l %%d3,28(%0)\n"
+		FDCT32_M68K_SECOND_GROUP("", "4", "8", "12", "16", "20", "24", "28")
 		"\tlea 32(%0),%0\n\tdbra %%d7,1b\n"
 		: "+a" (buf), "+a" (cptr)
 		: "a" (&dct4)
 		: "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7", "cc", "memory");
 }
+#endif
+#undef FDCT32_M68K_SECOND_GROUP
 
 #define FDCT32_M68K_PAIR_STORE \
 	"\tmove.l %%d0,(%1)\n\tmove.l %%d0,32(%1)\n\tlea 256(%1),%1\n"
