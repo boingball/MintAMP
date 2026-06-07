@@ -97,6 +97,31 @@ The playback implementation does not call `CurrentDir()`, `Lock()`, `Forbid()`,
 `Permit()`, `Disable()`, or `Enable()`, so playback cleanup does not own a current
 directory lock or interrupt/task-switch nesting state.
 
+
+## Minimal Intuition GUI build
+
+A small Intuition frontend is available as `amiga_mp3gui`. It links the same
+decoder object files as the command-line tool, so the decoder does not have to
+be converted into a separate static library first:
+
+```sh
+make -f Makefile.amiga gui
+```
+
+The GUI currently keeps the scope intentionally small: it opens an Intuition
+status window, decodes an MP3 passed on the command line, writes signed 16-bit
+big-endian PCM, and lets the user abort by closing the window:
+
+```sh
+amiga_mp3gui infile.mp3 outfile.pcm
+```
+
+A separate library can still be added later if multiple frontends need to share
+higher-level application code such as file requesters, 8SVX writing, or Paula
+playback. For this first GUI, linking `amiga_mp3gui.c` directly with
+`mp3dec.c`, `mp3tabs.c`, and `real/*.c` avoids an extra archive step and uses the
+public `MP3InitDecoder`/`MP3Decode` API directly.
+
 ## Usage
 
 ```sh

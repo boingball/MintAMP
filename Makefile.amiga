@@ -1,4 +1,4 @@
-# Convenience build rules for the AmigaOS/m68k command-line decoder.
+# Convenience build rules for the AmigaOS/m68k decoder frontends.
 # Override CC, CPU, OPTFLAGS, TARGET, or EXTRA_CFLAGS from the command line.
 # Example:
 #   make -f Makefile.amiga fast030
@@ -10,10 +10,13 @@ CPU ?= -m68020
 STD ?= -std=gnu89
 OPTFLAGS ?= -O2 -fomit-frame-pointer
 TARGET ?= amiga_mp3dec
+GUI_TARGET ?= amiga_mp3gui
 
 CPPFLAGS_COMMON := -Ipub -Ireal -DAMIGA_M68K
 CFLAGS_COMMON := $(CPU) $(STD) $(OPTFLAGS)
-SOURCES := amiga_mp3dec.c mp3dec.c mp3tabs.c $(wildcard real/*.c)
+DECODER_SOURCES := mp3dec.c mp3tabs.c $(wildcard real/*.c)
+SOURCES := amiga_mp3dec.c $(DECODER_SOURCES)
+GUI_SOURCES := amiga_mp3gui.c $(DECODER_SOURCES)
 
 FAST030_CPPFLAGS := \
 	-DAMIGA_M68K_ASM \
@@ -30,7 +33,7 @@ FAST030_TARGET := amiga_mp3dec.fastexp
 FAST030_ASM_SOURCES := real/amiga_m68k_polyphase.S
 AMIGA_HUNK_FAST_PREFERRED := python3 tools/amiga_fast_preferred_hunks.py
 
-.PHONY: all fast030 clean print-command print-fast030-command
+.PHONY: all fast030 gui clean print-command print-fast030-command print-gui-command
 
 all: $(TARGET)
 
@@ -40,6 +43,12 @@ $(TARGET): $(SOURCES)
 
 fast030: $(FAST030_TARGET)
 
+gui: $(GUI_TARGET)
+
+$(GUI_TARGET): $(GUI_SOURCES)
+	$(CC) $(CFLAGS_COMMON) $(CPPFLAGS_COMMON) $(EXTRA_CFLAGS) -o $@ $(GUI_SOURCES) -lauto
+	$(AMIGA_HUNK_FAST_PREFERRED) $@
+
 $(FAST030_TARGET): $(SOURCES) $(FAST030_ASM_SOURCES)
 	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(FAST030_CPPFLAGS) $(EXTRA_CFLAGS) -o $@ $(SOURCES) $(FAST030_ASM_SOURCES)
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
@@ -48,9 +57,13 @@ print-command:
 	@printf '%s\n' '$(CC) $(CFLAGS_COMMON) $(CPPFLAGS_COMMON) $(EXTRA_CFLAGS) -o $(TARGET) $(SOURCES)'
 	@printf '%s\n' '$(AMIGA_HUNK_FAST_PREFERRED) $(TARGET)'
 
+print-gui-command:
+	@printf '%s\n' '$(CC) $(CFLAGS_COMMON) $(CPPFLAGS_COMMON) $(EXTRA_CFLAGS) -o $(GUI_TARGET) $(GUI_SOURCES) -lauto'
+	@printf '%s\n' '$(AMIGA_HUNK_FAST_PREFERRED) $(GUI_TARGET)'
+
 print-fast030-command:
 	@printf '%s\n' '$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(FAST030_CPPFLAGS) $(EXTRA_CFLAGS) -o $(FAST030_TARGET) $(SOURCES) $(FAST030_ASM_SOURCES)'
 	@printf '%s\n' '$(AMIGA_HUNK_FAST_PREFERRED) $(FAST030_TARGET)'
 
 clean:
-	rm -f $(TARGET) $(FAST030_TARGET)
+	rm -f $(TARGET) $(FAST030_TARGET) $(GUI_TARGET)
