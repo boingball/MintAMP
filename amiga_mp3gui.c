@@ -21,6 +21,7 @@
 #include <intuition/intuition.h>
 #include <libraries/asl.h>
 #include <dos/dos.h>
+#include <dos/dostags.h>
 #include <proto/exec.h>
 #include <proto/intuition.h>
 #include <proto/graphics.h>
