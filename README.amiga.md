@@ -242,7 +242,8 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   window cases.
 - `--selftest-polyphase` compares the C fast mono polyphase path with the active
   mono polyphase entry point, so `AMIGA_M68K_ASM_POLYPHASE` builds can prove the
-  optional 68030 assembly kernel before selecting it with `--exp-poly`.
+  optional 68030 assembly kernel.  When the asm hook is active, `--exp-poly` also
+  runs this selftest before enabling the playback/decode hot path.
 - `--selftest-fastlowrate` compares a synthetic ramp/impulse-like PCM sequence
   through normal 44100 -> 11025 `--rate` decimation and the stride-4
   fast-lowrate selector across chunk boundaries.
@@ -320,8 +321,9 @@ decoded frame count and output sample count.
 
 6. `AMIGA_M68K_ASM_POLYPHASE` is an opt-in, experimental 68030 mono fast
    polyphase kernel.  The C fast mono path remains callable as the reference;
-   `--selftest-polyphase` compares it against the active asm hook before
-   playback selects the assembly path with `--exp-poly`.
+   `--selftest-polyphase` compares it against the active asm hook, and
+   `--exp-poly` reruns that check automatically before playback or decode
+   selects the assembly path.
 
    ```sh
    m68k-amigaos-gcc -m68030 -std=gnu89 -O3 -fomit-frame-pointer \

@@ -869,7 +869,7 @@ void PolyphaseMonoFast_C_REFERENCE(short *pcm, int *vbuf, const int *coefBase)
 #endif
 }
 
-int PolyphaseMonoFast_HAS_AMIGA_M68K_ASM_RUNTIME(void)
+int AmigaM68KPolyphaseMonoFast_IsActive(void)
 {
 #if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_M68K_ASM_POLYPHASE)
 	return AmigaM68KPolyphaseMonoFast ? 1 : 0;
@@ -878,10 +878,15 @@ int PolyphaseMonoFast_HAS_AMIGA_M68K_ASM_RUNTIME(void)
 #endif
 }
 
+int PolyphaseMonoFast_HAS_AMIGA_M68K_ASM_RUNTIME(void)
+{
+	return AmigaM68KPolyphaseMonoFast_IsActive();
+}
+
 void PolyphaseMonoFast_TEST_ACTIVE(short *pcm, int *vbuf, const int *coefBase)
 {
 #if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_M68K_ASM_POLYPHASE)
-	if (AmigaM68KPolyphaseMonoFast) {
+	if (AmigaM68KPolyphaseMonoFast_IsActive()) {
 		AmigaM68KPolyphaseMonoFast(pcm, vbuf, coefBase);
 		return;
 	}

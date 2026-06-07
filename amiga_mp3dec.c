@@ -45,6 +45,7 @@ int STATNAME(IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
 void STATNAME(PolyphaseMonoFast_C_REFERENCE)(short *pcm, int *vbuf, const int *coefBase);
 void STATNAME(PolyphaseMonoFast_TEST_ACTIVE)(short *pcm, int *vbuf, const int *coefBase);
 int STATNAME(PolyphaseMonoFast_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
+int STATNAME(AmigaM68KPolyphaseMonoFast_IsActive)(void);
 extern const int STATNAME(polyCoef)[264];
 #define AMIGA_FDCT32 STATNAME(FDCT32)
 #define AMIGA_FDCT32_C_REFERENCE STATNAME(FDCT32_C_REFERENCE)
@@ -56,6 +57,7 @@ extern const int STATNAME(polyCoef)[264];
 #define AMIGA_POLYPHASE_MONO_FAST_C_REFERENCE STATNAME(PolyphaseMonoFast_C_REFERENCE)
 #define AMIGA_POLYPHASE_MONO_FAST_TEST_ACTIVE STATNAME(PolyphaseMonoFast_TEST_ACTIVE)
 #define AMIGA_POLYPHASE_MONO_FAST_HAS_ASM STATNAME(PolyphaseMonoFast_HAS_AMIGA_M68K_ASM_RUNTIME)
+#define AMIGA_M68K_POLYPHASE_MONO_FAST_IS_ACTIVE STATNAME(AmigaM68KPolyphaseMonoFast_IsActive)
 #define AMIGA_POLY_COEF STATNAME(polyCoef)
 
 #define READBUF_SIZE (1024 * 16)
@@ -3997,7 +3999,6 @@ int main(int argc, char **argv)
 		fprintf(stderr, "Stereo playback needs significantly more CPU and may underrun on 030.\n");
 
 	MP3SetOutputMono(decoder, opt.mono && !opt.stereo);
-	MP3SetExperimentalPolyphase(opt.expPoly);
 	if (opt.expPoly) {
 #if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_M68K_ASM_POLYPHASE)
 		fprintf(stderr, "warning: --exp-poly enables experimental 68030 asm "
@@ -4006,7 +4007,25 @@ int main(int argc, char **argv)
 #else
 		fprintf(stderr, "warning: --exp-poly requested, but this build has no 68030 asm polyphase; using existing polyphase\n");
 #endif
+		if (AMIGA_M68K_POLYPHASE_MONO_FAST_IS_ACTIVE()) {
+			int polySelftestErr;
+
+			fprintf(stderr, "running --selftest-polyphase before enabling experimental polyphase asm\n");
+			polySelftestErr = SelftestPolyphase();
+			if (polySelftestErr) {
+				fprintf(stderr, "experimental polyphase asm selftest failed; refusing to enable hot path\n");
+				if (outfile)
+					fclose(outfile);
+				InputSourceClose(&input);
+				CloseInputFile(&infile, opt.debugCleanup);
+				MP3FreeDecoder(decoder);
+				free(resolvedOutName);
+				AmigaFreeNormalizedArgs(&normalized);
+				return polySelftestErr;
+			}
+		}
 	}
+	MP3SetExperimentalPolyphase(opt.expPoly);
 
 	if (opt.fastLowrate) {
 		int stride = FastLowrateStrideForOutputRate(opt.outputRate);

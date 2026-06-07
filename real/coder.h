@@ -102,6 +102,7 @@
 #define PolyphaseMonoFast_C_REFERENCE STATNAME(PolyphaseMonoFast_C_REFERENCE)
 #define PolyphaseMonoFast_TEST_ACTIVE STATNAME(PolyphaseMonoFast_TEST_ACTIVE)
 #define PolyphaseMonoFast_HAS_AMIGA_M68K_ASM_RUNTIME STATNAME(PolyphaseMonoFast_HAS_AMIGA_M68K_ASM_RUNTIME)
+#define AmigaM68KPolyphaseMonoFast_IsActive STATNAME(AmigaM68KPolyphaseMonoFast_IsActive)
 #define FDCT32				STATNAME(FDCT32)
 #define FDCT32Half			STATNAME(FDCT32Half)
 #define FDCT32_C_REFERENCE	STATNAME(FDCT32_C_REFERENCE)
@@ -294,6 +295,7 @@ int IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME(void);
 void PolyphaseMonoFast_C_REFERENCE(short *pcm, int *vbuf, const int *coefBase);
 void PolyphaseMonoFast_TEST_ACTIVE(short *pcm, int *vbuf, const int *coefBase);
 int PolyphaseMonoFast_HAS_AMIGA_M68K_ASM_RUNTIME(void);
+int AmigaM68KPolyphaseMonoFast_IsActive(void);
 
 /* hufftabs.c */
 extern const HuffTabLookup huffTabLookup[HUFF_PAIRTABS];
