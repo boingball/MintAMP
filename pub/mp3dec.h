@@ -133,6 +133,9 @@ typedef struct _MP3DecodeCoreProfile {
 
 typedef struct _MP3FastLowrateGranuleDebug {
 	int granule;
+	int stride;
+	int phaseStart;
+	int phaseEnd;
 	int fullRateSamps;
 	int lowrateSamps;
 	int cumulativeLowrateSamps;

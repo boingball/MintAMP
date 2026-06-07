@@ -4750,10 +4750,12 @@ int main(int argc, char **argv)
 			int dbgIndex;
 			for (dbgIndex = 0; dbgIndex < dbgCount && dbgIndex < MAX_NGRAN; dbgIndex++) {
 				fprintf(stderr,
-					"fast-lowrate frame=%lu granule=%d full-rate-samps=%d "
-					"lowrate-samps=%d cumulative-lowrate-samps=%d "
-					"dest-offset=%d..%d\n",
+					"fast-lowrate frame=%lu granule=%d stride=%d "
+					"phase=%d..%d full-rate-samps=%d lowrate-samps=%d "
+					"cumulative-lowrate-samps=%d dest-offset=%d..%d\n",
 					stats.decodedFrames, fastDbg[dbgIndex].granule,
+					fastDbg[dbgIndex].stride, fastDbg[dbgIndex].phaseStart,
+					fastDbg[dbgIndex].phaseEnd,
 					fastDbg[dbgIndex].fullRateSamps,
 					fastDbg[dbgIndex].lowrateSamps,
 					fastDbg[dbgIndex].cumulativeLowrateSamps,
