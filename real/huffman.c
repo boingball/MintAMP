@@ -398,7 +398,7 @@ static int DecodeHuffmanPairs_BFEXTU(int *xy, int nVals, int tabIdx, int bitsLef
 {
 	int x, y;
 	int len, startBits, maxBits;
-	int bitPos, remaining, validBits;
+	int alignBits, bitPos, remaining, validBits;
 	HuffTabType tabType;
 	unsigned short cw, *tBase, *tCurr;
 	unsigned int bits;
@@ -409,6 +409,7 @@ static int DecodeHuffmanPairs_BFEXTU(int *xy, int nVals, int tabIdx, int bitsLef
 	if (bitsLeft < 0)
 		return -1;
 	startBits = bitsLeft;
+	alignBits = (8 - bitOffset) & 0x07;
 
 	tBase = (unsigned short *)(huffTable + huffTabOffset[tabIdx]);
 	tabType = huffTabLookup[tabIdx].tabType;
@@ -483,7 +484,7 @@ done:
 		return -1;
 	if (remaining < 0)
 		remaining = 0;
-	return (startBits - remaining);
+	return (startBits - remaining) + alignBits;
 }
 #endif
 
