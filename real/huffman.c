@@ -406,7 +406,7 @@ static int DecodeHuffmanPairs_BFEXTU(int *xy, int nVals, int tabIdx, int bitsLef
 	remaining = bitsLeft;
 	while (nVals > 0) {
 		if (remaining <= 0)
-			return -1;
+			goto done;
 
 		tCurr = tBase;
 		for (;;) {
@@ -418,6 +418,8 @@ static int DecodeHuffmanPairs_BFEXTU(int *xy, int nVals, int tabIdx, int bitsLef
 			if (!len) {
 				bitPos += maxBits;
 				remaining -= maxBits;
+				if (remaining < 0)
+					goto done;
 				tCurr += cw;
 				continue;
 			}
@@ -442,15 +444,12 @@ static int DecodeHuffmanPairs_BFEXTU(int *xy, int nVals, int tabIdx, int bitsLef
 			remaining--;
 		}
 
-		/* Equivalent to the C reference cachedBits < padBits drain check. */
-		if (remaining < 0)
-			return -1;
-
 		*xy++ = x;
 		*xy++ = y;
 		nVals -= 2;
 	}
 
+done:
 	return (startBits - remaining);
 }
 #endif
