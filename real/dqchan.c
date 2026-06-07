@@ -241,6 +241,43 @@ int DequantBlock_C_REFERENCE(int *inbuf, int *outbuf, int num, int scale)
 }
 
 #if DEQUANTBLOCK_HAS_AMIGA_M68K_ASM
+static __inline void DequantBlock_AmigaM68K_ReadInput(int **pinbuf, int *sx, int *x)
+{
+	int *p;
+	int sxReg;
+	int xReg;
+
+	p = *pinbuf;
+	__asm__ volatile (
+		"move.l (%[p])+,%[sx]\n\t"
+		"move.l %[sx],%[x]\n\t"
+		"bclr #31,%[x]"
+		: [p] "+a" (p), [sx] "=&d" (sxReg), [x] "=&d" (xReg)
+		:
+		: "cc", "memory");
+	*pinbuf = p;
+	*sx = sxReg;
+	*x = xReg;
+}
+
+static __inline void DequantBlock_AmigaM68K_WriteOutput(int **poutbuf, int y)
+{
+	int *p;
+
+	p = *poutbuf;
+	__asm__ volatile (
+		"move.l %[y],(%[p])+"
+		: [p] "+a" (p)
+		: [y] "d" (y)
+		: "memory");
+	*poutbuf = p;
+}
+
+static __inline int DequantBlock_AmigaM68K_ApplySign(int y, int sx)
+{
+	return (sx < 0) ? -y : y;
+}
+
 static int DequantBlock_AmigaM68KAsm(int *inbuf, int *outbuf, int num, int scale)
 {
 	int tab4[4];
@@ -271,12 +308,15 @@ static int DequantBlock_AmigaM68KAsm(int *inbuf, int *outbuf, int num, int scale
 
 	do {
 
-		sx = *inbuf++;
-		x = sx & 0x7fffffff;	/* sx = sign|mag */
+		/* Read signed-magnitude input exactly once using post-increment.
+		 * Never write back through inbuf; dequantization permits in-place
+		 * output only via outbuf stores below.
+		 */
+		DequantBlock_AmigaM68K_ReadInput(&inbuf, &sx, &x);
 
 		/* Zero is the dominant sparse-spectrum case; avoid scale/sign work. */
 		if (!x) {
-			*outbuf++ = 0;
+			DequantBlock_AmigaM68K_WriteOutput(&outbuf, 0);
 			continue;
 		}
 
@@ -289,7 +329,8 @@ static int DequantBlock_AmigaM68KAsm(int *inbuf, int *outbuf, int num, int scale
 				: [out] "=&d" (y), [mask] "+d" (mask)
 				: [tab] "a" (tab4Reg), [idx] "d" (x), [sh] "d" (tab4ShiftReg)
 				: "cc");
-			*outbuf++ = (sx < 0) ? -y : y;
+			DequantBlock_AmigaM68K_WriteOutput(&outbuf,
+				DequantBlock_AmigaM68K_ApplySign(y, sx));
 			continue;
 
 		} else if (x < 16) {
@@ -371,7 +412,8 @@ static int DequantBlock_AmigaM68KAsm(int *inbuf, int *outbuf, int num, int scale
 
 		/* sign and store */
 		mask |= y;
-		*outbuf++ = (sx < 0) ? -y : y;
+		DequantBlock_AmigaM68K_WriteOutput(&outbuf,
+			DequantBlock_AmigaM68K_ApplySign(y, sx));
 
 	} while (--num);
 
