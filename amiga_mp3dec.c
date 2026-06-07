@@ -4007,23 +4007,6 @@ int main(int argc, char **argv)
 #else
 		fprintf(stderr, "warning: --exp-poly requested, but this build has no 68030 asm polyphase; using existing polyphase\n");
 #endif
-		if (AMIGA_M68K_POLYPHASE_MONO_FAST_IS_ACTIVE()) {
-			int polySelftestErr;
-
-			fprintf(stderr, "running --selftest-polyphase before enabling experimental polyphase asm\n");
-			polySelftestErr = SelftestPolyphase();
-			if (polySelftestErr) {
-				fprintf(stderr, "experimental polyphase asm selftest failed; refusing to enable hot path\n");
-				if (outfile)
-					fclose(outfile);
-				InputSourceClose(&input);
-				CloseInputFile(&infile, opt.debugCleanup);
-				MP3FreeDecoder(decoder);
-				free(resolvedOutName);
-				AmigaFreeNormalizedArgs(&normalized);
-				return polySelftestErr;
-			}
-		}
 	}
 	MP3SetExperimentalPolyphase(opt.expPoly);
 

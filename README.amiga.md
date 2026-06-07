@@ -41,6 +41,7 @@ m68k-amigaos-gcc -m68030 -std=gnu89 -O3 -fomit-frame-pointer \
   -DAMIGA_M68K_ASM_IMDCT -DAMIGA_M68K_ASM_MIDSIDE \
   -o amiga_mp3dec.fastexp amiga_mp3dec.c mp3dec.c mp3tabs.c real/*.c \
   real/amiga_m68k_polyphase.S
+python3 tools/amiga_fast_preferred_hunks.py amiga_mp3dec.fastexp
 ```
 
 Keep a space between every `-D...` define and every `-I...` include path.  For
@@ -49,6 +50,12 @@ definition, so the compiler never receives the `pub` include path and then fails
 with missing `mp3dec.h`/`mp3common.h` errors.  Likewise,
 `DAMIGA_M68K_ASM_IMDCT` without the leading `-D` is treated as an input file name
 instead of a preprocessor define.
+
+After linking, `Makefile.amiga` runs `tools/amiga_fast_preferred_hunks.py` on the
+Amiga executable.  The tool clears explicit chip-only or fast-only allocation
+bits in the load-file hunk table, leaving the normal AmigaDOS "any memory, prefer
+Fast RAM" setting.  This makes the program code/data load into Fast RAM when Fast
+RAM is available while preserving compatibility with chip-only systems.
 
 
 `--exp-poly` selects the additional experimental 68030 mono polyphase
@@ -242,8 +249,9 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   window cases.
 - `--selftest-polyphase` compares the C fast mono polyphase path with the active
   mono polyphase entry point, so `AMIGA_M68K_ASM_POLYPHASE` builds can prove the
-  optional 68030 assembly kernel.  When the asm hook is active, `--exp-poly` also
-  runs this selftest before enabling the playback/decode hot path.
+  optional 68030 assembly kernel.  `--exp-poly` no longer runs this selftest
+  automatically; use this standalone flag when you want to re-verify the asm
+  kernel.
 - `--selftest-fastlowrate` compares a synthetic ramp/impulse-like PCM sequence
   through normal 44100 -> 11025 `--rate` decimation and the stride-4
   fast-lowrate selector across chunk boundaries.

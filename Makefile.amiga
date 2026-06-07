@@ -25,6 +25,7 @@ FAST030_CPPFLAGS := \
 FAST030_CFLAGS := -m68030 $(STD) -O3 -fomit-frame-pointer
 FAST030_TARGET := amiga_mp3dec.fastexp
 FAST030_ASM_SOURCES := real/amiga_m68k_polyphase.S
+AMIGA_HUNK_FAST_PREFERRED := python3 tools/amiga_fast_preferred_hunks.py
 
 .PHONY: all fast030 clean print-command print-fast030-command
 
@@ -32,17 +33,21 @@ all: $(TARGET)
 
 $(TARGET): $(SOURCES)
 	$(CC) $(CFLAGS_COMMON) $(CPPFLAGS_COMMON) $(EXTRA_CFLAGS) -o $@ $(SOURCES)
+	$(AMIGA_HUNK_FAST_PREFERRED) $@
 
 fast030: $(FAST030_TARGET)
 
 $(FAST030_TARGET): $(SOURCES) $(FAST030_ASM_SOURCES)
 	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(FAST030_CPPFLAGS) $(EXTRA_CFLAGS) -o $@ $(SOURCES) $(FAST030_ASM_SOURCES)
+	$(AMIGA_HUNK_FAST_PREFERRED) $@
 
 print-command:
 	@printf '%s\n' '$(CC) $(CFLAGS_COMMON) $(CPPFLAGS_COMMON) $(EXTRA_CFLAGS) -o $(TARGET) $(SOURCES)'
+	@printf '%s\n' '$(AMIGA_HUNK_FAST_PREFERRED) $(TARGET)'
 
 print-fast030-command:
 	@printf '%s\n' '$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(FAST030_CPPFLAGS) $(EXTRA_CFLAGS) -o $(FAST030_TARGET) $(SOURCES) $(FAST030_ASM_SOURCES)'
+	@printf '%s\n' '$(AMIGA_HUNK_FAST_PREFERRED) $(FAST030_TARGET)'
 
 clean:
 	rm -f $(TARGET) $(FAST030_TARGET)
