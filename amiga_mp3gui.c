@@ -1,74 +1,220 @@
 /*
- * Minimal AmigaOS Intuition frontend for the Helix fixed-point MP3 decoder.
- *
- * This program intentionally links the same decoder objects as amiga_mp3dec.c
- * instead of requiring a separate library build.  It writes signed 16-bit
- * big-endian PCM and keeps the UI deliberately small: a status window with the
- * standard close gadget, which doubles as an abort button during decoding.
+ * HelixAMP3 - compact AmigaOS mini-player frontend for the Helix fixed-point
+ * MP3 decoder.  The GUI wraps the existing amiga_mp3dec playback frontend so
+ * the same Paula streaming path, fast-lowrate options, and buffer handling are
+ * used from either Shell or Workbench.
  */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "mp3dec.h"
-
-#define GUI_READBUF_SIZE (1024 * 16)
-#define GUI_OUTBUF_SAMPS (MAX_NCHAN * MAX_NGRAN * MAX_NSAMP)
+#if defined(AMIGA_M68K)
+#define main HelixAmp3CliMain
+#include "amiga_mp3dec.c"
+#undef main
+#endif
 
 #ifdef AMIGA_M68K
 #include <exec/types.h>
+#include <exec/tasks.h>
 #include <intuition/intuition.h>
-#include <graphics/gfxbase.h>
+#include <libraries/asl.h>
+#include <dos/dos.h>
 #include <proto/exec.h>
 #include <proto/intuition.h>
 #include <proto/graphics.h>
+#include <proto/asl.h>
+#include <proto/dos.h>
 
+#define HELIXAMP3_MAX_PATH 256
+#define HELIXAMP3_ARGC_MAX 12
+#define HELIXAMP3_SIGMASK(gui) (1UL << (gui)->win->UserPort->mp_SigBit)
 
-typedef struct GuiState {
+#define GID_BROWSE 1
+#define GID_PROFILE 2
+#define GID_BUFFER_DOWN 3
+#define GID_BUFFER_UP 4
+#define GID_RATE 5
+#define GID_PLAY 6
+#define GID_STOP 7
+
+#define HIT_NONE 0
+
+typedef struct RectDef {
+	int id;
+	WORD left;
+	WORD top;
+	WORD right;
+	WORD bottom;
+} RectDef;
+
+typedef struct HelixAmp3Gui {
 	struct Window *win;
-	char line1[80];
-	char line2[80];
-	int abortRequested;
-} GuiState;
+	char inputName[HELIXAMP3_MAX_PATH];
+	char status[96];
+	int profile;
+	int bufferSeconds;
+	int rateIndex;
+	int closeRequested;
+	int redrawRequested;
+} HelixAmp3Gui;
 
-static void GuiRedraw(GuiState *gui);
+typedef struct HelixAmp3Player {
+	volatile int running;
+	volatile int stopRequested;
+	int argc;
+	char *argv[HELIXAMP3_ARGC_MAX];
+	char argvStorage[HELIXAMP3_ARGC_MAX][HELIXAMP3_MAX_PATH];
+	struct Process *process;
+} HelixAmp3Player;
 
-static int GuiOpen(GuiState *gui)
+static HelixAmp3Player gGuiPlayer;
+
+static const char * const kProfiles[] = {
+	"Fast",
+	"Medium",
+	"Slow"
+};
+
+static const char * const kRates[] = {
+	"8287",
+	"8820",
+	"11025"
+};
+
+static const RectDef kRects[] = {
+	{ GID_BROWSE,      388,  24, 476,  41 },
+	{ GID_PROFILE,    104,  54, 206,  71 },
+	{ GID_BUFFER_DOWN,104,  82, 126,  99 },
+	{ GID_BUFFER_UP,  184,  82, 206,  99 },
+	{ GID_RATE,       104, 110, 206, 127 },
+	{ GID_PLAY,       254, 110, 342, 127 },
+	{ GID_STOP,       366, 110, 454, 127 },
+	{ HIT_NONE, 0, 0, 0, 0 }
+};
+
+static void SafeCopy(char *dst, size_t dstSize, const char *src)
+{
+	if (!dst || dstSize == 0)
+		return;
+	if (!src)
+		src = "";
+	strncpy(dst, src, dstSize - 1);
+	dst[dstSize - 1] = '\0';
+}
+
+static void DrawBox(struct RastPort *rp, const RectDef *r, const char *text)
+{
+	RectFill(rp, r->left, r->top, r->right, r->bottom);
+	SetAPen(rp, 0);
+	Move(rp, r->left + 6, r->top + 13);
+	Text(rp, text, (LONG)strlen(text));
+	SetAPen(rp, 1);
+}
+
+static const RectDef *FindRect(int id)
+{
+	int i;
+	for (i = 0; kRects[i].id != HIT_NONE; i++) {
+		if (kRects[i].id == id)
+			return &kRects[i];
+	}
+	return NULL;
+}
+
+static int HitTest(WORD x, WORD y)
+{
+	int i;
+	for (i = 0; kRects[i].id != HIT_NONE; i++) {
+		if (x >= kRects[i].left && x <= kRects[i].right &&
+			y >= kRects[i].top && y <= kRects[i].bottom)
+			return kRects[i].id;
+	}
+	return HIT_NONE;
+}
+
+static void GuiRedraw(HelixAmp3Gui *gui)
+{
+	struct RastPort *rp;
+	char bufferText[32];
+	char fileText[80];
+	const char *base;
+
+	if (!gui->win)
+		return;
+	rp = gui->win->RPort;
+	SetAPen(rp, 0);
+	RectFill(rp, 8, 12, gui->win->Width - 9, gui->win->Height - 9);
+	SetAPen(rp, 1);
+	Move(rp, 16, 20);
+	Text(rp, "HelixAMP3 mini MP3 player", 26);
+
+	Move(rp, 16, 37);
+	Text(rp, "MP3:", 4);
+	base = gui->inputName[0] ? gui->inputName : "<choose a file>";
+	SafeCopy(fileText, sizeof(fileText), base);
+	Move(rp, 60, 37);
+	Text(rp, fileText, (LONG)strlen(fileText));
+	DrawBox(rp, FindRect(GID_BROWSE), "Browse");
+
+	Move(rp, 16, 67);
+	Text(rp, "Profile:", 8);
+	DrawBox(rp, FindRect(GID_PROFILE), kProfiles[gui->profile]);
+
+	Move(rp, 16, 95);
+	Text(rp, "Buffer:", 7);
+	DrawBox(rp, FindRect(GID_BUFFER_DOWN), "-");
+	sprintf(bufferText, "%d sec", gui->bufferSeconds);
+	Move(rp, 132, 95);
+	Text(rp, bufferText, (LONG)strlen(bufferText));
+	DrawBox(rp, FindRect(GID_BUFFER_UP), "+");
+
+	Move(rp, 16, 123);
+	Text(rp, "Rate:", 5);
+	DrawBox(rp, FindRect(GID_RATE), kRates[gui->rateIndex]);
+	DrawBox(rp, FindRect(GID_PLAY), gGuiPlayer.running ? "Playing" : "Play");
+	DrawBox(rp, FindRect(GID_STOP), "Stop");
+
+	Move(rp, 16, 151);
+	Text(rp, gui->status, (LONG)strlen(gui->status));
+}
+
+static int GuiOpen(HelixAmp3Gui *gui)
 {
 	struct NewWindow nw;
 
 	memset(gui, 0, sizeof(*gui));
+	gui->profile = 1;
+	gui->bufferSeconds = 4;
+	gui->rateIndex = 0;
+	SafeCopy(gui->status, sizeof(gui->status), "Choose an MP3, then Play. Stop asks playback to end.");
 	memset(&nw, 0, sizeof(nw));
 	nw.LeftEdge = 40;
 	nw.TopEdge = 30;
-	nw.Width = 520;
-	nw.Height = 96;
+	nw.Width = 492;
+	nw.Height = 170;
 	nw.DetailPen = 0;
 	nw.BlockPen = 1;
-	nw.IDCMPFlags = IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW;
+	nw.IDCMPFlags = IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW | IDCMP_MOUSEBUTTONS;
 	nw.Flags = WFLG_CLOSEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET |
 		WFLG_ACTIVATE | WFLG_SIMPLE_REFRESH;
-	nw.FirstGadget = NULL;
-	nw.CheckMark = NULL;
-	nw.Title = (UBYTE *)"Helix MP3 Decoder";
-	nw.Screen = NULL;
-	nw.BitMap = NULL;
-	nw.MinWidth = 240;
-	nw.MinHeight = 60;
+	nw.Title = (UBYTE *)"HelixAMP3";
+	nw.MinWidth = 320;
+	nw.MinHeight = 150;
 	nw.MaxWidth = 640;
-	nw.MaxHeight = 200;
+	nw.MaxHeight = 220;
 	nw.Type = WBENCHSCREEN;
-
 	gui->win = OpenWindow(&nw);
 	if (!gui->win) {
-		fprintf(stderr, "cannot open Intuition window\n");
+		fprintf(stderr, "cannot open HelixAMP3 window\n");
 		return -1;
 	}
+	GuiRedraw(gui);
 	return 0;
 }
 
-static void GuiClose(GuiState *gui)
+static void GuiClose(HelixAmp3Gui *gui)
 {
 	if (gui->win) {
 		CloseWindow(gui->win);
@@ -76,254 +222,213 @@ static void GuiClose(GuiState *gui)
 	}
 }
 
-
-static void GuiPoll(GuiState *gui)
+static void GuiPoll(HelixAmp3Gui *gui)
 {
 	struct IntuiMessage *msg;
 	ULONG classValue;
+	UWORD code;
+	WORD mx;
+	WORD my;
 
-	if (!gui->win || !gui->win->UserPort)
-		return;
-	while ((msg = (struct IntuiMessage *)GetMsg(gui->win->UserPort)) != NULL) {
+	while (gui->win && (msg = (struct IntuiMessage *)GetMsg(gui->win->UserPort)) != NULL) {
 		classValue = msg->Class;
+		code = msg->Code;
+		mx = msg->MouseX;
+		my = msg->MouseY;
 		ReplyMsg((struct Message *)msg);
 		if (classValue == IDCMP_CLOSEWINDOW)
-			gui->abortRequested = 1;
-		else if (classValue == IDCMP_REFRESHWINDOW && gui->win) {
+			gui->closeRequested = 1;
+		else if (classValue == IDCMP_REFRESHWINDOW) {
 			BeginRefresh(gui->win);
 			GuiRedraw(gui);
 			EndRefresh(gui->win, TRUE);
+		} else if (classValue == IDCMP_MOUSEBUTTONS && code == SELECTUP) {
+			int hit = HitTest(mx, my);
+			if (hit != HIT_NONE) {
+				gui->redrawRequested = hit;
+				return;
+			}
 		}
 	}
 }
 
-static void GuiRedraw(GuiState *gui)
+static void ChooseMp3(HelixAmp3Gui *gui)
 {
-	struct RastPort *rp;
+	struct FileRequester *req;
+	char path[HELIXAMP3_MAX_PATH];
 
-	if (!gui->win)
+	req = (struct FileRequester *)AllocAslRequestTags(ASL_FileRequest,
+		ASLFR_TitleText, (ULONG)"Select MP3 for HelixAMP3",
+		ASLFR_DoPatterns, TRUE,
+		ASLFR_InitialPattern, (ULONG)"#?.mp3",
+		TAG_DONE);
+	if (!req) {
+		SafeCopy(gui->status, sizeof(gui->status), "Cannot allocate ASL file requester.");
 		return;
-	rp = gui->win->RPort;
-	SetAPen(rp, 0);
-	RectFill(rp, 8, 18, gui->win->Width - 9, gui->win->Height - 9);
-	SetAPen(rp, 1);
-	Move(rp, 16, 36);
-	Text(rp, gui->line1, (LONG)strlen(gui->line1));
-	Move(rp, 16, 58);
-	Text(rp, gui->line2, (LONG)strlen(gui->line2));
+	}
+	if (AslRequest(req, NULL)) {
+		path[0] = '\0';
+		if (req->fr_Drawer && req->fr_Drawer[0]) {
+			SafeCopy(path, sizeof(path), req->fr_Drawer);
+			AddPart(path, req->fr_File, sizeof(path));
+		} else {
+			SafeCopy(path, sizeof(path), req->fr_File);
+		}
+		SafeCopy(gui->inputName, sizeof(gui->inputName), path);
+		SafeCopy(gui->status, sizeof(gui->status), "Ready.");
+	}
+	FreeAslRequest(req);
 }
 
-static void GuiSetStatus(GuiState *gui, const char *line1, const char *line2)
+static void AddArg(HelixAmp3Player *player, const char *text)
 {
-	if (line1) {
-		strncpy(gui->line1, line1, sizeof(gui->line1) - 1);
-		gui->line1[sizeof(gui->line1) - 1] = '\0';
+	if (player->argc >= HELIXAMP3_ARGC_MAX)
+		return;
+	SafeCopy(player->argvStorage[player->argc], HELIXAMP3_MAX_PATH, text);
+	player->argv[player->argc] = player->argvStorage[player->argc];
+	player->argc++;
+}
+
+static void BuildPlaybackArgs(HelixAmp3Gui *gui, HelixAmp3Player *player)
+{
+	char num[16];
+
+	memset(player, 0, sizeof(*player));
+	AddArg(player, "amiga_mp3dec");
+	AddArg(player, "--play");
+	AddArg(player, "--buffer-seconds");
+	sprintf(num, "%d", gui->bufferSeconds);
+	AddArg(player, num);
+	AddArg(player, "--rate");
+	AddArg(player, kRates[gui->rateIndex]);
+	if (gui->profile == 0) {
+		AddArg(player, "--fast-mem");
+		AddArg(player, "--play-fast-path");
+	} else if (gui->profile == 1) {
+		AddArg(player, "--fast-mem");
 	}
-	if (line2) {
-		strncpy(gui->line2, line2, sizeof(gui->line2) - 1);
-		gui->line2[sizeof(gui->line2) - 1] = '\0';
+	AddArg(player, gui->inputName);
+	player->argv[player->argc] = NULL;
+}
+
+static void PlaybackEntry(void)
+{
+	gGuiPlayer.running = 1;
+	gGuiPlayer.stopRequested = 0;
+	gPlaybackInterrupted = 0;
+	HelixAmp3CliMain(gGuiPlayer.argc, gGuiPlayer.argv);
+	gGuiPlayer.running = 0;
+	Forbid();
+	gGuiPlayer.process = NULL;
+	Permit();
+}
+
+static void StartPlayback(HelixAmp3Gui *gui)
+{
+	if (!gui->inputName[0]) {
+		SafeCopy(gui->status, sizeof(gui->status), "Browse to an MP3 first.");
+		return;
+	}
+	if (gGuiPlayer.running) {
+		SafeCopy(gui->status, sizeof(gui->status), "Already playing; press Stop first.");
+		return;
+	}
+	BuildPlaybackArgs(gui, &gGuiPlayer);
+	gGuiPlayer.process = CreateNewProcTags(NP_Entry, (ULONG)PlaybackEntry,
+		NP_Name, (ULONG)"HelixAMP3 playback",
+		NP_StackSize, 32768,
+		TAG_DONE);
+	if (!gGuiPlayer.process) {
+		SafeCopy(gui->status, sizeof(gui->status), "Cannot start playback process.");
+		return;
+	}
+	gGuiPlayer.running = 1;
+	SafeCopy(gui->status, sizeof(gui->status), "Playing through amiga_mp3dec Paula path.");
+}
+
+static void StopPlayback(HelixAmp3Gui *gui)
+{
+	if (!gGuiPlayer.running) {
+		SafeCopy(gui->status, sizeof(gui->status), "Nothing is playing.");
+		return;
+	}
+	gGuiPlayer.stopRequested = 1;
+	gPlaybackInterrupted = 1;
+	SafeCopy(gui->status, sizeof(gui->status), "Stop requested; waiting for playback loop to exit.");
+}
+
+static void HandleGuiAction(HelixAmp3Gui *gui, int action)
+{
+	switch (action) {
+	case GID_BROWSE:
+		ChooseMp3(gui);
+		break;
+	case GID_PROFILE:
+		gui->profile = (gui->profile + 1) % 3;
+		if (gui->profile == 0)
+			SafeCopy(gui->status, sizeof(gui->status), "Fast: fast-mem and fast playback path enabled.");
+		else if (gui->profile == 1)
+			SafeCopy(gui->status, sizeof(gui->status), "Medium: fast-mem enabled, conservative speed options.");
+		else
+			SafeCopy(gui->status, sizeof(gui->status), "Slow: baseline playback options for best quality.");
+		break;
+	case GID_BUFFER_DOWN:
+		if (gui->bufferSeconds > 1)
+			gui->bufferSeconds--;
+		break;
+	case GID_BUFFER_UP:
+		if (gui->bufferSeconds < 10)
+			gui->bufferSeconds++;
+		break;
+	case GID_RATE:
+		gui->rateIndex = (gui->rateIndex + 1) % 3;
+		break;
+	case GID_PLAY:
+		StartPlayback(gui);
+		break;
+	case GID_STOP:
+		StopPlayback(gui);
+		break;
 	}
 	GuiRedraw(gui);
-	GuiPoll(gui);
-}
-
-static int GuiWaitForClose(GuiState *gui)
-{
-	while (!gui->abortRequested) {
-		Wait(1UL << gui->win->UserPort->mp_SigBit);
-		GuiPoll(gui);
-	}
-	return 0;
-}
-#else
-
-typedef struct GuiState {
-	int abortRequested;
-} GuiState;
-
-static int GuiOpen(GuiState *gui)
-{
-	memset(gui, 0, sizeof(*gui));
-	fprintf(stderr, "amiga_mp3gui needs an AMIGA_M68K Intuition build\n");
-	return -1;
-}
-
-static void GuiClose(GuiState *gui)
-{
-	(void)gui;
-}
-
-static void GuiSetStatus(GuiState *gui, const char *line1, const char *line2)
-{
-	(void)gui;
-	if (line1)
-		fprintf(stderr, "%s\n", line1);
-	if (line2)
-		fprintf(stderr, "%s\n", line2);
-}
-#endif
-
-static int FillReadBuffer(unsigned char *buffer, unsigned char **readPtr,
-	int *bytesLeft, FILE *input, int *eofReached)
-{
-	int nRead;
-
-	if (*bytesLeft > 0 && *readPtr != buffer)
-		memmove(buffer, *readPtr, *bytesLeft);
-	*readPtr = buffer;
-	nRead = (int)fread(buffer + *bytesLeft, 1,
-		GUI_READBUF_SIZE - *bytesLeft, input);
-	if (nRead <= 0)
-		*eofReached = 1;
-	else
-		*bytesLeft += nRead;
-	return nRead;
-}
-
-static int WriteBigEndianPcm(FILE *output, const short *samples, int count)
-{
-	int i;
-
-	for (i = 0; i < count; i++) {
-		unsigned short sample = (unsigned short)samples[i];
-		if (fputc((sample >> 8) & 0xff, output) == EOF ||
-			fputc(sample & 0xff, output) == EOF) {
-			return -1;
-		}
-	}
-	return 0;
-}
-
-static int DecodeMp3ToPcm(const char *inputName, const char *outputName,
-	GuiState *gui)
-{
-	FILE *input;
-	FILE *output;
-	HMP3Decoder decoder;
-	MP3FrameInfo info;
-	unsigned char readBuf[GUI_READBUF_SIZE];
-	unsigned char *readPtr;
-	short decodeBuf[GUI_OUTBUF_SAMPS];
-	int bytesLeft;
-	int eofReached;
-	unsigned long frames;
-	unsigned long samples;
-	char status[80];
-	int result;
-
-	input = NULL;
-	output = NULL;
-	decoder = NULL;
-	readPtr = readBuf;
-	bytesLeft = 0;
-	eofReached = 0;
-	frames = 0;
-	samples = 0;
-	result = 1;
-	memset(&info, 0, sizeof(info));
-
-	input = fopen(inputName, "rb");
-	if (!input) {
-		GuiSetStatus(gui, "Cannot open MP3 input", inputName);
-		goto cleanup;
-	}
-	output = fopen(outputName, "wb");
-	if (!output) {
-		GuiSetStatus(gui, "Cannot create PCM output", outputName);
-		goto cleanup;
-	}
-	decoder = MP3InitDecoder();
-	if (!decoder) {
-		GuiSetStatus(gui, "MP3InitDecoder failed", "Out of memory?");
-		goto cleanup;
-	}
-
-	GuiSetStatus(gui, "Decoding MP3 to signed 16-bit PCM", "Close window to abort");
-	while (!gui->abortRequested) {
-		int offset;
-		int err;
-
-		if (bytesLeft < 2 * MAINBUF_SIZE && !eofReached)
-			FillReadBuffer(readBuf, &readPtr, &bytesLeft, input, &eofReached);
-
-		offset = MP3FindSyncWord(readPtr, bytesLeft);
-		if (offset < 0) {
-			if (eofReached)
-				break;
-			if (bytesLeft > 3) {
-				readPtr += bytesLeft - 3;
-				bytesLeft = 3;
-			}
-			continue;
-		}
-
-		readPtr += offset;
-		bytesLeft -= offset;
-		err = MP3Decode(decoder, &readPtr, &bytesLeft, decodeBuf, 0);
-		if (err) {
-			if (err == ERR_MP3_INDATA_UNDERFLOW && !eofReached)
-				continue;
-			if (err == ERR_MP3_MAINDATA_UNDERFLOW)
-				continue;
-			sprintf(status, "Decode error %d after %lu frames", err, frames);
-			GuiSetStatus(gui, status, "Output file is incomplete");
-			goto cleanup;
-		}
-
-		MP3GetLastFrameInfo(decoder, &info);
-		if (WriteBigEndianPcm(output, decodeBuf, info.outputSamps) != 0) {
-			GuiSetStatus(gui, "Write error", outputName);
-			goto cleanup;
-		}
-		frames++;
-		samples += (unsigned long)info.outputSamps;
-		if ((frames & 15UL) == 0) {
-			sprintf(status, "%lu frames, %lu samples", frames, samples);
-			GuiSetStatus(gui, status, "Close window to abort");
-		}
-	}
-
-	if (gui->abortRequested) {
-		GuiSetStatus(gui, "Decode aborted", "Output file is incomplete");
-		goto cleanup;
-	}
-
-	sprintf(status, "%lu frames, %lu samples", frames, samples);
-	GuiSetStatus(gui, "Decode complete", status);
-	result = 0;
-
-cleanup:
-	if (decoder)
-		MP3FreeDecoder(decoder);
-	if (output)
-		fclose(output);
-	if (input)
-		fclose(input);
-	return result;
 }
 
 int main(int argc, char **argv)
 {
-	GuiState gui;
-	int result;
+	HelixAmp3Gui gui;
 
+	(void)argc;
+	(void)argv;
 	if (GuiOpen(&gui) != 0)
 		return 1;
-
-	if (argc != 3) {
-		GuiSetStatus(&gui, "Usage: amiga_mp3gui infile.mp3 outfile.pcm",
-			"Close this window to exit");
-#ifdef AMIGA_M68K
-		GuiWaitForClose(&gui);
-#endif
-		GuiClose(&gui);
-		return 1;
+	while (!gui.closeRequested) {
+		Wait(HELIXAMP3_SIGMASK(&gui) | SIGBREAKF_CTRL_C);
+		if (SetSignal(0, 0) & SIGBREAKF_CTRL_C)
+			gui.closeRequested = 1;
+		GuiPoll(&gui);
+		if (gui.redrawRequested) {
+			int action = gui.redrawRequested;
+			gui.redrawRequested = 0;
+			HandleGuiAction(&gui, action);
+		} else if (!gGuiPlayer.running) {
+			GuiRedraw(&gui);
+		}
 	}
-
-	result = DecodeMp3ToPcm(argv[1], argv[2], &gui);
-#ifdef AMIGA_M68K
-	GuiWaitForClose(&gui);
-#endif
+	if (gGuiPlayer.running)
+		StopPlayback(&gui);
 	GuiClose(&gui);
-	return result;
+	return 0;
 }
+
+#else
+
+int main(int argc, char **argv)
+{
+	(void)argc;
+	(void)argv;
+	fprintf(stderr, "HelixAMP3 GUI requires an AMIGA_M68K Intuition/ASL build.\n");
+	fprintf(stderr, "Use amiga_mp3dec --play --rate 8287 --buffer-seconds 4 file.mp3 on this host.\n");
+	return 1;
+}
+
+#endif

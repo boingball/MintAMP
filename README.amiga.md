@@ -108,19 +108,29 @@ be converted into a separate static library first:
 make -f Makefile.amiga gui
 ```
 
-The GUI currently keeps the scope intentionally small: it opens an Intuition
-status window, decodes an MP3 passed on the command line, writes signed 16-bit
-big-endian PCM, and lets the user abort by closing the window:
+`amiga_mp3gui` is now the HelixAMP3 mini-player. It opens a compact
+Intuition window with an ASL file requester for choosing an MP3, a profile
+selector, buffer-depth controls, playback-rate selection, and Play/Stop buttons.
 
-```sh
-amiga_mp3gui infile.mp3 outfile.pcm
-```
+The profiles map to the same playback code used by `amiga_mp3dec`:
+
+- **Fast** enables `--fast-mem` and the explicit `--play-fast-path` alias for the
+  lowest-overhead playback setup.
+- **Medium** enables `--fast-mem` but leaves the rest of the conservative default
+  playback path in place.
+- **Slow** uses the baseline playback options, avoiding the extra speed-oriented
+  input preload.
+
+The buffer control chooses the `--buffer-seconds` value from 1 to 10 seconds, and
+the rate selector cycles through the three mini-player rates: 8287, 8820, and
+11025 Hz. Playback still uses the Paula streaming implementation inside
+`amiga_mp3dec`, so Stop requests the same interrupt flag used by Shell playback
+and exits after the streaming loop notices the request.
 
 A separate library can still be added later if multiple frontends need to share
-higher-level application code such as file requesters, 8SVX writing, or Paula
-playback. For this first GUI, linking `amiga_mp3gui.c` directly with
-`mp3dec.c`, `mp3tabs.c`, and `real/*.c` avoids an extra archive step and uses the
-public `MP3InitDecoder`/`MP3Decode` API directly.
+higher-level application code. For now, `amiga_mp3gui.c` includes the existing
+CLI frontend with its `main` renamed internally, keeping a single compiled GUI
+source while reusing the public decoder and Paula playback implementation.
 
 ## Usage
 
