@@ -69,8 +69,16 @@
  *                (should be guaranteed from dequant, and max gain from stproc * max 
  *                 gain from AntiAlias < 2.0)
  **************************************************************************************/
+#if defined(AMIGA_M68K) && defined(AMIGA_M68K_ASM_ANTIALIAS) && \
+	defined(__GNUC__) && (defined(__mc68020__) || defined(__mc68030__) || \
+	defined(__mc68040__) || defined(__mc68060__) || defined(mc68020))
+#define ANTIALIAS_HAS_AMIGA_M68K_ASM 1
+#else
+#define ANTIALIAS_HAS_AMIGA_M68K_ASM 0
+#endif
+
 // a little bit faster in RAM (< 1 ms per block)
-static void AntiAlias(int *x, int nBfly)
+void AntiAlias_C_REFERENCE(int *x, int nBfly)
 {
 	int k, a0, b0, c0, c1;
 	const int *c;
@@ -112,6 +120,77 @@ static void AntiAlias(int *x, int nBfly)
 		x[-8] = (MULSHIFT32(c0, a0) - MULSHIFT32(c1, b0)) << 1;	
 		x[7] =  (MULSHIFT32(c0, b0) + MULSHIFT32(c1, a0)) << 1;
 	}
+}
+
+#if ANTIALIAS_HAS_AMIGA_M68K_ASM
+static __inline void AntiAlias_AmigaM68KBoundary(int *x)
+{
+	const int *c;
+	int *xLo;
+	int *xHi;
+
+	c = csa[0];
+	xLo = x;
+	xHi = x;
+	__asm__ volatile (
+		"moveq #7,%%d7\n"
+		"1:\n\t"
+		/* Keep xLo (d0) and xHi (d1) live across the two pairs of muls.l. */
+		"move.l -4(%[xlo]),%%d0\n\t"
+		"move.l (%[xhi]),%%d1\n\t"
+		/* tmp = MULSHIFT32(c0, xHi) - MULSHIFT32(c1, xLo) */
+		"move.l %%d1,%%d2\n\t"
+		"muls.l (%[c]),%%d3:%%d2\n\t"
+		"move.l %%d0,%%d4\n\t"
+		"muls.l 4(%[c]),%%d5:%%d4\n\t"
+		"sub.l %%d5,%%d3\n\t"
+		/* xLo = MULSHIFT32(c0, xLo) + MULSHIFT32(c1, xHi) */
+		"move.l %%d0,%%d4\n\t"
+		"muls.l (%[c]),%%d5:%%d4\n\t"
+		"move.l %%d1,%%d2\n\t"
+		"muls.l 4(%[c]),%%d6:%%d2\n\t"
+		"add.l %%d6,%%d5\n\t"
+		"add.l %%d3,%%d3\n\t"
+		"add.l %%d5,%%d5\n\t"
+		"move.l %%d5,-4(%[xlo])\n\t"
+		"move.l %%d3,(%[xhi])\n\t"
+		"subq.l #4,%[xlo]\n\t"
+		"addq.l #4,%[xhi]\n\t"
+		"addq.l #8,%[c]\n\t"
+		"dbra %%d7,1b"
+		: [c] "+a" (c), [xlo] "+a" (xLo), [xhi] "+a" (xHi)
+		:
+		: "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7", "cc", "memory");
+}
+
+static void AntiAlias_AmigaM68KAsm(int *x, int nBfly)
+{
+	int k;
+
+	for (k = nBfly; k > 0; k--) {
+		x += 18;
+		AntiAlias_AmigaM68KBoundary(x);
+	}
+}
+#endif
+
+int AntiAlias_HAS_AMIGA_M68K_ASM_RUNTIME(void)
+{
+	return ANTIALIAS_HAS_AMIGA_M68K_ASM;
+}
+
+void AntiAlias_TEST_ACTIVE(int *x, int nBfly)
+{
+#if ANTIALIAS_HAS_AMIGA_M68K_ASM
+	AntiAlias_AmigaM68KAsm(x, nBfly);
+#else
+	AntiAlias_C_REFERENCE(x, nBfly);
+#endif
+}
+
+static void AntiAlias(int *x, int nBfly)
+{
+	AntiAlias_TEST_ACTIVE(x, nBfly);
 }
 
 /**************************************************************************************
@@ -651,7 +730,6 @@ static __inline int IMDCT36_AMIGA_M68K_LONG_WINDOW(int *xp, const int *cp,
 		"dbra %%d7,1b"
 		: "=&d" (mOut), "+a" (xp), "+a" (cp), "+a" (wp),
 		  "+a" (xPrev), "+a" (ypLo), "+a" (ypHi)
-		:
 		: "d0", "d1", "d2", "d3", "d4", "d5", "d7", "cc", "memory");
 
 	return mOut;

@@ -39,6 +39,9 @@ void STATNAME(FDCT32)(int *x, int *d, int offset, int oddBlock, int gb);
 void STATNAME(FDCT32_C_REFERENCE)(int *x, int *d, int offset, int oddBlock, int gb);
 void STATNAME(FDCT32Half)(int *x, int *d, int offset, int oddBlock, int gb);
 int STATNAME(FDCT32_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
+void STATNAME(AntiAlias_C_REFERENCE)(int *x, int nBfly);
+void STATNAME(AntiAlias_TEST_ACTIVE)(int *x, int nBfly);
+int STATNAME(AntiAlias_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
 int STATNAME(IMDCT36_C_REFERENCE)(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb);
 int STATNAME(IMDCT36_TEST_ACTIVE)(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb);
 int STATNAME(IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
@@ -64,6 +67,9 @@ extern const int STATNAME(polyCoef)[264];
 #define AMIGA_FDCT32_C_REFERENCE STATNAME(FDCT32_C_REFERENCE)
 #define AMIGA_FDCT32_HALF STATNAME(FDCT32Half)
 #define AMIGA_FDCT32_HAS_ASM STATNAME(FDCT32_HAS_AMIGA_M68K_ASM_RUNTIME)
+#define AMIGA_ANTIALIAS_C_REFERENCE STATNAME(AntiAlias_C_REFERENCE)
+#define AMIGA_ANTIALIAS_TEST_ACTIVE STATNAME(AntiAlias_TEST_ACTIVE)
+#define AMIGA_ANTIALIAS_HAS_ASM STATNAME(AntiAlias_HAS_AMIGA_M68K_ASM_RUNTIME)
 #define AMIGA_IMDCT36_C_REFERENCE STATNAME(IMDCT36_C_REFERENCE)
 #define AMIGA_IMDCT36_TEST_ACTIVE STATNAME(IMDCT36_TEST_ACTIVE)
 #define AMIGA_IMDCT36_HAS_ASM STATNAME(IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME)
@@ -113,6 +119,7 @@ typedef struct DecodeOptions {
 	int selftestClz;
 	int selftestFdct32;
 	int selftestImdct;
+	int selftestAntialias;
 	int selftestPolyphase;
 	int selftestPolyphaseStride2;
 	int selftestPolyphaseStride4;
@@ -479,6 +486,7 @@ static void PrintUsage(const char *prog)
 	printf("  --selftest-clz compare C and optional m68k bfffo CLZ helpers\n");
 	printf("  --selftest-fdct32 compare C reference and optional m68k asm FDCT32 path\n");
 	printf("  --selftest-imdct compare C reference and optional m68k asm long IMDCT path\n");
+	printf("  --selftest-antialias compare C reference and optional m68k asm antialias path\n");
 	printf("  --selftest-polyphase compare C fast mono polyphase and optional m68k asm path\n");
 	printf("  --selftest-polyphase-stride2 compare C and optional asm stride-2 mono polyphase paths\n");
 	printf("  --selftest-polyphase-stride4 compare C and optional asm stride-4 mono polyphase paths\n");
@@ -582,6 +590,8 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->selftestFdct32 = 1;
 		} else if (!strcmp(argv[i], "--selftest-imdct")) {
 			opt->selftestImdct = 1;
+		} else if (!strcmp(argv[i], "--selftest-antialias")) {
+			opt->selftestAntialias = 1;
 		} else if (!strcmp(argv[i], "--selftest-polyphase")) {
 			opt->selftestPolyphase = 1;
 		} else if (!strcmp(argv[i], "--selftest-polyphase-stride2")) {
@@ -641,7 +651,7 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 		return 0;
 
 	if (opt->selftestMulshift || opt->selftestClz || opt->selftestFdct32 || opt->selftestImdct ||
-		opt->selftestPolyphase || opt->selftestPolyphaseStride2 ||
+		opt->selftestAntialias || opt->selftestPolyphase || opt->selftestPolyphaseStride2 ||
 		opt->selftestPolyphaseStride4 || opt->selftestFastLowrate ||
 		opt->selftestHuffman || opt->selftestDequant ||
 		opt->selftestMonoFastLowrateStereo)
@@ -1936,6 +1946,70 @@ static int TestImdctCase(unsigned long index, int pattern, unsigned long seed,
 	}
 	return 0;
 }
+
+static int TestAntialiasCase(unsigned long index, unsigned long seed, int pattern, int nBfly)
+{
+	static int cx[AMIGA_IMDCT_BLOCK_SIZE * AMIGA_IMDCT_NBANDS];
+	static int ax[AMIGA_IMDCT_BLOCK_SIZE * AMIGA_IMDCT_NBANDS];
+	int i;
+	int nSamps;
+
+	nSamps = (nBfly + 1) * AMIGA_IMDCT_BLOCK_SIZE;
+	for (i = 0; i < nSamps; i++) {
+		seed = seed * 1664525UL + 1013904223UL;
+		if (pattern == 0)
+			cx[i] = 0;
+		else if (pattern == 1)
+			cx[i] = ((int)seed) >> 7;
+		else
+			cx[i] = (i & 1) ? 0x03ffffff : (int)0xfc000000UL;
+		ax[i] = cx[i];
+	}
+
+	AMIGA_ANTIALIAS_C_REFERENCE(cx, nBfly);
+	AMIGA_ANTIALIAS_TEST_ACTIVE(ax, nBfly);
+
+	for (i = 0; i < nSamps; i++) {
+		if (ax[i] != cx[i]) {
+			printf("AntiAlias mismatch %lu[%d]: C=%ld active=%ld nBfly=%d pattern=%d\n",
+				index, i, (long)cx[i], (long)ax[i], nBfly, pattern);
+			return -1;
+		}
+	}
+	return 0;
+}
+
+static int SelftestAntialias(void)
+{
+	unsigned long i;
+	unsigned long failures;
+	unsigned long seed;
+	int pattern;
+	int nBfly;
+
+	failures = 0;
+	seed = 0x0aa51aa5UL;
+	for (i = 0; i < 4096UL; i++) {
+		seed = seed * 1664525UL + 1013904223UL;
+		pattern = (i < 16UL) ? 0 : ((i < 32UL) ? 2 : 1);
+		nBfly = (int)(seed % AMIGA_IMDCT_NBANDS);
+		if (TestAntialiasCase(i, seed, pattern, nBfly) != 0)
+			failures++;
+	}
+
+	printf("AntiAlias asm requested: %s\n",
+#ifdef AMIGA_M68K_ASM_ANTIALIAS
+		"yes"
+#else
+		"no"
+#endif
+	);
+	printf("AntiAlias asm active: %s\n", AMIGA_ANTIALIAS_HAS_ASM() ? "yes" : "no");
+	printf("AntiAlias selftest cases: %lu\n", 4096UL);
+	printf("AntiAlias selftest failures: %lu\n", failures);
+	return failures ? 1 : 0;
+}
+
 
 static int SelftestImdct(void)
 {
@@ -4349,6 +4423,11 @@ int main(int argc, char **argv)
 	}
 	if (opt.selftestImdct) {
 		int selftestErr = SelftestImdct();
+		AmigaFreeNormalizedArgs(&normalized);
+		return selftestErr;
+	}
+	if (opt.selftestAntialias) {
+		int selftestErr = SelftestAntialias();
 		AmigaFreeNormalizedArgs(&normalized);
 		return selftestErr;
 	}
