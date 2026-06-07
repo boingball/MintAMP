@@ -3058,6 +3058,7 @@ typedef struct AmigaAudioPlayer {
 	struct IOAudio *req[2][2];
 	int deviceOpen[2];
 	int sent[2][2];
+	int prepared[2];
 	int stereo;
 	unsigned int period;
 	signed char *splitBuf[2][2];
@@ -3295,7 +3296,7 @@ static int AmigaAudioOpen(AmigaAudioPlayer *player, unsigned int period,
 	return 0;
 }
 
-static void AmigaAudioSubmitOne(AmigaAudioPlayer *player, int index,
+static void AmigaAudioPrepareOne(AmigaAudioPlayer *player, int index,
 	int ch, signed char *buf, unsigned long len)
 {
 	struct IOAudio *req = player->req[index][ch];
@@ -3307,7 +3308,11 @@ static void AmigaAudioSubmitOne(AmigaAudioPlayer *player, int index,
 	req->ioa_Period = player->period;
 	req->ioa_Volume = 64;
 	req->ioa_Cycles = 1;
-	BeginIO((struct IORequest *)req);
+}
+
+static void AmigaAudioCommitOne(AmigaAudioPlayer *player, int index, int ch)
+{
+	BeginIO((struct IORequest *)player->req[index][ch]);
 	player->sent[index][ch] = 1;
 }
 
@@ -3317,7 +3322,7 @@ static void AmigaPlaybackCopy(const signed char *src, signed char *dest,
 	CopyMem((APTR)src, (APTR)dest, bytes);
 }
 
-static int AmigaAudioSubmit(AmigaAudioPlayer *player, int index,
+static int AmigaAudioPrepare(AmigaAudioPlayer *player, int index,
 	signed char *buf, unsigned long len)
 {
 	if (len == 0 || (player->stereo && (len & 1UL)))
@@ -3326,23 +3331,25 @@ static int AmigaAudioSubmit(AmigaAudioPlayer *player, int index,
 		unsigned long frames = len / 2UL;
 		unsigned long i;
 
+		if (frames > player->splitBytes)
+			return -1;
 		if (player->splitWorkBuf[index][0] && player->splitWorkBuf[index][1]) {
-			if (frames > player->splitBytes || frames > player->splitWorkBytes)
+			if (frames > player->splitWorkBytes)
 				return -1;
 			AmigaPlaybackCopy(player->splitWorkBuf[index][0],
 				player->splitBuf[index][0], frames);
 			AmigaPlaybackCopy(player->splitWorkBuf[index][1],
 				player->splitBuf[index][1], frames);
-		} else {
-			if (!buf)
-				return -1;
+		} else if (buf) {
 			for (i = 0; i < frames; i++) {
 				player->splitBuf[index][0][i] = buf[2UL * i];
 				player->splitBuf[index][1][i] = buf[2UL * i + 1UL];
 			}
+		} else if (!player->splitBuf[index][0] || !player->splitBuf[index][1]) {
+			return -1;
 		}
-		AmigaAudioSubmitOne(player, index, 1, player->splitBuf[index][1], frames);
-		AmigaAudioSubmitOne(player, index, 0, player->splitBuf[index][0], frames);
+		AmigaAudioPrepareOne(player, index, 1, player->splitBuf[index][1], frames);
+		AmigaAudioPrepareOne(player, index, 0, player->splitBuf[index][0], frames);
 	} else {
 		if (!buf || len > player->splitBytes)
 			return -1;
@@ -3350,18 +3357,23 @@ static int AmigaAudioSubmit(AmigaAudioPlayer *player, int index,
 			AmigaPlaybackCopy(buf, player->splitBuf[index][0], len);
 			buf = player->splitBuf[index][0];
 		}
-		AmigaAudioSubmitOne(player, index, 0, buf, len);
+		AmigaAudioPrepareOne(player, index, 0, buf, len);
 	}
+	player->prepared[index] = 1;
 	return 0;
 }
 
-static int AmigaAudioSubmitPlanar(AmigaAudioPlayer *player, int index,
-	unsigned long frames)
+static int AmigaAudioCommit(AmigaAudioPlayer *player, int index)
 {
-	if (!player->stereo || frames == 0 || frames > player->splitBytes)
+	if (!player->prepared[index])
 		return -1;
-	AmigaAudioSubmitOne(player, index, 1, player->splitBuf[index][1], frames);
-	AmigaAudioSubmitOne(player, index, 0, player->splitBuf[index][0], frames);
+	if (player->stereo) {
+		AmigaAudioCommitOne(player, index, 1);
+		AmigaAudioCommitOne(player, index, 0);
+	} else {
+		AmigaAudioCommitOne(player, index, 0);
+	}
+	player->prepared[index] = 0;
 	return 0;
 }
 
@@ -3437,6 +3449,7 @@ static int AmigaAudioAllocWorkBuffers(AmigaAudioPlayer *player, int stereo,
 typedef struct AmigaAudioPlayer {
 	int stereo;
 	int sent[2][2];
+	int prepared[2];
 	signed char *splitBuf[2][2];
 	unsigned long splitBytes;
 	signed char *splitWorkBuf[2][2];
@@ -3467,28 +3480,29 @@ static int AmigaAudioOpen(AmigaAudioPlayer *player, unsigned int period,
 	fprintf(stderr, "--play requires an AmigaOS audio.device build\n");
 	return -1;
 }
-static int AmigaAudioSubmit(AmigaAudioPlayer *player, int index,
+static int AmigaAudioPrepare(AmigaAudioPlayer *player, int index,
 	signed char *buf, unsigned long len)
 {
 	(void)buf;
-	if (len == 0)
+	if (len == 0 || (player->stereo && (len & 1UL)))
 		return -1;
-	player->sent[index][0] = 1;
+	player->prepared[index] = 1;
 	return 0;
 }
-static int AmigaAudioSubmitPlanar(AmigaAudioPlayer *player, int index,
-	unsigned long frames)
+static int AmigaAudioCommit(AmigaAudioPlayer *player, int index)
 {
-	if (frames == 0)
+	if (!player->prepared[index])
 		return -1;
 	player->sent[index][0] = 1;
-	player->sent[index][1] = 1;
+	if (player->stereo)
+		player->sent[index][1] = 1;
+	player->prepared[index] = 0;
 	return 0;
 }
 static int AmigaAudioDone(AmigaAudioPlayer *player, int index)
 { (void)player; (void)index; return 1; }
 static int AmigaAudioWait(AmigaAudioPlayer *player, int index)
-{ player->sent[index][0] = 0; return 0; }
+{ player->sent[index][0] = 0; player->sent[index][1] = 0; return 0; }
 static int AmigaAudioAllocWorkBuffers(AmigaAudioPlayer *player, int stereo,
 	unsigned long bytes)
 {
@@ -3610,16 +3624,15 @@ static unsigned long DecodeStreamFillPlaybackBuffer(DecodeStream *stream,
 	return (unsigned long)DecodeStreamFillS8(stream, opt, buf, (int)maxBytes);
 }
 
-static int AmigaAudioSubmitPlayback(AmigaAudioPlayer *player, int index,
+static int AmigaAudioPreparePlaybackBuffer(AmigaAudioPlayer *player, int index,
 	signed char *buf, unsigned long len)
 {
-	if (player->stereo) {
-		if (len & 1UL)
-			return -1;
-		if (!player->splitWorkBuf[index][0] && !buf)
-			return AmigaAudioSubmitPlanar(player, index, len / 2UL);
-	}
-	return AmigaAudioSubmit(player, index, buf, len);
+	return AmigaAudioPrepare(player, index, buf, len);
+}
+
+static int AmigaAudioCommitPlaybackBuffer(AmigaAudioPlayer *player, int index)
+{
+	return AmigaAudioCommit(player, index);
 }
 
 static int PlaybackBufferPeak(const DecodeOptions *opt,
@@ -3868,8 +3881,8 @@ static int AmigaPlayWholeBuffer(const signed char *pcm, unsigned long totalBytes
 	pending = 0;
 	first = 1;
 	while (!gPlaybackInterrupted && len[cur] > 0) {
-		if (AmigaAudioSubmitPlayback(&player, cur, opt->stereo ? NULL : buf[cur],
-			len[cur]) != 0) {
+		if (AmigaAudioPreparePlaybackBuffer(&player, cur, opt->stereo ? NULL : buf[cur],
+			len[cur]) != 0 || AmigaAudioCommitPlaybackBuffer(&player, cur) != 0) {
 			fprintf(stderr, "playback buffer %s CMD_WRITE byte length is invalid\n",
 				PlaybackBufferName(cur));
 			goto cleanup;
@@ -4052,39 +4065,36 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 		goto cleanup;
 	}
 
-	/* Submit both prefilled requests so audio.device can switch without a gap. */
-	if (AmigaAudioSubmitPlayback(&player, 0, buf[0], len[0]) != 0) {
+	/* Prepare both prefilled requests, then start only the first one.  The
+	 * second buffer is copied into chip RAM now, so after WaitIO completes the
+	 * next loop can BeginIO it immediately before any decode or CopyMem work. */
+	if (AmigaAudioPreparePlaybackBuffer(&player, 0, buf[0], len[0]) != 0) {
 		fprintf(stderr, "playback buffer A CMD_WRITE byte length is invalid\n");
 		err = -1;
 	} else {
 		err = 0;
-		if (opt->debugPlay)
-			printf("debug-play: CMD_WRITE submitted A: %lu bytes\n", len[0]);
 	}
 	if (err == 0 && len[1] > 0) {
-		if (AmigaAudioSubmitPlayback(&player, 1, buf[1], len[1]) != 0) {
+		if (AmigaAudioPreparePlaybackBuffer(&player, 1, buf[1], len[1]) != 0) {
 			fprintf(stderr, "playback buffer B CMD_WRITE byte length is invalid\n");
 			err = -1;
+		}
+	}
+	if (err == 0) {
+		if (AmigaAudioCommitPlaybackBuffer(&player, 0) != 0) {
+			fprintf(stderr, "playback buffer A CMD_WRITE byte length is invalid\n");
+			err = -1;
 		} else if (opt->debugPlay) {
-			printf("debug-play: CMD_WRITE submitted B: %lu bytes\n", len[1]);
+			printf("debug-play: CMD_WRITE submitted A: %lu bytes\n", len[0]);
 		}
 	}
 
 	active = 0;
 	refill = 1;
-	if (err == 0 && player.sent[0][0] && !player.sent[1][0]) {
-		if (AmigaAudioWait(&player, active) != 0) {
-			fprintf(stderr, "audio.device write failed\n");
-			err = -1;
-		} else if (opt->debugPlay) {
-			printf("debug-play: CMD_WRITE completed %s\n",
-				PlaybackBufferName(active));
-		}
-	}
 	while (err == 0 && !gPlaybackInterrupted &&
-		player.sent[active][0] && player.sent[1 - active][0]) {
-		clock_t activeStarted;
+		player.sent[active][0] && player.prepared[refill]) {
 		clock_t submittedAt;
+		clock_t preparedAt;
 		unsigned long elapsedMilliseconds;
 		unsigned long activeMilliseconds;
 		long spareMilliseconds;
@@ -4092,8 +4102,8 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 		int underrun;
 		int late;
 
-		/* Detect whether the oldest queued/playing buffer has already run dry
-		 * before WaitIO reaps it; after WaitIO the buffer is always done. */
+		/* Detect whether the playing buffer has already run dry before WaitIO
+		 * reaps it; after WaitIO the buffer is always done. */
 		underrun = AmigaAudioDone(&player, active);
 		if (AmigaAudioWait(&player, active) != 0) {
 			fprintf(stderr, "audio.device write failed\n");
@@ -4105,14 +4115,22 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 				PlaybackBufferName(active));
 
 		completed = active;
-		active = 1 - active;
+		if (AmigaAudioCommitPlaybackBuffer(&player, refill) != 0) {
+			fprintf(stderr, "playback buffer %s CMD_WRITE byte length is invalid\n",
+				PlaybackBufferName(refill));
+			err = -1;
+			break;
+		}
+		submittedAt = clock();
+		if (opt->debugPlay)
+			printf("debug-play: CMD_WRITE submitted %s: %lu bytes\n",
+				PlaybackBufferName(refill), len[refill]);
+
+		active = refill;
 		refill = completed;
 
-		/* The completed Fast RAM work buffer is refilled while audio.device plays
-		 * the other request. AmigaAudioSubmitPlayback copies that work buffer into
-		 * the separate chip RAM splitBuf before BeginIO, restoring the two-request
-		 * queue before this loop waits for the current active buffer. */
-		activeStarted = clock();
+		/* Decode into Fast RAM and copy into the completed chip RAM buffer while
+		 * audio.device is already playing the freshly committed buffer. */
 		len[refill] = DecodeStreamFillPlaybackBuffer(&stream, opt, &player, refill,
 			buf[refill], bufBytes);
 		PrintPlaybackFillDebug(opt, refill, len[refill]);
@@ -4131,19 +4149,16 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 					PlaybackBufferName(active));
 			break;
 		}
-
-		if (AmigaAudioSubmitPlayback(&player, refill, buf[refill], len[refill]) != 0) {
+		if (AmigaAudioPreparePlaybackBuffer(&player, refill, buf[refill],
+			len[refill]) != 0) {
 			fprintf(stderr, "playback buffer %s CMD_WRITE byte length is invalid\n",
 				PlaybackBufferName(refill));
 			err = -1;
 			break;
 		}
-		if (opt->debugPlay)
-			printf("debug-play: CMD_WRITE submitted %s: %lu bytes\n",
-				PlaybackBufferName(refill), len[refill]);
 
-		submittedAt = clock();
-		elapsedMilliseconds = PlaybackElapsedMilliseconds(activeStarted, submittedAt);
+		preparedAt = clock();
+		elapsedMilliseconds = PlaybackElapsedMilliseconds(submittedAt, preparedAt);
 		activeMilliseconds = PlaybackBufferDurationMilliseconds(opt, len[active],
 			playbackRate);
 		spareMilliseconds = (long)activeMilliseconds - (long)elapsedMilliseconds;
@@ -4159,7 +4174,7 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 			stats->underrunBuffers[completed]++;
 			if (opt->debugPlay)
 				printf("debug-play: underrun detected before buffer %s refill submit\n",
-					PlaybackBufferName(refill));
+					PlaybackBufferName(active));
 		}
 	}
 
@@ -4238,8 +4253,8 @@ static int AmigaPlayLifecycleTest(const DecodeOptions *opt)
 			PrintPlaybackCleanupStatus(opt, &cleanupStatus);
 			break;
 		}
-		if (AmigaAudioSubmitPlayback(&player, 0, opt->stereo ? NULL : buf[0],
-			len) != 0) {
+		if (AmigaAudioPreparePlaybackBuffer(&player, 0, opt->stereo ? NULL : buf[0],
+			len) != 0 || AmigaAudioCommitPlaybackBuffer(&player, 0) != 0) {
 			fprintf(stderr, "play lifecycle test CMD_WRITE byte length is invalid\n");
 			err = -1;
 		}
