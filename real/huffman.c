@@ -400,6 +400,8 @@ static int DecodeHuffmanPairs_BFEXTU(int *xy, int nVals, int tabIdx, int bitsLef
 	bitPos = bitOffset;
 	remaining = bitsLeft;
 	while (nVals > 0) {
+		if (remaining <= 0)
+			return -1;
 		tCurr = tBase;
 		for (;;) {
 			maxBits = GetMaxbits(tCurr[0]);
@@ -410,13 +412,15 @@ static int DecodeHuffmanPairs_BFEXTU(int *xy, int nVals, int tabIdx, int bitsLef
 			if (!len) {
 				bitPos += maxBits;
 				remaining -= maxBits;
+				if (remaining < 0)
+					return -1;
 				tCurr += cw;
 				continue;
 			}
 			bitPos += len;
 			remaining -= len;
-			if (remaining < -(linBits + 2))
-				return -1;
+			if (remaining <= 0)
+				goto done;
 			break;
 		}
 
@@ -424,41 +428,43 @@ static int DecodeHuffmanPairs_BFEXTU(int *xy, int nVals, int tabIdx, int bitsLef
 		y = GetCWY(cw);
 
 		if (x == 15) {
-			validBits = (remaining < linBits) ? remaining : linBits;
-			x += (int)HuffmanBFExtUPadded(buf, bitPos, linBits, validBits);
+			if (remaining < linBits)
+				goto done;
+			x += (int)HuffmanBFExtU(buf, bitPos, linBits);
 			bitPos += linBits;
 			remaining -= linBits;
 		}
 		if (x) {
-			validBits = (remaining < 1) ? remaining : 1;
-			if (HuffmanBFExtUPadded(buf, bitPos, 1, validBits))
+			if (remaining < 1)
+				goto done;
+			if (HuffmanBFExtU(buf, bitPos, 1))
 				x |= (int)0x80000000;
 			bitPos++;
 			remaining--;
 		}
 
 		if (y == 15) {
-			validBits = (remaining < linBits) ? remaining : linBits;
-			y += (int)HuffmanBFExtUPadded(buf, bitPos, linBits, validBits);
+			if (remaining < linBits)
+				goto done;
+			y += (int)HuffmanBFExtU(buf, bitPos, linBits);
 			bitPos += linBits;
 			remaining -= linBits;
 		}
 		if (y) {
-			validBits = (remaining < 1) ? remaining : 1;
-			if (HuffmanBFExtUPadded(buf, bitPos, 1, validBits))
+			if (remaining < 1)
+				goto done;
+			if (HuffmanBFExtU(buf, bitPos, 1))
 				y |= (int)0x80000000;
 			bitPos++;
 			remaining--;
 		}
-
-		if (remaining < -(linBits * 2 + 4))
-			return -1;
 
 		*xy++ = x;
 		*xy++ = y;
 		nVals -= 2;
 	}
 
+ done:
 	return (startBits - remaining);
 }
 #endif
