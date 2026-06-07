@@ -135,25 +135,26 @@ static __inline void AntiAlias_AmigaM68KBoundary(int *x)
 	__asm__ volatile (
 		"moveq #7,%%d7\n"
 		"1:\n\t"
-		/* Pre-decrement xLo and post-increment xHi to visit x[-1..-8] and x[0..7]. */
+		/* Read a0 = x[-(i+1)] and b0 = x[i]. */
 		"move.l -(%[xlo]),%%d0\n\t"
 		"move.l (%[xhi])+,%%d1\n\t"
-		/* xLo = MULSHIFT32(c0, xLo) - MULSHIFT32(c1, xHi) */
-		"move.l %%d0,%%d4\n\t"
-		"muls.l (%[c]),%%d5:%%d4\n\t"
-		"move.l %%d1,%%d2\n\t"
-		"muls.l 4(%[c]),%%d6:%%d2\n\t"
-		"sub.l %%d6,%%d5\n\t"
-		/* xHi = MULSHIFT32(c0, xHi) + MULSHIFT32(c1, xLo) */
-		"move.l %%d1,%%d2\n\t"
+		/* newLo = (MULSHIFT32(c0, a0) - MULSHIFT32(c1, b0)) << 1. */
+		"move.l %%d0,%%d2\n\t"
 		"muls.l (%[c]),%%d3:%%d2\n\t"
+		"move.l %%d1,%%d4\n\t"
+		"muls.l 4(%[c]),%%d5:%%d4\n\t"
+		"sub.l %%d5,%%d3\n\t"
+		"add.l %%d3,%%d3\n\t"
+		/* newHi = (MULSHIFT32(c0, b0) + MULSHIFT32(c1, a0)) << 1. */
+		"move.l %%d1,%%d2\n\t"
+		"muls.l (%[c]),%%d5:%%d2\n\t"
 		"move.l %%d0,%%d4\n\t"
 		"muls.l 4(%[c]),%%d6:%%d4\n\t"
-		"add.l %%d6,%%d3\n\t"
+		"add.l %%d6,%%d5\n\t"
 		"add.l %%d5,%%d5\n\t"
-		"add.l %%d3,%%d3\n\t"
-		"move.l %%d5,4(%[xlo])\n\t"
-		"move.l %%d3,-4(%[xhi])\n\t"
+		/* Store to the locations just read by pre-decrement/post-increment. */
+		"move.l %%d3,(%[xlo])\n\t"
+		"move.l %%d5,-4(%[xhi])\n\t"
 		"addq.l #8,%[c]\n\t"
 		"dbra %%d7,1b"
 		: [c] "+a" (c), [xlo] "+a" (xLo), [xhi] "+a" (xHi)
