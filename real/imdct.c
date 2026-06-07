@@ -135,27 +135,25 @@ static __inline void AntiAlias_AmigaM68KBoundary(int *x)
 	__asm__ volatile (
 		"moveq #7,%%d7\n"
 		"1:\n\t"
-		/* Keep xLo (d0) and xHi (d1) live across the two pairs of muls.l. */
-		"move.l -4(%[xlo]),%%d0\n\t"
-		"move.l (%[xhi]),%%d1\n\t"
-		/* tmp = MULSHIFT32(c0, xHi) - MULSHIFT32(c1, xLo) */
-		"move.l %%d1,%%d2\n\t"
-		"muls.l (%[c]),%%d3:%%d2\n\t"
-		"move.l %%d0,%%d4\n\t"
-		"muls.l 4(%[c]),%%d5:%%d4\n\t"
-		"sub.l %%d5,%%d3\n\t"
-		/* xLo = MULSHIFT32(c0, xLo) + MULSHIFT32(c1, xHi) */
+		/* Pre-decrement xLo and post-increment xHi to visit x[-1..-8] and x[0..7]. */
+		"move.l -(%[xlo]),%%d0\n\t"
+		"move.l (%[xhi])+,%%d1\n\t"
+		/* xLo = MULSHIFT32(c0, xLo) - MULSHIFT32(c1, xHi) */
 		"move.l %%d0,%%d4\n\t"
 		"muls.l (%[c]),%%d5:%%d4\n\t"
 		"move.l %%d1,%%d2\n\t"
 		"muls.l 4(%[c]),%%d6:%%d2\n\t"
-		"add.l %%d6,%%d5\n\t"
-		"add.l %%d3,%%d3\n\t"
+		"sub.l %%d6,%%d5\n\t"
+		/* xHi = MULSHIFT32(c0, xHi) + MULSHIFT32(c1, xLo) */
+		"move.l %%d1,%%d2\n\t"
+		"muls.l (%[c]),%%d3:%%d2\n\t"
+		"move.l %%d0,%%d4\n\t"
+		"muls.l 4(%[c]),%%d6:%%d4\n\t"
+		"add.l %%d6,%%d3\n\t"
 		"add.l %%d5,%%d5\n\t"
-		"move.l %%d5,-4(%[xlo])\n\t"
-		"move.l %%d3,(%[xhi])\n\t"
-		"subq.l #4,%[xlo]\n\t"
-		"addq.l #4,%[xhi]\n\t"
+		"add.l %%d3,%%d3\n\t"
+		"move.l %%d5,4(%[xlo])\n\t"
+		"move.l %%d3,-4(%[xhi])\n\t"
 		"addq.l #8,%[c]\n\t"
 		"dbra %%d7,1b"
 		: [c] "+a" (c), [xlo] "+a" (xLo), [xhi] "+a" (xHi)
