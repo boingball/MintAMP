@@ -407,6 +407,19 @@ static void MP3ClearBadFrame(MP3DecInfo *mp3DecInfo, short *outbuf)
 		outbuf[i] = 0;
 }
 
+
+static int FastLowrateExpectedGranuleSamps(const MP3DecInfo *mp3DecInfo)
+{
+	int outputChans;
+	int stride;
+
+	stride = mp3DecInfo->fastLowrateStride;
+	if (stride != 2 && stride != 4)
+		return 0;
+	outputChans = (mp3DecInfo->outputMono && mp3DecInfo->nChans > 1) ? 1 : mp3DecInfo->nChans;
+	return (mp3DecInfo->nGranSamps / stride) * outputChans;
+}
+
 /**************************************************************************************
  * Function:    MP3Decode
  *
@@ -642,6 +655,9 @@ int MP3Decode(HMP3Decoder hMP3Decoder, unsigned char **inbuf, int *bytesLeft, sh
 		{
 			int dstStart;
 			int dstEnd;
+			int phaseStart;
+
+			phaseStart = mp3DecInfo->fastLowratePhase;
 
 			if (mp3DecInfo->fastLowrateStride > 1)
 				dstStart = mp3DecInfo->fastLowrateOutputSamps;
@@ -654,12 +670,27 @@ int MP3Decode(HMP3Decoder hMP3Decoder, unsigned char **inbuf, int *bytesLeft, sh
 				return ERR_MP3_INVALID_SUBBAND;
 			}
 
+			if (mp3DecInfo->fastLowrateStride > 1) {
+				int expectedLowrateSamps;
+
+				dstEnd = mp3DecInfo->fastLowrateOutputSamps;
+				expectedLowrateSamps = FastLowrateExpectedGranuleSamps(mp3DecInfo);
+				if (expectedLowrateSamps > 0 &&
+					dstEnd - dstStart > expectedLowrateSamps) {
+					dstEnd = dstStart + expectedLowrateSamps;
+					mp3DecInfo->fastLowrateOutputSamps = dstEnd;
+				}
+			}
+
 			if (mp3DecInfo->fastLowrateStride > 1 &&
 				mp3DecInfo->fastLowrateDebugCount < MAX_NGRAN) {
 				MP3FastLowrateGranuleDebug *dbg =
 					&mp3DecInfo->fastLowrateDebug[mp3DecInfo->fastLowrateDebugCount++];
 				dstEnd = mp3DecInfo->fastLowrateOutputSamps;
 				dbg->granule = gr;
+				dbg->stride = mp3DecInfo->fastLowrateStride;
+				dbg->phaseStart = phaseStart;
+				dbg->phaseEnd = mp3DecInfo->fastLowratePhase;
 				dbg->fullRateSamps = mp3DecInfo->nGranSamps *
 					((mp3DecInfo->outputMono && mp3DecInfo->nChans > 1) ? 1 : mp3DecInfo->nChans);
 				dbg->lowrateSamps = dstEnd - dstStart;
