@@ -572,6 +572,30 @@ static __inline int IMDCT36_AMIGA_M68K_LONG_WINDOW(int *xp, const int *cp,
 {
 	int mOut;
 
+	/*
+	 * The loop below is the btCurr == 0 && btPrev == 0 C fast path:
+	 *
+	 *   c = *cp--; xo = *(xp + 9); xe = *xp--;
+	 *   xo = MULSHIFT32(c, xo); xe >>= 2;
+	 *   s = -*xPrev; d = -(xe - xo); *xPrev++ = xe + xo;
+	 *   t = s - d;
+	 *   yLo = d + (MULSHIFT32(t, *wp++) << 2);
+	 *   yHi = s + (MULSHIFT32(t, *wp++) << 2);
+	 *
+	 * Instruction-group map for each of the nine DBRA iterations:
+	 *   - xo: load xp[9] into d1, load *cp into d0, cp -= 1 int,
+	 *     then muls.l d0,d2:d1 so d2 is MULSHIFT32(*old_cp, xp[9]).
+	 *   - xe: load *xp into d0, xp -= 1 int, then asr.l #2 to match
+	 *     xe >>= 2 exactly.
+	 *   - s/d/xPrev: d3 = -*xPrev, d4 = xe + xo stored to
+	 *     *xPrev++, and d5 = xo - xe (the C d = -(xe - xo)).
+	 *   - yLo: recompute t = s - d in d1, multiply by *wp++, shift
+	 *     the high word left by 2, add d, store through ypLo, advance
+	 *     ypLo by NBANDS ints (128 bytes), and OR FASTABS(yLo) into mOut.
+	 *   - yHi: recompute the same t, multiply by the next *wp++, shift
+	 *     left by 2, add s, store through ypHi, retreat ypHi by NBANDS
+	 *     ints (128 bytes), and OR FASTABS(yHi) into mOut.
+	 */
 	__asm__ volatile (
 		"\tmoveq #0,%0\n\t"
 		"moveq #8,%%d7\n"
