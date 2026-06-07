@@ -69,6 +69,31 @@ static __inline unsigned int LOADBE16(const unsigned char *buf)
 /* apply sign of s to the positive number x (save in MSB, will do two's complement in dequant) */
 #define ApplySign(x, s)	{ (x) |= ((s) & 0x80000000); }
 
+
+#if defined(AMIGA_M68K) && defined(AMIGA_M68K_ASM_HUFFMAN)
+static int gExperimentalHuffmanEnabled;
+
+void MP3SetExperimentalHuffman(int enabled)
+{
+	gExperimentalHuffmanEnabled = enabled ? 1 : 0;
+}
+
+int MP3ExperimentalHuffmanEnabled(void)
+{
+	return gExperimentalHuffmanEnabled;
+}
+#else
+void MP3SetExperimentalHuffman(int enabled)
+{
+	(void)enabled;
+}
+
+int MP3ExperimentalHuffmanEnabled(void)
+{
+	return 0;
+}
+#endif
+
 #if defined(AMIGA_M68K) && defined(AMIGA_M68K_ASM_HUFFMAN) && defined(__GNUC__) && \
 	(defined(__mc68020__) || defined(__mc68030__) || defined(__mc68040__) || defined(__mc68060__) || \
 	 defined(mc68020) || defined(mc68030) || defined(mc68040) || defined(mc68060))
@@ -653,7 +678,11 @@ int DecodeHuffman(MP3DecInfo *mp3DecInfo, unsigned char *buf, int *bitOffset, in
 	/* decode Huffman pairs (rEnd[i] are always even numbers) */
 	bitsLeft = huffBlockBits;
 	for (i = 0; i < 3; i++) {
-		bitsUsed = DecodeHuffmanPairs_TEST_ACTIVE(hi->huffDecBuf[ch] + rEnd[i], rEnd[i+1] - rEnd[i], sis->tableSelect[i], bitsLeft, buf, *bitOffset);
+		if (MP3ExperimentalHuffmanEnabled() &&
+			DecodeHuffmanPairs_HAS_AMIGA_M68K_ASM_RUNTIME())
+			bitsUsed = DecodeHuffmanPairs_TEST_ACTIVE(hi->huffDecBuf[ch] + rEnd[i], rEnd[i+1] - rEnd[i], sis->tableSelect[i], bitsLeft, buf, *bitOffset);
+		else
+			bitsUsed = DecodeHuffmanPairs_C_REFERENCE(hi->huffDecBuf[ch] + rEnd[i], rEnd[i+1] - rEnd[i], sis->tableSelect[i], bitsLeft, buf, *bitOffset);
 		if (bitsUsed < 0 || bitsUsed > bitsLeft)	/* error - overran end of bitstream */
 			return -1;
 

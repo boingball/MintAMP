@@ -44,6 +44,11 @@ m68k-amigaos-gcc -m68030 -std=gnu89 -O3 -fomit-frame-pointer \
 python3 tools/amiga_fast_preferred_hunks.py amiga_mp3dec.fastexp
 ```
 
+The fast030 default deliberately leaves the experimental Huffman asm path off.
+Build `make -f Makefile.amiga exp-huff` (or add `-DAMIGA_M68K_ASM_HUFFMAN`
+yourself) only when you want a binary that exposes the runtime `--exp-huff`
+switch for further Huffman tuning.
+
 Keep a space between every `-D...` define and every `-I...` include path.  For
 example, `-DAMIGA_M68K_ASM_MIDSIDE-Ipub` is parsed as one malformed macro
 definition, so the compiler never receives the `pub` include path and then fails
@@ -391,18 +396,16 @@ decoded frame count and output sample count.
    amiga_mp3dec.midsideasm --bench --decode-only --checksum stereo-joint.mp3
    ```
 
-8. `AMIGA_M68K_ASM_HUFFMAN` is an opt-in 68020+ GNU m68k Huffman pair
-   decoder path for linbits pair tables.  It uses `bfextu` with an offsettable
-   memory operand to read the lookup field directly from the bitstream instead
-   of maintaining the byte-refilled software cache.  The portable C pair
-   decoder remains available as the selftest reference; do not enable this path
-   on 68000/68010 builds.
+8. `AMIGA_M68K_ASM_HUFFMAN` is an experimental opt-in 68020+ GNU m68k
+   Huffman pair decoder path.  The normal decode path keeps using the portable
+   C Huffman pair decoder unless the binary was compiled with
+   `-DAMIGA_M68K_ASM_HUFFMAN` and the user passes `--exp-huff`.  Builds without
+   that define do not advertise the `--exp-huff` option.  Keep this path out of
+   default/release builds until it is corrected and verified on real input.
 
    ```sh
-   m68k-amigaos-gcc -m68030 -std=gnu89 -O3 -fomit-frame-pointer \
-     -DAMIGA_M68K -DAMIGA_M68K_ASM_HUFFMAN -Ipub -Ireal \
-     -o amiga_mp3dec.huffasm amiga_mp3dec.c mp3dec.c mp3tabs.c real/*.c
-   amiga_mp3dec.huffasm --selftest-huffman
+   make -f Makefile.amiga exp-huff
+   amiga_mp3dec.fastexp --exp-huff --selftest-huffman
    ```
 
 9. Checksum the C and ASM FDCT32 builds with identical inputs and output modes

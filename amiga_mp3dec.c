@@ -124,6 +124,7 @@ typedef struct DecodeOptions {
 	int outputRate;
 	int fastLowrate;
 	int expPoly;
+	int expHuff;
 	int help;
 	int debugArgv;
 	int debugFastLowrate;
@@ -471,6 +472,9 @@ static void PrintUsage(const char *prog)
 	printf("  --fast-lowrate experimental lower-quality Amiga conversion; requires --rate\n");
 	printf("                 22050, 11025, 8820, or 8287 and can skip discarded synthesis samples\n");
 	printf("  --exp-poly  use experimental 68030 asm mono polyphase when compiled in\n");
+#ifdef AMIGA_M68K_ASM_HUFFMAN
+	printf("  --exp-huff  use experimental 68020+ asm Huffman pairs when compiled in\n");
+#endif
 	printf("  --selftest-mulshift compare C and optional asm MULSHIFT32 helpers\n");
 	printf("  --selftest-clz compare C and optional m68k bfffo CLZ helpers\n");
 	printf("  --selftest-fdct32 compare C reference and optional m68k asm FDCT32 path\n");
@@ -598,6 +602,10 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->fastLowrate = 1;
 		} else if (!strcmp(argv[i], "--exp-poly")) {
 			opt->expPoly = 1;
+#ifdef AMIGA_M68K_ASM_HUFFMAN
+		} else if (!strcmp(argv[i], "--exp-huff")) {
+			opt->expHuff = 1;
+#endif
 		} else if (!strcmp(argv[i], "--rate")) {
 			if (++i >= argc)
 				return -1;
@@ -4447,6 +4455,12 @@ int main(int argc, char **argv)
 #endif
 	}
 	MP3SetExperimentalPolyphase(opt.expPoly);
+	if (opt.expHuff) {
+#if defined(AMIGA_M68K_ASM_HUFFMAN)
+		fprintf(stderr, "warning: --exp-huff enables experimental 68020+ asm Huffman pairs when available; otherwise Huffman stays on the C path\n");
+#endif
+	}
+	MP3SetExperimentalHuffman(opt.expHuff);
 
 	if (opt.fastLowrate) {
 		int stride = FastLowrateStrideForOutputRate(opt.outputRate);

@@ -312,6 +312,8 @@ int IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME(void);
 int DecodeHuffmanPairs_C_REFERENCE(int *xy, int nVals, int tabIdx, int bitsLeft, unsigned char *buf, int bitOffset);
 int DecodeHuffmanPairs_TEST_ACTIVE(int *xy, int nVals, int tabIdx, int bitsLeft, unsigned char *buf, int bitOffset);
 int DecodeHuffmanPairs_HAS_AMIGA_M68K_ASM_RUNTIME(void);
+void MP3SetExperimentalHuffman(int enabled);
+int MP3ExperimentalHuffmanEnabled(void);
 
 /* polyphase.c selftest hooks */
 void PolyphaseMonoFast_C_REFERENCE(short *pcm, int *vbuf, const int *coefBase);
