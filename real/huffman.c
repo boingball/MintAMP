@@ -400,6 +400,8 @@ static int DecodeHuffmanPairs_BFEXTU(int *xy, int nVals, int tabIdx, int bitsLef
 	bitPos = bitOffset;
 	remaining = bitsLeft;
 	while (nVals > 0) {
+		if (remaining <= 0)
+			return -1;
 		tCurr = tBase;
 		for (;;) {
 			maxBits = GetMaxbits(tCurr[0]);
@@ -410,11 +412,11 @@ static int DecodeHuffmanPairs_BFEXTU(int *xy, int nVals, int tabIdx, int bitsLef
 			if (!len) {
 				bitPos += maxBits;
 				remaining -= maxBits;
+				if (remaining < 0)
+					return -1;
 				tCurr += cw;
 				continue;
 			}
-			if (remaining < len)
-				return -1;
 			bitPos += len;
 			remaining -= len;
 			break;
