@@ -397,10 +397,11 @@ int DecodeHuffmanPairs_C_REFERENCE(int *xy, int nVals, int tabIdx, int bitsLeft,
 static int DecodeHuffmanPairs_BFEXTU(int *xy, int nVals, int tabIdx, int bitsLeft, unsigned char *buf, int bitOffset)
 {
 	int x, y;
-	int len, startBits, maxBits;
-	int bitPos, remaining, validBits;
+	int cachedBits, padBits, len, startBits, maxBits, validBits;
+	int bitPos;
 	HuffTabType tabType;
 	unsigned short cw, *tBase, *tCurr;
+	unsigned char *cacheBuf;
 	unsigned int bits;
 
 	if(nVals <= 0)
@@ -418,72 +419,76 @@ static int DecodeHuffmanPairs_BFEXTU(int *xy, int nVals, int tabIdx, int bitsLef
 	ASSERT(tabIdx >= 0);
 	ASSERT(tabType != invalidTab);
 
-	/*
-	 * bfextu maps cleanly to the no-linbits tables: lookup a codeword,
-	 * consume the optional x/y sign bits, then emit the pair.  The linbits
-	 * tables have escape values plus C-reference padBits/cachedBits end-drain
-	 * accounting, so keep them on the portable path for correctness.
-	 */
 	if (tabType != loopNoLinbits)
 		return DecodeHuffmanPairs_C_REFERENCE(xy, nVals, tabIdx, bitsLeft, buf, bitOffset);
 
+	/*
+	 * Keep the C reference loopNoLinbits cache bookkeeping exactly, including
+	 * startBits/bitsLeft/cachedBits/padBits accounting.  The only difference is
+	 * that the Huffman and sign bits are read directly from the original buffer
+	 * with bfextu at bitPos rather than from the left-justified cache.
+	 */
+	cacheBuf = buf;
 	bitPos = bitOffset;
-	remaining = bitsLeft;
-	while (nVals > 0) {
-		if (remaining <= 0)
-			goto done;
 
-		tCurr = tBase;
-		for (;;) {
+	/* initially fill cache with any partial byte */
+	cachedBits = (8 - bitOffset) & 0x07;
+	if (cachedBits)
+		cacheBuf++;
+	bitsLeft -= cachedBits;
+
+	/* no-linbits decode loop, mirrored from DecodeHuffmanPairs_C_REFERENCE */
+	tCurr = tBase;
+	padBits = 0;
+	while (nVals > 0) {
+		/* refill cache - assumes cachedBits <= 16 */
+		if (bitsLeft >= 16) {
+			cacheBuf += 2;
+			cachedBits += 16;
+			bitsLeft -= 16;
+		} else {
+			if (cachedBits + bitsLeft <= 0)	return -1;
+			if (bitsLeft > 0)	cacheBuf++;
+			if (bitsLeft > 8)	cacheBuf++;
+			cachedBits += bitsLeft;
+			bitsLeft = 0;
+
+			padBits = 11;
+			cachedBits += padBits;
+		}
+
+		while (nVals > 0 && cachedBits >= 11) {
 			maxBits = GetMaxbits(tCurr[0]);
-			validBits = (remaining < maxBits) ? remaining : maxBits;
+			validBits = cachedBits - padBits;
+			if (validBits > maxBits)
+				validBits = maxBits;
 			bits = HuffmanBFExtUPadded(buf, bitPos, maxBits, validBits);
 			cw = tCurr[bits + 1];
 			len = GetHLen(cw);
 			if (!len) {
+				cachedBits -= maxBits;
 				bitPos += maxBits;
-				remaining -= maxBits;
-				if (remaining < 0)
-					goto done;
 				tCurr += cw;
 				continue;
 			}
+			cachedBits -= len;
 			bitPos += len;
-			remaining -= len;
-			break;
-		}
 
-		x = GetCWX(cw);
-		if (x) {
-			if (remaining > 0) {
-				if (HuffmanBFExtU(buf, bitPos, 1))
-					x |= (int)0x80000000;
-				bitPos++;
-				remaining--;
-			}
-		}
+			x = GetCWX(cw);		if (x)	{if (HuffmanBFExtU(buf, bitPos, 1)) x = -x; bitPos++; cachedBits--;}
+			y = GetCWY(cw);		if (y)	{if (HuffmanBFExtU(buf, bitPos, 1)) y = -y; bitPos++; cachedBits--;}
 
-		y = GetCWY(cw);
-		if (y) {
-			if (remaining > 0) {
-				if (HuffmanBFExtU(buf, bitPos, 1))
-					y |= (int)0x80000000;
-				bitPos++;
-				remaining--;
-			}
-		}
+			if (cachedBits < padBits)
+				return -1;
 
-		*xy++ = x;
-		*xy++ = y;
-		nVals -= 2;
+			*xy++ = x;
+			*xy++ = y;
+			nVals -= 2;
+			tCurr = tBase;
+		}
 	}
-
-done:
-	if (nVals > 0)
-		return -1;
-	if (remaining < 0)
-		remaining = 0;
-	return (startBits - remaining);
+	bitsLeft += (cachedBits - padBits);
+	(void)cacheBuf;
+	return (startBits - bitsLeft);
 }
 #endif
 
