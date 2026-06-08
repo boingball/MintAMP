@@ -210,6 +210,26 @@ void MP3SetFastLowrate(HMP3Decoder hMP3Decoder, int stride)
 	mp3DecInfo->fastLowrateDebugCount = 0;
 }
 
+
+void MP3SetExperimentalIMDCTThin(HMP3Decoder hMP3Decoder, int enabled)
+{
+	MP3DecInfo *mp3DecInfo = (MP3DecInfo *)hMP3Decoder;
+
+	if (!mp3DecInfo)
+		return;
+	mp3DecInfo->expImdctThin = enabled ? 1 : 0;
+	mp3DecInfo->imdctThinActive = 0;
+}
+
+int MP3ExperimentalIMDCTThinActive(HMP3Decoder hMP3Decoder)
+{
+	MP3DecInfo *mp3DecInfo = (MP3DecInfo *)hMP3Decoder;
+
+	if (!mp3DecInfo)
+		return 0;
+	return mp3DecInfo->imdctThinActive;
+}
+
 int MP3GetFastLowrateStride(HMP3Decoder hMP3Decoder)
 {
 	MP3DecInfo *mp3DecInfo = (MP3DecInfo *)hMP3Decoder;

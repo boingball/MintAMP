@@ -44,6 +44,8 @@
 
 #include "coder.h"
 #include "assembly.h"
+#include <stdio.h>
+#include <string.h>
 
 /**************************************************************************************
  * Function:    AntiAlias
@@ -286,6 +288,28 @@ static __inline void FreqInvertOdd(int *y)
 	*y = -y6;	y += 2*NBANDS;
 	*y = -y7;	y += 2*NBANDS;
 	*y = -y8;
+}
+
+
+static int IMDCTThinOutputCanActivate(const MP3DecInfo *mp3DecInfo)
+{
+#if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_M68K_IMDCT_THIN_OUTPUT)
+	/*
+	 * The runtime option is intentionally more conservative than the compile-time
+	 * experiment.  Stride-4 11025 Hz mono fast-lowrate currently still runs the
+	 * full FDCT32 for each of the 18 IMDCT time slots, so no final IMDCT y[] row
+	 * has been proven dead for the checksum-preserving path.  Keep the hook and
+	 * selftest in place, but leave thinning inactive until a matching stride-4
+	 * FDCT/polyphase dependency mask is proven.
+	 */
+	if (mp3DecInfo && mp3DecInfo->expImdctThin &&
+		mp3DecInfo->fastLowrateStride == 4 &&
+		mp3DecInfo->outputMono && mp3DecInfo->nChans <= 2)
+		return 0;
+#else
+	(void)mp3DecInfo;
+#endif
+	return 0;
 }
 
 static int FreqInvertRescale(int *y, int *xPrev, int blockIdx, int es)
@@ -982,6 +1006,9 @@ static int HybridTransform(int *xCurr, int *xPrev, int y[BLOCK_SIZE][NBANDS], Si
 	prevType = bc->prevType;
 	prevWinSwitch = bc->prevWinSwitch;
 	currWinSwitch = bc->currWinSwitch;
+	(void)bc->imdctThinActive;
+	(void)bc->imdctThinStride;
+	(void)bc->imdctThinPhase;
 
 	/* do long blocks, if any */
 	if (!mixedBlock && prevWinSwitch == 0) {
@@ -1072,6 +1099,124 @@ static int HybridTransform(int *xCurr, int *xPrev, int y[BLOCK_SIZE][NBANDS], Si
 	return nBlocksOut;
 }
 
+
+static unsigned long IMDCTThinChecksumPCM(const int y[BLOCK_SIZE][NBANDS], int gb)
+{
+	int vbuf[MAX_NCHAN * VBUF_LENGTH];
+	short pcm[BLOCK_SIZE * NBANDS];
+	int tmp[NBANDS];
+	int phase;
+	int vindex;
+	int out;
+	int b;
+	int i;
+	unsigned long sum;
+
+	memset(vbuf, 0, sizeof(vbuf));
+	memset(pcm, 0, sizeof(pcm));
+	phase = 0;
+	vindex = 0;
+	out = 0;
+	for (b = 0; b < BLOCK_SIZE; b += 2) {
+		memcpy(tmp, y[b], sizeof(tmp));
+		FDCT32(tmp, vbuf, vindex, 0, gb);
+		out += PolyphaseMonoFastLowrate(pcm + out, vbuf + vindex, polyCoef, 4, &phase);
+		memcpy(tmp, y[b + 1], sizeof(tmp));
+		FDCT32(tmp, vbuf, vindex, 1, gb);
+		out += PolyphaseMonoFastLowrate(pcm + out, vbuf + vindex + VBUF_LENGTH, polyCoef, 4, &phase);
+		vindex = (vindex - 1) & 7;
+	}
+
+	sum = 2166136261UL;
+	for (i = 0; i < out; i++) {
+		sum ^= (unsigned short)pcm[i];
+		sum *= 16777619UL;
+	}
+	return sum;
+}
+
+int IMDCTThinOutputSelftest(void)
+{
+	int xFull[MAX_NSAMP];
+	int xThin[MAX_NSAMP];
+	int prevFull[MAX_NSAMP / 2];
+	int prevThin[MAX_NSAMP / 2];
+	int yFull[BLOCK_SIZE][NBANDS];
+	int yThin[BLOCK_SIZE][NBANDS];
+	SideInfoSub sis;
+	BlockCount fullBc;
+	BlockCount thinBc;
+	int i;
+	int outFull;
+	int outThin;
+	unsigned long pcmFull;
+	unsigned long pcmThin;
+	int failures;
+
+	for (i = 0; i < MAX_NSAMP; i++) {
+		xFull[i] = ((i * 1103515245UL + 12345UL) & 0x001fffff) - 0x00100000;
+		xThin[i] = xFull[i];
+	}
+	for (i = 0; i < MAX_NSAMP / 2; i++) {
+		prevFull[i] = ((i * 69069UL + 1UL) & 0x0007ffff) - 0x00040000;
+		prevThin[i] = prevFull[i];
+	}
+	memset(yFull, 0xa5, sizeof(yFull));
+	memset(yThin, 0xa5, sizeof(yThin));
+	memset(&sis, 0, sizeof(sis));
+	memset(&fullBc, 0, sizeof(fullBc));
+	memset(&thinBc, 0, sizeof(thinBc));
+
+	sis.blockType = 0;
+	sis.mixedBlock = 0;
+	fullBc.nBlocksLong = 32;
+	fullBc.nBlocksTotal = 32;
+	fullBc.nBlocksPrev = 32;
+	fullBc.prevType = 0;
+	fullBc.prevWinSwitch = 0;
+	fullBc.currWinSwitch = 0;
+	fullBc.gbIn = 8;
+	thinBc = fullBc;
+	thinBc.imdctThinActive = 0;
+	thinBc.imdctThinStride = 4;
+	thinBc.imdctThinPhase = 0;
+
+	outFull = HybridTransform(xFull, prevFull, yFull, &sis, &fullBc);
+	outThin = HybridTransform(xThin, prevThin, yThin, &sis, &thinBc);
+	pcmFull = IMDCTThinChecksumPCM(yFull, fullBc.gbOut);
+	pcmThin = IMDCTThinChecksumPCM(yThin, thinBc.gbOut);
+
+	failures = 0;
+	if (outFull != outThin) {
+		printf("IMDCT thin nBlocksOut mismatch: full=%d thin=%d\n", outFull, outThin);
+		failures++;
+	}
+	if (memcmp(prevFull, prevThin, sizeof(prevFull)) != 0) {
+		printf("IMDCT thin xPrev mismatch\n");
+		failures++;
+	}
+	if (memcmp(yFull, yThin, sizeof(yFull)) != 0) {
+		printf("IMDCT thin selected y[] mismatch\n");
+		failures++;
+	}
+	if (pcmFull != pcmThin) {
+		printf("IMDCT thin fast-lowrate PCM checksum mismatch: full=%lu thin=%lu\n", pcmFull, pcmThin);
+		failures++;
+	}
+
+	printf("IMDCT thin compile gate: %s\n",
+#if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_M68K_IMDCT_THIN_OUTPUT)
+		"available"
+#else
+		"unavailable"
+#endif
+	);
+	printf("IMDCT thin runtime activation: disabled until stride-4 dependencies are proven\n");
+	printf("IMDCT thin fast-lowrate PCM checksum: %lu\n", pcmFull);
+	printf("IMDCT thin selftest failures: %d\n", failures);
+	return failures ? -1 : 0;
+}
+
 /**************************************************************************************
  * Function:    IMDCT
  *
@@ -1141,6 +1286,10 @@ int IMDCT(MP3DecInfo *mp3DecInfo, int gr, int ch)
 	bc.prevWinSwitch = mi->prevWinSwitch[ch];
 	bc.currWinSwitch = (si->sis[gr][ch].mixedBlock ? blockCutoff : 0);	/* where WINDOW switches (not nec. transform) */
 	bc.gbIn = hi->gb[ch];
+	bc.imdctThinStride = mp3DecInfo->fastLowrateStride;
+	bc.imdctThinPhase = mp3DecInfo->fastLowratePhase;
+	bc.imdctThinActive = IMDCTThinOutputCanActivate(mp3DecInfo);
+	mp3DecInfo->imdctThinActive = bc.imdctThinActive;
 
 	mi->numPrevIMDCT[ch] = HybridTransform(hi->huffDecBuf[ch], mi->overBuf[ch], mi->outBuf[ch], &si->sis[gr][ch], &bc);
 	mi->prevType[ch] = si->sis[gr][ch].blockType;

@@ -125,6 +125,7 @@
 #define IMDCT36_C_REFERENCE STATNAME(IMDCT36_C_REFERENCE)
 #define IMDCT36_TEST_ACTIVE STATNAME(IMDCT36_TEST_ACTIVE)
 #define IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME STATNAME(IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME)
+#define IMDCTThinOutputSelftest STATNAME(IMDCTThinOutputSelftest)
 #define DecodeHuffmanPairs_C_REFERENCE STATNAME(DecodeHuffmanPairs_C_REFERENCE)
 
 #define	ISFMpeg1			STATNAME(ISFMpeg1)
@@ -252,6 +253,9 @@ typedef struct _BlockCount {
 	int currWinSwitch;
 	int gbIn;
 	int gbOut;
+	int imdctThinActive;
+	int imdctThinStride;
+	int imdctThinPhase;
 } BlockCount;
 
 /* max bits in scalefactors = 5, so use char's to save space */
@@ -310,6 +314,7 @@ int FDCT32_HAS_AMIGA_M68K_ASM_RUNTIME(void);
 int IMDCT36_C_REFERENCE(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb);
 int IMDCT36_TEST_ACTIVE(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb);
 int IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME(void);
+int IMDCTThinOutputSelftest(void);
 
 /* huffman.c selftest hooks */
 int DecodeHuffmanPairs_C_REFERENCE(int *xy, int nVals, int tabIdx, int bitsLeft, unsigned char *buf, int bitOffset);

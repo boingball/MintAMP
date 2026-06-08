@@ -45,6 +45,7 @@ int STATNAME(AntiAlias_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
 int STATNAME(IMDCT36_C_REFERENCE)(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb);
 int STATNAME(IMDCT36_TEST_ACTIVE)(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb);
 int STATNAME(IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
+int STATNAME(IMDCTThinOutputSelftest)(void);
 void STATNAME(PolyphaseMonoFast_C_REFERENCE)(short *pcm, int *vbuf, const int *coefBase);
 void STATNAME(PolyphaseMonoFast_TEST_ACTIVE)(short *pcm, int *vbuf, const int *coefBase);
 int STATNAME(PolyphaseMonoFast_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
@@ -72,6 +73,7 @@ extern const int STATNAME(polyCoef)[264];
 #define AMIGA_IMDCT36_C_REFERENCE STATNAME(IMDCT36_C_REFERENCE)
 #define AMIGA_IMDCT36_TEST_ACTIVE STATNAME(IMDCT36_TEST_ACTIVE)
 #define AMIGA_IMDCT36_HAS_ASM STATNAME(IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME)
+#define AMIGA_IMDCT_THIN_SELFTEST STATNAME(IMDCTThinOutputSelftest)
 #define AMIGA_POLYPHASE_MONO_FAST_C_REFERENCE STATNAME(PolyphaseMonoFast_C_REFERENCE)
 #define AMIGA_POLYPHASE_MONO_FAST_TEST_ACTIVE STATNAME(PolyphaseMonoFast_TEST_ACTIVE)
 #define AMIGA_POLYPHASE_MONO_FAST_HAS_ASM STATNAME(PolyphaseMonoFast_HAS_AMIGA_M68K_ASM_RUNTIME)
@@ -117,6 +119,7 @@ typedef struct DecodeOptions {
 	int selftestClz;
 	int selftestFdct32;
 	int selftestImdct;
+	int selftestImdctThin;
 	int selftestAntialias;
 	int selftestPolyphase;
 	int selftestPolyphaseStride2;
@@ -130,6 +133,7 @@ typedef struct DecodeOptions {
 	int outputRate;
 	int fastLowrate;
 	int expPoly;
+	int expImdctThin;
 	int help;
 	int debugArgv;
 	int debugFastLowrate;
@@ -477,10 +481,12 @@ static void PrintUsage(const char *prog)
 	printf("  --fast-lowrate experimental lower-quality Amiga conversion; requires --rate\n");
 	printf("                 22050, 11025, 8820, or 8287 and can skip discarded synthesis samples\n");
 	printf("  --exp-poly  use experimental 68030 asm mono polyphase when compiled in\n");
+	printf("  --exp-imdct-thin request experimental fast-lowrate IMDCT output thinning\n");
 	printf("  --selftest-mulshift compare C and optional asm MULSHIFT32 helpers\n");
 	printf("  --selftest-clz compare C and optional m68k bfffo CLZ helpers\n");
 	printf("  --selftest-fdct32 compare C reference and optional m68k asm FDCT32 path\n");
 	printf("  --selftest-imdct compare C reference and optional m68k asm long IMDCT path\n");
+	printf("  --selftest-imdct-thin compare full and requested thinned IMDCT output paths\n");
 	printf("  --selftest-antialias compare C reference and optional m68k asm antialias path\n");
 	printf("  --selftest-polyphase compare C fast mono polyphase and optional m68k asm path\n");
 	printf("  --selftest-polyphase-stride2 compare C and optional asm stride-2 mono polyphase paths\n");
@@ -586,6 +592,8 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->selftestFdct32 = 1;
 		} else if (!strcmp(argv[i], "--selftest-imdct")) {
 			opt->selftestImdct = 1;
+		} else if (!strcmp(argv[i], "--selftest-imdct-thin")) {
+			opt->selftestImdctThin = 1;
 		} else if (!strcmp(argv[i], "--selftest-antialias")) {
 			opt->selftestAntialias = 1;
 		} else if (!strcmp(argv[i], "--selftest-polyphase")) {
@@ -610,6 +618,8 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->fastLowrate = 1;
 		} else if (!strcmp(argv[i], "--exp-poly")) {
 			opt->expPoly = 1;
+		} else if (!strcmp(argv[i], "--exp-imdct-thin")) {
+			opt->expImdctThin = 1;
 		} else if (!strcmp(argv[i], "--rate")) {
 			if (++i >= argc)
 				return -1;
@@ -645,7 +655,7 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 		return 0;
 
 	if (opt->selftestMulshift || opt->selftestClz || opt->selftestFdct32 || opt->selftestImdct ||
-		opt->selftestAntialias || opt->selftestPolyphase || opt->selftestPolyphaseStride2 ||
+		opt->selftestImdctThin || opt->selftestAntialias || opt->selftestPolyphase || opt->selftestPolyphaseStride2 ||
 		opt->selftestPolyphaseStride4 || opt->selftestFastLowrate ||
 		opt->selftestHuffman || opt->selftestDequant ||
 		opt->selftestBitstream || opt->selftestMonoFastLowrateStereo)
@@ -4413,6 +4423,11 @@ int main(int argc, char **argv)
 		AmigaFreeNormalizedArgs(&normalized);
 		return selftestErr;
 	}
+	if (opt.selftestImdctThin) {
+		int selftestErr = AMIGA_IMDCT_THIN_SELFTEST();
+		AmigaFreeNormalizedArgs(&normalized);
+		return selftestErr;
+	}
 	if (opt.selftestAntialias) {
 		int selftestErr = SelftestAntialias();
 		AmigaFreeNormalizedArgs(&normalized);
@@ -4561,6 +4576,7 @@ int main(int argc, char **argv)
 #endif
 	}
 	MP3SetExperimentalPolyphase(opt.expPoly);
+	MP3SetExperimentalIMDCTThin(decoder, opt.expImdctThin);
 	if (opt.fastLowrate) {
 		int stride = FastLowrateStrideForOutputRate(opt.outputRate);
 		MP3SetFastLowrate(decoder, stride);
@@ -4568,6 +4584,8 @@ int main(int argc, char **argv)
 			fprintf(stderr,
 				"22050 requires significantly more CPU and may underrun on 030 systems.\n");
 #if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE)
+		if (opt.expImdctThin)
+			fprintf(stderr, "warning: --exp-imdct-thin requested; unsupported stride-4 IMDCT thinning remains disabled unless selftest-proven\n");
 		fprintf(stderr, "warning: --fast-lowrate is experimental, lower quality, "
 			"and only skips polyphase output samples; IMDCT/DCT32 still run full-rate\n");
 #else
