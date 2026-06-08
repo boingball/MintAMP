@@ -1192,9 +1192,6 @@ int PolyphaseStereoFastLowrateStride4_C_REFERENCE(short *pcm, int *vbuf,
 #if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE)
 	return PolyphaseStereoFastLowrateList(pcm, vbuf, coefBase,
 		fastLowrateStride4Samples[phase], 8);
-#endif
-	return PolyphaseStereoFastLowrateList(pcm, vbuf, coefBase,
-		fastLowrateStride4Samples[phase], 8);
 #else
 	return PolyphaseStereoFastLowrate(pcm, vbuf, coefBase, 4, &phase);
 #endif
