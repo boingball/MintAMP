@@ -640,16 +640,11 @@ void FDCT32Quarter(int *buf, int *dest, int offset, int oddBlock, int gb)
 {
 #if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_FAST_FDCT32_QUARTER)
 	int i, s, es, oddBase, evenBase, delayOff, clipBits;
-	int pp[8];
-	int p[8];
-	int q[8];
+	const int *cptr = dcttab;
+	int a0, a1, a2, a3, a4, a5, a6, a7;
+	int b0, b1, b2, b3, b4, b5, b6, b7;
 	int *d;
-	static const int cos1_16 = (int)0x7d8a5f40UL;
-	static const int cos3_16 = (int)0x6a6d98a4UL;
-	static const int cos5_16 = (int)0x471cece7UL;
-	static const int cos7_16 = (int)0x18f8b83cUL;
-	static const int cos1_8 = (int)0x7641af3dUL;
-	static const int cos3_8 = (int)0x30fbc54dUL;
+	static const unsigned char firstPassShift[8] = { 1, 1, 1, 1, 1, 2, 2, 4 };
 
 	es = 0;
 	if (gb < 6) {
@@ -658,32 +653,46 @@ void FDCT32Quarter(int *buf, int *dest, int offset, int oddBlock, int gb)
 			buf[i] >>= es;
 	}
 
-	pp[0] = buf[0] + buf[7];
-	pp[4] = FDCT32_HALF_MULSHIFT32(cos1_16, buf[0] - buf[7]);
-	pp[1] = buf[1] + buf[6];
-	pp[5] = FDCT32_HALF_MULSHIFT32(cos3_16, buf[1] - buf[6]);
-	pp[2] = buf[2] + buf[5];
-	pp[6] = FDCT32_HALF_MULSHIFT32(cos5_16, buf[2] - buf[5]);
-	pp[3] = buf[3] + buf[4];
-	pp[7] = FDCT32_HALF_MULSHIFT32(cos7_16, buf[3] - buf[4]);
+	/* Match FDCT32Half's symmetric first pass so quarter-rate rows stay
+	 * in the libhelix FDCT32 pipeline.
+	 */
+	for (i = 0; i < 8; i++) {
+		a0 = buf[i];
+		a3 = buf[31 - i];
+		a1 = buf[15 - i];
+		a2 = buf[16 + i];
+		b0 = a0 + a3;
+		b1 = a1 + a2;
+		buf[i] = b0 + b1;
+		buf[15 - i] = FDCT32_HALF_MULSHIFT32(cptr[2], b0 - b1) << firstPassShift[i];
+		cptr += 3;
+	}
 
-	p[0] = pp[0] + pp[3];
-	p[2] = FDCT32_HALF_MULSHIFT32(cos1_8, pp[0] - pp[3]);
-	p[1] = pp[1] + pp[2];
-	p[3] = FDCT32_HALF_MULSHIFT32(cos3_8, pp[1] - pp[2]);
-	p[4] = pp[4] + pp[7];
-	p[6] = FDCT32_HALF_MULSHIFT32(cos1_8, pp[4] - pp[7]);
-	p[5] = pp[5] + pp[6];
-	p[7] = FDCT32_HALF_MULSHIFT32(cos3_8, pp[5] - pp[6]);
+	/* Run only FDCT32Half's first radix-8 group; buf[8..15] feed rows
+	 * that stride-4 output never consumes.
+	 */
+	a0 = buf[0];		a7 = buf[7];		a3 = buf[3];		a4 = buf[4];
+	b0 = a0 + a7;		b7 = FDCT32_HALF_MULSHIFT32(*cptr++, a0 - a7) << 1;
+	b3 = a3 + a4;		b4 = FDCT32_HALF_MULSHIFT32(*cptr++, a3 - a4) << 3;
+	a0 = b0 + b3;		a3 = FDCT32_HALF_MULSHIFT32(*cptr, b0 - b3) << 1;
+	a4 = b4 + b7;		a7 = FDCT32_HALF_MULSHIFT32(*cptr++, b7 - b4) << 1;
 
-	q[0] = p[0] + p[1];
-	q[1] = FDCT32_HALF_MULSHIFT32(COS4_0, p[0] - p[1]);
-	q[2] = p[2] + p[3];
-	q[3] = FDCT32_HALF_MULSHIFT32(COS4_0, p[3] - p[2]);
-	q[4] = p[4] + p[5];
-	q[5] = FDCT32_HALF_MULSHIFT32(COS4_0, p[4] - p[5]);
-	q[6] = p[6] + p[7];
-	q[7] = FDCT32_HALF_MULSHIFT32(COS4_0, p[7] - p[6]);
+	a1 = buf[1];		a6 = buf[6];		a2 = buf[2];		a5 = buf[5];
+	b1 = a1 + a6;		b6 = FDCT32_HALF_MULSHIFT32(*cptr++, a1 - a6) << 1;
+	b2 = a2 + a5;		b5 = FDCT32_HALF_MULSHIFT32(*cptr++, a2 - a5) << 1;
+	a1 = b1 + b2;		a2 = FDCT32_HALF_MULSHIFT32(*cptr, b1 - b2) << 2;
+	a5 = b5 + b6;		a6 = FDCT32_HALF_MULSHIFT32(*cptr++, b6 - b5) << 2;
+
+	b0 = a0 + a1;		b1 = FDCT32_HALF_MULSHIFT32(COS4_0, a0 - a1) << 1;
+	b2 = a2 + a3;		b3 = FDCT32_HALF_MULSHIFT32(COS4_0, a3 - a2) << 1;
+	buf[0] = b0;		buf[1] = b1;
+	buf[2] = b2 + b3;	buf[3] = b3;
+
+	b4 = a4 + a5;		b5 = FDCT32_HALF_MULSHIFT32(COS4_0, a4 - a5) << 1;
+	b6 = a6 + a7;		b7 = FDCT32_HALF_MULSHIFT32(COS4_0, a7 - a6) << 1;
+	b6 += b7;
+	buf[4] = b4 + b6;	buf[5] = b5 + b7;
+	buf[6] = b5 + b6;	buf[7] = b7;
 
 	oddBase = oddBlock ? VBUF_LENGTH : 0;
 	evenBase = oddBlock ? 0 : VBUF_LENGTH;
@@ -708,23 +717,31 @@ void FDCT32Quarter(int *buf, int *dest, int offset, int oddBlock, int gb)
 	}
 
 	d = dest + 64 * 16 + delayOff + evenBase;
-	FDCT32_HALF_STORE(q[1]);
-	d = dest + offset + oddBase + 64 * 0;
-	FDCT32_HALF_STORE(q[5] + q[7]);
-	d = dest + offset + oddBase + 64 * 4;
-	FDCT32_HALF_STORE(q[3]);
-	d = dest + offset + oddBase + 64 * 8;
-	FDCT32_HALF_STORE(q[7]);
-	d = dest + offset + oddBase + 64 * 12;
-	FDCT32_HALF_STORE(0);
-	d = dest + 16 + delayOff + evenBase + 64 * 0;
-	FDCT32_HALF_STORE(q[4] + q[5]);
+	FDCT32_HALF_STORE(buf[0]);
+
+	d = dest + offset + oddBase;
+	FDCT32_HALF_STORE(buf[1]);
+
+	d = dest + 16 + delayOff + evenBase;
+	FDCT32_HALF_STORE(buf[1]);
+
 	d = dest + 16 + delayOff + evenBase + 64 * 4;
-	FDCT32_HALF_STORE(q[2]);
-	d = dest + 16 + delayOff + evenBase + 64 * 8;
-	FDCT32_HALF_STORE(q[6] + q[7]);
-	d = dest + 16 + delayOff + evenBase + 64 * 12;
-	FDCT32_HALF_STORE(q[0]);
+	FDCT32_HALF_STORE(buf[2]);
+
+	d = dest + offset + oddBase + 64 * 4;
+	FDCT32_HALF_STORE(buf[3]);
+
+	d = dest + 16 + delayOff + evenBase + 64 * 6;
+	FDCT32_HALF_STORE(buf[4]);
+
+	d = dest + offset + oddBase + 64 * 2;
+	FDCT32_HALF_STORE(buf[5]);
+
+	d = dest + 16 + delayOff + evenBase + 64 * 2;
+	FDCT32_HALF_STORE(buf[6]);
+
+	d = dest + offset + oddBase + 64 * 6;
+	FDCT32_HALF_STORE(buf[7]);
 
 #undef FDCT32_HALF_STORE
 #else
