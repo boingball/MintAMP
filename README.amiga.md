@@ -45,9 +45,10 @@ m68k-amigaos-gcc -m68030 -std=gnu89 -O3 -fomit-frame-pointer \
 python3 tools/amiga_fast_preferred_hunks.py amiga_mp3dec.fastexp
 ```
 
-The Huffman decoder currently stays on the portable C path.  The previous
-experimental m68k Huffman asm toggle was removed because it could produce bit
-errors on real input.
+The optional Huffman m68k ASM refill path is runtime-gated.  It is included in
+the quality 0 preset and remains available as `--exp-huff` for targeted
+profiling; builds without `AMIGA_M68K_ASM_HUFFMAN` silently stay on the portable
+C Huffman decoder.
 
 Keep a space between every `-D...` define and every `-I...` include path.  For
 example, `-DAMIGA_M68K_ASM_MIDSIDE-Ipub` is parsed as one malformed macro
@@ -138,7 +139,7 @@ source while reusing the public decoder and Paula playback implementation.
 ```sh
 amiga_mp3dec [options] infile.mp3 outfile
 amiga_mp3dec --info infile.mp3
-amiga_mp3dec --play [--stereo] [--rate 8287|8820|11025|22050] [--buffer-seconds N] [--fast-mem] infile.mp3
+amiga_mp3dec --play [--stereo] [--rate 8287|8820|11025|22050] [--quality 0|1|2|3] [--buffer-seconds N] [--fast-mem] infile.mp3
 amiga_mp3dec --selftest-play-cleanup [--debug-cleanup] [--buffer-seconds N]
 ```
 
@@ -251,8 +252,8 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
 - `--rate 22050`, `--rate 11025`, `--rate 8820`, or `--rate 8287` post-decode downsamples the
   output with a lightweight nearest-sample decimator when the MP3 sample rate is
   higher than the requested output rate.
-- `--fast-lowrate` is an experimental, lower-quality Amiga conversion mode for
-  speed experiments, not hi-fi playback. It requires one of the `--rate` values
+- `--fast-lowrate` is a lower-quality Amiga conversion mode for speed-oriented
+  playback and conversion. It requires one of the `--rate` values
   above. In `AMIGA_M68K` + `AMIGA_FAST_POLYPHASE` builds it writes only every
   second polyphase output sample for 22050 Hz, every fourth for 11025 Hz, and
   every fifth for 8820/8287 Hz. This skips discarded polyphase sample work,
@@ -278,6 +279,31 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
 - `--debug-fastlowrate` prints one line per decoded frame/granule with the
   full-rate sample count, low-rate samples emitted, cumulative low-rate samples,
   and destination offset range used for contiguous placement.
+
+### Quality/speed tradeoff
+
+`--quality N` selects one of the verified fast-path combinations while leaving
+the individual `--exp-*` flags available for fine-grained override. If
+`--quality` is omitted, `--fast-lowrate --rate 11025` defaults to quality 1; all
+other invocations default to quality 3.
+
+- `--quality 0` (fastest) enables reduced taps, quarter-rate FDCT32, thinned
+  IMDCT output, fast polyphase, and the optional Huffman ASM refill path. The
+  Huffman shortcut is limited to this level because its ASM path has known
+  bit-accounting edge cases; in builds without the Huffman m68k ASM path it
+  silently falls back to the normal C Huffman decoder.
+- `--quality 1` (fast) enables reduced taps, thinned IMDCT output, and fast
+  polyphase. This is the automatic default for `--fast-lowrate --rate 11025`.
+- `--quality 2` (balanced) enables thinned IMDCT output and fast polyphase.
+- `--quality 3` (accurate) enables no approximations and is equivalent to the
+  original decoder behavior.
+
+For 68030 realtime playback of 192 kbps and higher content, start with:
+
+```sh
+amiga_mp3dec --quality 0 --play --fast-mem --fast-lowrate --rate 11025 --mono song.mp3
+```
+
 - `--selftest-mulshift` compares the portable C `MULSHIFT32` reference with the
   optional 68020+ assembly helper over edge cases and 100,000 pseudo-random
   input pairs.
@@ -316,6 +342,9 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
 - `--selftest-dequant` compares the C dequant block reference with the active
   optional 68030 dequant inner loop for scale values -47..0 and coefficient
   magnitudes 0..8206.
+- `--selftest-quality` verifies the `--quality 0` through `--quality 3` flag
+  combinations, explicit `--exp-*` override preservation, and the automatic
+  `--fast-lowrate --rate 11025` quality 1 default.
 - `--checksum` prints a 32-bit checksum of the decoded 16-bit PCM stream before
   optional mixing, downsampling, or output-format conversion. With
   `--fast-lowrate`, it instead covers the low-rate output samples so experiments
