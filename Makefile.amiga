@@ -10,13 +10,14 @@ CPU ?= -m68020
 STD ?= -std=gnu89
 OPTFLAGS ?= -O2 -fomit-frame-pointer
 TARGET ?= amiga_mp3dec
-GUI_TARGET ?= amiga_mp3gui
+GUI_TARGET ?= miniamp3
 
 CPPFLAGS_COMMON := -Ipub -Ireal -DAMIGA_M68K
 CFLAGS_COMMON := $(CPU) $(STD) $(OPTFLAGS)
 DECODER_SOURCES := mp3dec.c mp3tabs.c $(wildcard real/*.c)
 SOURCES := amiga_mp3dec.c $(DECODER_SOURCES)
 GUI_SOURCES := amiga_mp3gui.c
+# The GUI uses gadtools.library via proto/gadtools.h; no linker flag is needed.
 
 FAST030_CPPFLAGS := \
 	-DAMIGA_M68K_ASM \
@@ -51,7 +52,7 @@ fast030: $(FAST030_TARGET)
 gui: $(GUI_TARGET)
 
 $(GUI_TARGET): $(GUI_SOURCES) amiga_mp3dec.c
-	$(CC) $(CFLAGS_COMMON) $(CPPFLAGS_COMMON) $(EXTRA_CFLAGS) -o $@ $(GUI_SOURCES) -lauto
+	$(CC) $(CFLAGS_COMMON) $(CPPFLAGS_COMMON) $(EXTRA_CFLAGS) -o $@ $(GUI_SOURCES)
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
 
 $(FAST030_TARGET): $(SOURCES) $(FAST030_ASM_SOURCES)
@@ -63,7 +64,7 @@ print-command:
 	@printf '%s\n' '$(AMIGA_HUNK_FAST_PREFERRED) $(TARGET)'
 
 print-gui-command:
-	@printf '%s\n' '$(CC) $(CFLAGS_COMMON) $(CPPFLAGS_COMMON) $(EXTRA_CFLAGS) -o $(GUI_TARGET) $(GUI_SOURCES) -lauto'
+	@printf '%s\n' '$(CC) $(CFLAGS_COMMON) $(CPPFLAGS_COMMON) $(EXTRA_CFLAGS) -o $(GUI_TARGET) $(GUI_SOURCES)'
 	@printf '%s\n' '$(AMIGA_HUNK_FAST_PREFERRED) $(GUI_TARGET)'
 
 print-fast030-command:

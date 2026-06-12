@@ -1,8 +1,8 @@
 /*
- * HelixAMP3 - compact AmigaOS mini-player frontend for the Helix fixed-point
- * MP3 decoder.  The GUI wraps the existing amiga_mp3dec playback frontend so
- * the same Paula streaming path, fast-lowrate options, and buffer handling are
- * used from either Shell or Workbench.
+ * MiniAMP3 - compact AmigaOS GadTools mini-player frontend for the Helix
+ * fixed-point MP3 decoder.  The GUI wraps the existing amiga_mp3dec playback
+ * frontend so the same Paula streaming path, fast-lowrate options, and buffer
+ * handling are used from either Shell or Workbench.
  */
 
 #include <stdio.h>
@@ -19,46 +19,56 @@
 #include <exec/types.h>
 #include <exec/tasks.h>
 #include <intuition/intuition.h>
+#include <intuition/intuitionbase.h>
 #include <libraries/asl.h>
+#include <libraries/gadtools.h>
 #include <dos/dos.h>
 #include <dos/dostags.h>
 #include <proto/exec.h>
 #include <proto/intuition.h>
-#include <proto/graphics.h>
 #include <proto/asl.h>
 #include <proto/dos.h>
+#include <proto/gadtools.h>
 
 #define HELIXAMP3_MAX_PATH 256
-#define HELIXAMP3_ARGC_MAX 12
+#define HELIXAMP3_ARGC_MAX 16
 #define HELIXAMP3_SIGMASK(gui) (1UL << (gui)->win->UserPort->mp_SigBit)
 
-#define GID_BROWSE 1
-#define GID_PROFILE 2
-#define GID_BUFFER_DOWN 3
-#define GID_BUFFER_UP 4
-#define GID_RATE 5
-#define GID_PLAY 6
-#define GID_STOP 7
-
-#define HIT_NONE 0
-
-typedef struct RectDef {
-	int id;
-	WORD left;
-	WORD top;
-	WORD right;
-	WORD bottom;
-} RectDef;
+enum {
+	GID_FILE = 1,
+	GID_BROWSE,
+	GID_FAST_LOWRATE,
+	GID_FAST_MEM,
+	GID_MONO,
+	GID_RATE,
+	GID_BUFFER,
+	GID_QUALITY,
+	GID_PLAY,
+	GID_STOP,
+	GID_STATUS,
+	GID_COUNT
+};
 
 typedef struct HelixAmp3Gui {
-	struct Window *win;
-	char inputName[HELIXAMP3_MAX_PATH];
-	char status[96];
-	int profile;
-	int bufferSeconds;
-	int rateIndex;
-	int closeRequested;
-	int redrawRequested;
+	struct Window  *win;
+	struct Gadget  *gadgets;
+	struct Gadget  *gadContext;
+	struct Gadget  *gadFile;
+	struct Gadget  *gadStatus;
+	struct Gadget  *gadBuffer;
+	struct Gadget  *gadPlay;
+	struct Gadget  *gadStop;
+	struct VisualInfo *vi;
+	char  inputName[HELIXAMP3_MAX_PATH];
+	char  fileText[HELIXAMP3_MAX_PATH];
+	char  statusText[128];
+	int   fastLowrate;
+	int   fastMem;
+	int   mono;
+	int   rateIndex;
+	int   bufferSeconds;
+	int   qualityIndex;
+	int   closeRequested;
 } HelixAmp3Gui;
 
 typedef struct HelixAmp3Player {
@@ -70,29 +80,31 @@ typedef struct HelixAmp3Player {
 	struct Process *process;
 } HelixAmp3Player;
 
+struct IntuitionBase *IntuitionBase;
+struct Library *AslBase;
+struct Library *GadToolsBase;
 static HelixAmp3Player gGuiPlayer;
-
-static const char * const kProfiles[] = {
-	"Fast",
-	"Medium",
-	"Slow"
-};
 
 static const char * const kRates[] = {
 	"8287",
 	"8820",
-	"11025"
+	"11025",
+	"22050"
 };
 
-static const RectDef kRects[] = {
-	{ GID_BROWSE,      388,  24, 476,  41 },
-	{ GID_PROFILE,    104,  54, 206,  71 },
-	{ GID_BUFFER_DOWN,104,  82, 126,  99 },
-	{ GID_BUFFER_UP,  184,  82, 206,  99 },
-	{ GID_RATE,       104, 110, 206, 127 },
-	{ GID_PLAY,       254, 110, 342, 127 },
-	{ GID_STOP,       366, 110, 454, 127 },
-	{ HIT_NONE, 0, 0, 0, 0 }
+static const STRPTR kRateLabels[] = {
+	(STRPTR)"8287",
+	(STRPTR)"8820",
+	(STRPTR)"11025",
+	(STRPTR)"22050",
+	NULL
+};
+
+static const STRPTR kQualityLabels[] = {
+	(STRPTR)"Fast",
+	(STRPTR)"Normal",
+	(STRPTR)"Best",
+	NULL
 };
 
 static void SafeCopy(char *dst, size_t dstSize, const char *src)
@@ -105,113 +117,279 @@ static void SafeCopy(char *dst, size_t dstSize, const char *src)
 	dst[dstSize - 1] = '\0';
 }
 
-static void DrawBox(struct RastPort *rp, const RectDef *r, const char *text)
+static void SetStatus(HelixAmp3Gui *gui, const char *text)
 {
-	RectFill(rp, r->left, r->top, r->right, r->bottom);
-	SetAPen(rp, 0);
-	Move(rp, r->left + 6, r->top + 13);
-	Text(rp, text, (LONG)strlen(text));
-	SetAPen(rp, 1);
-}
-
-static const RectDef *FindRect(int id)
-{
-	int i;
-	for (i = 0; kRects[i].id != HIT_NONE; i++) {
-		if (kRects[i].id == id)
-			return &kRects[i];
+	SafeCopy(gui->statusText, sizeof(gui->statusText), text);
+	if (gui->win && gui->gadStatus) {
+		GT_SetGadgetAttrs(gui->gadStatus, gui->win, NULL,
+			GTTX_Text, (ULONG)gui->statusText,
+			TAG_DONE);
 	}
-	return NULL;
 }
 
-static int HitTest(WORD x, WORD y)
+static void SetFileDisplay(HelixAmp3Gui *gui, const char *text)
 {
-	int i;
-	for (i = 0; kRects[i].id != HIT_NONE; i++) {
-		if (x >= kRects[i].left && x <= kRects[i].right &&
-			y >= kRects[i].top && y <= kRects[i].bottom)
-			return kRects[i].id;
+	if (!text || !text[0])
+		text = "<choose a file>";
+	SafeCopy(gui->fileText, sizeof(gui->fileText), text);
+	if (gui->win && gui->gadFile) {
+		GT_SetGadgetAttrs(gui->gadFile, gui->win, NULL,
+			GTTX_Text, (ULONG)gui->fileText,
+			TAG_DONE);
 	}
-	return HIT_NONE;
 }
 
-static void GuiRedraw(HelixAmp3Gui *gui)
+static struct Gadget *MakeGadget(HelixAmp3Gui *gui, struct Gadget *prev,
+	ULONG kind, UWORD id, WORD left, WORD top, WORD width, WORD height,
+	const char *label, ULONG tag1, ULONG value1, ULONG tag2, ULONG value2,
+	ULONG tag3, ULONG value3, ULONG tag4, ULONG value4)
 {
-	struct RastPort *rp;
-	char bufferText[32];
-	char fileText[80];
-	const char *base;
+	struct NewGadget ng;
 
-	if (!gui->win)
-		return;
-	rp = gui->win->RPort;
-	SetAPen(rp, 0);
-	RectFill(rp, 8, 12, gui->win->Width - 9, gui->win->Height - 9);
-	SetAPen(rp, 1);
-	Move(rp, 16, 20);
-	Text(rp, "HelixAMP3 mini MP3 player", 26);
+	memset(&ng, 0, sizeof(ng));
+	ng.ng_LeftEdge = left;
+	ng.ng_TopEdge = top;
+	ng.ng_Width = width;
+	ng.ng_Height = height;
+	ng.ng_GadgetText = (UBYTE *)label;
+	ng.ng_GadgetID = id;
+	if (kind == BUTTON_KIND)
+		ng.ng_Flags = PLACETEXT_IN;
+	else if (kind == CHECKBOX_KIND)
+		ng.ng_Flags = PLACETEXT_RIGHT;
+	else
+		ng.ng_Flags = PLACETEXT_LEFT;
+	ng.ng_VisualInfo = gui->vi;
+	return CreateGadget(kind, prev, &ng,
+		tag1, value1,
+		tag2, value2,
+		tag3, value3,
+		tag4, value4,
+		TAG_DONE);
+}
 
-	Move(rp, 16, 37);
-	Text(rp, "MP3:", 4);
-	base = gui->inputName[0] ? gui->inputName : "<choose a file>";
-	SafeCopy(fileText, sizeof(fileText), base);
-	Move(rp, 60, 37);
-	Text(rp, fileText, (LONG)strlen(fileText));
-	DrawBox(rp, FindRect(GID_BROWSE), "Browse");
+static int GuiCreateGadgets(HelixAmp3Gui *gui)
+{
+	struct Gadget *gad;
 
-	Move(rp, 16, 67);
-	Text(rp, "Profile:", 8);
-	DrawBox(rp, FindRect(GID_PROFILE), kProfiles[gui->profile]);
+	gui->gadContext = CreateContext(&gui->gadgets);
+	if (!gui->gadContext)
+		return -1;
+	gad = gui->gadContext;
 
-	Move(rp, 16, 95);
-	Text(rp, "Buffer:", 7);
-	DrawBox(rp, FindRect(GID_BUFFER_DOWN), "-");
-	sprintf(bufferText, "%d sec", gui->bufferSeconds);
-	Move(rp, 132, 95);
-	Text(rp, bufferText, (LONG)strlen(bufferText));
-	DrawBox(rp, FindRect(GID_BUFFER_UP), "+");
+	gui->gadFile = gad = MakeGadget(gui, gad, TEXT_KIND, GID_FILE,
+		55, 16, 280, 14, "File:",
+		GTTX_Text, (ULONG)gui->fileText,
+		GTTX_Border, TRUE,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
 
-	Move(rp, 16, 123);
-	Text(rp, "Rate:", 5);
-	DrawBox(rp, FindRect(GID_RATE), kRates[gui->rateIndex]);
-	DrawBox(rp, FindRect(GID_PLAY), gGuiPlayer.running ? "Playing" : "Play");
-	DrawBox(rp, FindRect(GID_STOP), "Stop");
+	gad = MakeGadget(gui, gad, BUTTON_KIND, GID_BROWSE,
+		345, 14, 68, 16, "Browse...",
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
 
-	Move(rp, 16, 151);
-	Text(rp, gui->status, (LONG)strlen(gui->status));
+	gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_FAST_LOWRATE,
+		22, 46, 20, 12, "Fast-lowrate",
+		GTCB_Checked, gui->fastLowrate,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_FAST_MEM,
+		160, 46, 20, 12, "Fast-mem",
+		GTCB_Checked, gui->fastMem,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_MONO,
+		278, 46, 20, 12, "Mono",
+		GTCB_Checked, gui->mono,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gad = MakeGadget(gui, gad, CYCLE_KIND, GID_RATE,
+		55, 76, 98, 16, "Rate:",
+		GTCY_Labels, (ULONG)kRateLabels,
+		GTCY_Active, gui->rateIndex,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gad = MakeGadget(gui, gad, CYCLE_KIND, GID_QUALITY,
+		238, 76, 112, 16, "Quality:",
+		GTCY_Labels, (ULONG)kQualityLabels,
+		GTCY_Active, gui->qualityIndex,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gui->gadBuffer = gad = MakeGadget(gui, gad, SLIDER_KIND, GID_BUFFER,
+		70, 108, 220, 16, "Buffer:",
+		GTSL_Min, 1,
+		GTSL_Max, 30,
+		GTSL_Level, gui->bufferSeconds,
+		GTSL_LevelFormat, (ULONG)"%ld sec");
+	if (!gad)
+		return -1;
+
+	gui->gadPlay = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_PLAY,
+		45, 140, 72, 18, "Play",
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gui->gadStop = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_STOP,
+		310, 140, 72, 18, "Stop",
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gui->gadStatus = gad = MakeGadget(gui, gad, TEXT_KIND, GID_STATUS,
+		58, 174, 350, 14, "Status:",
+		GTTX_Text, (ULONG)gui->statusText,
+		GTTX_Border, TRUE,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	return 0;
 }
 
 static int GuiOpen(HelixAmp3Gui *gui)
 {
 	struct NewWindow nw;
+	struct Screen *screen;
 
 	memset(gui, 0, sizeof(*gui));
-	gui->profile = 1;
-	gui->bufferSeconds = 4;
-	gui->rateIndex = 0;
-	SafeCopy(gui->status, sizeof(gui->status), "Choose an MP3, then Play. Stop asks playback to end.");
+	gui->fastLowrate = 1;
+	gui->fastMem = 1;
+	gui->mono = 1;
+	gui->rateIndex = 2;
+	gui->bufferSeconds = 10;
+	gui->qualityIndex = 0;
+	SafeCopy(gui->statusText, sizeof(gui->statusText), "Ready.");
+	SetFileDisplay(gui, NULL);
+
+	IntuitionBase = (struct IntuitionBase *)OpenLibrary("intuition.library", 37);
+	if (!IntuitionBase) {
+		fprintf(stderr, "MiniAMP3 requires intuition.library V37 or newer.\n");
+		return -1;
+	}
+	AslBase = OpenLibrary("asl.library", 37);
+	if (!AslBase) {
+		fprintf(stderr, "MiniAMP3 requires asl.library V37 or newer.\n");
+		CloseLibrary((struct Library *)IntuitionBase);
+		IntuitionBase = NULL;
+		return -1;
+	}
+	GadToolsBase = OpenLibrary("gadtools.library", 37);
+	if (!GadToolsBase) {
+		fprintf(stderr, "MiniAMP3 requires gadtools.library V37 or newer.\n");
+		CloseLibrary(AslBase);
+		AslBase = NULL;
+		CloseLibrary((struct Library *)IntuitionBase);
+		IntuitionBase = NULL;
+		return -1;
+	}
+
+	screen = LockPubScreen(NULL);
+	if (!screen) {
+		fprintf(stderr, "cannot lock Workbench screen\n");
+		CloseLibrary(GadToolsBase);
+		GadToolsBase = NULL;
+		CloseLibrary(AslBase);
+		AslBase = NULL;
+		CloseLibrary((struct Library *)IntuitionBase);
+		IntuitionBase = NULL;
+		return -1;
+	}
+	gui->vi = GetVisualInfo(screen, TAG_DONE);
+	UnlockPubScreen(NULL, screen);
+	if (!gui->vi) {
+		fprintf(stderr, "cannot create GadTools visual info\n");
+		CloseLibrary(GadToolsBase);
+		GadToolsBase = NULL;
+		CloseLibrary(AslBase);
+		AslBase = NULL;
+		CloseLibrary((struct Library *)IntuitionBase);
+		IntuitionBase = NULL;
+		return -1;
+	}
+
+	if (GuiCreateGadgets(gui) != 0) {
+		fprintf(stderr, "cannot create MiniAMP3 gadgets\n");
+		FreeGadList(gui->gadgets);
+		gui->gadgets = NULL;
+		FreeVisualInfo(gui->vi);
+		gui->vi = NULL;
+		CloseLibrary(GadToolsBase);
+		GadToolsBase = NULL;
+		CloseLibrary(AslBase);
+		AslBase = NULL;
+		CloseLibrary((struct Library *)IntuitionBase);
+		IntuitionBase = NULL;
+		return -1;
+	}
+
 	memset(&nw, 0, sizeof(nw));
 	nw.LeftEdge = 40;
 	nw.TopEdge = 30;
-	nw.Width = 492;
-	nw.Height = 170;
+	nw.Width = 420;
+	nw.Height = 200;
 	nw.DetailPen = 0;
 	nw.BlockPen = 1;
-	nw.IDCMPFlags = IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW | IDCMP_MOUSEBUTTONS;
+	nw.IDCMPFlags = IDCMP_GADGETUP | IDCMP_MOUSEMOVE | IDCMP_CLOSEWINDOW |
+		IDCMP_REFRESHWINDOW | IDCMP_ACTIVEWINDOW;
 	nw.Flags = WFLG_CLOSEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET |
-		WFLG_ACTIVATE | WFLG_SIMPLE_REFRESH;
-	nw.Title = (UBYTE *)"HelixAMP3";
-	nw.MinWidth = 320;
-	nw.MinHeight = 150;
+		WFLG_SIZEGADGET | WFLG_SIZEBBOTTOM | WFLG_ACTIVATE |
+		WFLG_SMART_REFRESH;
+	nw.FirstGadget = gui->gadgets;
+	nw.Title = (UBYTE *)"MiniAMP3";
+	nw.MinWidth = 420;
+	nw.MinHeight = 200;
 	nw.MaxWidth = 640;
-	nw.MaxHeight = 220;
+	nw.MaxHeight = 256;
 	nw.Type = WBENCHSCREEN;
 	gui->win = OpenWindow(&nw);
 	if (!gui->win) {
-		fprintf(stderr, "cannot open HelixAMP3 window\n");
+		fprintf(stderr, "cannot open MiniAMP3 window\n");
+		FreeGadList(gui->gadgets);
+		gui->gadgets = NULL;
+		FreeVisualInfo(gui->vi);
+		gui->vi = NULL;
+		CloseLibrary(GadToolsBase);
+		GadToolsBase = NULL;
+		CloseLibrary(AslBase);
+		AslBase = NULL;
+		CloseLibrary((struct Library *)IntuitionBase);
+		IntuitionBase = NULL;
 		return -1;
 	}
-	GuiRedraw(gui);
+	GT_RefreshWindow(gui->win, NULL);
 	return 0;
 }
 
@@ -221,35 +399,25 @@ static void GuiClose(HelixAmp3Gui *gui)
 		CloseWindow(gui->win);
 		gui->win = NULL;
 	}
-}
-
-static void GuiPoll(HelixAmp3Gui *gui)
-{
-	struct IntuiMessage *msg;
-	ULONG classValue;
-	UWORD code;
-	WORD mx;
-	WORD my;
-
-	while (gui->win && (msg = (struct IntuiMessage *)GetMsg(gui->win->UserPort)) != NULL) {
-		classValue = msg->Class;
-		code = msg->Code;
-		mx = msg->MouseX;
-		my = msg->MouseY;
-		ReplyMsg((struct Message *)msg);
-		if (classValue == IDCMP_CLOSEWINDOW)
-			gui->closeRequested = 1;
-		else if (classValue == IDCMP_REFRESHWINDOW) {
-			BeginRefresh(gui->win);
-			GuiRedraw(gui);
-			EndRefresh(gui->win, TRUE);
-		} else if (classValue == IDCMP_MOUSEBUTTONS && code == SELECTUP) {
-			int hit = HitTest(mx, my);
-			if (hit != HIT_NONE) {
-				gui->redrawRequested = hit;
-				return;
-			}
-		}
+	if (gui->gadgets) {
+		FreeGadList(gui->gadgets);
+		gui->gadgets = NULL;
+	}
+	if (gui->vi) {
+		FreeVisualInfo(gui->vi);
+		gui->vi = NULL;
+	}
+	if (GadToolsBase) {
+		CloseLibrary(GadToolsBase);
+		GadToolsBase = NULL;
+	}
+	if (AslBase) {
+		CloseLibrary(AslBase);
+		AslBase = NULL;
+	}
+	if (IntuitionBase) {
+		CloseLibrary((struct Library *)IntuitionBase);
+		IntuitionBase = NULL;
 	}
 }
 
@@ -259,12 +427,12 @@ static void ChooseMp3(HelixAmp3Gui *gui)
 	char path[HELIXAMP3_MAX_PATH];
 
 	req = (struct FileRequester *)AllocAslRequestTags(ASL_FileRequest,
-		ASLFR_TitleText, (ULONG)"Select MP3 for HelixAMP3",
+		ASLFR_TitleText, (ULONG)"Select MP3 for MiniAMP3",
 		ASLFR_DoPatterns, TRUE,
 		ASLFR_InitialPattern, (ULONG)"#?.mp3",
 		TAG_DONE);
 	if (!req) {
-		SafeCopy(gui->status, sizeof(gui->status), "Cannot allocate ASL file requester.");
+		SetStatus(gui, "Cannot allocate ASL file requester.");
 		return;
 	}
 	if (AslRequest(req, NULL)) {
@@ -276,7 +444,8 @@ static void ChooseMp3(HelixAmp3Gui *gui)
 			SafeCopy(path, sizeof(path), req->fr_File);
 		}
 		SafeCopy(gui->inputName, sizeof(gui->inputName), path);
-		SafeCopy(gui->status, sizeof(gui->status), "Ready.");
+		SetFileDisplay(gui, gui->inputName);
+		SetStatus(gui, "File chosen. Press Play to start.");
 	}
 	FreeAslRequest(req);
 }
@@ -297,17 +466,19 @@ static void BuildPlaybackArgs(HelixAmp3Gui *gui, HelixAmp3Player *player)
 	memset(player, 0, sizeof(*player));
 	AddArg(player, "amiga_mp3dec");
 	AddArg(player, "--play");
+	if (gui->fastMem || gui->qualityIndex == 0 || gui->qualityIndex == 1)
+		AddArg(player, "--fast-mem");
+	if (gui->fastLowrate)
+		AddArg(player, "--fast-lowrate");
+	if (gui->mono)
+		AddArg(player, "--mono");
+	AddArg(player, "--rate");
+	AddArg(player, kRates[gui->rateIndex]);
 	AddArg(player, "--buffer-seconds");
 	sprintf(num, "%d", gui->bufferSeconds);
 	AddArg(player, num);
-	AddArg(player, "--rate");
-	AddArg(player, kRates[gui->rateIndex]);
-	if (gui->profile == 0) {
-		AddArg(player, "--fast-mem");
+	if (gui->qualityIndex == 0)
 		AddArg(player, "--play-fast-path");
-	} else if (gui->profile == 1) {
-		AddArg(player, "--fast-mem");
-	}
 	AddArg(player, gui->inputName);
 	player->argv[player->argc] = NULL;
 }
@@ -327,62 +498,82 @@ static void PlaybackEntry(void)
 static void StartPlayback(HelixAmp3Gui *gui)
 {
 	if (!gui->inputName[0]) {
-		SafeCopy(gui->status, sizeof(gui->status), "Browse to an MP3 first.");
+		SetStatus(gui, "Browse to an MP3 first.");
 		return;
 	}
 	if (gGuiPlayer.running) {
-		SafeCopy(gui->status, sizeof(gui->status), "Already playing; press Stop first.");
+		SetStatus(gui, "Already playing; press Stop first.");
 		return;
 	}
 	BuildPlaybackArgs(gui, &gGuiPlayer);
 	gGuiPlayer.process = CreateNewProcTags(NP_Entry, (ULONG)PlaybackEntry,
-		NP_Name, (ULONG)"HelixAMP3 playback",
+		NP_Name, (ULONG)"MiniAMP3 playback",
 		NP_StackSize, 32768,
 		TAG_DONE);
 	if (!gGuiPlayer.process) {
-		SafeCopy(gui->status, sizeof(gui->status), "Cannot start playback process.");
+		SetStatus(gui, "Cannot start playback process.");
 		return;
 	}
 	gGuiPlayer.running = 1;
-	SafeCopy(gui->status, sizeof(gui->status), "Playing through amiga_mp3dec Paula path.");
+	SetStatus(gui, "Playing through amiga_mp3dec Paula path.");
 }
 
 static void StopPlayback(HelixAmp3Gui *gui)
 {
 	if (!gGuiPlayer.running) {
-		SafeCopy(gui->status, sizeof(gui->status), "Nothing is playing.");
+		SetStatus(gui, "Nothing is playing.");
 		return;
 	}
 	gGuiPlayer.stopRequested = 1;
 	gPlaybackInterrupted = 1;
-	SafeCopy(gui->status, sizeof(gui->status), "Stop requested; waiting for playback loop to exit.");
+	SetStatus(gui, "Stop requested; waiting for playback loop to exit.");
 }
 
-static void HandleGuiAction(HelixAmp3Gui *gui, int action)
+static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code)
 {
-	switch (action) {
+	if (!gad)
+		return;
+	switch (gad->GadgetID) {
 	case GID_BROWSE:
 		ChooseMp3(gui);
 		break;
-	case GID_PROFILE:
-		gui->profile = (gui->profile + 1) % 3;
-		if (gui->profile == 0)
-			SafeCopy(gui->status, sizeof(gui->status), "Fast: fast-mem and fast playback path enabled.");
-		else if (gui->profile == 1)
-			SafeCopy(gui->status, sizeof(gui->status), "Medium: fast-mem enabled, conservative speed options.");
-		else
-			SafeCopy(gui->status, sizeof(gui->status), "Slow: baseline playback options for best quality.");
+	case GID_FAST_LOWRATE:
+		gui->fastLowrate = !gui->fastLowrate;
+		GT_SetGadgetAttrs(gad, gui->win, NULL, GTCB_Checked, gui->fastLowrate, TAG_DONE);
+		SetStatus(gui, gui->fastLowrate ? "Fast-lowrate enabled." : "Fast-lowrate disabled.");
 		break;
-	case GID_BUFFER_DOWN:
-		if (gui->bufferSeconds > 1)
-			gui->bufferSeconds--;
+	case GID_FAST_MEM:
+		gui->fastMem = !gui->fastMem;
+		GT_SetGadgetAttrs(gad, gui->win, NULL, GTCB_Checked, gui->fastMem, TAG_DONE);
+		SetStatus(gui, gui->fastMem ? "Fast memory path enabled." : "Fast memory path disabled.");
 		break;
-	case GID_BUFFER_UP:
-		if (gui->bufferSeconds < 10)
-			gui->bufferSeconds++;
+	case GID_MONO:
+		gui->mono = !gui->mono;
+		GT_SetGadgetAttrs(gad, gui->win, NULL, GTCB_Checked, gui->mono, TAG_DONE);
+		SetStatus(gui, gui->mono ? "Mono output enabled." : "Stereo output enabled.");
 		break;
 	case GID_RATE:
-		gui->rateIndex = (gui->rateIndex + 1) % 3;
+		gui->rateIndex = code;
+		if (gui->rateIndex < 0 || gui->rateIndex > 3)
+			gui->rateIndex = 2;
+		SetStatus(gui, "Output sample rate updated.");
+		break;
+	case GID_BUFFER:
+		gui->bufferSeconds = code;
+		if (gui->bufferSeconds < 1)
+			gui->bufferSeconds = 1;
+		if (gui->bufferSeconds > 30)
+			gui->bufferSeconds = 30;
+		GT_SetGadgetAttrs(gui->gadBuffer, gui->win, NULL,
+			GTSL_Level, gui->bufferSeconds,
+			TAG_DONE);
+		SetStatus(gui, "Buffer depth updated.");
+		break;
+	case GID_QUALITY:
+		gui->qualityIndex = code;
+		if (gui->qualityIndex < 0 || gui->qualityIndex > 2)
+			gui->qualityIndex = 0;
+		SetStatus(gui, "Quality profile updated.");
 		break;
 	case GID_PLAY:
 		StartPlayback(gui);
@@ -391,7 +582,32 @@ static void HandleGuiAction(HelixAmp3Gui *gui, int action)
 		StopPlayback(gui);
 		break;
 	}
-	GuiRedraw(gui);
+}
+
+static void GuiPoll(HelixAmp3Gui *gui)
+{
+	struct IntuiMessage *msg;
+	ULONG classValue;
+	UWORD code;
+	struct Gadget *gad;
+
+	while (gui->win && (msg = GT_GetIMsg(gui->win->UserPort)) != NULL) {
+		classValue = msg->Class;
+		code = msg->Code;
+		gad = (struct Gadget *)msg->IAddress;
+		GT_ReplyIMsg(msg);
+		if (classValue == IDCMP_CLOSEWINDOW)
+			gui->closeRequested = 1;
+		else if (classValue == IDCMP_REFRESHWINDOW) {
+			GT_BeginRefresh(gui->win);
+			GT_EndRefresh(gui->win, TRUE);
+		} else if (classValue == IDCMP_GADGETUP) {
+			HandleGuiAction(gui, gad, code);
+		} else if (classValue == IDCMP_MOUSEMOVE) {
+			if (gad && gad->GadgetID == GID_BUFFER)
+				HandleGuiAction(gui, gad, code);
+		}
+	}
 }
 
 int main(int argc, char **argv)
@@ -407,13 +623,6 @@ int main(int argc, char **argv)
 		if (SetSignal(0, 0) & SIGBREAKF_CTRL_C)
 			gui.closeRequested = 1;
 		GuiPoll(&gui);
-		if (gui.redrawRequested) {
-			int action = gui.redrawRequested;
-			gui.redrawRequested = 0;
-			HandleGuiAction(&gui, action);
-		} else if (!gGuiPlayer.running) {
-			GuiRedraw(&gui);
-		}
 	}
 	if (gGuiPlayer.running)
 		StopPlayback(&gui);
@@ -427,8 +636,8 @@ int main(int argc, char **argv)
 {
 	(void)argc;
 	(void)argv;
-	fprintf(stderr, "HelixAMP3 GUI requires an AMIGA_M68K Intuition/ASL build.\n");
-	fprintf(stderr, "Use amiga_mp3dec --play --rate 8287 --buffer-seconds 4 file.mp3 on this host.\n");
+	fprintf(stderr, "MiniAMP3 GUI requires an AMIGA_M68K Intuition/ASL/GadTools build.\n");
+	fprintf(stderr, "Use amiga_mp3dec --play --rate 11025 --buffer-seconds 10 file.mp3 on this host.\n");
 	return 1;
 }
 

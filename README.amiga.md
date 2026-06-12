@@ -100,34 +100,39 @@ The playback implementation does not call `CurrentDir()`, `Lock()`, `Forbid()`,
 directory lock or interrupt/task-switch nesting state.
 
 
-## Minimal Intuition GUI build
+## Minimal GadTools GUI build
 
-A small Intuition frontend is available as `amiga_mp3gui`. It links the same
-decoder object files as the command-line tool, so the decoder does not have to
-be converted into a separate static library first:
+A small Workbench 2.x/3.x GadTools frontend is available as `miniamp3`. It links
+the same decoder object files as the command-line tool, so the decoder does not
+have to be converted into a separate static library first:
 
 ```sh
 make -f Makefile.amiga gui
+# or
+make -f Makefile.amiga miniamp3
 ```
 
-`amiga_mp3gui` is now the HelixAMP3 mini-player. It opens a compact
-Intuition window with an ASL file requester for choosing an MP3, a profile
-selector, buffer-depth controls, playback-rate selection, and Play/Stop buttons.
+`miniamp3` opens the MiniAMP3 window with an ASL file requester for choosing an
+MP3, checkboxes for the fast-lowrate, fast-mem, and mono playback flags, sample
+rate and quality cycle gadgets, a 1-30 second buffer slider, a read-only file
+path display, a status bar, and Play/Stop buttons. The GUI uses
+`gadtools.library` through the AmigaOS m68k pragmas, so no `-lauto` linker flag
+is needed.
 
-The profiles map to the same playback code used by `amiga_mp3dec`:
+The quality cycle maps to the same playback code used by `amiga_mp3dec`:
 
 - **Fast** enables `--fast-mem` and the explicit `--play-fast-path` alias for the
   lowest-overhead playback setup.
-- **Medium** enables `--fast-mem` but leaves the rest of the conservative default
+- **Normal** enables `--fast-mem` but leaves the rest of the conservative default
   playback path in place.
-- **Slow** uses the baseline playback options, avoiding the extra speed-oriented
+- **Best** uses the baseline playback options, avoiding the extra speed-oriented
   input preload.
 
-The buffer control chooses the `--buffer-seconds` value from 1 to 10 seconds, and
-the rate selector cycles through the three mini-player rates: 8287, 8820, and
-11025 Hz. Playback still uses the Paula streaming implementation inside
-`amiga_mp3dec`, so Stop requests the same interrupt flag used by Shell playback
-and exits after the streaming loop notices the request.
+The buffer slider chooses the `--buffer-seconds` value from 1 to 30 seconds, and
+the rate selector cycles through 8287, 8820, 11025, and 22050 Hz. Playback still
+uses the Paula streaming implementation inside `amiga_mp3dec`, so Stop requests
+the same interrupt flag used by Shell playback and exits after the streaming
+loop notices the request.
 
 A separate library can still be added later if multiple frontends need to share
 higher-level application code. For now, `amiga_mp3gui.c` includes the existing
