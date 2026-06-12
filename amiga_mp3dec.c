@@ -151,9 +151,12 @@ typedef struct DecodeOptions {
 	int selftestDequant;
 	int selftestBitstream;
 	int selftestMonoFastLowrateStereo;
+	int selftestQuality;
 	int checksum;
 	int outputRate;
 	int fastLowrate;
+	int quality;
+	int qualitySpecified;
 	int expPoly;
 	int expHuff;
 	int expImdctThin;
@@ -503,8 +506,12 @@ static void PrintUsage(const char *prog)
 	printf("  --no-output  run conversion/compression paths but discard output bytes\n");
 	printf("  --rate HZ    output/downsample rate: 22050, 11025, 8820, or 8287 Hz\n");
 	printf("               22050 playback is experimental/high CPU and may underrun\n");
-	printf("  --fast-lowrate experimental lower-quality Amiga conversion; requires --rate\n");
+	printf("  --fast-lowrate lower-quality Amiga conversion; requires --rate\n");
 	printf("                 22050, 11025, 8820, or 8287 and can skip discarded synthesis samples\n");
+	printf("  --quality N set quality/speed level (0 fastest, 1 fast, 2 balanced, 3 accurate)\n");
+	printf("               default: 1 for --fast-lowrate --rate 11025, otherwise 3\n");
+	printf("               0 enables all fast paths including Huffman; 3 is original behavior\n");
+	printf("               individual --exp-* flags may still be enabled independently\n");
 	printf("  --exp-poly  use experimental 68030 asm mono polyphase when compiled in\n");
 	printf("  --exp-huff  use experimental 68030 inline-asm Huffman pair refill when compiled in\n");
 	printf("  --exp-imdct-thin request experimental fast-lowrate IMDCT output thinning\n");
@@ -528,6 +535,7 @@ static void PrintUsage(const char *prog)
 	printf("  --selftest-dequant compare C and optional m68k asm dequant block paths\n");
 	printf("  --selftest-bitstream compare C and optional m68k move.l bitstream refill paths\n");
 	printf("  --selftest-mono-fastlowrate-stereo verify stereo-to-mono low-rate accounting\n");
+	printf("  --selftest-quality verify --quality flag mapping and auto-default selection\n");
 	printf("  --checksum  print a 32-bit checksum of decoded PCM samples\n");
 	printf("  --debug-fastlowrate print per-frame/granule fast-lowrate placement\n");
 	printf("  --debug-play print audio.device playback startup diagnostics\n");
@@ -555,6 +563,32 @@ static int ParseBufferSecondsOption(const char *arg, int *outSeconds)
 	return 0;
 }
 
+static void ApplyQualityOptions(DecodeOptions *opt)
+{
+	int quality;
+
+	quality = opt->qualitySpecified ? opt->quality :
+		(opt->fastLowrate && opt->outputRate == 11025 ? 1 : 3);
+	opt->quality = quality;
+
+	switch (quality) {
+	case 0:
+		opt->expHuff = 1;
+		opt->expFdct32Quarter = 1;
+		/* fall through */
+	case 1:
+		opt->expReducedTaps = 1;
+		/* fall through */
+	case 2:
+		opt->expImdctThin = 1;
+		opt->expPoly = 1;
+		break;
+	case 3:
+	default:
+		break;
+	}
+}
+
 static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 {
 	int i;
@@ -563,6 +597,8 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 	opt->outFormat = OUT_PCM16;
 	opt->compression = SVX_COMP_NONE;
 	opt->outputRate = 0;
+	opt->quality = 3;
+	opt->qualitySpecified = 0;
 	opt->bufferSeconds = 4;
 
 	for (i = 1; i < argc; i++) {
@@ -652,6 +688,8 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->selftestBitstream = 1;
 		} else if (!strcmp(argv[i], "--selftest-mono-fastlowrate-stereo")) {
 			opt->selftestMonoFastLowrateStereo = 1;
+		} else if (!strcmp(argv[i], "--selftest-quality")) {
+			opt->selftestQuality = 1;
 		} else if (!strcmp(argv[i], "--checksum")) {
 			opt->checksum = 1;
 		} else if (!strcmp(argv[i], "--fast-lowrate")) {
@@ -666,6 +704,15 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->expReducedTaps = 1;
 		} else if (!strcmp(argv[i], "--exp-fdct32-quarter")) {
 			opt->expFdct32Quarter = 1;
+		} else if (!strcmp(argv[i], "--quality")) {
+			if (++i >= argc)
+				return -1;
+			if (argv[i][0] < '0' || argv[i][0] > '3' || argv[i][1] != '\0') {
+				fprintf(stderr, "--quality requires 0, 1, 2, or 3\n");
+				return -1;
+			}
+			opt->quality = argv[i][0] - '0';
+			opt->qualitySpecified = 1;
 		} else if (!strcmp(argv[i], "--rate")) {
 			if (++i >= argc)
 				return -1;
@@ -717,7 +764,8 @@ if (opt->selftestMulshift ||
     opt->selftestHuffman ||
     opt->selftestDequant ||
     opt->selftestBitstream ||
-    opt->selftestMonoFastLowrateStereo)
+    opt->selftestMonoFastLowrateStereo ||
+    opt->selftestQuality)
 		return 0;
 
 	if (opt->stereo && !opt->play) {
@@ -750,6 +798,8 @@ if (opt->selftestMulshift ||
 		fprintf(stderr, "--fast-lowrate requires --rate 22050, 11025, 8820, or 8287\n");
 		return -1;
 	}
+
+	ApplyQualityOptions(opt);
 
 	if (opt->playLifecycleTest)
 		return 0;
@@ -1785,6 +1835,87 @@ static int FastLowrateSelectFrame(int *phase, const short *in, short *out,
 			*phase = 0;
 	}
 	return produced * channels;
+}
+
+
+static int QualitySelftestExpect(const char *name, DecodeOptions opt,
+	int expReducedTaps, int expFdct32Quarter, int expImdctThin,
+	int expPoly, int expHuff, int expectedQuality)
+{
+	ApplyQualityOptions(&opt);
+	if (opt.quality != expectedQuality ||
+		opt.expReducedTaps != expReducedTaps ||
+		opt.expFdct32Quarter != expFdct32Quarter ||
+		opt.expImdctThin != expImdctThin ||
+		opt.expPoly != expPoly || opt.expHuff != expHuff) {
+		fprintf(stderr,
+			"quality selftest %s mismatch: quality=%d reduced=%d fdct32q=%d imdctThin=%d poly=%d huff=%d\n",
+			name, opt.quality, opt.expReducedTaps, opt.expFdct32Quarter,
+			opt.expImdctThin, opt.expPoly, opt.expHuff);
+		fprintf(stderr,
+			"quality selftest %s expected: quality=%d reduced=%d fdct32q=%d imdctThin=%d poly=%d huff=%d\n",
+			name, expectedQuality, expReducedTaps, expFdct32Quarter,
+			expImdctThin, expPoly, expHuff);
+		return -1;
+	}
+	return 0;
+}
+
+static int SelftestQuality(void)
+{
+	DecodeOptions opt;
+	int failures;
+
+	failures = 0;
+
+	memset(&opt, 0, sizeof(opt));
+	opt.quality = 0;
+	opt.qualitySpecified = 1;
+	failures += QualitySelftestExpect("quality0", opt, 1, 1, 1, 1, 1, 0) != 0;
+
+	memset(&opt, 0, sizeof(opt));
+	opt.quality = 1;
+	opt.qualitySpecified = 1;
+	failures += QualitySelftestExpect("quality1", opt, 1, 0, 1, 1, 0, 1) != 0;
+
+	memset(&opt, 0, sizeof(opt));
+	opt.quality = 2;
+	opt.qualitySpecified = 1;
+	failures += QualitySelftestExpect("quality2", opt, 0, 0, 1, 1, 0, 2) != 0;
+
+	memset(&opt, 0, sizeof(opt));
+	opt.quality = 3;
+	opt.qualitySpecified = 1;
+	failures += QualitySelftestExpect("quality3", opt, 0, 0, 0, 0, 0, 3) != 0;
+
+	memset(&opt, 0, sizeof(opt));
+	opt.expHuff = 1;
+	opt.expFdct32Quarter = 1;
+	opt.expReducedTaps = 1;
+	opt.expImdctThin = 1;
+	opt.expPoly = 1;
+	opt.quality = 3;
+	opt.qualitySpecified = 1;
+	failures += QualitySelftestExpect("quality3-explicit-flags", opt, 1, 1, 1, 1, 1, 3) != 0;
+
+	memset(&opt, 0, sizeof(opt));
+	opt.fastLowrate = 1;
+	opt.outputRate = 11025;
+	failures += QualitySelftestExpect("auto-fast-lowrate-11025", opt, 1, 0, 1, 1, 0, 1) != 0;
+
+	memset(&opt, 0, sizeof(opt));
+	opt.fastLowrate = 1;
+	opt.outputRate = 8820;
+	failures += QualitySelftestExpect("auto-fast-lowrate-8820", opt, 0, 0, 0, 0, 0, 3) != 0;
+
+	memset(&opt, 0, sizeof(opt));
+	failures += QualitySelftestExpect("auto-default", opt, 0, 0, 0, 0, 0, 3) != 0;
+
+	printf("Quality selftest cases: %d\n", 7);
+	printf("Quality selftest failures: %d\n", failures);
+	if (!failures)
+		printf("Quality selftest passed\n");
+	return failures ? -1 : 0;
 }
 
 static int SelftestFastLowrate(void)
@@ -4868,6 +4999,11 @@ int main(int argc, char **argv)
 	}
 	if (opt.selftestMonoFastLowrateStereo) {
 		int selftestErr = SelftestMonoFastLowrateStereo();
+		AmigaFreeNormalizedArgs(&normalized);
+		return selftestErr;
+	}
+	if (opt.selftestQuality) {
+		int selftestErr = SelftestQuality();
 		AmigaFreeNormalizedArgs(&normalized);
 		return selftestErr;
 	}
