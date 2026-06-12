@@ -61,6 +61,9 @@ int STATNAME(PolyphaseStereoFastLowrateStride4_TEST_ACTIVE)(short *pcm, int *vbu
 int STATNAME(AmigaM68KPolyphaseMonoFast_IsActive)(void);
 int STATNAME(AmigaM68KPolyphaseMonoFastStride2_IsActive)(void);
 int STATNAME(DecodeHuffmanPairs_C_REFERENCE)(int *xy, int nVals, int tabIdx, int bitsLeft, unsigned char *buf, int bitOffset);
+int STATNAME(DecodeHuffmanPairs_TEST_ACTIVE)(int *xy, int nVals, int tabIdx, int bitsLeft, unsigned char *buf, int bitOffset);
+int STATNAME(DecodeHuffmanPairs_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
+const char *STATNAME(DecodeHuffmanPairs_AMIGA_M68K_ASM_NOTE)(void);
 int STATNAME(DequantBlock_C_REFERENCE)(int *inbuf, int *outbuf, int num, int scale);
 int STATNAME(DequantBlock_TEST_ACTIVE)(int *inbuf, int *outbuf, int num, int scale);
 int STATNAME(DequantBlock_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
@@ -92,6 +95,9 @@ extern const int STATNAME(polyCoef)[264];
 #define AMIGA_M68K_POLYPHASE_MONO_FAST_IS_ACTIVE STATNAME(AmigaM68KPolyphaseMonoFast_IsActive)
 #define AMIGA_M68K_POLYPHASE_MONO_FAST_STRIDE2_IS_ACTIVE STATNAME(AmigaM68KPolyphaseMonoFastStride2_IsActive)
 #define AMIGA_HUFFMAN_PAIRS_C_REFERENCE STATNAME(DecodeHuffmanPairs_C_REFERENCE)
+#define AMIGA_HUFFMAN_PAIRS_TEST_ACTIVE STATNAME(DecodeHuffmanPairs_TEST_ACTIVE)
+#define AMIGA_HUFFMAN_PAIRS_HAS_ASM STATNAME(DecodeHuffmanPairs_HAS_AMIGA_M68K_ASM_RUNTIME)
+#define AMIGA_HUFFMAN_PAIRS_ASM_NOTE STATNAME(DecodeHuffmanPairs_AMIGA_M68K_ASM_NOTE)
 #define AMIGA_DEQUANT_BLOCK_C_REFERENCE STATNAME(DequantBlock_C_REFERENCE)
 #define AMIGA_DEQUANT_BLOCK_TEST_ACTIVE STATNAME(DequantBlock_TEST_ACTIVE)
 #define AMIGA_DEQUANT_BLOCK_HAS_ASM STATNAME(DequantBlock_HAS_AMIGA_M68K_ASM_RUNTIME)
@@ -141,6 +147,7 @@ typedef struct DecodeOptions {
 	int outputRate;
 	int fastLowrate;
 	int expPoly;
+	int expHuff;
 	int expImdctThin;
 	int help;
 	int debugArgv;
@@ -489,6 +496,7 @@ static void PrintUsage(const char *prog)
 	printf("  --fast-lowrate experimental lower-quality Amiga conversion; requires --rate\n");
 	printf("                 22050, 11025, 8820, or 8287 and can skip discarded synthesis samples\n");
 	printf("  --exp-poly  use experimental 68030 asm mono polyphase when compiled in\n");
+	printf("  --exp-huff  use experimental 68030 inline-asm Huffman pair refill when compiled in\n");
 	printf("  --exp-imdct-thin request experimental fast-lowrate IMDCT output thinning\n");
 	printf("  --selftest-mulshift compare C and optional asm MULSHIFT32 helpers\n");
 	printf("  --selftest-clz compare C and optional m68k bfffo CLZ helpers\n");
@@ -502,7 +510,7 @@ static void PrintUsage(const char *prog)
 	printf("  --selftest-polyphase-stride4 compare C and optional asm stride-4 mono polyphase paths\n");
 	printf("  --selftest-polyphase-stride4-stereo compare stereo stride-4 compact polyphase output\n");
 	printf("  --selftest-fastlowrate compare synthetic stride decimation paths\n");
-	printf("  --selftest-huffman compare repeated portable C Huffman pair decodes\n");
+	printf("  --selftest-huffman compare C and active Huffman pair decode paths\n");
 	printf("  --selftest-dequant compare C and optional m68k asm dequant block paths\n");
 	printf("  --selftest-bitstream compare C and optional m68k move.l bitstream refill paths\n");
 	printf("  --selftest-mono-fastlowrate-stereo verify stereo-to-mono low-rate accounting\n");
@@ -632,6 +640,8 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->fastLowrate = 1;
 		} else if (!strcmp(argv[i], "--exp-poly")) {
 			opt->expPoly = 1;
+		} else if (!strcmp(argv[i], "--exp-huff")) {
+			opt->expHuff = 1;
 		} else if (!strcmp(argv[i], "--exp-imdct-thin")) {
 			opt->expImdctThin = 1;
 		} else if (!strcmp(argv[i], "--rate")) {
@@ -2534,7 +2544,7 @@ static int SelftestHuffman(void)
 		bitOffset = (int)(NextRand32(&seed) & 7UL);
 
 		cret = AMIGA_HUFFMAN_PAIRS_C_REFERENCE(cxy, nVals, tabIdx, bitsLeft, buf, bitOffset);
-		aret = AMIGA_HUFFMAN_PAIRS_C_REFERENCE(axy, nVals, tabIdx, bitsLeft, buf, bitOffset);
+		aret = AMIGA_HUFFMAN_PAIRS_TEST_ACTIVE(axy, nVals, tabIdx, bitsLeft, buf, bitOffset);
 		if (aret != cret) {
 			printf("Huffman selftest bitsUsed mismatch %lu: tab=%d nVals=%d bitsLeft=%d bitOffset=%d first=%d second=%d\n",
 				i, tabIdx, nVals, bitsLeft, bitOffset, cret, aret);
@@ -2551,7 +2561,7 @@ static int SelftestHuffman(void)
 		}
 	}
 
-	printf("Huffman asm active: no (portable C path only)\n");
+	printf("Huffman asm active: %s\n", AMIGA_HUFFMAN_PAIRS_ASM_NOTE());
 	printf("Huffman selftest cases: %lu\n", i);
 	printf("Huffman selftest failures: %lu\n", failures);
 	return failures ? 1 : 0;
@@ -4685,6 +4695,7 @@ int main(int argc, char **argv)
 #endif
 	}
 	MP3SetExperimentalPolyphase(opt.expPoly);
+	MP3SetExperimentalHuffman(opt.expHuff);
 	MP3SetExperimentalIMDCTThin(decoder, opt.expImdctThin);
 	if (opt.fastLowrate) {
 		int stride = FastLowrateStrideForOutputRate(opt.outputRate);

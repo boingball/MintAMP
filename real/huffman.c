@@ -70,6 +70,74 @@ static __inline unsigned int LOADBE16(const unsigned char *buf)
 /* apply sign of s to the positive number x (save in MSB, will do two's complement in dequant) */
 #define ApplySign(x, s)	{ (x) |= ((s) & 0x80000000); }
 
+#if defined(AMIGA_M68K) && defined(AMIGA_M68K_ASM_HUFFMAN) && defined(__GNUC__) && \
+	(defined(__mc68020__) || defined(__mc68030__) || defined(__mc68040__) || \
+	 defined(__mc68060__) || defined(mc68020))
+#define HUFFMAN_PAIRS_HAS_AMIGA_M68K_ASM 1
+#else
+#define HUFFMAN_PAIRS_HAS_AMIGA_M68K_ASM 0
+#endif
+
+#if HUFFMAN_PAIRS_HAS_AMIGA_M68K_ASM
+static int gExperimentalHuffmanEnabled;
+
+void MP3SetExperimentalHuffman(int enabled)
+{
+	gExperimentalHuffmanEnabled = enabled ? 1 : 0;
+}
+
+int MP3ExperimentalHuffmanEnabled(void)
+{
+	return gExperimentalHuffmanEnabled;
+}
+#else
+void MP3SetExperimentalHuffman(int enabled)
+{
+	(void)enabled;
+}
+
+int MP3ExperimentalHuffmanEnabled(void)
+{
+	return 0;
+}
+#endif
+
+#if HUFFMAN_PAIRS_HAS_AMIGA_M68K_ASM
+static __inline unsigned int HuffmanLoadBE16_AMIGA_M68K_ASM(unsigned char **buf, int bitsLeft)
+{
+	unsigned int value;
+
+	if (bitsLeft >= 32) {
+		unsigned char *p = *buf;
+		__asm__ volatile (
+			"move.l (%1)+,%0\n\t"
+			"lea -2(%1),%1\n\t"
+			"swap %0\n\t"
+			"and.l #0xffff,%0"
+			: "=&d" (value), "+a" (p)
+			:
+			: "memory");
+		*buf = p;
+		return value;
+	}
+
+	value = LOADBE16(*buf);
+	*buf += 2;
+	return value;
+}
+#define HUFFMAN_LOADBE16_FAST(bufPtr, bitsLeft) HuffmanLoadBE16_AMIGA_M68K_ASM(&(bufPtr), (bitsLeft))
+#else
+#define HUFFMAN_LOADBE16_FAST(bufPtr, bitsLeft) LOADBE16(bufPtr)
+#endif
+
+#if HUFFMAN_PAIRS_HAS_AMIGA_M68K_ASM && MULSHIFT32_HAS_AMIGA_M68K_ASM
+#define HUFFMAN_PAIRS_FAST_NOTE "m68k inline move.l refill + m68k MULSHIFT32 available"
+#elif HUFFMAN_PAIRS_HAS_AMIGA_M68K_ASM
+#define HUFFMAN_PAIRS_FAST_NOTE "m68k inline move.l refill available"
+#else
+#define HUFFMAN_PAIRS_FAST_NOTE "no (C reference path only in this build)"
+#endif
+
 /**************************************************************************************
  * Function:    DecodeHuffmanPairs
  *
@@ -91,7 +159,7 @@ static __inline unsigned int LOADBE16(const unsigned char *buf)
  *                necessarily all linBits outputs for x,y > 15)
  **************************************************************************************/
 // no improvement with section=data
-int DecodeHuffmanPairs_C_REFERENCE(int *xy, int nVals, int tabIdx, int bitsLeft, unsigned char *buf, int bitOffset)
+static int DecodeHuffmanPairs_Impl(int *xy, int nVals, int tabIdx, int bitsLeft, unsigned char *buf, int bitOffset, int useAsmRefill)
 {
 	int x, y;
 	int cachedBits, padBits, len, startBits, linBits, maxBits, minBits;
@@ -138,8 +206,12 @@ int DecodeHuffmanPairs_C_REFERENCE(int *xy, int nVals, int tabIdx, int bitsLeft,
 			/* refill cache - assumes cachedBits <= 16 */
 			if (bitsLeft >= 16) {
 				/* load 2 new bytes into left-justified cache */
-				cache |= LOADBE16(buf) << (16 - cachedBits);
-				buf += 2;
+				if (useAsmRefill) {
+					cache |= HUFFMAN_LOADBE16_FAST(buf, bitsLeft) << (16 - cachedBits);
+				} else {
+					cache |= LOADBE16(buf) << (16 - cachedBits);
+					buf += 2;
+				}
 				cachedBits += 16;
 				bitsLeft -= 16;
 			} else {
@@ -196,8 +268,12 @@ int DecodeHuffmanPairs_C_REFERENCE(int *xy, int nVals, int tabIdx, int bitsLeft,
 		while (nVals > 0) {
 			/* refill cache - assumes cachedBits <= 16 */
 			if (bitsLeft >= 16) {
-				cache |= LOADBE16(buf) << (16 - cachedBits);
-				buf += 2;
+				if (useAsmRefill) {
+					cache |= HUFFMAN_LOADBE16_FAST(buf, bitsLeft) << (16 - cachedBits);
+				} else {
+					cache |= LOADBE16(buf) << (16 - cachedBits);
+					buf += 2;
+				}
 				cachedBits += 16;
 				bitsLeft -= 16;
 			} else {
@@ -255,8 +331,12 @@ int DecodeHuffmanPairs_C_REFERENCE(int *xy, int nVals, int tabIdx, int bitsLeft,
 			/* refill cache - assumes cachedBits <= 16 */
 			if (bitsLeft >= 16) {
 				/* load 2 new bytes into left-justified cache */
-				cache |= LOADBE16(buf) << (16 - cachedBits);
-				buf += 2;
+				if (useAsmRefill) {
+					cache |= HUFFMAN_LOADBE16_FAST(buf, bitsLeft) << (16 - cachedBits);
+				} else {
+					cache |= LOADBE16(buf) << (16 - cachedBits);
+					buf += 2;
+				}
 				cachedBits += 16;
 				bitsLeft -= 16;
 			} else {
@@ -354,6 +434,30 @@ int DecodeHuffmanPairs_C_REFERENCE(int *xy, int nVals, int tabIdx, int bitsLeft,
 
 	/* error in bitstream - trying to access unused Huffman table */
 	return -1;
+}
+
+int DecodeHuffmanPairs_C_REFERENCE(int *xy, int nVals, int tabIdx, int bitsLeft, unsigned char *buf, int bitOffset)
+{
+	return DecodeHuffmanPairs_Impl(xy, nVals, tabIdx, bitsLeft, buf, bitOffset, 0);
+}
+
+int DecodeHuffmanPairs_TEST_ACTIVE(int *xy, int nVals, int tabIdx, int bitsLeft, unsigned char *buf, int bitOffset)
+{
+#if HUFFMAN_PAIRS_HAS_AMIGA_M68K_ASM
+	return DecodeHuffmanPairs_Impl(xy, nVals, tabIdx, bitsLeft, buf, bitOffset, 1);
+#else
+	return DecodeHuffmanPairs_C_REFERENCE(xy, nVals, tabIdx, bitsLeft, buf, bitOffset);
+#endif
+}
+
+int DecodeHuffmanPairs_HAS_AMIGA_M68K_ASM_RUNTIME(void)
+{
+	return HUFFMAN_PAIRS_HAS_AMIGA_M68K_ASM;
+}
+
+const char *DecodeHuffmanPairs_AMIGA_M68K_ASM_NOTE(void)
+{
+	return HUFFMAN_PAIRS_FAST_NOTE;
 }
 
 /**************************************************************************************
@@ -537,7 +641,10 @@ int DecodeHuffman(MP3DecInfo *mp3DecInfo, unsigned char *buf, int *bitOffset, in
 	/* decode Huffman pairs (rEnd[i] are always even numbers) */
 	bitsLeft = huffBlockBits;
 	for (i = 0; i < 3; i++) {
-		bitsUsed = DecodeHuffmanPairs_C_REFERENCE(hi->huffDecBuf[ch] + rEnd[i], rEnd[i+1] - rEnd[i], sis->tableSelect[i], bitsLeft, buf, *bitOffset);
+		if (MP3ExperimentalHuffmanEnabled())
+			bitsUsed = DecodeHuffmanPairs_TEST_ACTIVE(hi->huffDecBuf[ch] + rEnd[i], rEnd[i+1] - rEnd[i], sis->tableSelect[i], bitsLeft, buf, *bitOffset);
+		else
+			bitsUsed = DecodeHuffmanPairs_C_REFERENCE(hi->huffDecBuf[ch] + rEnd[i], rEnd[i+1] - rEnd[i], sis->tableSelect[i], bitsLeft, buf, *bitOffset);
 		if (bitsUsed < 0 || bitsUsed > bitsLeft)	/* error - overran end of bitstream */
 			return -1;
 

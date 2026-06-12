@@ -39,6 +39,7 @@ m68k-amigaos-gcc -m68030 -std=gnu89 -O3 -fomit-frame-pointer \
   -DAMIGA_M68K -DAMIGA_M68K_ASM -DAMIGA_M68K_ASM_FDCT32 \
   -DAMIGA_FAST_POLYPHASE -DAMIGA_M68K_ASM_POLYPHASE \
   -DAMIGA_M68K_ASM_IMDCT -DAMIGA_M68K_ASM_MIDSIDE \
+  -DAMIGA_M68K_ASM_HUFFMAN \
   -o amiga_mp3dec.fastexp amiga_mp3dec.c mp3dec.c mp3tabs.c real/*.c \
   real/amiga_m68k_polyphase.S
 python3 tools/amiga_fast_preferred_hunks.py amiga_mp3dec.fastexp
@@ -307,8 +308,11 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   through normal 44100 -> 11025 `--rate` decimation and the stride-4
   fast-lowrate selector across chunk boundaries.
 - `--selftest-huffman` runs 1000 pseudo-random Huffman pair decode cases
-  through repeated portable C decodes to verify stable bit counts and
-  coefficients.
+  through the portable C reference and active test path to verify stable bit
+  counts and coefficients.  `--exp-huff` enables the optional
+  `AMIGA_M68K_ASM_HUFFMAN` decode path at runtime; it keeps the C Huffman state
+  machine and bit extraction logic, but uses inline m68k refill code in the hot
+  pair loops when compiled for 68020+.
 - `--selftest-dequant` compares the C dequant block reference with the active
   optional 68030 dequant inner loop for scale values -47..0 and coefficient
   magnitudes 0..8206.
@@ -435,7 +439,26 @@ decoded frame count and output sample count.
    amiga_mp3dec.midsideasm --bench --decode-only --checksum stereo-joint.mp3
    ```
 
-8. Checksum the C and ASM FDCT32 builds with identical inputs and output modes
+
+8. `AMIGA_M68K_ASM_HUFFMAN` is an opt-in experimental Huffman-pair refill
+   shortcut for 68020+ GNU m68k builds, tuned for 68030.  It deliberately does
+   not add a `.S` Huffman decoder and does not use `bfextu`; the C Huffman
+   state machine remains authoritative while the hot pair-loop refill can use
+   inline `move.l` on buffers with at least four safe bytes remaining, falling
+   back to the existing 16-bit refill near the tail.  It is also gated at
+   runtime by `--exp-huff`, so compiled-in support is inert unless explicitly
+   requested.  Validate with `--selftest-huffman` and compare `--checksum`
+   output against a reference decode before using it for playback benchmarks.
+
+   ```sh
+   m68k-amigaos-gcc -m68030 -std=gnu89 -O3 -fomit-frame-pointer \
+     -DAMIGA_M68K -DAMIGA_M68K_ASM -DAMIGA_M68K_ASM_HUFFMAN -Ipub -Ireal \
+     -o amiga_mp3dec.huffasm amiga_mp3dec.c mp3dec.c mp3tabs.c real/*.c
+   amiga_mp3dec.huffasm --selftest-huffman
+   amiga_mp3dec.huffasm --exp-huff --bench --decode-only --checksum song.mp3
+   ```
+
+9. Checksum the C and ASM FDCT32 builds with identical inputs and output modes
    before enabling the ASM binary in a release or local deployment.  The
    required regression set is: mono 56 kbps, stereo 160 kbps, stereo 256 kbps,
    fast-lowrate 11025 Hz, and fast-lowrate 8820 Hz.
@@ -463,7 +486,7 @@ decoded frame count and output sample count.
    and ASM binaries.  If any PCM checksum differs, do not define
    `AMIGA_M68K_ASM_FDCT32` for the default build.
 
-8. `AMIGA_FAST_POLYPHASE` is an opt-in Amiga/m68k polyphase synthesis path
+10. `AMIGA_FAST_POLYPHASE` is an opt-in Amiga/m68k polyphase synthesis path
    for 68020+ builds.  It keeps the original implementation available when the
    flag is omitted, but replaces the 64-bit polyphase accumulator with 32-bit
    fixed-point high-multiply terms to reduce 68030 inner-loop overhead:
@@ -473,7 +496,7 @@ decoded frame count and output sample count.
      -o amiga_mp3dec.fastpoly amiga_mp3dec.c mp3dec.c mp3tabs.c real/*.c
    ```
 
-9. Compare default and `AMIGA_FAST_POLYPHASE` builds with identical inputs,
+11. Compare default and `AMIGA_FAST_POLYPHASE` builds with identical inputs,
    output modes, and checksum reporting:
 
    ```sh
@@ -487,7 +510,7 @@ decoded frame count and output sample count.
    amiga_mp3dec.fastpoly --bench --no-output --fibdelta --rate 22050 --checksum song.mp3
    ```
 
-10. Check final Amiga binaries for libgcc 64-bit helper calls before measuring:
+12. Check final Amiga binaries for libgcc 64-bit helper calls before measuring:
 
    ```sh
    m68k-amigaos-nm -u amiga_mp3dec.asm | egrep '__muldi3|__ashrdi3|__lshrdi3'
