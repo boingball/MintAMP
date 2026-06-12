@@ -508,7 +508,7 @@ static void StartPlayback(HelixAmp3Gui *gui)
 	BuildPlaybackArgs(gui, &gGuiPlayer);
 	gGuiPlayer.process = CreateNewProcTags(NP_Entry, (ULONG)PlaybackEntry,
 		NP_Name, (ULONG)"MiniAMP3 playback",
-		NP_StackSize, 32768,
+		NP_StackSize, 262144,
 		TAG_DONE);
 	if (!gGuiPlayer.process) {
 		SetStatus(gui, "Cannot start playback process.");
