@@ -108,6 +108,7 @@ extern GuiPlaybackStatus gGuiPlaybackStatus;
 #define ITEMNUM_DTP       0
 #define ITEMNUM_BENCH     1
 #define ITEMNUM_ARTWORK   2
+#define ITEMNUM_PROGRESS  3
 
 enum {
 	GID_FILE = 1,
@@ -205,6 +206,7 @@ typedef struct HelixAmp3Gui {
 	int   launchBufferSecs;
 	unsigned long lastUnderrunCount;   /* last underrun count seen from IPC */
 	long          lastDisplayedSpareMs; /* spare ms last shown in status bar */
+	int           progressEnabled;     /* 1 = redraw progress bar during playback */
 } HelixAmp3Gui;
 
 typedef struct HelixAmp3Args {
@@ -290,6 +292,8 @@ static struct NewMenu myNewMenus[] = {
 		(APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_BENCH) },
 	{ NM_ITEM,  (STRPTR)"Artwork",          0, CHECKIT | MENUTOGGLE, 0,
 		(APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_ARTWORK) },
+	{ NM_ITEM,  (STRPTR)"Progress Bar",     0, CHECKIT | MENUTOGGLE, 0,
+		(APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_PROGRESS) },
 	{ NM_END,   NULL,                       0, 0, 0, 0 }
 };
 
@@ -396,6 +400,7 @@ static void SaveGuiSettings(HelixAmp3Gui *gui)
 	SaveEnvInt("DecodeThenPlay", gui->decodeThenPlay);
 	SaveEnvInt("Bench", gui->bench);
 	SaveEnvInt("Artwork", gui->artEnabled);
+	SaveEnvInt("ProgressBar", gui->progressEnabled);
 	SaveEnvString("LastDrawer", gui->lastDrawer);
 }
 
@@ -1483,6 +1488,8 @@ static void HandleTimerSignal(HelixAmp3Gui *gui)
 			break;
 		}
 
+		if (gui->progressEnabled)
+			DrawProgress(gui);
 	}
 	PumpArtDecode(gui);
 	SendTimerRequest(gui, gui->artDecode.active ? ART_TIMER_MICROS :
@@ -1763,6 +1770,8 @@ static void SyncMenuChecks(HelixAmp3Gui *gui)
 	SetMenuItemChecked(gui, MENUNUM_PLAYBACK, ITEMNUM_BENCH, gui->bench);
 	SetMenuItemChecked(gui, MENUNUM_PLAYBACK, ITEMNUM_ARTWORK,
 		gui->artEnabled);
+	SetMenuItemChecked(gui, MENUNUM_PLAYBACK, ITEMNUM_PROGRESS,
+		gui->progressEnabled);
 }
 
 static void GuiClose(HelixAmp3Gui *gui);
@@ -1781,6 +1790,7 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	gui->decodeThenPlay = LoadEnvInt("DecodeThenPlay", 0, 0, 1);
 	gui->bench = LoadEnvInt("Bench", 0, 0, 1);
 	gui->artEnabled = LoadEnvInt("Artwork", 1, 0, 1);
+	gui->progressEnabled = LoadEnvInt("ProgressBar", 0, 0, 1);
 	LoadEnvString("LastDrawer", gui->lastDrawer, sizeof(gui->lastDrawer));
 	SafeCopy(gui->statusText, sizeof(gui->statusText), "Ready.");
 	SetFileDisplay(gui, NULL);
@@ -2293,6 +2303,23 @@ static void GuiPoll(HelixAmp3Gui *gui)
 						SaveGuiSettings(gui);
 					} else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_ARTWORK)
 						SetArtworkEnabled(gui, !gui->artEnabled);
+					else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_PROGRESS) {
+						gui->progressEnabled = !gui->progressEnabled;
+						SetMenuItemChecked(gui, MENUNUM_PLAYBACK, ITEMNUM_PROGRESS,
+							gui->progressEnabled);
+						if (!gui->progressEnabled) {
+							/* Blank the progress area immediately */
+							if (gui->win) {
+								struct RastPort *rp = gui->win->RPort;
+								SetAPen(rp, gui->win->DetailPen);
+								RectFill(rp, PROG_X, PROG_TOP_Y,
+									PROG_X + PROG_W - 1, PROG_TOP_Y + PROG_H - 1);
+							}
+						} else {
+							DrawProgress(gui);
+						}
+						SaveGuiSettings(gui);
+					}
 				}
 				menuCode = item ? item->NextSelect : MENUNULL;
 			}
