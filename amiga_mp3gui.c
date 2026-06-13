@@ -80,7 +80,10 @@
 #define TIME_W          80
 #define TIMER_TICK_MICROS 1000000UL
 #define ART_TIMER_MICROS 20000UL
-#define ART_MCUS_PER_PUMP 4
+#define ART_MCUS_PER_PUMP 3
+#define ART_SAMPLE_SHIFT 1
+#define ART_SAMPLE_MASK ((1 << ART_SAMPLE_SHIFT) - 1)
+#define GUI_ENV_PREFIX "MiniAMP3"
 
 #define MENUNUM_PROJECT   0
 #define MENUNUM_PLAYBACK  1
@@ -88,6 +91,7 @@
 #define ITEMNUM_QUIT      1
 #define ITEMNUM_DTP       0
 #define ITEMNUM_BENCH     1
+#define ITEMNUM_ARTWORK   2
 
 enum {
 	GID_FILE = 1,
@@ -155,6 +159,7 @@ typedef struct HelixAmp3Gui {
 	struct Menu *menuStrip;
 	int artValid;
 	int artLoading;
+	int artEnabled;
 	unsigned char artGreyBuf[ART_W * ART_H];
 	ArtDecodeState artDecode;
 	struct MsgPort *timerPort;
@@ -265,6 +270,8 @@ static struct NewMenu myNewMenus[] = {
 		(APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_DTP) },
 	{ NM_ITEM,  (STRPTR)"Bench mode",       0, CHECKIT | MENUTOGGLE, 0,
 		(APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_BENCH) },
+	{ NM_ITEM,  (STRPTR)"Artwork",          0, CHECKIT | MENUTOGGLE, 0,
+		(APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_ARTWORK) },
 	{ NM_END,   NULL,                       0, 0, 0, 0 }
 };
 
@@ -296,6 +303,82 @@ static void CopyDrawerFromPath(char *drawer, size_t drawerSize, const char *path
 		*(q + 1) = '\0';
 	else
 		drawer[0] = '\0';
+}
+
+
+static void EnvName(char *dst, size_t dstSize, const char *key)
+{
+	SafeCopy(dst, dstSize, GUI_ENV_PREFIX);
+	strncat(dst, "/", dstSize - strlen(dst) - 1);
+	strncat(dst, key, dstSize - strlen(dst) - 1);
+}
+
+static int LoadEnvInt(const char *key, int fallback, int minValue, int maxValue)
+{
+	char name[64];
+	char value[32];
+	long n;
+	int v;
+
+	EnvName(name, sizeof(name), key);
+	n = GetVar((STRPTR)name, (STRPTR)value, sizeof(value) - 1, 0);
+	if (n <= 0)
+		return fallback;
+	value[n] = '\0';
+	v = atoi(value);
+	if (v < minValue)
+		v = minValue;
+	if (v > maxValue)
+		v = maxValue;
+	return v;
+}
+
+static void LoadEnvString(const char *key, char *dst, size_t dstSize)
+{
+	char name[64];
+	long n;
+
+	if (!dst || dstSize == 0)
+		return;
+	EnvName(name, sizeof(name), key);
+	n = GetVar((STRPTR)name, (STRPTR)dst, dstSize - 1, 0);
+	if (n > 0)
+		dst[n] = '\0';
+	else
+		dst[0] = '\0';
+}
+
+static void SaveEnvString(const char *key, const char *value)
+{
+	char name[64];
+
+	EnvName(name, sizeof(name), key);
+	if (!value)
+		value = "";
+	SetVar((STRPTR)name, (STRPTR)value, strlen(value), GVF_GLOBAL_ONLY);
+	SetVar((STRPTR)name, (STRPTR)value, strlen(value), GVF_SAVE_VAR);
+}
+
+static void SaveEnvInt(const char *key, int value)
+{
+	char text[16];
+
+	sprintf(text, "%d", value);
+	SaveEnvString(key, text);
+}
+
+static void SaveGuiSettings(HelixAmp3Gui *gui)
+{
+	SaveEnvInt("FastLowrate", gui->fastLowrate);
+	SaveEnvInt("FastMem", gui->fastMem);
+	SaveEnvInt("Mono", gui->mono);
+	SaveEnvInt("RateIndex", gui->rateIndex);
+	SaveEnvInt("BufferSeconds", gui->bufferSeconds);
+	SaveEnvInt("QualityIndex", gui->qualityIndex);
+	SaveEnvInt("DecodeThenPlay", gui->decodeThenPlay);
+	SaveEnvInt("Bench", gui->bench);
+	SaveEnvInt("Artwork", gui->artEnabled);
+	SaveEnvString("LastDrawer", gui->lastDrawer);
 }
 
 static void FreeTags(Mp3Tags *tags)
@@ -600,7 +683,7 @@ static void DetectPictureMime(const unsigned char *payload,
 		*isPng = 1;
 }
 
-static void ReadId3v2Frames(FILE *f, Mp3Tags *tags, const unsigned char *hdr)
+static void ReadId3v2Frames(FILE *f, Mp3Tags *tags, const unsigned char *hdr, int loadArt)
 {
 	unsigned char fh[10];
 	long tagStart;
@@ -637,7 +720,7 @@ static void ReadId3v2Frames(FILE *f, Mp3Tags *tags, const unsigned char *hdr)
 		payloadPos = ftell(f);
 		if (frameSize <= 0 || payloadPos + frameSize > tagEnd)
 			break;
-		if (!tags->artData &&
+		if (loadArt && !tags->artData &&
 			((version == 2 && strcmp(id, "PIC") == 0) ||
 			strcmp(id, "APIC") == 0) &&
 			frameSize > 4 && frameSize <= 512L * 1024L) {
@@ -753,7 +836,7 @@ static void TryFolderArt(const char *inputName, Mp3Tags *tags)
 	}
 }
 
-static void ReadMp3Tags(const char *path, Mp3Tags *tags)
+static void ReadMp3Tags(const char *path, Mp3Tags *tags, int loadArt)
 {
 	FILE *f;
 	unsigned char hdr[10];
@@ -771,7 +854,7 @@ static void ReadMp3Tags(const char *path, Mp3Tags *tags)
 	firstFrameOffset = -1L;
 	if (fread(hdr, 1, sizeof(hdr), f) == sizeof(hdr) && memcmp(hdr, "ID3", 3) == 0) {
 		hadId3v2 = 1;
-		ReadId3v2Frames(f, tags, hdr);
+		ReadId3v2Frames(f, tags, hdr, loadArt);
 	} else {
 		fseek(f, 0, SEEK_SET);
 	}
@@ -791,7 +874,8 @@ static void ReadMp3Tags(const char *path, Mp3Tags *tags)
 	if (!hadId3v2)
 		ReadId3v1(f, tags);
 	fclose(f);
-	TryFolderArt(path, tags);
+	if (loadArt)
+		TryFolderArt(path, tags);
 }
 
 static void FormatReadyStatus(const Mp3Tags *tags, char *buf, size_t bufSize)
@@ -973,6 +1057,14 @@ static int DecodeJpegToGrey(const unsigned char *jpegData, unsigned long jpegByt
 
 static void DrawArtPanel(HelixAmp3Gui *gui);
 
+static void CancelArtDecode(HelixAmp3Gui *gui)
+{
+	if (!gui)
+		return;
+	memset(&gui->artDecode, 0, sizeof(gui->artDecode));
+	gui->artLoading = 0;
+}
+
 static int JpegGreySample(const pjpeg_image_info_t *info, int off)
 {
 	if (info->m_comps == 1)
@@ -1022,7 +1114,7 @@ static void PumpArtDecode(HelixAmp3Gui *gui)
 	ArtDecodeState *st = &gui->artDecode;
 	int pumped;
 
-	if (!st->active)
+	if (!st->active || !gui->artEnabled)
 		return;
 	for (pumped = 0; pumped < ART_MCUS_PER_PUMP && st->active; pumped++) {
 		unsigned char status;
@@ -1051,12 +1143,18 @@ static void PumpArtDecode(HelixAmp3Gui *gui)
 			int dstY;
 			int x;
 
+			if ((srcY & ART_SAMPLE_MASK) != 0)
+				continue;
+
 			if (srcY >= st->info.m_height)
 				continue;
 			dstY = st->yMap[srcY];
 			for (x = 0; x < st->info.m_MCUWidth; x++) {
 				int srcX = mcuX + x;
 				int dst;
+
+				if ((srcX & ART_SAMPLE_MASK) != 0)
+					continue;
 
 				if (srcX >= st->info.m_width)
 					continue;
@@ -1079,7 +1177,7 @@ static void StartArtDecode(HelixAmp3Gui *gui)
 	memset(st, 0, sizeof(*st));
 	gui->artValid = 0;
 	gui->artLoading = 0;
-	if (!gui->tags.artData || gui->tags.artBytes <= 4 || gui->tags.artIsPng) {
+	if (!gui->artEnabled || !gui->tags.artData || gui->tags.artBytes <= 4 || gui->tags.artIsPng) {
 		DrawArtPanel(gui);
 		return;
 	}
@@ -1156,12 +1254,12 @@ static void DrawArtPanel(HelixAmp3Gui *gui)
 			}
 		}
 	} else {
-		const char *label = gui->artLoading ? "Loading" : "No art";
+		const char *label = !gui->artEnabled ? "Art off" : (gui->artLoading ? "Loading" : "No art");
 		SetAPen(rp, 0);
 		RectFill(rp, ART_X, ART_Y, ART_X + ART_W - 1, ART_Y + ART_H - 1);
 		SetAPen(rp, 1);
-		Move(rp, ART_X + (gui->artLoading ? 10 : 16), ART_Y + ART_H / 2);
-		Text(rp, label, gui->artLoading ? 7 : 6);
+		Move(rp, ART_X + (!gui->artEnabled ? 10 : (gui->artLoading ? 10 : 16)), ART_Y + ART_H / 2);
+		Text(rp, label, strlen(label));
 	}
 }
 
@@ -1313,6 +1411,9 @@ static void GuiRefresh(HelixAmp3Gui *gui)
 	DrawArtPanel(gui);
 }
 
+static void SetMenuItemChecked(HelixAmp3Gui *gui, int menuNum, int itemNum,
+	int checked);
+
 static void SetDecodeThenPlay(HelixAmp3Gui *gui, int enabled)
 {
 	gui->decodeThenPlay = enabled ? 1 : 0;
@@ -1324,6 +1425,23 @@ static void SetDecodeThenPlay(HelixAmp3Gui *gui, int enabled)
 	SetStatus(gui, gui->decodeThenPlay ?
 		"Decode-then-play enabled; Buffer slider disabled." :
 		"Streaming playback mode enabled.");
+	SaveGuiSettings(gui);
+}
+
+static void SetArtworkEnabled(HelixAmp3Gui *gui, int enabled)
+{
+	gui->artEnabled = enabled ? 1 : 0;
+	SetMenuItemChecked(gui, MENUNUM_PLAYBACK, ITEMNUM_ARTWORK,
+		gui->artEnabled);
+	CancelArtDecode(gui);
+	if (gui->artEnabled && gui->inputName[0] && !gui->tags.artData) {
+		ReadMp3Tags(gui->inputName, &gui->tags, 1);
+		gui->totalSecs = gui->tags.durationSecs;
+		UpdateTagDisplay(gui);
+	}
+	UpdateArtDisplay(gui);
+	SetStatus(gui, gui->artEnabled ? "Artwork enabled." : "Artwork disabled.");
+	SaveGuiSettings(gui);
 }
 
 static void ShowAbout(HelixAmp3Gui *gui)
@@ -1510,6 +1628,32 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 	return 0;
 }
 
+
+static void SetMenuItemChecked(HelixAmp3Gui *gui, int menuNum, int itemNum,
+	int checked)
+{
+	struct MenuItem *item;
+
+	if (!gui->menuStrip)
+		return;
+	item = ItemAddress(gui->menuStrip, FULLMENUNUM(menuNum, itemNum, NOSUB));
+	if (!item)
+		return;
+	if (checked)
+		item->Flags |= CHECKED;
+	else
+		item->Flags &= ~CHECKED;
+}
+
+static void SyncMenuChecks(HelixAmp3Gui *gui)
+{
+	SetMenuItemChecked(gui, MENUNUM_PLAYBACK, ITEMNUM_DTP,
+		gui->decodeThenPlay);
+	SetMenuItemChecked(gui, MENUNUM_PLAYBACK, ITEMNUM_BENCH, gui->bench);
+	SetMenuItemChecked(gui, MENUNUM_PLAYBACK, ITEMNUM_ARTWORK,
+		gui->artEnabled);
+}
+
 static void GuiClose(HelixAmp3Gui *gui);
 
 static int GuiOpen(HelixAmp3Gui *gui)
@@ -1517,12 +1661,16 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	struct NewWindow nw;
 
 	memset(gui, 0, sizeof(*gui));
-	gui->fastLowrate = 1;
-	gui->fastMem = 1;
-	gui->mono = 1;
-	gui->rateIndex = 2;
-	gui->bufferSeconds = 10;
-	gui->qualityIndex = 0;
+	gui->fastLowrate = LoadEnvInt("FastLowrate", 1, 0, 1);
+	gui->fastMem = LoadEnvInt("FastMem", 1, 0, 1);
+	gui->mono = LoadEnvInt("Mono", 1, 0, 1);
+	gui->rateIndex = LoadEnvInt("RateIndex", 2, 0, 3);
+	gui->bufferSeconds = LoadEnvInt("BufferSeconds", 10, 1, 30);
+	gui->qualityIndex = LoadEnvInt("QualityIndex", 0, 0, 2);
+	gui->decodeThenPlay = LoadEnvInt("DecodeThenPlay", 0, 0, 1);
+	gui->bench = LoadEnvInt("Bench", 0, 0, 1);
+	gui->artEnabled = LoadEnvInt("Artwork", 1, 0, 1);
+	LoadEnvString("LastDrawer", gui->lastDrawer, sizeof(gui->lastDrawer));
 	SafeCopy(gui->statusText, sizeof(gui->statusText), "Ready.");
 	SetFileDisplay(gui, NULL);
 
@@ -1599,10 +1747,16 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	}
 	AddGList(gui->win, gui->gadgets, (UWORD)-1, -1, NULL);
 	RefreshGList(gui->gadgets, gui->win, NULL, -1);
+	if (gui->decodeThenPlay && gui->gadBuffer) {
+		GT_SetGadgetAttrs(gui->gadBuffer, gui->win, NULL,
+			GA_Disabled, TRUE,
+			TAG_DONE);
+	}
 
 	gui->menuStrip = CreateMenus(myNewMenus, TAG_DONE);
 	if (gui->menuStrip) {
 		LayoutMenus(gui->menuStrip, gui->visualInfo, TAG_DONE);
+		SyncMenuChecks(gui);
 		SetMenuStrip(gui->win, gui->menuStrip);
 	}
 	gui->timerPort = CreateMsgPort();
@@ -1742,7 +1896,7 @@ static void ChooseMp3(HelixAmp3Gui *gui)
 		}
 		SafeCopy(gui->inputName, sizeof(gui->inputName), path);
 		SetFileDisplay(gui, gui->inputName);
-		ReadMp3Tags(gui->inputName, &gui->tags);
+		ReadMp3Tags(gui->inputName, &gui->tags, gui->artEnabled);
 		gui->totalSecs = gui->tags.durationSecs;
 		gui->elapsedSecs = 0;
 		UpdateTagDisplay(gui);
@@ -1754,6 +1908,7 @@ static void ChooseMp3(HelixAmp3Gui *gui)
 			FormatReadyStatus(&gui->tags, gui->statusText, sizeof(gui->statusText));
 			SetStatus(gui, gui->statusText);
 		}
+		SaveGuiSettings(gui);
 	}
 	FreeAslRequest(req);
 }
@@ -1835,6 +1990,8 @@ static void StartPlayback(HelixAmp3Gui *gui)
 		SetStatus(gui, "Cannot start playback: no done port.");
 		return;
 	}
+	CancelArtDecode(gui);
+	DrawArtPanel(gui);
 	gui->elapsedSecs = 0;
 	gui->launchBufferSecs = gui->decodeThenPlay ? 0 : gui->bufferSeconds;
 	DrawProgress(gui);
@@ -1916,22 +2073,26 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code)
 		gui->fastLowrate = !gui->fastLowrate;
 		GT_SetGadgetAttrs(gad, gui->win, NULL, GTCB_Checked, gui->fastLowrate, TAG_DONE);
 		SetStatus(gui, gui->fastLowrate ? "Fast-lowrate enabled." : "Fast-lowrate disabled.");
+		SaveGuiSettings(gui);
 		break;
 	case GID_FAST_MEM:
 		gui->fastMem = !gui->fastMem;
 		GT_SetGadgetAttrs(gad, gui->win, NULL, GTCB_Checked, gui->fastMem, TAG_DONE);
 		SetStatus(gui, gui->fastMem ? "Fast memory path enabled." : "Fast memory path disabled.");
+		SaveGuiSettings(gui);
 		break;
 	case GID_MONO:
 		gui->mono = !gui->mono;
 		GT_SetGadgetAttrs(gad, gui->win, NULL, GTCB_Checked, gui->mono, TAG_DONE);
 		SetStatus(gui, gui->mono ? "Mono output enabled." : "Stereo output enabled.");
+		SaveGuiSettings(gui);
 		break;
 	case GID_RATE:
 		gui->rateIndex = code;
 		if (gui->rateIndex < 0 || gui->rateIndex > 3)
 			gui->rateIndex = 2;
 		SetStatus(gui, "Output sample rate updated.");
+		SaveGuiSettings(gui);
 		break;
 	case GID_BUFFER:
 		gui->bufferSeconds = code;
@@ -1943,12 +2104,14 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code)
 			GTSL_Level, gui->bufferSeconds,
 			TAG_DONE);
 		SetStatus(gui, "Buffer depth updated.");
+		SaveGuiSettings(gui);
 		break;
 	case GID_QUALITY:
 		gui->qualityIndex = code;
 		if (gui->qualityIndex < 0 || gui->qualityIndex > 2)
 			gui->qualityIndex = 0;
 		SetStatus(gui, "Quality profile updated.");
+		SaveGuiSettings(gui);
 		break;
 	case GID_PLAY:
 		StartPlayback(gui);
@@ -1991,10 +2154,14 @@ static void GuiPoll(HelixAmp3Gui *gui)
 						SetDecodeThenPlay(gui, !gui->decodeThenPlay);
 					else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_BENCH) {
 						gui->bench = !gui->bench;
+						SetMenuItemChecked(gui, MENUNUM_PLAYBACK, ITEMNUM_BENCH,
+							gui->bench);
 						SetStatus(gui, gui->bench ?
 							"Bench mode enabled." :
 							"Bench mode disabled.");
-					}
+						SaveGuiSettings(gui);
+					} else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_ARTWORK)
+						SetArtworkEnabled(gui, !gui->artEnabled);
 				}
 				menuCode = item ? item->NextSelect : MENUNULL;
 			}
@@ -2009,7 +2176,7 @@ static void GuiPoll(HelixAmp3Gui *gui)
 
 int main(int argc, char **argv)
 {
-	HelixAmp3Gui gui;
+	static HelixAmp3Gui gui;
 
 	(void)argc;
 	(void)argv;
@@ -2039,6 +2206,7 @@ int main(int argc, char **argv)
 				break;
 		}
 	}
+	SaveGuiSettings(&gui);
 	GuiClose(&gui);
 	return 0;
 }
