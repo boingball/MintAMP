@@ -65,11 +65,11 @@ extern GuiPlaybackStatus gGuiPlaybackStatus;
 #define GUI_ENV_PREFIX  "ENVARC:MiniAMP3"
 
 #define GUI_WIN_W       560    /* inner width; wide enough for all controls */
-#define GUI_WIN_H       260    /* inner height */
+#define GUI_WIN_H       320    /* inner height */
 
 #define GUI_MARGIN_L     8     /* left margin */
 #define GUI_MARGIN_R     8     /* right margin */
-#define GUI_TOP_Y       20     /* y of first gadget row */
+#define GUI_TOP_Y       56     /* y of first gadget row */
 #define GUI_ROW_H       18     /* row pitch - enough for Topaz 8 + padding */
 
 #define ART_W           64
@@ -84,12 +84,16 @@ extern GuiPlaybackStatus gGuiPlaybackStatus;
 #define ROW_TITLE       (GUI_TOP_Y + 1 * GUI_ROW_H)
 #define ROW_ARTIST      (GUI_TOP_Y + 2 * GUI_ROW_H)
 #define ROW_ALBUM       (GUI_TOP_Y + 3 * GUI_ROW_H)
-#define ROW_CHECKS      (GUI_TOP_Y + 4 * GUI_ROW_H + 4)
-#define ROW_CYCLES      (GUI_TOP_Y + 5 * GUI_ROW_H + 4)
-#define ROW_BUFFER      (GUI_TOP_Y + 6 * GUI_ROW_H + 4)
-#define ROW_PROGRESS    (GUI_TOP_Y + 7 * GUI_ROW_H + 8)
-#define ROW_BUTTONS     (GUI_TOP_Y + 8 * GUI_ROW_H + 12)
-#define ROW_STATUS      (GUI_TOP_Y + 9 * GUI_ROW_H + 12)
+#define ROW_RATING      (GUI_TOP_Y + 4 * GUI_ROW_H)
+#define ROW_TRACK       (GUI_TOP_Y + 5 * GUI_ROW_H)
+#define ROW_GENRE       (GUI_TOP_Y + 6 * GUI_ROW_H)
+#define ROW_CHECKS      (GUI_TOP_Y + 7 * GUI_ROW_H + 4)
+#define ROW_CYCLES      (GUI_TOP_Y + 8 * GUI_ROW_H + 4)
+#define ROW_BUFFER      (GUI_TOP_Y + 9 * GUI_ROW_H + 4)
+#define ROW_PROGRESS    (GUI_TOP_Y + 10 * GUI_ROW_H + 8)
+#define ROW_BUTTONS     (GUI_TOP_Y + 11 * GUI_ROW_H + 12)
+#define ROW_STATUS      (GUI_TOP_Y + 12 * GUI_ROW_H + 12)
+#define ROW_FILEINFO    (GUI_TOP_Y + 13 * GUI_ROW_H + 12)
 
 #define PROG_X          (GUI_MARGIN_L + 8)
 #define PROG_W          (GUI_WIN_W - PROG_X - 90 - GUI_MARGIN_R)
@@ -125,6 +129,15 @@ enum {
 	GID_PLAY,
 	GID_STOP,
 	GID_STATUS,
+	GID_RATING_LABEL,
+	GID_TRACK,
+	GID_GENRE,
+	GID_FILEINFO,
+	GID_STAR1,
+	GID_STAR2,
+	GID_STAR3,
+	GID_STAR4,
+	GID_STAR5,
 	GID_COUNT
 };
 
@@ -152,8 +165,13 @@ typedef struct Mp3Tags {
 	char title[64];
 	char artist[64];
 	char album[64];
+	char track[16];
+	char genre[32];
+	int  rating;
 	int  bitrateKbps;
 	int  sampleRate;
+	int  channels;
+	unsigned long fileSize;
 	int  durationSecs;
 	unsigned char *artData;
 	unsigned long artBytes;
@@ -168,6 +186,10 @@ typedef struct HelixAmp3Gui {
 	struct Gadget  *gadTitle;
 	struct Gadget  *gadArtist;
 	struct Gadget  *gadAlbum;
+	struct Gadget  *gadTrack;
+	struct Gadget  *gadGenre;
+	struct Gadget  *gadFileInfo;
+	struct Gadget  *gadStars[5];
 	struct Gadget  *gadStatus;
 	struct Gadget  *gadBuffer;
 	struct Gadget  *gadPlay;
@@ -191,6 +213,8 @@ typedef struct HelixAmp3Gui {
 	char  fileText[HELIXAMP3_MAX_PATH];
 	char  lastDrawer[HELIXAMP3_MAX_PATH];
 	char  statusText[128];
+	char  fileInfoText[128];
+	char  ratingText[8];
 	int   fastLowrate;
 	int   fastMem;
 	int   mono;
@@ -628,6 +652,7 @@ static void ReadMpegInfo(FILE *f, Mp3Tags *tags, long *firstFrameOffset)
 			tags->bitrateKbps = bitrateTab[idx];
 			idx = (h[2] >> 2) & 0x03;
 			tags->sampleRate = samplerateTab[idx];
+			tags->channels = (((h[3] >> 6) & 0x03) == 3) ? 1 : 2;
 			return;
 		}
 	}
@@ -651,6 +676,10 @@ static void ReadId3v1(FILE *f, Mp3Tags *tags)
 		CopyId3v1TextField(tags->artist, sizeof(tags->artist), buf + 33, 30);
 	if (!tags->album[0])
 		CopyId3v1TextField(tags->album, sizeof(tags->album), buf + 63, 30);
+	if (!tags->track[0] && buf[125] == 0 && buf[126] != 0)
+		sprintf(tags->track, "%u", (unsigned int)buf[126]);
+	if (!tags->genre[0] && buf[127] != 255)
+		sprintf(tags->genre, "ID3 genre %u", (unsigned int)buf[127]);
 }
 
 
@@ -706,6 +735,23 @@ static void DetectPictureMime(const unsigned char *payload,
 		*isJpeg = 1;
 	else if (ContainsTextNoCase(mime, "png"))
 		*isPng = 1;
+}
+
+static int RatingFromPopm(const unsigned char *payload, long frameSize)
+{
+	long i;
+	unsigned int rating;
+
+	if (!payload || frameSize <= 0)
+		return 0;
+	for (i = 0; i < frameSize && payload[i] != 0; i++)
+		;
+	if (i + 1 >= frameSize)
+		return 0;
+	rating = payload[i + 1];
+	if (rating == 0)
+		return 0;
+	return (int)((rating + 25) / 51);
 }
 
 static void ReadId3v2Frames(FILE *f, Mp3Tags *tags, const unsigned char *hdr, int loadArt)
@@ -789,7 +835,18 @@ static void ReadId3v2Frames(FILE *f, Mp3Tags *tags, const unsigned char *hdr, in
 			target = tags->artist;
 		else if ((version == 2 && strcmp(id, "TAL") == 0) || strcmp(id, "TALB") == 0)
 			target = tags->album;
-		if (target && !target[0]) {
+		else if ((version == 2 && strcmp(id, "TRK") == 0) || strcmp(id, "TRCK") == 0)
+			target = tags->track;
+		else if ((version == 2 && strcmp(id, "TCO") == 0) || strcmp(id, "TCON") == 0)
+			target = tags->genre;
+		if (strcmp(id, "POPM") == 0 && tags->rating == 0) {
+			unsigned char popm[96];
+			long n = frameSize;
+			if (n > (long)sizeof(popm))
+				n = (long)sizeof(popm);
+			if (fread(popm, 1, (size_t)n, f) == (size_t)n)
+				tags->rating = RatingFromPopm(popm, n);
+		} else if (target && !target[0]) {
 			unsigned char text[96];
 			long n = frameSize;
 			if (n > (long)sizeof(text))
@@ -890,11 +947,16 @@ static void ReadMp3Tags(const char *path, Mp3Tags *tags, int loadArt)
 
 		if (fseek(f, 0, SEEK_END) == 0) {
 			fileSize = ftell(f);
+			tags->fileSize = fileSize > 0 ? (unsigned long)fileSize : 0;
 			audioBytes = fileSize - firstFrameOffset;
 			if (audioBytes > 0)
 				tags->durationSecs = (int)(audioBytes * 8L /
 					((long)tags->bitrateKbps * 1000L));
 		}
+	}
+	if (tags->fileSize == 0 && fseek(f, 0, SEEK_END) == 0) {
+		long fileSize = ftell(f);
+		tags->fileSize = fileSize > 0 ? (unsigned long)fileSize : 0;
 	}
 	if (!hadId3v2)
 		ReadId3v1(f, tags);
@@ -934,6 +996,48 @@ static void SetFileDisplay(HelixAmp3Gui *gui, const char *text)
 	}
 }
 
+
+static void FormatRatingText(HelixAmp3Gui *gui)
+{
+	int i;
+
+	for (i = 0; i < 5; i++)
+		gui->ratingText[i] = (i < gui->tags.rating) ? '*' : '-';
+	gui->ratingText[5] = '\0';
+}
+
+static void FormatFileInfo(HelixAmp3Gui *gui)
+{
+	const char *ch = gui->tags.channels == 1 ? "mono" :
+		(gui->tags.channels == 2 ? "stereo" : "?");
+	unsigned long kb = (gui->tags.fileSize + 1023UL) / 1024UL;
+
+	if (gui->tags.bitrateKbps > 0 || gui->tags.sampleRate > 0 ||
+		gui->tags.fileSize > 0)
+		sprintf(gui->fileInfoText, "%d kbps, %s, %d Hz, %lu KB",
+			gui->tags.bitrateKbps, ch, gui->tags.sampleRate, kb);
+	else
+		SafeCopy(gui->fileInfoText, sizeof(gui->fileInfoText), "-");
+}
+
+static void SetRating(HelixAmp3Gui *gui, int rating)
+{
+	int i;
+
+	if (rating < 0)
+		rating = 0;
+	if (rating > 5)
+		rating = 5;
+	gui->tags.rating = rating;
+	FormatRatingText(gui);
+	for (i = 0; i < 5; i++) {
+		if (gui->win && gui->gadStars[i])
+			GT_SetGadgetAttrs(gui->gadStars[i], gui->win, NULL,
+				GA_Text, (ULONG)(i < rating ? "*" : "-"),
+				TAG_DONE);
+	}
+}
+
 static void UpdateTagDisplay(HelixAmp3Gui *gui)
 {
 	if (!gui->win)
@@ -951,6 +1055,23 @@ static void UpdateTagDisplay(HelixAmp3Gui *gui)
 	if (gui->gadAlbum) {
 		GT_SetGadgetAttrs(gui->gadAlbum, gui->win, NULL,
 			GTTX_Text, (ULONG)(gui->tags.album[0] ? gui->tags.album : "-"),
+			TAG_DONE);
+	}
+	if (gui->gadTrack) {
+		GT_SetGadgetAttrs(gui->gadTrack, gui->win, NULL,
+			GTTX_Text, (ULONG)(gui->tags.track[0] ? gui->tags.track : "-"),
+			TAG_DONE);
+	}
+	if (gui->gadGenre) {
+		GT_SetGadgetAttrs(gui->gadGenre, gui->win, NULL,
+			GTTX_Text, (ULONG)(gui->tags.genre[0] ? gui->tags.genre : "-"),
+			TAG_DONE);
+	}
+	SetRating(gui, gui->tags.rating);
+	FormatFileInfo(gui);
+	if (gui->gadFileInfo) {
+		GT_SetGadgetAttrs(gui->gadFileInfo, gui->win, NULL,
+			GTTX_Text, (ULONG)gui->fileInfoText,
 			TAG_DONE);
 	}
 }
@@ -1671,6 +1792,53 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 	if (!gad)
 		return -1;
 
+	gad = MakeGadget(gui, gad, TEXT_KIND, GID_RATING_LABEL,
+		GUI_MARGIN_L + 54, ROW_RATING, 1, 16, "Rating:",
+		GTTX_Text, (ULONG)"",
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gui->gadStars[0] = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_STAR1,
+		GUI_MARGIN_L + 62, ROW_RATING - 1, 22, 16, "-",
+		TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0);
+	if (!gad) return -1;
+	gui->gadStars[1] = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_STAR2,
+		GUI_MARGIN_L + 86, ROW_RATING - 1, 22, 16, "-",
+		TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0);
+	if (!gad) return -1;
+	gui->gadStars[2] = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_STAR3,
+		GUI_MARGIN_L + 110, ROW_RATING - 1, 22, 16, "-",
+		TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0);
+	if (!gad) return -1;
+	gui->gadStars[3] = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_STAR4,
+		GUI_MARGIN_L + 134, ROW_RATING - 1, 22, 16, "-",
+		TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0);
+	if (!gad) return -1;
+	gui->gadStars[4] = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_STAR5,
+		GUI_MARGIN_L + 158, ROW_RATING - 1, 22, 16, "-",
+		TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0);
+	if (!gad) return -1;
+	gui->gadTrack = gad = MakeGadget(gui, gad, TEXT_KIND, GID_TRACK,
+		GUI_MARGIN_L + 54, ROW_TRACK, TEXT_COL_W - 54, 16, "Track:",
+		GTTX_Text, (ULONG)"-",
+		GTTX_Border, TRUE,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gui->gadGenre = gad = MakeGadget(gui, gad, TEXT_KIND, GID_GENRE,
+		GUI_MARGIN_L + 54, ROW_GENRE, TEXT_COL_W - 54, 16, "Genre:",
+		GTTX_Text, (ULONG)"-",
+		GTTX_Border, TRUE,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
 	gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_FAST_LOWRATE,
 		GUI_MARGIN_L + 14, ROW_CHECKS, 20, 12, "Fast-lr",
 		GTCB_Checked, gui->fastLowrate,
@@ -1753,6 +1921,15 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 	if (!gad)
 		return -1;
 
+	gui->gadFileInfo = gad = MakeGadget(gui, gad, TEXT_KIND, GID_FILEINFO,
+		GUI_MARGIN_L + 68, ROW_FILEINFO, GUI_WIN_W - GUI_MARGIN_L - GUI_MARGIN_R - 88, 16, "File info:",
+		GTTX_Text, (ULONG)gui->fileInfoText,
+		GTTX_Border, TRUE,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
 	return 0;
 }
 
@@ -1803,6 +1980,7 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	gui->progressEnabled = LoadEnvInt("ProgressBar", 0, 0, 1);
 	LoadEnvString("LastDrawer", gui->lastDrawer, sizeof(gui->lastDrawer));
 	SafeCopy(gui->statusText, sizeof(gui->statusText), "Ready.");
+	SafeCopy(gui->fileInfoText, sizeof(gui->fileInfoText), "-");
 	SetFileDisplay(gui, NULL);
 
 	IntuitionBase = (struct IntuitionBase *)OpenLibrary("intuition.library", 37);
@@ -1838,7 +2016,7 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	nw.Height = GUI_WIN_H;
 	nw.DetailPen = 0;
 	nw.BlockPen = 1;
-	nw.IDCMPFlags = IDCMP_GADGETUP | IDCMP_MOUSEMOVE | IDCMP_CLOSEWINDOW |
+	nw.IDCMPFlags = IDCMP_GADGETUP | IDCMP_MOUSEMOVE | IDCMP_MOUSEBUTTONS | IDCMP_CLOSEWINDOW |
 		IDCMP_REFRESHWINDOW | IDCMP_ACTIVEWINDOW | IDCMP_MENUPICK;
 	nw.Flags = WFLG_CLOSEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET |
 		WFLG_SIZEGADGET | WFLG_SIZEBBOTTOM | WFLG_ACTIVATE |
@@ -1848,7 +2026,7 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	nw.MinWidth = GUI_WIN_W;
 	nw.MinHeight = GUI_WIN_H;
 	nw.MaxWidth = 680;
-	nw.MaxHeight = 320;
+	nw.MaxHeight = 420;
 	nw.Type = WBENCHSCREEN;
 	gui->win = OpenWindowTags(&nw,
 		WA_InnerWidth, GUI_WIN_W,
@@ -2266,6 +2444,14 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code)
 			TAG_DONE);
 		SetStatus(gui, "Buffer depth updated.");
 		SaveGuiSettings(gui);
+		break;
+	case GID_STAR1:
+	case GID_STAR2:
+	case GID_STAR3:
+	case GID_STAR4:
+	case GID_STAR5:
+		SetRating(gui, (int)gad->GadgetID - GID_STAR1 + 1);
+		SetStatus(gui, "Rating updated in the display.");
 		break;
 	case GID_QUALITY:
 		gui->qualityIndex = code;
