@@ -69,7 +69,7 @@ extern GuiPlaybackStatus gGuiPlaybackStatus;
 
 #define GUI_MARGIN_L     8     /* left margin */
 #define GUI_MARGIN_R     8     /* right margin */
-#define GUI_TOP_Y       56     /* y of first gadget row */
+#define GUI_TOP_Y       36     /* y of first gadget row */
 #define GUI_ROW_H       18     /* row pitch - enough for Topaz 8 + padding */
 
 #define ART_W           64
@@ -130,6 +130,7 @@ enum {
 	GID_STOP,
 	GID_STATUS,
 	GID_RATING_LABEL,
+	GID_RATING_VALUE,
 	GID_TRACK,
 	GID_GENRE,
 	GID_FILEINFO,
@@ -189,6 +190,7 @@ typedef struct HelixAmp3Gui {
 	struct Gadget  *gadTrack;
 	struct Gadget  *gadGenre;
 	struct Gadget  *gadFileInfo;
+	struct Gadget  *gadRatingValue;
 	struct Gadget  *gadStars[5];
 	struct Gadget  *gadStatus;
 	struct Gadget  *gadBuffer;
@@ -214,7 +216,7 @@ typedef struct HelixAmp3Gui {
 	char  lastDrawer[HELIXAMP3_MAX_PATH];
 	char  statusText[128];
 	char  fileInfoText[128];
-	char  ratingText[8];
+	char  ratingText[16];
 	int   fastLowrate;
 	int   fastMem;
 	int   mono;
@@ -1003,7 +1005,7 @@ static void FormatRatingText(HelixAmp3Gui *gui)
 
 	for (i = 0; i < 5; i++)
 		gui->ratingText[i] = (i < gui->tags.rating) ? '*' : '-';
-	gui->ratingText[5] = '\0';
+	sprintf(gui->ratingText + 5, " %d/5", gui->tags.rating);
 }
 
 static void FormatFileInfo(HelixAmp3Gui *gui)
@@ -1036,6 +1038,10 @@ static void SetRating(HelixAmp3Gui *gui, int rating)
 				GA_Text, (ULONG)(i < rating ? "*" : "-"),
 				TAG_DONE);
 	}
+	if (gui->win && gui->gadRatingValue)
+		GT_SetGadgetAttrs(gui->gadRatingValue, gui->win, NULL,
+			GTTX_Text, (ULONG)gui->ratingText,
+			TAG_DONE);
 }
 
 static void UpdateTagDisplay(HelixAmp3Gui *gui)
@@ -1802,24 +1808,29 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadStars[0] = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_STAR1,
-		GUI_MARGIN_L + 62, ROW_RATING - 1, 22, 16, "-",
+		GUI_MARGIN_L + 78, ROW_RATING - 1, 22, 16, "-",
 		TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0);
 	if (!gad) return -1;
 	gui->gadStars[1] = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_STAR2,
-		GUI_MARGIN_L + 86, ROW_RATING - 1, 22, 16, "-",
+		GUI_MARGIN_L + 102, ROW_RATING - 1, 22, 16, "-",
 		TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0);
 	if (!gad) return -1;
 	gui->gadStars[2] = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_STAR3,
-		GUI_MARGIN_L + 110, ROW_RATING - 1, 22, 16, "-",
+		GUI_MARGIN_L + 126, ROW_RATING - 1, 22, 16, "-",
 		TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0);
 	if (!gad) return -1;
 	gui->gadStars[3] = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_STAR4,
-		GUI_MARGIN_L + 134, ROW_RATING - 1, 22, 16, "-",
+		GUI_MARGIN_L + 150, ROW_RATING - 1, 22, 16, "-",
 		TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0);
 	if (!gad) return -1;
 	gui->gadStars[4] = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_STAR5,
-		GUI_MARGIN_L + 158, ROW_RATING - 1, 22, 16, "-",
+		GUI_MARGIN_L + 174, ROW_RATING - 1, 22, 16, "-",
 		TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0);
+	if (!gad) return -1;
+	gui->gadRatingValue = gad = MakeGadget(gui, gad, TEXT_KIND, GID_RATING_VALUE,
+		GUI_MARGIN_L + 206, ROW_RATING, 80, 16, "",
+		GTTX_Text, (ULONG)gui->ratingText,
+		TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0);
 	if (!gad) return -1;
 	gui->gadTrack = gad = MakeGadget(gui, gad, TEXT_KIND, GID_TRACK,
 		GUI_MARGIN_L + 54, ROW_TRACK, TEXT_COL_W - 54, 16, "Track:",
@@ -1981,6 +1992,7 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	LoadEnvString("LastDrawer", gui->lastDrawer, sizeof(gui->lastDrawer));
 	SafeCopy(gui->statusText, sizeof(gui->statusText), "Ready.");
 	SafeCopy(gui->fileInfoText, sizeof(gui->fileInfoText), "-");
+	FormatRatingText(gui);
 	SetFileDisplay(gui, NULL);
 
 	IntuitionBase = (struct IntuitionBase *)OpenLibrary("intuition.library", 37);
