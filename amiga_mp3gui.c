@@ -1071,9 +1071,13 @@ static int JpegGreySample(const pjpeg_image_info_t *info, int off)
 		return info->m_pMCUBufR[off];
 #if defined(AMIGA_M68K) && defined(AMIGA_M68K_ASM_JPEG_GREY)
 	{
+		/* Sum = R*30 + G*59 + B*11, range [0, 25500].
+		 * Divide by 100 via multiply-shift: x/100 ~ (x*41944)>>22,
+		 * exact for all x in [0,25500]. Avoids 32-bit software divul. */
 		unsigned long r = info->m_pMCUBufR[off];
 		unsigned long g = info->m_pMCUBufG[off];
 		unsigned long b = info->m_pMCUBufB[off];
+		unsigned long sum;
 		__asm__ volatile (
 			"mulu #30,%0\n\t"
 			"mulu #59,%1\n\t"
@@ -1081,12 +1085,25 @@ static int JpegGreySample(const pjpeg_image_info_t *info, int off)
 			"add.l %1,%0\n\t"
 			"add.l %2,%0"
 			: "+d" (r), "+d" (g), "+d" (b));
-		return (int)(r / 100UL);
+		sum = r;
+		/* (sum * 41944) >> 22. 41944 fits in 16 bits so mulu.w is safe.
+		 * sum fits in 15 bits (max 25500 < 32768), so sum*41944 < 2^31,
+		 * safe for unsigned 32-bit result before the shift. */
+		__asm__ volatile (
+			"mulu #41944,%0\n\t"
+			"lsr.l #22,%0"
+			: "+d" (sum));
+		return (int)sum;
 	}
 #else
-	return ((int)info->m_pMCUBufR[off] * 30 +
-		(int)info->m_pMCUBufG[off] * 59 +
-		(int)info->m_pMCUBufB[off] * 11) / 100;
+	/* C reference path: same multiply-shift for consistency. */
+	{
+		unsigned long sum = (unsigned long)(
+			(int)info->m_pMCUBufR[off] * 30 +
+			(int)info->m_pMCUBufG[off] * 59 +
+			(int)info->m_pMCUBufB[off] * 11);
+		return (int)((sum * 41944UL) >> 22);
+	}
 #endif
 }
 
@@ -1204,6 +1221,7 @@ static void StartArtDecode(HelixAmp3Gui *gui)
 
 static int ArtGreyPen(HelixAmp3Gui *gui, int level)
 {
+	/* retained for potential future use */
 	struct DrawInfo *dri;
 	int pen;
 
@@ -1237,20 +1255,57 @@ static void DrawArtPanel(HelixAmp3Gui *gui)
 		GTBB_Recessed, TRUE,
 		TAG_DONE);
 	if (gui->artValid) {
-		int darkPen = ArtGreyPen(gui, 0);
-		int midPen = ArtGreyPen(gui, 1);
-		int lightPen = ArtGreyPen(gui, 2);
+		/* Resolve all three pens with a single GetScreenDrawInfo/Free pair. */
+		int pens[3];
+		{
+			struct DrawInfo *dri = gui->win ?
+				GetScreenDrawInfo(gui->win->WScreen) : NULL;
+			if (dri) {
+				pens[0] = dri->dri_Pens[SHADOWPEN];
+				pens[1] = dri->dri_Pens[BACKGROUNDPEN];
+				pens[2] = dri->dri_Pens[SHINEPEN];
+				FreeScreenDrawInfo(gui->win->WScreen, dri);
+			} else {
+				pens[0] = 0;
+				pens[1] = 1;
+				pens[2] = 1;
+			}
+		}
 
+		/* Render using horizontal RectFill runs instead of per-pixel WritePixel. */
 		for (y = 0; y < ART_H; y++) {
-			for (x = 0; x < ART_W; x++) {
-				int g = gui->artGreyBuf[y * ART_W + x];
-				int d = kBayer4x4[y & 3][x & 3] - 8;
-				int shade = (g + d * 2) >= 176 ? 2 :
-					((g + d * 2) >= 80 ? 1 : 0);
+			int runStart = 0;
+			int runShade;
 
-				SetAPen(rp, shade == 2 ? lightPen :
-					(shade == 1 ? midPen : darkPen));
-				WritePixel(rp, ART_X + x, ART_Y + y);
+			/* Compute first pixel's shade to seed the run. */
+			{
+				int g0 = gui->artGreyBuf[y * ART_W];
+				int dv = kBayer4x4[y & 3][0] - 8;
+				int gd = g0 + dv * 2;
+
+				runShade = gd >= 176 ? 2 : (gd >= 80 ? 1 : 0);
+			}
+			for (x = 1; x <= ART_W; x++) {
+				int shade;
+
+				if (x < ART_W) {
+					int g = gui->artGreyBuf[y * ART_W + x];
+					int dv = kBayer4x4[y & 3][x & 3] - 8;
+					int gd = g + dv * 2;
+
+					shade = gd >= 176 ? 2 : (gd >= 80 ? 1 : 0);
+				} else {
+					shade = -1; /* sentinel to flush last run */
+				}
+				if (shade != runShade) {
+					/* Flush the completed run. */
+					SetAPen(rp, pens[runShade]);
+					RectFill(rp,
+						ART_X + runStart, ART_Y + y,
+						ART_X + x - 1, ART_Y + y);
+					runStart = x;
+					runShade = shade;
+				}
 			}
 		}
 	} else {
