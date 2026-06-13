@@ -756,6 +756,112 @@ static int RatingFromPopm(const unsigned char *payload, long frameSize)
 	return (int)((rating + 25) / 51);
 }
 
+static unsigned char PopmByteFromRating(int rating)
+{
+	if (rating <= 0)
+		return 0;
+	if (rating > 5)
+		rating = 5;
+	return (unsigned char)(rating * 51);
+}
+
+static void StoreId3FrameSize(unsigned char *dst, long size, int version)
+{
+	if (version == 4) {
+		dst[0] = (unsigned char)((size >> 21) & 0x7f);
+		dst[1] = (unsigned char)((size >> 14) & 0x7f);
+		dst[2] = (unsigned char)((size >> 7) & 0x7f);
+		dst[3] = (unsigned char)(size & 0x7f);
+	} else {
+		dst[0] = (unsigned char)((size >> 24) & 0xff);
+		dst[1] = (unsigned char)((size >> 16) & 0xff);
+		dst[2] = (unsigned char)((size >> 8) & 0xff);
+		dst[3] = (unsigned char)(size & 0xff);
+	}
+}
+
+static long MakePopmFrame(unsigned char *dst, int rating, int version)
+{
+	static const char kEmail[] = "amiga-libhelix-mp3";
+	long payloadSize = (long)sizeof(kEmail) + 5L;
+
+	memcpy(dst, "POPM", 4);
+	StoreId3FrameSize(dst + 4, payloadSize, version);
+	dst[8] = 0;
+	dst[9] = 0;
+	memcpy(dst + 10, kEmail, sizeof(kEmail));
+	dst[10 + sizeof(kEmail)] = PopmByteFromRating(rating);
+	memset(dst + 11 + sizeof(kEmail), 0, 4);
+	return 10L + payloadSize;
+}
+
+static int WriteRatingToId3Tag(const char *path, int rating)
+{
+	unsigned char hdr[10];
+	unsigned char frame[64];
+	FILE *f;
+	long tagSize;
+	long tagEnd;
+	long frameBytes;
+	int version;
+	int wrote;
+
+	if (!path || !path[0])
+		return 0;
+	f = fopen(path, "r+b");
+	if (!f)
+		return 0;
+	if (fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr) ||
+		memcmp(hdr, "ID3", 3) != 0 || hdr[3] < 3 || hdr[3] > 4) {
+		fclose(f);
+		return 0;
+	}
+	version = hdr[3];
+	tagSize = Id3Synchsafe(hdr + 6);
+	tagEnd = ftell(f) + tagSize;
+	frameBytes = MakePopmFrame(frame, rating, version);
+	wrote = 0;
+	while (ftell(f) + 10 <= tagEnd) {
+		unsigned char fh[10];
+		long frameSize;
+		long payloadPos;
+
+		if (fread(fh, 1, 10, f) != 10)
+			break;
+		if (fh[0] == 0) {
+			long padPos = ftell(f) - 10;
+			if (tagEnd - padPos >= frameBytes) {
+				fseek(f, padPos, SEEK_SET);
+				wrote = fwrite(frame, 1, (size_t)frameBytes, f) ==
+					(size_t)frameBytes;
+			}
+			break;
+		}
+		frameSize = version == 4 ? Id3Synchsafe(fh + 4) :
+			Id3BigEndian32(fh + 4);
+		payloadPos = ftell(f);
+		if (frameSize <= 0 || payloadPos + frameSize > tagEnd)
+			break;
+		if (memcmp(fh, "POPM", 4) == 0) {
+			long i;
+			for (i = 0; i < frameSize; i++) {
+				int c = fgetc(f);
+				if (c == EOF)
+					break;
+				if (c == 0 && i + 1 < frameSize) {
+					wrote = fputc(PopmByteFromRating(rating), f) != EOF;
+					break;
+				}
+			}
+			break;
+		}
+		if (fseek(f, frameSize, SEEK_CUR) != 0)
+			break;
+	}
+	fclose(f);
+	return wrote;
+}
+
 static void ReadId3v2Frames(FILE *f, Mp3Tags *tags, const unsigned char *hdr, int loadArt)
 {
 	unsigned char fh[10];
@@ -2463,7 +2569,10 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code)
 	case GID_STAR4:
 	case GID_STAR5:
 		SetRating(gui, (int)gad->GadgetID - GID_STAR1 + 1);
-		SetStatus(gui, "Rating updated in the display.");
+		if (WriteRatingToId3Tag(gui->inputName, gui->tags.rating))
+			SetStatus(gui, "Rating written to the ID3 tag.");
+		else
+			SetStatus(gui, "Rating updated; no writable ID3v2 rating frame/padding.");
 		break;
 	case GID_QUALITY:
 		gui->qualityIndex = code;
