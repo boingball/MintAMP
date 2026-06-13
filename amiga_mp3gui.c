@@ -22,6 +22,8 @@
 #include <intuition/intuitionbase.h>
 #include <libraries/asl.h>
 #include <libraries/gadtools.h>
+#include <graphics/gfxbase.h>
+#include <graphics/text.h>
 #include <devices/timer.h>
 #include <exec/io.h>
 #include <exec/ports.h>
@@ -32,17 +34,20 @@
 #include <proto/asl.h>
 #include <proto/dos.h>
 #include <proto/gadtools.h>
+#include <proto/graphics.h>
 #include <proto/timer.h>
 
 #define HELIXAMP3_MAX_PATH 256
 #define HELIXAMP3_ARGC_MAX 18
 #define HELIXAMP3_SIGMASK(gui) (1UL << (gui)->win->UserPort->mp_SigBit)
 
-#define VU_X      60
-#define VU_W     340
-#define VU_H       8
-#define VU_GAP     3
-#define VU_TOP_Y 204
+#define PROG_X      60
+#define PROG_W     300
+#define PROG_H       8
+#define PROG_TOP_Y 204
+#define TIME_X     (PROG_X + PROG_W + 8)
+#define TIME_Y     (PROG_TOP_Y + PROG_H - 1)
+#define TIMER_TICK_MICROS 1000000UL
 
 #define MENUNUM_PROJECT   0
 #define MENUNUM_PLAYBACK  1
@@ -75,6 +80,7 @@ typedef struct Mp3Tags {
 	char album[64];
 	int  bitrateKbps;
 	int  sampleRate;
+	int  durationSecs;
 } Mp3Tags;
 
 typedef struct HelixAmp3Gui {
@@ -93,6 +99,8 @@ typedef struct HelixAmp3Gui {
 	struct Menu *menuStrip;
 	struct MsgPort *timerPort;
 	struct timerequest *timerReq;
+	struct TextFont *smallFont;
+	struct TextAttr smallTextAttr;
 	int timerOpen;
 	int timerPending;
 	Mp3Tags tags;
@@ -109,6 +117,8 @@ typedef struct HelixAmp3Gui {
 	int   bench;
 	int   closeRequested;
 	int   playbackWasRunning;
+	int   totalSecs;
+	int   elapsedSecs;
 } HelixAmp3Gui;
 
 typedef struct HelixAmp3Args {
@@ -128,6 +138,7 @@ typedef struct HelixAmp3Player {
 struct IntuitionBase *IntuitionBase;
 struct Library *AslBase;
 struct Library *GadToolsBase;
+struct GfxBase *GfxBase;
 static HelixAmp3Player gGuiPlayer;
 static HelixAmp3Args gGuiArgs;
 
@@ -237,7 +248,7 @@ static int IsMpegSyncHeader(const unsigned char *h)
 		h[1] == 0xf3 || h[1] == 0xf2 || h[1] == 0xe3 || h[1] == 0xe2);
 }
 
-static void ReadMpegInfo(FILE *f, Mp3Tags *tags)
+static void ReadMpegInfo(FILE *f, Mp3Tags *tags, long *firstFrameOffset)
 {
 	static const int bitrateTab[16] = {
 		0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0
@@ -247,6 +258,8 @@ static void ReadMpegInfo(FILE *f, Mp3Tags *tags)
 	int b;
 	int idx;
 
+	if (firstFrameOffset)
+		*firstFrameOffset = -1L;
 	if (!f || !tags)
 		return;
 	h[0] = h[1] = h[2] = h[3] = 0;
@@ -256,6 +269,9 @@ static void ReadMpegInfo(FILE *f, Mp3Tags *tags)
 		h[2] = h[3];
 		h[3] = (unsigned char)b;
 		if (IsMpegSyncHeader(h)) {
+			long pos = ftell(f);
+			if (firstFrameOffset && pos >= 4)
+				*firstFrameOffset = pos - 4;
 			idx = (h[2] >> 4) & 0x0f;
 			tags->bitrateKbps = bitrateTab[idx];
 			idx = (h[2] >> 2) & 0x03;
@@ -351,6 +367,7 @@ static void ReadMp3Tags(const char *path, Mp3Tags *tags)
 {
 	FILE *f;
 	unsigned char hdr[10];
+	long firstFrameOffset;
 	int hadId3v2;
 
 	if (!tags)
@@ -360,13 +377,26 @@ static void ReadMp3Tags(const char *path, Mp3Tags *tags)
 	if (!f)
 		return;
 	hadId3v2 = 0;
+	firstFrameOffset = -1L;
 	if (fread(hdr, 1, sizeof(hdr), f) == sizeof(hdr) && memcmp(hdr, "ID3", 3) == 0) {
 		hadId3v2 = 1;
 		ReadId3v2Frames(f, tags, hdr);
 	} else {
 		fseek(f, 0, SEEK_SET);
 	}
-	ReadMpegInfo(f, tags);
+	ReadMpegInfo(f, tags, &firstFrameOffset);
+	if (tags->bitrateKbps > 0 && firstFrameOffset >= 0) {
+		long fileSize;
+		long audioBytes;
+
+		if (fseek(f, 0, SEEK_END) == 0) {
+			fileSize = ftell(f);
+			audioBytes = fileSize - firstFrameOffset;
+			if (audioBytes > 0)
+				tags->durationSecs = (int)(audioBytes * 8L /
+					((long)tags->bitrateKbps * 1000L));
+		}
+	}
 	if (!hadId3v2)
 		ReadId3v1(f, tags);
 	fclose(f);
@@ -424,79 +454,71 @@ static void UpdateTagDisplay(HelixAmp3Gui *gui)
 	}
 }
 
-static void DrawVuFrame(HelixAmp3Gui *gui)
+static void DrawProgressFrame(HelixAmp3Gui *gui)
 {
 	if (!gui->win)
 		return;
 	DrawBevelBox(gui->win->RPort,
-		VU_X - 18, VU_TOP_Y - 4,
-		VU_W + 24, 2 * VU_H + VU_GAP + 8,
+		PROG_X - 4, PROG_TOP_Y - 4,
+		PROG_W + 8, PROG_H + 8,
 		GT_VisualInfo, (ULONG)gui->visualInfo,
 		GTBB_Recessed, TRUE,
 		TAG_DONE);
 }
 
-static void DrawVuMeter(HelixAmp3Gui *gui)
+static void DrawProgress(HelixAmp3Gui *gui)
 {
 	struct RastPort *rp;
-	int fillL, fillR, emptyL, emptyR;
-	WORD yL, yR;
+	int fill, empty;
+	char timeBuf[32];
+	int elapsed, total, remaining;
 
 	if (!gui->win)
 		return;
 	rp = gui->win->RPort;
-	yL = VU_TOP_Y;
-	yR = yL + VU_H + VU_GAP;
+	elapsed = gui->elapsedSecs;
+	total = gui->totalSecs;
+	if (elapsed < 0)
+		elapsed = 0;
+	if (total > 0 && elapsed > total)
+		elapsed = total;
+	fill = total > 0 ? (elapsed * PROG_W) / total : 0;
+	if (fill < 0)
+		fill = 0;
+	if (fill > PROG_W)
+		fill = PROG_W;
+	empty = PROG_W - fill;
 
-	fillL = ((int)gVuPeakL * VU_W) / 127;
-	if (fillL < 0)
-		fillL = 0;
-	if (fillL > VU_W)
-		fillL = VU_W;
-	emptyL = VU_W - fillL;
-
-	fillR = ((int)gVuPeakR * VU_W) / 127;
-	if (fillR < 0)
-		fillR = 0;
-	if (fillR > VU_W)
-		fillR = VU_W;
-	emptyR = VU_W - fillR;
-
-	SetAPen(rp, 1);
-	Move(rp, VU_X - 14, yL + VU_H - 1);
-	Text(rp, "L", 1);
-	if (fillL > 0) {
+	if (gui->smallFont)
+		SetFont(rp, gui->smallFont);
+	if (fill > 0) {
 		SetAPen(rp, 3);
-		RectFill(rp, VU_X, yL, VU_X + fillL - 1, yL + VU_H - 1);
+		RectFill(rp, PROG_X, PROG_TOP_Y,
+			PROG_X + fill - 1, PROG_TOP_Y + PROG_H - 1);
 	}
-	if (emptyL > 0) {
+	if (empty > 0) {
 		SetAPen(rp, gui->win->DetailPen);
-		RectFill(rp, VU_X + fillL, yL, VU_X + VU_W - 1, yL + VU_H - 1);
+		RectFill(rp, PROG_X + fill, PROG_TOP_Y,
+			PROG_X + PROG_W - 1, PROG_TOP_Y + PROG_H - 1);
 	}
 
+	if (total > 0) {
+		remaining = total - elapsed;
+		if (remaining < 0)
+			remaining = 0;
+		sprintf(timeBuf, "-%d:%02d / %d:%02d",
+			remaining / 60, remaining % 60,
+			total / 60, total % 60);
+	} else {
+		sprintf(timeBuf, "%d:%02d", elapsed / 60, elapsed % 60);
+	}
+
+	SetAPen(rp, gui->win->DetailPen);
+	RectFill(rp, TIME_X, PROG_TOP_Y,
+		TIME_X + 88, PROG_TOP_Y + PROG_H + 1);
 	SetAPen(rp, 1);
-	Move(rp, VU_X - 14, yR + VU_H - 1);
-	Text(rp, "R", 1);
-	if (fillR > 0) {
-		SetAPen(rp, 3);
-		RectFill(rp, VU_X, yR, VU_X + fillR - 1, yR + VU_H - 1);
-	}
-	if (emptyR > 0) {
-		SetAPen(rp, gui->win->DetailPen);
-		RectFill(rp, VU_X + fillR, yR, VU_X + VU_W - 1, yR + VU_H - 1);
-	}
-}
-
-static void DecayVuMeter(void)
-{
-	if (gVuPeakL > 8)
-		gVuPeakL -= 8;
-	else
-		gVuPeakL = 0;
-	if (gVuPeakR > 8)
-		gVuPeakR -= 8;
-	else
-		gVuPeakR = 0;
+	Move(rp, TIME_X, TIME_Y);
+	Text(rp, timeBuf, strlen(timeBuf));
 }
 
 static void SendTimerRequest(HelixAmp3Gui *gui, ULONG micros)
@@ -525,20 +547,17 @@ static void HandleTimerSignal(HelixAmp3Gui *gui)
 	gui->playbackWasRunning = gGuiPlayer.running;
 	if (wasRunning && !gGuiPlayer.running) {
 		stoppedByUser = gGuiPlayer.stopRequested;
-		gVuPeakL = 0;
-		gVuPeakR = 0;
-		DrawVuMeter(gui);
+		gui->elapsedSecs = 0;
+		DrawProgress(gui);
 		SetStatus(gui, stoppedByUser ?
 			"Stopped." : "Playback finished.");
 		if (stoppedByUser)
 			gGuiPlayer.stopRequested = 0;
+	} else if (gGuiPlayer.running) {
+		gui->elapsedSecs++;
+		DrawProgress(gui);
 	}
-
-	if (gGuiPlayer.running) {
-		DrawVuMeter(gui);
-		DecayVuMeter();
-	}
-	SendTimerRequest(gui, 100000UL);
+	SendTimerRequest(gui, TIMER_TICK_MICROS);
 }
 
 static void GuiRefresh(HelixAmp3Gui *gui)
@@ -547,8 +566,8 @@ static void GuiRefresh(HelixAmp3Gui *gui)
 		return;
 	GT_BeginRefresh(gui->win);
 	GT_EndRefresh(gui->win, TRUE);
-	DrawVuFrame(gui);
-	DrawVuMeter(gui);
+	DrawProgressFrame(gui);
+	DrawProgress(gui);
 }
 
 static void SetDecodeThenPlay(HelixAmp3Gui *gui, int enabled)
@@ -590,6 +609,7 @@ static struct Gadget *MakeGadget(HelixAmp3Gui *gui, struct Gadget *prev,
 	ng.ng_Height = height;
 	ng.ng_GadgetText = (UBYTE *)label;
 	ng.ng_GadgetID = id;
+	ng.ng_TextAttr = &gui->smallTextAttr;
 	if (kind == BUTTON_KIND)
 		ng.ng_Flags = PLACETEXT_IN;
 	else if (kind == CHECKBOX_KIND)
@@ -714,7 +734,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadPlay = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_PLAY,
-		45, 236, 72, 18, "Play",
+		45, 226, 72, 18, "Play",
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
@@ -723,7 +743,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadStop = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_STOP,
-		310, 236, 72, 18, "Stop",
+		310, 226, 72, 18, "Stop",
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
@@ -732,7 +752,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadStatus = gad = MakeGadget(gui, gad, TEXT_KIND, GID_STATUS,
-		58, 264, 350, 14, "Status:",
+		58, 252, 350, 14, "Status:",
 		GTTX_Text, (ULONG)gui->statusText,
 		GTTX_Border, TRUE,
 		TAG_IGNORE, 0,
@@ -758,6 +778,11 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	SafeCopy(gui->statusText, sizeof(gui->statusText), "Ready.");
 	SetFileDisplay(gui, NULL);
 
+	gui->smallTextAttr.ta_Name = (STRPTR)"topaz.font";
+	gui->smallTextAttr.ta_YSize = 8;
+	gui->smallTextAttr.ta_Style = FS_NORMAL;
+	gui->smallTextAttr.ta_Flags = 0;
+
 	IntuitionBase = (struct IntuitionBase *)OpenLibrary("intuition.library", 37);
 	if (!IntuitionBase) {
 		fprintf(stderr, "MiniAMP3 requires intuition.library V37 or newer.\n");
@@ -779,10 +804,28 @@ static int GuiOpen(HelixAmp3Gui *gui)
 		IntuitionBase = NULL;
 		return -1;
 	}
+	GfxBase = (struct GfxBase *)OpenLibrary("graphics.library", 37);
+	if (!GfxBase) {
+		fprintf(stderr, "MiniAMP3 requires graphics.library V37 or newer.\n");
+		CloseLibrary(GadToolsBase);
+		GadToolsBase = NULL;
+		CloseLibrary(AslBase);
+		AslBase = NULL;
+		CloseLibrary((struct Library *)IntuitionBase);
+		IntuitionBase = NULL;
+		return -1;
+	}
+	gui->smallFont = OpenFont(&gui->smallTextAttr);
 
 	screen = LockPubScreen(NULL);
 	if (!screen) {
 		fprintf(stderr, "cannot lock Workbench screen\n");
+		if (gui->smallFont) {
+			CloseFont(gui->smallFont);
+			gui->smallFont = NULL;
+		}
+		CloseLibrary((struct Library *)GfxBase);
+		GfxBase = NULL;
 		CloseLibrary(GadToolsBase);
 		GadToolsBase = NULL;
 		CloseLibrary(AslBase);
@@ -795,6 +838,12 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	UnlockPubScreen(NULL, screen);
 	if (!gui->visualInfo) {
 		fprintf(stderr, "cannot create GadTools visual info\n");
+		if (gui->smallFont) {
+			CloseFont(gui->smallFont);
+			gui->smallFont = NULL;
+		}
+		CloseLibrary((struct Library *)GfxBase);
+		GfxBase = NULL;
 		CloseLibrary(GadToolsBase);
 		GadToolsBase = NULL;
 		CloseLibrary(AslBase);
@@ -810,6 +859,12 @@ static int GuiOpen(HelixAmp3Gui *gui)
 		gui->gadgets = NULL;
 		FreeVisualInfo(gui->visualInfo);
 		gui->visualInfo = NULL;
+		if (gui->smallFont) {
+			CloseFont(gui->smallFont);
+			gui->smallFont = NULL;
+		}
+		CloseLibrary((struct Library *)GfxBase);
+		GfxBase = NULL;
 		CloseLibrary(GadToolsBase);
 		GadToolsBase = NULL;
 		CloseLibrary(AslBase);
@@ -822,8 +877,8 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	memset(&nw, 0, sizeof(nw));
 	nw.LeftEdge = 40;
 	nw.TopEdge = 30;
-	nw.Width = 420;
-	nw.Height = 292;
+	nw.Width = 460;
+	nw.Height = 280;
 	nw.DetailPen = 0;
 	nw.BlockPen = 1;
 	nw.IDCMPFlags = IDCMP_GADGETUP | IDCMP_MOUSEMOVE | IDCMP_CLOSEWINDOW |
@@ -833,10 +888,10 @@ static int GuiOpen(HelixAmp3Gui *gui)
 		WFLG_SMART_REFRESH;
 	nw.FirstGadget = gui->gadgets;
 	nw.Title = (UBYTE *)"MiniAMP3";
-	nw.MinWidth = 420;
-	nw.MinHeight = 292;
-	nw.MaxWidth = 640;
-	nw.MaxHeight = 340;
+	nw.MinWidth = 460;
+	nw.MinHeight = 280;
+	nw.MaxWidth = 680;
+	nw.MaxHeight = 328;
 	nw.Type = WBENCHSCREEN;
 	gui->win = OpenWindow(&nw);
 	if (!gui->win) {
@@ -845,6 +900,12 @@ static int GuiOpen(HelixAmp3Gui *gui)
 		gui->gadgets = NULL;
 		FreeVisualInfo(gui->visualInfo);
 		gui->visualInfo = NULL;
+		if (gui->smallFont) {
+			CloseFont(gui->smallFont);
+			gui->smallFont = NULL;
+		}
+		CloseLibrary((struct Library *)GfxBase);
+		GfxBase = NULL;
 		CloseLibrary(GadToolsBase);
 		GadToolsBase = NULL;
 		CloseLibrary(AslBase);
@@ -876,10 +937,10 @@ static int GuiOpen(HelixAmp3Gui *gui)
 		}
 	}
 	GT_RefreshWindow(gui->win, NULL);
-	DrawVuFrame(gui);
-	DrawVuMeter(gui);
+	DrawProgressFrame(gui);
+	DrawProgress(gui);
 	if (gui->timerOpen)
-		SendTimerRequest(gui, 100000UL);
+		SendTimerRequest(gui, TIMER_TICK_MICROS);
 	return 0;
 }
 
@@ -920,6 +981,14 @@ static void GuiClose(HelixAmp3Gui *gui)
 		FreeVisualInfo(gui->visualInfo);
 		gui->visualInfo = NULL;
 	}
+	if (gui->smallFont) {
+		CloseFont(gui->smallFont);
+		gui->smallFont = NULL;
+	}
+	if (GfxBase) {
+		CloseLibrary((struct Library *)GfxBase);
+		GfxBase = NULL;
+	}
 	if (GadToolsBase) {
 		CloseLibrary(GadToolsBase);
 		GadToolsBase = NULL;
@@ -959,7 +1028,10 @@ static void ChooseMp3(HelixAmp3Gui *gui)
 		SafeCopy(gui->inputName, sizeof(gui->inputName), path);
 		SetFileDisplay(gui, gui->inputName);
 		ReadMp3Tags(gui->inputName, &gui->tags);
+		gui->totalSecs = gui->tags.durationSecs;
+		gui->elapsedSecs = 0;
 		UpdateTagDisplay(gui);
+		DrawProgress(gui);
 		FormatReadyStatus(&gui->tags, gui->statusText, sizeof(gui->statusText));
 		SetStatus(gui, gui->statusText);
 	}
@@ -1012,17 +1084,11 @@ static void ResetDecoderStatics(void)
 
 static void PlaybackEntry(void)
 {
-	gVuActive = 0;
-	gVuPeakL = 0;
-	gVuPeakR = 0;
 	ResetDecoderStatics();
 	gGuiPlayer.running = 1;
 	gGuiPlayer.stopRequested = 0;
 	gPlaybackInterrupted = 0;
 	HelixAmp3CliMain(gGuiPlayer.argc, gGuiPlayer.argv);
-	gVuActive = 0;
-	gVuPeakL = 0;
-	gVuPeakR = 0;
 	gGuiPlayer.running = 0;
 	Forbid();
 	gGuiPlayer.process = NULL;
@@ -1043,9 +1109,8 @@ static void StartPlayback(HelixAmp3Gui *gui)
 		SetStatus(gui, "Already playing; press Stop first.");
 		return;
 	}
-	gVuPeakL = 0;
-	gVuPeakR = 0;
-	DrawVuMeter(gui);
+	gui->elapsedSecs = 0;
+	DrawProgress(gui);
 	BuildPlaybackArgs(gui, &gGuiArgs);
 	gGuiPlayer.argc = gGuiArgs.argc;
 	gGuiPlayer.argv = gGuiArgs.argv;
@@ -1093,9 +1158,8 @@ static void StartPlayback(HelixAmp3Gui *gui)
 
 static void StopPlayback(HelixAmp3Gui *gui)
 {
-	gVuPeakL = 0;
-	gVuPeakR = 0;
-	DrawVuMeter(gui);
+	gui->elapsedSecs = 0;
+	DrawProgress(gui);
 	if (!gGuiPlayer.running || gGuiPlayer.stopRequested) {
 		SetStatus(gui, gGuiPlayer.stopRequested ?
 			"Stopping..." : "Nothing is playing.");

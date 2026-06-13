@@ -30,15 +30,6 @@
 #include "assembly.h"
 #include "statname.h"
 
-#ifdef AMIGA_M68K
-volatile WORD gVuPeakL = 0;
-volatile WORD gVuPeakR = 0;
-#else
-volatile short gVuPeakL = 0;
-volatile short gVuPeakR = 0;
-#endif
-volatile int gVuActive = 0;
-
 #if defined(AMIGA_M68K)
 /* Tell AmigaOS to provide at least 250 KB of stack for this executable. */
 static const char amigaStackCookie[] __attribute__((used)) = "$STACK:250000";
@@ -3230,74 +3221,6 @@ static int DecodeStreamCopySpill(DecodeStream *stream, signed char *dest,
 	return n;
 }
 
-static void UpdateVuPeak(const signed char *buf, int n, int stereo)
-{
-	int i;
-	int v;
-	int peakL = 0;
-	int peakR = 0;
-
-	if (!gVuActive)
-		return;
-	if (!buf || n <= 0)
-		return;
-	if (stereo) {
-		for (i = 0; i + 1 < n; i += 2) {
-			v = buf[i] < 0 ? -buf[i] : buf[i];
-			if (v > peakL)
-				peakL = v;
-			v = buf[i + 1] < 0 ? -buf[i + 1] : buf[i + 1];
-			if (v > peakR)
-				peakR = v;
-		}
-	} else {
-		for (i = 0; i < n; i++) {
-			v = buf[i] < 0 ? -buf[i] : buf[i];
-			if (v > peakL)
-				peakL = v;
-		}
-		peakR = peakL;
-	}
-	if (peakL > 127)
-		peakL = 127;
-	if (peakR > 127)
-		peakR = 127;
-	if (peakL > gVuPeakL)
-		gVuPeakL = (short)peakL;
-	if (peakR > gVuPeakR)
-		gVuPeakR = (short)peakR;
-}
-
-static void UpdateVuPeakPlanar(const signed char *left, const signed char *right,
-	int frames)
-{
-	int i;
-	int v;
-	int peakL = 0;
-	int peakR = 0;
-
-	if (!gVuActive)
-		return;
-	if (!left || !right || frames <= 0)
-		return;
-	for (i = 0; i < frames; i++) {
-		v = left[i] < 0 ? -left[i] : left[i];
-		if (v > peakL)
-			peakL = v;
-		v = right[i] < 0 ? -right[i] : right[i];
-		if (v > peakR)
-			peakR = v;
-	}
-	if (peakL > 127)
-		peakL = 127;
-	if (peakR > 127)
-		peakR = 127;
-	if (peakL > gVuPeakL)
-		gVuPeakL = (short)peakL;
-	if (peakR > gVuPeakR)
-		gVuPeakR = (short)peakR;
-}
-
 static int DecodeStreamFillS8(DecodeStream *stream, const DecodeOptions *opt,
 	signed char *dest, int maxBytes)
 {
@@ -3306,8 +3229,6 @@ static int DecodeStreamFillS8(DecodeStream *stream, const DecodeOptions *opt,
 
 	produced = 0;
 	DecodeStreamCopySpill(stream, dest, maxBytes, &produced);
-	if (produced > 0)
-		UpdateVuPeak(dest, produced, opt->stereo);
 	while (produced < maxBytes && !stream->outOfData) {
 		int nRead;
 		int offset;
@@ -3450,8 +3371,6 @@ static int DecodeStreamFillS8(DecodeStream *stream, const DecodeOptions *opt,
 				}
 				for (; i < direct; i++)
 					dest[produced + i] = Sample16ToS8(stream->writeBuf[i]);
-				if (direct > 0)
-					UpdateVuPeak(dest + produced, direct, opt->stereo);
 				produced += direct;
 
 				spill = outSamps - direct;
@@ -3504,8 +3423,6 @@ static int DecodeStreamFillPlanarS8(DecodeStream *stream, const DecodeOptions *o
 
 	produced = 0;
 	DecodeStreamCopyPlanarSpill(stream, left, right, maxFrames, &produced);
-	if (produced > 0)
-		UpdateVuPeakPlanar(left, right, produced);
 	while (produced < maxFrames && !stream->outOfData) {
 		const short *pcm;
 		int frames;
@@ -3640,8 +3557,6 @@ static int DecodeStreamFillPlanarS8(DecodeStream *stream, const DecodeOptions *o
 				stream->spill.planar[1][spill] = stream->spill.planar[0][spill];
 			}
 		}
-		if (direct > 0)
-			UpdateVuPeakPlanar(left + produced, right + produced, direct);
 		produced += direct;
 		stream->stats->outputSamples += (unsigned long)frames * 2UL;
 		stream->stats->decodedFrames++;
@@ -4652,11 +4567,8 @@ static int AmigaPlayDecodeThenPlay(InputSource *input, HMP3Decoder decoder,
 		goto cleanup;
 	}
 	printf("decode-then-play bytes: %lu\n", used);
-	gVuActive = 1;
 	err = AmigaPlayWholeBuffer(all, used, opt, stats);
-	gVuActive = 0;
 cleanup:
-	gVuActive = 0;
 	free(all);
 	all = NULL;
 	return err;
@@ -4767,7 +4679,6 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 		}
 	}
 	if (err == 0) {
-		gVuActive = 1;
 		if (AmigaAudioCommitPlaybackBuffer(&player, 0) != 0) {
 			fprintf(stderr, "playback buffer A CMD_WRITE byte length is invalid\n");
 			err = -1;
@@ -4894,7 +4805,6 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 		err = -1;
 	}
 cleanup:
-	gVuActive = 0;
 	AmigaAudioClose(&player, &cleanupStatus);
 	if (cleanupStatus.canaryErrors)
 		err = -1;
