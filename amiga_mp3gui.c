@@ -2094,6 +2094,15 @@ static void StartPlayback(HelixAmp3Gui *gui)
 		SetStatus(gui, "Cannot start playback: no done port.");
 		return;
 	}
+	/* Drain any stale done message from a previous cycle before launching.
+	 * gDoneMsg is a single static Exec message node, so it must not remain
+	 * queued when the next playback subprocess exits and posts it again. */
+	{
+		struct Message *stale;
+
+		while ((stale = GetMsg(gui->donePort)) != NULL)
+			;
+	}
 	CancelArtDecode(gui);
 	DrawArtPanel(gui);
 	gui->elapsedSecs = 0;
@@ -2154,6 +2163,13 @@ static void StopPlayback(HelixAmp3Gui *gui)
 {
 	if (!gui->playbackActive) {
 		SetStatus(gui, "Nothing is playing.");
+		return;
+	}
+	/* If the subprocess already exited but the done message has not been
+	 * processed yet (race between subprocess exit and GUI event loop),
+	 * handle it now to avoid signalling a stale/dead process. */
+	if (!gGuiPlayer.process) {
+		HandleDoneSignal(gui);
 		return;
 	}
 	if (gGuiPlayer.stopRequested) {
