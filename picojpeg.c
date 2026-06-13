@@ -48,16 +48,26 @@ static const pj_u8 gZigZag[64] = {
 	58,59,52,45,38,31,39,46,53,60,61,54,47,55,62,63
 };
 
-static const int gIdctCos[8][8] = {
-	{ 181, 181, 181, 181, 181, 181, 181, 181 },
-	{ 251, 213, 142,  50, -50,-142,-213,-251 },
-	{ 237,  98, -98,-237,-237, -98,  98, 237 },
-	{ 213, -50,-251,-142, 142, 251,  50,-213 },
-	{ 181,-181,-181, 181, 181,-181,-181, 181 },
-	{ 142,-251,  50, 213,-213, -50, 251,-142 },
-	{  98,-237, 237, -98, -98, 237,-237,  98 },
-	{  50,-142, 213,-251, 251,-213, 142, -50 }
+#define PJ_IDCT_CONST_BITS 8
+#define PJ_IDCT_PASS1_BITS 2
+#define PJ_AAN_SCALE_BITS 14
+#define PJ_AAN_QUANT_BITS (PJ_AAN_SCALE_BITS - PJ_IDCT_PASS1_BITS)
+
+static const int gAANScale[64] = {
+	16384, 22725, 21407, 19266, 16384, 12873,  8867,  4520,
+	22725, 31521, 29692, 26722, 22725, 17855, 12299,  6270,
+	21407, 29692, 27969, 25172, 21407, 16819, 11585,  5906,
+	19266, 26722, 25172, 22654, 19266, 15137, 10426,  5315,
+	16384, 22725, 21407, 19266, 16384, 12873,  8867,  4520,
+	12873, 17855, 16819, 15137, 12873, 10114,  6967,  3552,
+	 8867, 12299, 11585, 10426,  8867,  6967,  4799,  2446,
+	 4520,  6270,  5906,  5315,  4520,  3552,  2446,  1247
 };
+
+static const int gIdctFix1082 = 277;
+static const int gIdctFix1414 = 362;
+static const int gIdctFix1848 = 473;
+static const int gIdctFix2613 = 669;
 
 static pj_u8 *gJpegData;
 static unsigned long gJpegSize;
@@ -80,7 +90,7 @@ static int gRestartInterval;
 static int gRestartLeft;
 static int gNextRestart;
 static PjComponent gComp[PJPG_MAX_COMPONENTS];
-static pj_i16 gQuant[PJPG_MAX_TABLES][64];
+static int gQuant[PJPG_MAX_TABLES][64];
 static pj_u8 gQuantValid[PJPG_MAX_TABLES];
 static PjHuffTable gHuff[2][PJPG_MAX_TABLES];
 static pj_u8 gMCUBufR[256];
@@ -263,10 +273,15 @@ static unsigned char pj_read_dqt(void)
 		if (len < 1 + 64 * (prec ? 2 : 1))
 			return PJPG_BAD_DQT_LENGTH;
 		for (i = 0; i < 64; i++) {
+			int idx = gZigZag[i];
 			int v = prec ? pj_read_be16() : pj_read_byte();
+			int scaled;
+
 			if (v < 0)
 				return PJPG_BAD_DQT_MARKER;
-			gQuant[tq][gZigZag[i]] = (pj_i16)v;
+			scaled = (int)(((long)v * gAANScale[idx] +
+				(1L << (PJ_AAN_QUANT_BITS - 1))) >> PJ_AAN_QUANT_BITS);
+			gQuant[tq][idx] = (scaled || !v) ? scaled : 1;
 		}
 		gQuantValid[tq] = 1;
 		len -= 1 + 64 * (prec ? 2 : 1);
@@ -429,32 +444,168 @@ static unsigned char pj_read_dri(void)
 	return 0;
 }
 
-static void pj_idct_block(const pj_i16 *coef, pj_u8 *out)
+static int pj_idct_descale(long x, int n)
 {
-	int x, y, u, v;
-	for (y = 0; y < 8; y++) {
-		for (x = 0; x < 8; x++) {
-			long sum = 0;
-			for (v = 0; v < 8; v++) {
-				for (u = 0; u < 8; u++) {
-					long c = coef[v * 8 + u];
-					long basis = (long)gIdctCos[u][x] * (long)gIdctCos[v][y];
-					sum += (c * basis) >> 16;
-				}
-			}
-			sum = (sum >> 2) + 128;
-			if (sum < 0)
-				sum = 0;
-			else if (sum > 255)
-				sum = 255;
-			out[y * 8 + x] = (pj_u8)sum;
+	return (int)((x + (1L << (n - 1))) >> n);
+}
+
+static int pj_idct_multiply(int x, int c)
+{
+	return pj_idct_descale((long)x * c, PJ_IDCT_CONST_BITS);
+}
+
+static pj_u8 pj_idct_clamp(int x)
+{
+	if (x < 0)
+		return 0;
+	if (x > 255)
+		return 255;
+	return (pj_u8)x;
+}
+
+static void pj_idct_block(const int *coef, pj_u8 *out)
+{
+	int workspace[64];
+	int ctr;
+	const int *inptr = coef;
+	int *wsptr = workspace;
+
+	for (ctr = 0; ctr < 8; ctr++) {
+		int tmp0, tmp1, tmp2, tmp3, tmp4, tmp5, tmp6, tmp7;
+		int tmp10, tmp11, tmp12, tmp13;
+		int z5, z10, z11, z12, z13;
+
+		if ((inptr[8] | inptr[16] | inptr[24] | inptr[32] |
+			inptr[40] | inptr[48] | inptr[56]) == 0) {
+			int dcval = inptr[0];
+
+			wsptr[0] = dcval;
+			wsptr[8] = dcval;
+			wsptr[16] = dcval;
+			wsptr[24] = dcval;
+			wsptr[32] = dcval;
+			wsptr[40] = dcval;
+			wsptr[48] = dcval;
+			wsptr[56] = dcval;
+			inptr++;
+			wsptr++;
+			continue;
 		}
+
+		tmp0 = inptr[0];
+		tmp1 = inptr[16];
+		tmp2 = inptr[32];
+		tmp3 = inptr[48];
+
+		tmp10 = tmp0 + tmp2;
+		tmp11 = tmp0 - tmp2;
+		tmp13 = tmp1 + tmp3;
+		tmp12 = pj_idct_multiply(tmp1 - tmp3, gIdctFix1414) - tmp13;
+		tmp0 = tmp10 + tmp13;
+		tmp3 = tmp10 - tmp13;
+		tmp1 = tmp11 + tmp12;
+		tmp2 = tmp11 - tmp12;
+
+		tmp4 = inptr[8];
+		tmp5 = inptr[24];
+		tmp6 = inptr[40];
+		tmp7 = inptr[56];
+		z13 = tmp6 + tmp5;
+		z10 = tmp6 - tmp5;
+		z11 = tmp4 + tmp7;
+		z12 = tmp4 - tmp7;
+		tmp7 = z11 + z13;
+		tmp11 = pj_idct_multiply(z11 - z13, gIdctFix1414);
+		z5 = pj_idct_multiply(z10 + z12, gIdctFix1848);
+		tmp10 = pj_idct_multiply(z12, gIdctFix1082) - z5;
+		tmp12 = pj_idct_multiply(z10, -gIdctFix2613) + z5;
+		tmp6 = tmp12 - tmp7;
+		tmp5 = tmp11 - tmp6;
+		tmp4 = tmp10 + tmp5;
+
+		wsptr[0] = tmp0 + tmp7;
+		wsptr[56] = tmp0 - tmp7;
+		wsptr[8] = tmp1 + tmp6;
+		wsptr[48] = tmp1 - tmp6;
+		wsptr[16] = tmp2 + tmp5;
+		wsptr[40] = tmp2 - tmp5;
+		wsptr[32] = tmp3 + tmp4;
+		wsptr[24] = tmp3 - tmp4;
+		inptr++;
+		wsptr++;
+	}
+
+	wsptr = workspace;
+	for (ctr = 0; ctr < 8; ctr++) {
+		int tmp0, tmp1, tmp2, tmp3, tmp4, tmp5, tmp6, tmp7;
+		int tmp10, tmp11, tmp12, tmp13;
+		int z5, z10, z11, z12, z13;
+
+		if ((wsptr[1] | wsptr[2] | wsptr[3] | wsptr[4] |
+			wsptr[5] | wsptr[6] | wsptr[7]) == 0) {
+			pj_u8 dcval = pj_idct_clamp(pj_idct_descale(wsptr[0],
+				PJ_IDCT_PASS1_BITS + 3) + 128);
+
+			out[0] = dcval;
+			out[1] = dcval;
+			out[2] = dcval;
+			out[3] = dcval;
+			out[4] = dcval;
+			out[5] = dcval;
+			out[6] = dcval;
+			out[7] = dcval;
+			wsptr += 8;
+			out += 8;
+			continue;
+		}
+
+		tmp10 = wsptr[0] + wsptr[4];
+		tmp11 = wsptr[0] - wsptr[4];
+		tmp13 = wsptr[2] + wsptr[6];
+		tmp12 = pj_idct_multiply(wsptr[2] - wsptr[6], gIdctFix1414) -
+			tmp13;
+		tmp0 = tmp10 + tmp13;
+		tmp3 = tmp10 - tmp13;
+		tmp1 = tmp11 + tmp12;
+		tmp2 = tmp11 - tmp12;
+
+		z13 = wsptr[5] + wsptr[3];
+		z10 = wsptr[5] - wsptr[3];
+		z11 = wsptr[1] + wsptr[7];
+		z12 = wsptr[1] - wsptr[7];
+		tmp7 = z11 + z13;
+		tmp11 = pj_idct_multiply(z11 - z13, gIdctFix1414);
+		z5 = pj_idct_multiply(z10 + z12, gIdctFix1848);
+		tmp10 = pj_idct_multiply(z12, gIdctFix1082) - z5;
+		tmp12 = pj_idct_multiply(z10, -gIdctFix2613) + z5;
+		tmp6 = tmp12 - tmp7;
+		tmp5 = tmp11 - tmp6;
+		tmp4 = tmp10 + tmp5;
+
+		out[0] = pj_idct_clamp(pj_idct_descale(tmp0 + tmp7,
+			PJ_IDCT_PASS1_BITS + 3) + 128);
+		out[7] = pj_idct_clamp(pj_idct_descale(tmp0 - tmp7,
+			PJ_IDCT_PASS1_BITS + 3) + 128);
+		out[1] = pj_idct_clamp(pj_idct_descale(tmp1 + tmp6,
+			PJ_IDCT_PASS1_BITS + 3) + 128);
+		out[6] = pj_idct_clamp(pj_idct_descale(tmp1 - tmp6,
+			PJ_IDCT_PASS1_BITS + 3) + 128);
+		out[2] = pj_idct_clamp(pj_idct_descale(tmp2 + tmp5,
+			PJ_IDCT_PASS1_BITS + 3) + 128);
+		out[5] = pj_idct_clamp(pj_idct_descale(tmp2 - tmp5,
+			PJ_IDCT_PASS1_BITS + 3) + 128);
+		out[4] = pj_idct_clamp(pj_idct_descale(tmp3 + tmp4,
+			PJ_IDCT_PASS1_BITS + 3) + 128);
+		out[3] = pj_idct_clamp(pj_idct_descale(tmp3 - tmp4,
+			PJ_IDCT_PASS1_BITS + 3) + 128);
+		wsptr += 8;
+		out += 8;
 	}
 }
 
 static unsigned char pj_decode_block(int ci, pj_u8 *out)
 {
-	pj_i16 coef[64];
+	int coef[64];
 	PjComponent *c = &gComp[ci];
 	int s;
 	int diff;
@@ -469,7 +620,7 @@ static unsigned char pj_decode_block(int ci, pj_u8 *out)
 	if (diff < 0)
 		return PJPG_DECODE_ERROR;
 	c->dc = (pj_i16)(c->dc + pj_extend(diff, s));
-	coef[0] = (pj_i16)(c->dc * gQuant[c->tq][0]);
+	coef[0] = c->dc * gQuant[c->tq][0];
 	k = 1;
 	while (k < 64) {
 		int rs = pj_huff_decode(&gHuff[1][c->ta]);
@@ -491,7 +642,7 @@ static unsigned char pj_decode_block(int ci, pj_u8 *out)
 		diff = pj_get_bits(s);
 		if (diff < 0)
 			return PJPG_DECODE_ERROR;
-		coef[gZigZag[k]] = (pj_i16)(pj_extend(diff, s) * gQuant[c->tq][gZigZag[k]]);
+		coef[gZigZag[k]] = pj_extend(diff, s) * gQuant[c->tq][gZigZag[k]];
 		k++;
 	}
 	pj_idct_block(coef, out);

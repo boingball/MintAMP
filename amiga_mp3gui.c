@@ -55,6 +55,7 @@
 #define ART_W           64
 #define ART_H           64
 #define ART_DEPTH        2
+#define MAX_JPEG_DIM    1024
 #define ART_X           (GUI_WIN_W - ART_W - GUI_MARGIN_R)
 #define ART_Y           GUI_TOP_Y
 
@@ -849,17 +850,26 @@ static int DecodeJpegToGrey(const unsigned char *jpegData, unsigned long jpegByt
 	pjpeg_image_info_t info;
 	PjpegSrc src;
 	unsigned char status;
+	unsigned char xMap[MAX_JPEG_DIM];
+	unsigned char yMap[MAX_JPEG_DIM];
 	int mcuIndex;
+	int i;
 
-	if (isPng || !jpegData || jpegBytes <= 4 || !greyOut)
+	if (isPng || !jpegData || jpegBytes <= 4 || !greyOut ||
+		outW <= 0 || outW > 255 || outH <= 0 || outH > 255)
 		return -1;
 	src.data = jpegData;
 	src.pos = 0;
 	src.size = jpegBytes;
 	memset(greyOut, 0x80, (size_t)(outW * outH));
 	status = pjpeg_decode_init(&info, pjpeg_cb, &src, 0);
-	if (status != 0 || info.m_width <= 0 || info.m_height <= 0)
+	if (status != 0 || info.m_width <= 0 || info.m_height <= 0 ||
+		info.m_width > MAX_JPEG_DIM || info.m_height > MAX_JPEG_DIM)
 		return -1;
+	for (i = 0; i < info.m_width; i++)
+		xMap[i] = (unsigned char)((i * outW) / info.m_width);
+	for (i = 0; i < info.m_height; i++)
+		yMap[i] = (unsigned char)((i * outH) / info.m_height);
 
 	for (mcuIndex = 0; mcuIndex < info.m_MCUSPerRow * info.m_MCUSPerCol;
 		mcuIndex++) {
@@ -876,23 +886,21 @@ static int DecodeJpegToGrey(const unsigned char *jpegData, unsigned long jpegByt
 		mcuY = (mcuIndex / info.m_MCUSPerRow) * info.m_MCUHeight;
 		for (y = 0; y < info.m_MCUHeight; y++) {
 			int srcY = mcuY + y;
+			int dstY;
 			int x;
 
 			if (srcY >= info.m_height)
 				continue;
+			dstY = yMap[srcY];
 			for (x = 0; x < info.m_MCUWidth; x++) {
 				int srcX = mcuX + x;
 				int dstX;
-				int dstY;
 				int off;
 				int g;
 
 				if (srcX >= info.m_width)
 					continue;
-				dstX = (srcX * outW) / info.m_width;
-				dstY = (srcY * outH) / info.m_height;
-				if (dstX < 0 || dstX >= outW || dstY < 0 || dstY >= outH)
-					continue;
+				dstX = xMap[srcX];
 				off = McuSampleOffset(&info, x, y);
 				if (info.m_comps == 1)
 					g = info.m_pMCUBufR[off];
