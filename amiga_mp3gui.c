@@ -80,10 +80,7 @@
 #define TIME_W          80
 #define TIMER_TICK_MICROS 1000000UL
 #define ART_TIMER_MICROS 20000UL
-#define ART_MCUS_PER_PUMP 3
-#define ART_SAMPLE_SHIFT 1
-#define ART_SAMPLE_MASK ((1 << ART_SAMPLE_SHIFT) - 1)
-#define GUI_ENV_PREFIX "MiniAMP3"
+#define ART_MCUS_PER_PUMP 4
 
 #define MENUNUM_PROJECT   0
 #define MENUNUM_PLAYBACK  1
@@ -159,7 +156,6 @@ typedef struct HelixAmp3Gui {
 	struct Menu *menuStrip;
 	int artValid;
 	int artLoading;
-	int artEnabled;
 	unsigned char artGreyBuf[ART_W * ART_H];
 	ArtDecodeState artDecode;
 	struct MsgPort *timerPort;
@@ -1057,53 +1053,30 @@ static int DecodeJpegToGrey(const unsigned char *jpegData, unsigned long jpegByt
 
 static void DrawArtPanel(HelixAmp3Gui *gui);
 
-static void CancelArtDecode(HelixAmp3Gui *gui)
-{
-	if (!gui)
-		return;
-	memset(&gui->artDecode, 0, sizeof(gui->artDecode));
-	gui->artLoading = 0;
-}
-
 static int JpegGreySample(const pjpeg_image_info_t *info, int off)
 {
 	if (info->m_comps == 1)
 		return info->m_pMCUBufR[off];
 #if defined(AMIGA_M68K) && defined(AMIGA_M68K_ASM_JPEG_GREY)
 	{
-		/* Sum = R*30 + G*59 + B*11, range [0, 25500].
-		 * Divide by 100 via multiply-shift: x/100 ~ (x*41944)>>22,
-		 * exact for all x in [0,25500]. Avoids 32-bit software divul. */
 		unsigned long r = info->m_pMCUBufR[off];
 		unsigned long g = info->m_pMCUBufG[off];
 		unsigned long b = info->m_pMCUBufB[off];
-		unsigned long sum;
 		__asm__ volatile (
-			"mulu #30,%0\n\t"
-			"mulu #59,%1\n\t"
-			"mulu #11,%2\n\t"
+			"mulu.w #30,%0\n\t"
+			"mulu.w #59,%1\n\t"
+			"mulu.w #11,%2\n\t"
 			"add.l %1,%0\n\t"
-			"add.l %2,%0"
+			"add.l %2,%0\n\t"
+			"divu.w #100,%0\n\t"
+			"andi.l #65535,%0"
 			: "+d" (r), "+d" (g), "+d" (b));
-		sum = r;
-		/* (sum * 41944) >> 22. 41944 fits in 16 bits so mulu.w is safe.
-		 * sum fits in 15 bits (max 25500 < 32768), so sum*41944 < 2^31,
-		 * safe for unsigned 32-bit result before the shift. */
-		__asm__ volatile (
-			"mulu #41944,%0\n\t"
-			"lsr.l #22,%0"
-			: "+d" (sum));
-		return (int)sum;
+		return (int)r;
 	}
 #else
-	/* C reference path: same multiply-shift for consistency. */
-	{
-		unsigned long sum = (unsigned long)(
-			(int)info->m_pMCUBufR[off] * 30 +
-			(int)info->m_pMCUBufG[off] * 59 +
-			(int)info->m_pMCUBufB[off] * 11);
-		return (int)((sum * 41944UL) >> 22);
-	}
+	return ((int)info->m_pMCUBufR[off] * 30 +
+		(int)info->m_pMCUBufG[off] * 59 +
+		(int)info->m_pMCUBufB[off] * 11) / 100;
 #endif
 }
 
@@ -1131,7 +1104,7 @@ static void PumpArtDecode(HelixAmp3Gui *gui)
 	ArtDecodeState *st = &gui->artDecode;
 	int pumped;
 
-	if (!st->active || !gui->artEnabled)
+	if (!st->active)
 		return;
 	for (pumped = 0; pumped < ART_MCUS_PER_PUMP && st->active; pumped++) {
 		unsigned char status;
@@ -1160,18 +1133,12 @@ static void PumpArtDecode(HelixAmp3Gui *gui)
 			int dstY;
 			int x;
 
-			if ((srcY & ART_SAMPLE_MASK) != 0)
-				continue;
-
 			if (srcY >= st->info.m_height)
 				continue;
 			dstY = st->yMap[srcY];
 			for (x = 0; x < st->info.m_MCUWidth; x++) {
 				int srcX = mcuX + x;
 				int dst;
-
-				if ((srcX & ART_SAMPLE_MASK) != 0)
-					continue;
 
 				if (srcX >= st->info.m_width)
 					continue;
@@ -1194,7 +1161,7 @@ static void StartArtDecode(HelixAmp3Gui *gui)
 	memset(st, 0, sizeof(*st));
 	gui->artValid = 0;
 	gui->artLoading = 0;
-	if (!gui->artEnabled || !gui->tags.artData || gui->tags.artBytes <= 4 || gui->tags.artIsPng) {
+	if (!gui->tags.artData || gui->tags.artBytes <= 4 || gui->tags.artIsPng) {
 		DrawArtPanel(gui);
 		return;
 	}
@@ -1309,12 +1276,12 @@ static void DrawArtPanel(HelixAmp3Gui *gui)
 			}
 		}
 	} else {
-		const char *label = !gui->artEnabled ? "Art off" : (gui->artLoading ? "Loading" : "No art");
+		const char *label = gui->artLoading ? "Loading" : "No art";
 		SetAPen(rp, 0);
 		RectFill(rp, ART_X, ART_Y, ART_X + ART_W - 1, ART_Y + ART_H - 1);
 		SetAPen(rp, 1);
-		Move(rp, ART_X + (!gui->artEnabled ? 10 : (gui->artLoading ? 10 : 16)), ART_Y + ART_H / 2);
-		Text(rp, label, strlen(label));
+		Move(rp, ART_X + (gui->artLoading ? 10 : 16), ART_Y + ART_H / 2);
+		Text(rp, label, gui->artLoading ? 7 : 6);
 	}
 }
 
@@ -1963,7 +1930,6 @@ static void ChooseMp3(HelixAmp3Gui *gui)
 			FormatReadyStatus(&gui->tags, gui->statusText, sizeof(gui->statusText));
 			SetStatus(gui, gui->statusText);
 		}
-		SaveGuiSettings(gui);
 	}
 	FreeAslRequest(req);
 }
