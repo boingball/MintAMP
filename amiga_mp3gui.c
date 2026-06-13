@@ -1101,6 +1101,17 @@ static void FinishArtDecode(HelixAmp3Gui *gui, int ok)
 	DrawArtPanel(gui);
 }
 
+static void CancelArtDecode(HelixAmp3Gui *gui)
+{
+	ArtDecodeState *st = &gui->artDecode;
+
+	if (!st->active && !gui->artLoading)
+		return;
+	st->active = 0;
+	gui->artLoading = 0;
+	DrawArtPanel(gui);
+}
+
 static void PumpArtDecode(HelixAmp3Gui *gui)
 {
 	ArtDecodeState *st = &gui->artDecode;
