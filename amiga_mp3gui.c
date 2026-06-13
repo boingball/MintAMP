@@ -739,6 +739,16 @@ static void DetectPictureMime(const unsigned char *payload,
 		*isPng = 1;
 }
 
+static const char kPopmOwner[] = "amiga-libhelix-mp3";
+
+static int PopmPayloadMatchesOwner(const unsigned char *payload, long frameSize)
+{
+	long ownerBytes = (long)sizeof(kPopmOwner);
+
+	return payload && frameSize >= ownerBytes + 1 &&
+		memcmp(payload, kPopmOwner, (size_t)ownerBytes) == 0;
+}
+
 static int RatingFromPopm(const unsigned char *payload, long frameSize)
 {
 	long i;
@@ -782,16 +792,15 @@ static void StoreId3FrameSize(unsigned char *dst, long size, int version)
 
 static long MakePopmFrame(unsigned char *dst, int rating, int version)
 {
-	static const char kEmail[] = "amiga-libhelix-mp3";
-	long payloadSize = (long)sizeof(kEmail) + 5L;
+	long payloadSize = (long)sizeof(kPopmOwner) + 5L;
 
 	memcpy(dst, "POPM", 4);
 	StoreId3FrameSize(dst + 4, payloadSize, version);
 	dst[8] = 0;
 	dst[9] = 0;
-	memcpy(dst + 10, kEmail, sizeof(kEmail));
-	dst[10 + sizeof(kEmail)] = PopmByteFromRating(rating);
-	memset(dst + 11 + sizeof(kEmail), 0, 4);
+	memcpy(dst + 10, kPopmOwner, sizeof(kPopmOwner));
+	dst[10 + sizeof(kPopmOwner)] = PopmByteFromRating(rating);
+	memset(dst + 11 + sizeof(kPopmOwner), 0, 4);
 	return 10L + payloadSize;
 }
 
@@ -803,6 +812,7 @@ static int WriteRatingToId3Tag(const char *path, int rating)
 	long tagSize;
 	long tagEnd;
 	long frameBytes;
+	long firstPopmRatingPos;
 	int version;
 	int wrote;
 
@@ -820,6 +830,7 @@ static int WriteRatingToId3Tag(const char *path, int rating)
 	tagSize = Id3Synchsafe(hdr + 6);
 	tagEnd = ftell(f) + tagSize;
 	frameBytes = MakePopmFrame(frame, rating, version);
+	firstPopmRatingPos = -1;
 	wrote = 0;
 	while (ftell(f) + 10 <= tagEnd) {
 		unsigned char fh[10];
@@ -834,6 +845,9 @@ static int WriteRatingToId3Tag(const char *path, int rating)
 				fseek(f, padPos, SEEK_SET);
 				wrote = fwrite(frame, 1, (size_t)frameBytes, f) ==
 					(size_t)frameBytes;
+			} else if (firstPopmRatingPos >= 0 &&
+				fseek(f, firstPopmRatingPos, SEEK_SET) == 0) {
+				wrote = fputc(PopmByteFromRating(rating), f) != EOF;
 			}
 			break;
 		}
@@ -843,21 +857,35 @@ static int WriteRatingToId3Tag(const char *path, int rating)
 		if (frameSize <= 0 || payloadPos + frameSize > tagEnd)
 			break;
 		if (memcmp(fh, "POPM", 4) == 0) {
+			unsigned char popm[64];
+			long n = frameSize;
 			long i;
-			for (i = 0; i < frameSize; i++) {
-				int c = fgetc(f);
-				if (c == EOF)
-					break;
-				if (c == 0 && i + 1 < frameSize) {
-					wrote = fputc(PopmByteFromRating(rating), f) != EOF;
+
+			if (n > (long)sizeof(popm))
+				n = (long)sizeof(popm);
+			if (fread(popm, 1, (size_t)n, f) == (size_t)n) {
+				for (i = 0; i < n && popm[i] != 0; i++)
+					;
+				if (i + 1 < frameSize && firstPopmRatingPos < 0)
+					firstPopmRatingPos = payloadPos + i + 1;
+				if (PopmPayloadMatchesOwner(popm, n)) {
+					long ratingPos = payloadPos + (long)sizeof(kPopmOwner);
+
+					if (fseek(f, ratingPos, SEEK_SET) == 0)
+						wrote = fputc(PopmByteFromRating(rating), f) != EOF;
 					break;
 				}
 			}
-			break;
+			if (fseek(f, payloadPos + frameSize, SEEK_SET) != 0)
+				break;
+			continue;
 		}
 		if (fseek(f, frameSize, SEEK_CUR) != 0)
 			break;
 	}
+	if (!wrote && firstPopmRatingPos >= 0 &&
+		fseek(f, firstPopmRatingPos, SEEK_SET) == 0)
+		wrote = fputc(PopmByteFromRating(rating), f) != EOF;
 	fclose(f);
 	return wrote;
 }
@@ -947,13 +975,17 @@ static void ReadId3v2Frames(FILE *f, Mp3Tags *tags, const unsigned char *hdr, in
 			target = tags->track;
 		else if ((version == 2 && strcmp(id, "TCO") == 0) || strcmp(id, "TCON") == 0)
 			target = tags->genre;
-		if (strcmp(id, "POPM") == 0 && tags->rating == 0) {
+		if (strcmp(id, "POPM") == 0) {
 			unsigned char popm[96];
 			long n = frameSize;
 			if (n > (long)sizeof(popm))
 				n = (long)sizeof(popm);
-			if (fread(popm, 1, (size_t)n, f) == (size_t)n)
-				tags->rating = RatingFromPopm(popm, n);
+			if (fread(popm, 1, (size_t)n, f) == (size_t)n) {
+				int popmRating = RatingFromPopm(popm, n);
+
+				if (PopmPayloadMatchesOwner(popm, n) || tags->rating == 0)
+					tags->rating = popmRating;
+			}
 		} else if (target && !target[0]) {
 			unsigned char text[96];
 			long n = frameSize;
