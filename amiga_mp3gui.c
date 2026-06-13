@@ -79,6 +79,8 @@
 #define TIME_X          (PROG_X + PROG_W + 6)
 #define TIME_W          80
 #define TIMER_TICK_MICROS 1000000UL
+#define ART_TIMER_MICROS 20000UL
+#define ART_MCUS_PER_PUMP 4
 
 #define MENUNUM_PROJECT   0
 #define MENUNUM_PLAYBACK  1
@@ -104,6 +106,26 @@ enum {
 	GID_STATUS,
 	GID_COUNT
 };
+
+typedef struct {
+	const unsigned char *data;
+	unsigned long pos;
+	unsigned long size;
+} PjpegSrc;
+
+typedef struct ArtDecodeState {
+	int active;
+	int isPng;
+	int mcuIndex;
+	int totalMcus;
+	pjpeg_image_info_t info;
+	PjpegSrc src;
+	unsigned char xMap[MAX_JPEG_DIM];
+	unsigned char yMap[MAX_JPEG_DIM];
+	unsigned long greyAccum[ART_W * ART_H];
+	unsigned short greyCount[ART_W * ART_H];
+	unsigned char greyOut[ART_W * ART_H];
+} ArtDecodeState;
 
 typedef struct Mp3Tags {
 	char title[64];
@@ -132,13 +154,16 @@ typedef struct HelixAmp3Gui {
 	struct VisualInfo *visualInfo;
 	struct Menu *menuStrip;
 	int artValid;
+	int artLoading;
 	unsigned char artGreyBuf[ART_W * ART_H];
+	ArtDecodeState artDecode;
 	struct MsgPort *timerPort;
 	struct MsgPort *donePort;
 	struct timerequest *timerReq;
 	struct TextFont *smallFont;
 	int timerOpen;
 	int timerPending;
+	int timerIsArt;
 	Mp3Tags tags;
 	char  inputName[HELIXAMP3_MAX_PATH];
 	char  fileText[HELIXAMP3_MAX_PATH];
@@ -822,12 +847,6 @@ static void UpdateTagDisplay(HelixAmp3Gui *gui)
 }
 
 
-typedef struct {
-	const unsigned char *data;
-	unsigned long pos;
-	unsigned long size;
-} PjpegSrc;
-
 static const unsigned char kBayer4x4[4][4] = {
 	{  0,  8,  2, 10 },
 	{ 12,  4, 14,  6 },
@@ -951,6 +970,140 @@ static int DecodeJpegToGrey(const unsigned char *jpegData, unsigned long jpegByt
 	return 0;
 }
 
+
+static void DrawArtPanel(HelixAmp3Gui *gui);
+
+static int JpegGreySample(const pjpeg_image_info_t *info, int off)
+{
+	if (info->m_comps == 1)
+		return info->m_pMCUBufR[off];
+#if defined(AMIGA_M68K) && defined(AMIGA_M68K_ASM_JPEG_GREY)
+	{
+		unsigned long r = info->m_pMCUBufR[off];
+		unsigned long g = info->m_pMCUBufG[off];
+		unsigned long b = info->m_pMCUBufB[off];
+		__asm__ volatile (
+			"mulu #30,%0\n\t"
+			"mulu #59,%1\n\t"
+			"mulu #11,%2\n\t"
+			"add.l %1,%0\n\t"
+			"add.l %2,%0"
+			: "+d" (r), "+d" (g), "+d" (b));
+		return (int)(r / 100UL);
+	}
+#else
+	return ((int)info->m_pMCUBufR[off] * 30 +
+		(int)info->m_pMCUBufG[off] * 59 +
+		(int)info->m_pMCUBufB[off] * 11) / 100;
+#endif
+}
+
+static void FinishArtDecode(HelixAmp3Gui *gui, int ok)
+{
+	ArtDecodeState *st = &gui->artDecode;
+	int i;
+
+	if (ok) {
+		for (i = 0; i < ART_W * ART_H; i++) {
+			if (st->greyCount[i])
+				st->greyOut[i] = (unsigned char)((st->greyAccum[i] +
+					(st->greyCount[i] / 2)) / st->greyCount[i]);
+		}
+		memcpy(gui->artGreyBuf, st->greyOut, ART_W * ART_H);
+		gui->artValid = 1;
+	}
+	st->active = 0;
+	gui->artLoading = 0;
+	DrawArtPanel(gui);
+}
+
+static void PumpArtDecode(HelixAmp3Gui *gui)
+{
+	ArtDecodeState *st = &gui->artDecode;
+	int pumped;
+
+	if (!st->active)
+		return;
+	for (pumped = 0; pumped < ART_MCUS_PER_PUMP && st->active; pumped++) {
+		unsigned char status;
+		int mcuX;
+		int mcuY;
+		int y;
+
+		if (st->mcuIndex >= st->totalMcus) {
+			FinishArtDecode(gui, 1);
+			break;
+		}
+		status = pjpeg_decode_mcu();
+		if (status == PJPG_NO_MORE_BLOCKS) {
+			FinishArtDecode(gui, 1);
+			break;
+		}
+		if (status != 0) {
+			FinishArtDecode(gui, 0);
+			break;
+		}
+		mcuX = (st->mcuIndex % st->info.m_MCUSPerRow) * st->info.m_MCUWidth;
+		mcuY = (st->mcuIndex / st->info.m_MCUSPerRow) * st->info.m_MCUHeight;
+		st->mcuIndex++;
+		for (y = 0; y < st->info.m_MCUHeight; y++) {
+			int srcY = mcuY + y;
+			int dstY;
+			int x;
+
+			if (srcY >= st->info.m_height)
+				continue;
+			dstY = st->yMap[srcY];
+			for (x = 0; x < st->info.m_MCUWidth; x++) {
+				int srcX = mcuX + x;
+				int dst;
+
+				if (srcX >= st->info.m_width)
+					continue;
+				dst = dstY * ART_W + st->xMap[srcX];
+				st->greyAccum[dst] += (unsigned long)JpegGreySample(&st->info,
+					McuSampleOffset(&st->info, x, y));
+				if (st->greyCount[dst] != 0xffff)
+					st->greyCount[dst]++;
+			}
+		}
+	}
+}
+
+static void StartArtDecode(HelixAmp3Gui *gui)
+{
+	ArtDecodeState *st = &gui->artDecode;
+	unsigned char status;
+	int i;
+
+	memset(st, 0, sizeof(*st));
+	gui->artValid = 0;
+	gui->artLoading = 0;
+	if (!gui->tags.artData || gui->tags.artBytes <= 4 || gui->tags.artIsPng) {
+		DrawArtPanel(gui);
+		return;
+	}
+	memset(st->greyOut, 0x80, sizeof(st->greyOut));
+	st->src.data = gui->tags.artData;
+	st->src.size = gui->tags.artBytes;
+	status = pjpeg_decode_init(&st->info, pjpeg_cb, &st->src, 0);
+	if (status != 0 || st->info.m_width <= 0 || st->info.m_height <= 0 ||
+		st->info.m_width > MAX_JPEG_DIM || st->info.m_height > MAX_JPEG_DIM) {
+		DrawArtPanel(gui);
+		return;
+	}
+	for (i = 0; i < st->info.m_width; i++)
+		st->xMap[i] = (unsigned char)((i * ART_W) / st->info.m_width);
+	for (i = 0; i < st->info.m_height; i++)
+		st->yMap[i] = (unsigned char)((i * ART_H) / st->info.m_height);
+	st->totalMcus = st->info.m_MCUSPerRow * st->info.m_MCUSPerCol;
+	st->active = 1;
+	gui->artLoading = 1;
+	SetStatus(gui, "Loading artwork...");
+	DrawArtPanel(gui);
+	PumpArtDecode(gui);
+}
+
 static int ArtGreyPen(HelixAmp3Gui *gui, int level)
 {
 	struct DrawInfo *dri;
@@ -1003,27 +1156,18 @@ static void DrawArtPanel(HelixAmp3Gui *gui)
 			}
 		}
 	} else {
+		const char *label = gui->artLoading ? "Loading" : "No art";
 		SetAPen(rp, 0);
 		RectFill(rp, ART_X, ART_Y, ART_X + ART_W - 1, ART_Y + ART_H - 1);
 		SetAPen(rp, 1);
-		Move(rp, ART_X + 16, ART_Y + ART_H / 2);
-		Text(rp, "No art", 6);
+		Move(rp, ART_X + (gui->artLoading ? 10 : 16), ART_Y + ART_H / 2);
+		Text(rp, label, gui->artLoading ? 7 : 6);
 	}
 }
 
 static void UpdateArtDisplay(HelixAmp3Gui *gui)
 {
-	unsigned char greyBuf[ART_W * ART_H];
-
-	gui->artValid = 0;
-	if (gui->tags.artData && gui->tags.artBytes > 4) {
-		if (DecodeJpegToGrey(gui->tags.artData, gui->tags.artBytes,
-			greyBuf, ART_W, ART_H, gui->tags.artIsPng) == 0) {
-			gui->artValid = 1;
-			memcpy(gui->artGreyBuf, greyBuf, ART_W * ART_H);
-		}
-	}
-	DrawArtPanel(gui);
+	StartArtDecode(gui);
 }
 
 static void DrawProgressFrame(HelixAmp3Gui *gui)
@@ -1100,28 +1244,40 @@ static void DrawProgress(HelixAmp3Gui *gui)
 
 static void SendTimerRequest(HelixAmp3Gui *gui, ULONG micros)
 {
-	if (!gui->timerReq || gui->timerPending)
+	if (!gui->timerReq)
 		return;
+	if (gui->timerPending) {
+		AbortIO((struct IORequest *)gui->timerReq);
+		WaitIO((struct IORequest *)gui->timerReq);
+		gui->timerPending = 0;
+	}
 	gui->timerReq->tr_node.io_Command = TR_ADDREQUEST;
 	gui->timerReq->tr_time.tv_secs = micros / 1000000UL;
 	gui->timerReq->tr_time.tv_micro = micros % 1000000UL;
 	SendIO((struct IORequest *)gui->timerReq);
 	gui->timerPending = 1;
+	gui->timerIsArt = (micros == ART_TIMER_MICROS);
 }
 
 static void HandleTimerSignal(HelixAmp3Gui *gui)
 {
+	int expiredWasArt;
+
 	if (!gui->timerReq)
 		return;
+	expiredWasArt = gui->timerIsArt;
 	while (GetMsg(gui->timerPort))
 		;
 	gui->timerPending = 0;
+	gui->timerIsArt = 0;
 
-	if (gui->playbackActive) {
+	if (gui->playbackActive && !expiredWasArt) {
 		gui->elapsedSecs++;
 		DrawProgress(gui);
 	}
-	SendTimerRequest(gui, TIMER_TICK_MICROS);
+	PumpArtDecode(gui);
+	SendTimerRequest(gui, gui->artDecode.active ? ART_TIMER_MICROS :
+		TIMER_TICK_MICROS);
 }
 
 static void HandleDoneSignal(HelixAmp3Gui *gui)
@@ -1488,6 +1644,7 @@ static void GuiClose(HelixAmp3Gui *gui)
 			AbortIO((struct IORequest *)gui->timerReq);
 			WaitIO((struct IORequest *)gui->timerReq);
 			gui->timerPending = 0;
+			gui->timerIsArt = 0;
 		}
 		if (gui->timerOpen) {
 			CloseDevice((struct IORequest *)gui->timerReq);
@@ -1591,8 +1748,12 @@ static void ChooseMp3(HelixAmp3Gui *gui)
 		UpdateTagDisplay(gui);
 		UpdateArtDisplay(gui);
 		DrawProgress(gui);
-		FormatReadyStatus(&gui->tags, gui->statusText, sizeof(gui->statusText));
-		SetStatus(gui, gui->statusText);
+		if (gui->artDecode.active)
+			SendTimerRequest(gui, ART_TIMER_MICROS);
+		if (!gui->artDecode.active) {
+			FormatReadyStatus(&gui->tags, gui->statusText, sizeof(gui->statusText));
+			SetStatus(gui, gui->statusText);
+		}
 	}
 	FreeAslRequest(req);
 }
