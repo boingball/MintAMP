@@ -3236,11 +3236,8 @@ static void UpdateVuPeak(const signed char *buf, int n, int stereo)
 	int peakL = 0;
 	int peakR = 0;
 
-	if (!buf || n <= 0) {
-		gVuPeakL = 0;
-		gVuPeakR = 0;
+	if (!buf || n <= 0)
 		return;
-	}
 	if (stereo) {
 		for (i = 0; i + 1 < n; i += 2) {
 			v = buf[i] < 0 ? -buf[i] : buf[i];
@@ -3258,8 +3255,14 @@ static void UpdateVuPeak(const signed char *buf, int n, int stereo)
 		}
 		peakR = peakL;
 	}
-	gVuPeakL = (short)peakL;
-	gVuPeakR = (short)peakR;
+	if (peakL > 127)
+		peakL = 127;
+	if (peakR > 127)
+		peakR = 127;
+	if (peakL > gVuPeakL)
+		gVuPeakL = (short)peakL;
+	if (peakR > gVuPeakR)
+		gVuPeakR = (short)peakR;
 }
 
 static void UpdateVuPeakPlanar(const signed char *left, const signed char *right,
@@ -3270,11 +3273,8 @@ static void UpdateVuPeakPlanar(const signed char *left, const signed char *right
 	int peakL = 0;
 	int peakR = 0;
 
-	if (!left || !right || frames <= 0) {
-		gVuPeakL = 0;
-		gVuPeakR = 0;
+	if (!left || !right || frames <= 0)
 		return;
-	}
 	for (i = 0; i < frames; i++) {
 		v = left[i] < 0 ? -left[i] : left[i];
 		if (v > peakL)
@@ -3283,8 +3283,14 @@ static void UpdateVuPeakPlanar(const signed char *left, const signed char *right
 		if (v > peakR)
 			peakR = v;
 	}
-	gVuPeakL = (short)peakL;
-	gVuPeakR = (short)peakR;
+	if (peakL > 127)
+		peakL = 127;
+	if (peakR > 127)
+		peakR = 127;
+	if (peakL > gVuPeakL)
+		gVuPeakL = (short)peakL;
+	if (peakR > gVuPeakR)
+		gVuPeakR = (short)peakR;
 }
 
 static int DecodeStreamFillS8(DecodeStream *stream, const DecodeOptions *opt,
@@ -3295,6 +3301,8 @@ static int DecodeStreamFillS8(DecodeStream *stream, const DecodeOptions *opt,
 
 	produced = 0;
 	DecodeStreamCopySpill(stream, dest, maxBytes, &produced);
+	if (produced > 0)
+		UpdateVuPeak(dest, produced, opt->stereo);
 	while (produced < maxBytes && !stream->outOfData) {
 		int nRead;
 		int offset;
@@ -3437,6 +3445,8 @@ static int DecodeStreamFillS8(DecodeStream *stream, const DecodeOptions *opt,
 				}
 				for (; i < direct; i++)
 					dest[produced + i] = Sample16ToS8(stream->writeBuf[i]);
+				if (direct > 0)
+					UpdateVuPeak(dest + produced, direct, opt->stereo);
 				produced += direct;
 
 				spill = outSamps - direct;
@@ -3453,8 +3463,6 @@ static int DecodeStreamFillS8(DecodeStream *stream, const DecodeOptions *opt,
 		}
 	}
 
-	if (produced > 0)
-		UpdateVuPeak(dest, produced, opt->stereo);
 	return produced;
 }
 
@@ -3491,6 +3499,8 @@ static int DecodeStreamFillPlanarS8(DecodeStream *stream, const DecodeOptions *o
 
 	produced = 0;
 	DecodeStreamCopyPlanarSpill(stream, left, right, maxFrames, &produced);
+	if (produced > 0)
+		UpdateVuPeakPlanar(left, right, produced);
 	while (produced < maxFrames && !stream->outOfData) {
 		const short *pcm;
 		int frames;
@@ -3625,14 +3635,14 @@ static int DecodeStreamFillPlanarS8(DecodeStream *stream, const DecodeOptions *o
 				stream->spill.planar[1][spill] = stream->spill.planar[0][spill];
 			}
 		}
+		if (direct > 0)
+			UpdateVuPeakPlanar(left + produced, right + produced, direct);
 		produced += direct;
 		stream->stats->outputSamples += (unsigned long)frames * 2UL;
 		stream->stats->decodedFrames++;
 		if (stream->timing)
 			stream->timing->pcmConvert += clock() - t0;
 	}
-	if (produced > 0)
-		UpdateVuPeakPlanar(left, right, produced);
 	return produced;
 }
 

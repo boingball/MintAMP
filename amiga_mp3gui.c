@@ -32,10 +32,24 @@
 #include <proto/asl.h>
 #include <proto/dos.h>
 #include <proto/gadtools.h>
+#include <proto/timer.h>
 
 #define HELIXAMP3_MAX_PATH 256
-#define HELIXAMP3_ARGC_MAX 16
+#define HELIXAMP3_ARGC_MAX 18
 #define HELIXAMP3_SIGMASK(gui) (1UL << (gui)->win->UserPort->mp_SigBit)
+
+#define VU_X      60
+#define VU_W     340
+#define VU_H       8
+#define VU_GAP     3
+#define VU_TOP_Y 204
+
+#define MENUNUM_PROJECT   0
+#define MENUNUM_PLAYBACK  1
+#define ITEMNUM_ABOUT     0
+#define ITEMNUM_QUIT      1
+#define ITEMNUM_DTP       0
+#define ITEMNUM_BENCH     1
 
 enum {
 	GID_FILE = 1,
@@ -75,7 +89,8 @@ typedef struct HelixAmp3Gui {
 	struct Gadget  *gadBuffer;
 	struct Gadget  *gadPlay;
 	struct Gadget  *gadStop;
-	struct VisualInfo *vi;
+	struct VisualInfo *visualInfo;
+	struct Menu *menuStrip;
 	struct MsgPort *timerPort;
 	struct timerequest *timerReq;
 	int timerOpen;
@@ -90,6 +105,8 @@ typedef struct HelixAmp3Gui {
 	int   rateIndex;
 	int   bufferSeconds;
 	int   qualityIndex;
+	int   decodeThenPlay;
+	int   bench;
 	int   closeRequested;
 } HelixAmp3Gui;
 
@@ -127,6 +144,20 @@ static const STRPTR kQualityLabels[] = {
 	(STRPTR)"Normal",
 	(STRPTR)"Best",
 	NULL
+};
+
+static struct NewMenu myNewMenus[] = {
+	{ NM_TITLE, (STRPTR)"Project",          0, 0, 0, 0 },
+	{ NM_ITEM,  (STRPTR)"About MiniAMP3...",0, 0, 0,
+		(APTR)(MENUNUM_PROJECT * 100 + ITEMNUM_ABOUT) },
+	{ NM_ITEM,  (STRPTR)"Quit",             0, 0, 0,
+		(APTR)(MENUNUM_PROJECT * 100 + ITEMNUM_QUIT) },
+	{ NM_TITLE, (STRPTR)"Playback",         0, 0, 0, 0 },
+	{ NM_ITEM,  (STRPTR)"Decode-then-play", 0, CHECKIT | MENUTOGGLE, 0,
+		(APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_DTP) },
+	{ NM_ITEM,  (STRPTR)"Bench mode",       0, CHECKIT | MENUTOGGLE, 0,
+		(APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_BENCH) },
+	{ NM_END,   NULL,                       0, 0, 0, 0 }
 };
 
 static void SafeCopy(char *dst, size_t dstSize, const char *src)
@@ -386,53 +417,79 @@ static void UpdateTagDisplay(HelixAmp3Gui *gui)
 	}
 }
 
+static void DrawVuFrame(HelixAmp3Gui *gui)
+{
+	if (!gui->win)
+		return;
+	DrawBevelBox(gui->win->RPort,
+		VU_X - 18, VU_TOP_Y - 4,
+		VU_W + 24, 2 * VU_H + VU_GAP + 8,
+		GT_VisualInfo, gui->visualInfo,
+		GTBB_Recessed, TRUE,
+		TAG_DONE);
+}
+
 static void DrawVuMeter(HelixAmp3Gui *gui)
 {
 	struct RastPort *rp;
-	int fillL;
-	int fillR;
-	WORD x = 55;
-	WORD y = 162;
-	WORD w = 300;
-	WORD h = 8;
+	int fillL, fillR, emptyL, emptyR;
+	WORD yL, yR;
 
 	if (!gui->win)
 		return;
 	rp = gui->win->RPort;
-	SetAPen(rp, 1);
-	Move(rp, 42, y + h - 1);
-	Text(rp, "L", 1);
-	Move(rp, 42, y + (2 * h) + 3);
-	Text(rp, "R", 1);
-	DrawBevelBox(rp, x - 2, y - 2, w + 4, (2 * h) + 8, TAG_DONE);
-	fillL = ((int)gVuPeakL * w) / 127;
+	yL = VU_TOP_Y;
+	yR = yL + VU_H + VU_GAP;
+
+	fillL = ((int)gVuPeakL * VU_W) / 127;
 	if (fillL < 0)
 		fillL = 0;
-	if (fillL > w)
-		fillL = w;
-	fillR = ((int)gVuPeakR * w) / 127;
+	if (fillL > VU_W)
+		fillL = VU_W;
+	emptyL = VU_W - fillL;
+
+	fillR = ((int)gVuPeakR * VU_W) / 127;
 	if (fillR < 0)
 		fillR = 0;
-	if (fillR > w)
-		fillR = w;
-	SetAPen(rp, 3);
-	if (fillL > 0)
-		RectFill(rp, x, y, x + fillL - 1, y + h - 1);
-	SetAPen(rp, 0);
-	if (fillL < w)
-		RectFill(rp, x + fillL, y, x + w - 1, y + h - 1);
-	SetAPen(rp, 3);
-	if (fillR > 0)
-		RectFill(rp, x, y + h + 2, x + fillR - 1, y + 2 * h + 1);
-	SetAPen(rp, 0);
-	if (fillR < w)
-		RectFill(rp, x + fillR, y + h + 2, x + w - 1, y + 2 * h + 1);
+	if (fillR > VU_W)
+		fillR = VU_W;
+	emptyR = VU_W - fillR;
+
+	SetAPen(rp, 1);
+	Move(rp, VU_X - 14, yL + VU_H - 1);
+	Text(rp, "L", 1);
+	if (fillL > 0) {
+		SetAPen(rp, 3);
+		RectFill(rp, VU_X, yL, VU_X + fillL - 1, yL + VU_H - 1);
+	}
+	if (emptyL > 0) {
+		SetAPen(rp, gui->win->DetailPen);
+		RectFill(rp, VU_X + fillL, yL, VU_X + VU_W - 1, yL + VU_H - 1);
+	}
+
+	SetAPen(rp, 1);
+	Move(rp, VU_X - 14, yR + VU_H - 1);
+	Text(rp, "R", 1);
+	if (fillR > 0) {
+		SetAPen(rp, 3);
+		RectFill(rp, VU_X, yR, VU_X + fillR - 1, yR + VU_H - 1);
+	}
+	if (emptyR > 0) {
+		SetAPen(rp, gui->win->DetailPen);
+		RectFill(rp, VU_X + fillR, yR, VU_X + VU_W - 1, yR + VU_H - 1);
+	}
 }
 
 static void DecayVuMeter(void)
 {
-	gVuPeakL = (WORD)(((int)gVuPeakL * 3) / 4);
-	gVuPeakR = (WORD)(((int)gVuPeakR * 3) / 4);
+	if (gVuPeakL > 8)
+		gVuPeakL -= 8;
+	else
+		gVuPeakL = 0;
+	if (gVuPeakR > 8)
+		gVuPeakR -= 8;
+	else
+		gVuPeakR = 0;
 }
 
 static void SendTimerRequest(HelixAmp3Gui *gui, ULONG micros)
@@ -458,6 +515,41 @@ static void HandleTimerSignal(HelixAmp3Gui *gui)
 	SendTimerRequest(gui, 100000UL);
 }
 
+static void GuiRefresh(HelixAmp3Gui *gui)
+{
+	if (!gui->win)
+		return;
+	GT_BeginRefresh(gui->win);
+	GT_EndRefresh(gui->win, TRUE);
+	DrawVuFrame(gui);
+	DrawVuMeter(gui);
+}
+
+static void SetDecodeThenPlay(HelixAmp3Gui *gui, int enabled)
+{
+	gui->decodeThenPlay = enabled ? 1 : 0;
+	if (gui->win && gui->gadBuffer) {
+		GT_SetGadgetAttrs(gui->gadBuffer, gui->win, NULL,
+			GA_Disabled, gui->decodeThenPlay,
+			TAG_DONE);
+	}
+	SetStatus(gui, gui->decodeThenPlay ?
+		"Decode-then-play enabled; Buffer slider disabled." :
+		"Streaming playback mode enabled.");
+}
+
+static void ShowAbout(HelixAmp3Gui *gui)
+{
+	struct EasyStruct es;
+
+	es.es_StructSize = sizeof(es);
+	es.es_Flags = 0;
+	es.es_Title = (UBYTE *)"About MiniAMP3";
+	es.es_TextFormat = (UBYTE *)"MiniAMP3\nHelix fixed-point MP3 decoder\nAmigaOS GadTools frontend";
+	es.es_GadgetFormat = (UBYTE *)"OK";
+	EasyRequest(gui->win, &es, NULL, TAG_DONE);
+}
+
 static struct Gadget *MakeGadget(HelixAmp3Gui *gui, struct Gadget *prev,
 	ULONG kind, UWORD id, WORD left, WORD top, WORD width, WORD height,
 	const char *label, ULONG tag1, ULONG value1, ULONG tag2, ULONG value2,
@@ -478,7 +570,7 @@ static struct Gadget *MakeGadget(HelixAmp3Gui *gui, struct Gadget *prev,
 		ng.ng_Flags = PLACETEXT_RIGHT;
 	else
 		ng.ng_Flags = PLACETEXT_LEFT;
-	ng.ng_VisualInfo = gui->vi;
+	ng.ng_VisualInfo = gui->visualInfo;
 	return CreateGadget(kind, prev, &ng,
 		tag1, value1,
 		tag2, value2,
@@ -596,7 +688,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadPlay = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_PLAY,
-		45, 216, 72, 18, "Play",
+		45, 236, 72, 18, "Play",
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
@@ -605,7 +697,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadStop = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_STOP,
-		310, 216, 72, 18, "Stop",
+		310, 236, 72, 18, "Stop",
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
@@ -614,7 +706,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadStatus = gad = MakeGadget(gui, gad, TEXT_KIND, GID_STATUS,
-		58, 244, 350, 14, "Status:",
+		58, 264, 350, 14, "Status:",
 		GTTX_Text, (ULONG)gui->statusText,
 		GTTX_Border, TRUE,
 		TAG_IGNORE, 0,
@@ -673,9 +765,9 @@ static int GuiOpen(HelixAmp3Gui *gui)
 		IntuitionBase = NULL;
 		return -1;
 	}
-	gui->vi = GetVisualInfo(screen, TAG_DONE);
+	gui->visualInfo = GetVisualInfo(screen, TAG_DONE);
 	UnlockPubScreen(NULL, screen);
-	if (!gui->vi) {
+	if (!gui->visualInfo) {
 		fprintf(stderr, "cannot create GadTools visual info\n");
 		CloseLibrary(GadToolsBase);
 		GadToolsBase = NULL;
@@ -690,8 +782,8 @@ static int GuiOpen(HelixAmp3Gui *gui)
 		fprintf(stderr, "cannot create MiniAMP3 gadgets\n");
 		FreeGadgets(gui->gadgets);
 		gui->gadgets = NULL;
-		FreeVisualInfo(gui->vi);
-		gui->vi = NULL;
+		FreeVisualInfo(gui->visualInfo);
+		gui->visualInfo = NULL;
 		CloseLibrary(GadToolsBase);
 		GadToolsBase = NULL;
 		CloseLibrary(AslBase);
@@ -705,28 +797,28 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	nw.LeftEdge = 40;
 	nw.TopEdge = 30;
 	nw.Width = 420;
-	nw.Height = 270;
+	nw.Height = 292;
 	nw.DetailPen = 0;
 	nw.BlockPen = 1;
 	nw.IDCMPFlags = IDCMP_GADGETUP | IDCMP_MOUSEMOVE | IDCMP_CLOSEWINDOW |
-		IDCMP_REFRESHWINDOW | IDCMP_ACTIVEWINDOW;
+		IDCMP_REFRESHWINDOW | IDCMP_ACTIVEWINDOW | IDCMP_MENUPICK;
 	nw.Flags = WFLG_CLOSEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET |
 		WFLG_SIZEGADGET | WFLG_SIZEBBOTTOM | WFLG_ACTIVATE |
 		WFLG_SMART_REFRESH;
 	nw.FirstGadget = gui->gadgets;
 	nw.Title = (UBYTE *)"MiniAMP3";
 	nw.MinWidth = 420;
-	nw.MinHeight = 270;
+	nw.MinHeight = 292;
 	nw.MaxWidth = 640;
-	nw.MaxHeight = 320;
+	nw.MaxHeight = 340;
 	nw.Type = WBENCHSCREEN;
 	gui->win = OpenWindow(&nw);
 	if (!gui->win) {
 		fprintf(stderr, "cannot open MiniAMP3 window\n");
 		FreeGadgets(gui->gadgets);
 		gui->gadgets = NULL;
-		FreeVisualInfo(gui->vi);
-		gui->vi = NULL;
+		FreeVisualInfo(gui->visualInfo);
+		gui->visualInfo = NULL;
 		CloseLibrary(GadToolsBase);
 		GadToolsBase = NULL;
 		CloseLibrary(AslBase);
@@ -734,6 +826,11 @@ static int GuiOpen(HelixAmp3Gui *gui)
 		CloseLibrary((struct Library *)IntuitionBase);
 		IntuitionBase = NULL;
 		return -1;
+	}
+	gui->menuStrip = CreateMenus(myNewMenus, TAG_DONE);
+	if (gui->menuStrip) {
+		LayoutMenus(gui->menuStrip, gui->visualInfo, TAG_DONE);
+		SetMenuStrip(gui->win, gui->menuStrip);
 	}
 	gui->timerPort = CreateMsgPort();
 	if (gui->timerPort)
@@ -753,6 +850,7 @@ static int GuiOpen(HelixAmp3Gui *gui)
 		}
 	}
 	GT_RefreshWindow(gui->win, NULL);
+	DrawVuFrame(gui);
 	DrawVuMeter(gui);
 	if (gui->timerOpen)
 		SendTimerRequest(gui, 100000UL);
@@ -778,6 +876,12 @@ static void GuiClose(HelixAmp3Gui *gui)
 		DeleteMsgPort(gui->timerPort);
 		gui->timerPort = NULL;
 	}
+	if (gui->win && gui->menuStrip)
+		ClearMenuStrip(gui->win);
+	if (gui->menuStrip) {
+		FreeMenus(gui->menuStrip);
+		gui->menuStrip = NULL;
+	}
 	if (gui->win) {
 		CloseWindow(gui->win);
 		gui->win = NULL;
@@ -786,9 +890,9 @@ static void GuiClose(HelixAmp3Gui *gui)
 		FreeGadgets(gui->gadgets);
 		gui->gadgets = NULL;
 	}
-	if (gui->vi) {
-		FreeVisualInfo(gui->vi);
-		gui->vi = NULL;
+	if (gui->visualInfo) {
+		FreeVisualInfo(gui->visualInfo);
+		gui->visualInfo = NULL;
 	}
 	if (GadToolsBase) {
 		CloseLibrary(GadToolsBase);
@@ -865,6 +969,10 @@ static void BuildPlaybackArgs(HelixAmp3Gui *gui, HelixAmp3Player *player)
 	AddArg(player, num);
 	if (gui->qualityIndex == 0)
 		AddArg(player, "--play-fast-path");
+	if (gui->decodeThenPlay)
+		AddArg(player, "--decode-then-play");
+	if (gui->bench)
+		AddArg(player, "--bench");
 	AddArg(player, gui->inputName);
 	player->argv[player->argc] = NULL;
 }
@@ -891,6 +999,9 @@ static void StartPlayback(HelixAmp3Gui *gui)
 		SetStatus(gui, "Already playing; press Stop first.");
 		return;
 	}
+	gVuPeakL = 0;
+	gVuPeakR = 0;
+	DrawVuMeter(gui);
 	BuildPlaybackArgs(gui, &gGuiPlayer);
 	gGuiPlayer.process = CreateNewProcTags(NP_Entry, (ULONG)PlaybackEntry,
 		NP_Name, (ULONG)"MiniAMP3 playback",
@@ -901,11 +1012,16 @@ static void StartPlayback(HelixAmp3Gui *gui)
 		return;
 	}
 	gGuiPlayer.running = 1;
-	SetStatus(gui, "Playing through amiga_mp3dec Paula path.");
+	SetStatus(gui, gui->decodeThenPlay ?
+		"Decoding to RAM, then playing..." :
+		"Streaming playback started.");
 }
 
 static void StopPlayback(HelixAmp3Gui *gui)
 {
+	gVuPeakL = 0;
+	gVuPeakR = 0;
+	DrawVuMeter(gui);
 	if (!gGuiPlayer.running) {
 		SetStatus(gui, "Nothing is playing.");
 		return;
@@ -989,8 +1105,30 @@ static void GuiPoll(HelixAmp3Gui *gui)
 		if (classValue == IDCMP_CLOSEWINDOW)
 			gui->closeRequested = 1;
 		else if (classValue == IDCMP_REFRESHWINDOW) {
-			GT_BeginRefresh(gui->win);
-			GT_EndRefresh(gui->win, TRUE);
+			GuiRefresh(gui);
+		} else if (classValue == IDCMP_MENUPICK && gui->menuStrip) {
+			UWORD menuCode = code;
+			while (menuCode != MENUNULL) {
+				struct MenuItem *item = ItemAddress(gui->menuStrip, menuCode);
+				if (item) {
+					ULONG userData = (ULONG)GTMENUITEM_USERDATA(item);
+					int mn = (int)(userData / 100);
+					int it = (int)(userData % 100);
+					if (mn == MENUNUM_PROJECT && it == ITEMNUM_QUIT)
+						gui->closeRequested = 1;
+					else if (mn == MENUNUM_PROJECT && it == ITEMNUM_ABOUT)
+						ShowAbout(gui);
+					else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_DTP)
+						SetDecodeThenPlay(gui, !gui->decodeThenPlay);
+					else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_BENCH) {
+						gui->bench = !gui->bench;
+						SetStatus(gui, gui->bench ?
+							"Bench mode enabled." :
+							"Bench mode disabled.");
+					}
+				}
+				menuCode = item ? item->NextSelect : MENUNULL;
+			}
 		} else if (classValue == IDCMP_GADGETUP) {
 			HandleGuiAction(gui, gad, code);
 		} else if (classValue == IDCMP_MOUSEMOVE) {
