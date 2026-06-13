@@ -41,12 +41,28 @@
 #define HELIXAMP3_ARGC_MAX 18
 #define HELIXAMP3_SIGMASK(gui) (1UL << (gui)->win->UserPort->mp_SigBit)
 
+#define GUI_LEFT_MARGIN   8
+#define GUI_TOP_Y        16
+#define GUI_ROW_H        14
+#define ROW_FILE    (GUI_TOP_Y + 0 * GUI_ROW_H)
+#define ROW_TITLE   (GUI_TOP_Y + 1 * GUI_ROW_H)
+#define ROW_ARTIST  (GUI_TOP_Y + 2 * GUI_ROW_H)
+#define ROW_ALBUM   (GUI_TOP_Y + 3 * GUI_ROW_H)
+#define ROW_CHECKS  (GUI_TOP_Y + 4 * GUI_ROW_H + 4)
+#define ROW_CYCLES  (GUI_TOP_Y + 5 * GUI_ROW_H + 4)
+#define ROW_BUFFER  (GUI_TOP_Y + 6 * GUI_ROW_H + 4)
+#define ROW_PROG    (GUI_TOP_Y + 7 * GUI_ROW_H + 4)
+#define ROW_BUTTONS (GUI_TOP_Y + 8 * GUI_ROW_H + 8)
+#define ROW_STATUS  (GUI_TOP_Y + 9 * GUI_ROW_H + 8)
+#define WIN_W       460
+#define WIN_H       (ROW_STATUS + GUI_ROW_H + 12)
+
 #define PROG_X      60
 #define PROG_W     300
 #define PROG_H       8
-#define PROG_TOP_Y 204
+#define PROG_TOP_Y ROW_PROG
 #define TIME_X     (PROG_X + PROG_W + 8)
-#define TIME_Y     (PROG_TOP_Y + PROG_H - 1)
+#define TIME_W      88
 #define TIMER_TICK_MICROS 1000000UL
 
 #define MENUNUM_PROJECT   0
@@ -98,6 +114,7 @@ typedef struct HelixAmp3Gui {
 	struct VisualInfo *visualInfo;
 	struct Menu *menuStrip;
 	struct MsgPort *timerPort;
+	struct MsgPort *donePort;
 	struct timerequest *timerReq;
 	struct TextFont *smallFont;
 	struct TextAttr smallTextAttr;
@@ -116,9 +133,10 @@ typedef struct HelixAmp3Gui {
 	int   decodeThenPlay;
 	int   bench;
 	int   closeRequested;
-	int   playbackWasRunning;
+	int   playbackActive;
 	int   totalSecs;
 	int   elapsedSecs;
+	int   launchBufferSecs;
 } HelixAmp3Gui;
 
 typedef struct HelixAmp3Args {
@@ -128,7 +146,6 @@ typedef struct HelixAmp3Args {
 } HelixAmp3Args;
 
 typedef struct HelixAmp3Player {
-	volatile int running;
 	volatile int stopRequested;
 	int argc;
 	char **argv;
@@ -141,6 +158,8 @@ struct Library *GadToolsBase;
 struct GfxBase *GfxBase;
 static HelixAmp3Player gGuiPlayer;
 static HelixAmp3Args gGuiArgs;
+static struct Message gDoneMsg;
+static struct MsgPort *gDonePort;
 
 static const char * const kRates[] = {
 	"8287",
@@ -472,11 +491,12 @@ static void DrawProgress(HelixAmp3Gui *gui)
 	int fill, empty;
 	char timeBuf[32];
 	int elapsed, total, remaining;
+	int textWidth, textX;
 
 	if (!gui->win)
 		return;
 	rp = gui->win->RPort;
-	elapsed = gui->elapsedSecs;
+	elapsed = gui->elapsedSecs - gui->launchBufferSecs;
 	total = gui->totalSecs;
 	if (elapsed < 0)
 		elapsed = 0;
@@ -506,18 +526,22 @@ static void DrawProgress(HelixAmp3Gui *gui)
 		remaining = total - elapsed;
 		if (remaining < 0)
 			remaining = 0;
-		sprintf(timeBuf, "-%d:%02d / %d:%02d",
+		sprintf(timeBuf, "-%02d:%02d / %02d:%02d",
 			remaining / 60, remaining % 60,
 			total / 60, total % 60);
 	} else {
-		sprintf(timeBuf, "%d:%02d", elapsed / 60, elapsed % 60);
+		sprintf(timeBuf, " 00:00 / %02d:%02d", elapsed / 60, elapsed % 60);
 	}
 
 	SetAPen(rp, gui->win->DetailPen);
-	RectFill(rp, TIME_X, PROG_TOP_Y,
-		TIME_X + 88, PROG_TOP_Y + PROG_H + 1);
+	RectFill(rp, TIME_X, PROG_TOP_Y - 1,
+		TIME_X + TIME_W, PROG_TOP_Y + GUI_ROW_H);
 	SetAPen(rp, 1);
-	Move(rp, TIME_X, TIME_Y);
+	textWidth = TextLength(rp, timeBuf, strlen(timeBuf));
+	textX = TIME_X + TIME_W - textWidth;
+	if (textX < TIME_X)
+		textX = TIME_X;
+	Move(rp, textX, PROG_TOP_Y + rp->TxBaseline);
 	Text(rp, timeBuf, strlen(timeBuf));
 }
 
@@ -534,30 +558,39 @@ static void SendTimerRequest(HelixAmp3Gui *gui, ULONG micros)
 
 static void HandleTimerSignal(HelixAmp3Gui *gui)
 {
-	int wasRunning;
-	int stoppedByUser;
-
 	if (!gui->timerReq)
 		return;
 	while (GetMsg(gui->timerPort))
 		;
 	gui->timerPending = 0;
 
-	wasRunning = gui->playbackWasRunning;
-	gui->playbackWasRunning = gGuiPlayer.running;
-	if (wasRunning && !gGuiPlayer.running) {
-		stoppedByUser = gGuiPlayer.stopRequested;
-		gui->elapsedSecs = 0;
-		DrawProgress(gui);
-		SetStatus(gui, stoppedByUser ?
-			"Stopped." : "Playback finished.");
-		if (stoppedByUser)
-			gGuiPlayer.stopRequested = 0;
-	} else if (gGuiPlayer.running) {
+	if (gui->playbackActive) {
 		gui->elapsedSecs++;
 		DrawProgress(gui);
 	}
 	SendTimerRequest(gui, TIMER_TICK_MICROS);
+}
+
+static void HandleDoneSignal(HelixAmp3Gui *gui)
+{
+	struct Message *msg;
+	int stoppedByUser;
+
+	if (!gui->donePort)
+		return;
+	while ((msg = GetMsg(gui->donePort)) != NULL)
+		;
+
+	stoppedByUser = gGuiPlayer.stopRequested;
+	gui->playbackActive = 0;
+	gGuiPlayer.process = NULL;
+	gDonePort = NULL;
+	if (gui->totalSecs > 0)
+		gui->elapsedSecs = gui->totalSecs + gui->launchBufferSecs;
+	DrawProgress(gui);
+	SetStatus(gui, stoppedByUser ? "Stopped." : "Playback finished.");
+	if (stoppedByUser)
+		gGuiPlayer.stopRequested = 0;
 }
 
 static void GuiRefresh(HelixAmp3Gui *gui)
@@ -635,7 +668,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 	gad = gui->gadContext;
 
 	gui->gadFile = gad = MakeGadget(gui, gad, TEXT_KIND, GID_FILE,
-		55, 16, 280, 14, "File:",
+		55, ROW_FILE, 280, 14, "File:",
 		GTTX_Text, (ULONG)gui->fileText,
 		GTTX_Border, TRUE,
 		TAG_IGNORE, 0,
@@ -644,7 +677,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gad = MakeGadget(gui, gad, BUTTON_KIND, GID_BROWSE,
-		345, 14, 68, 16, "Browse...",
+		345, ROW_FILE - 2, 68, 16, "Browse",
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
@@ -653,7 +686,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadTitle = gad = MakeGadget(gui, gad, TEXT_KIND, GID_TITLE,
-		55, 42, 300, 14, "Title:",
+		55, ROW_TITLE, 300, 14, "Title:",
 		GTTX_Text, (ULONG)"-",
 		GTTX_Border, TRUE,
 		TAG_IGNORE, 0,
@@ -662,7 +695,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadArtist = gad = MakeGadget(gui, gad, TEXT_KIND, GID_ARTIST,
-		55, 64, 300, 14, "Artist:",
+		55, ROW_ARTIST, 300, 14, "Artist:",
 		GTTX_Text, (ULONG)"-",
 		GTTX_Border, TRUE,
 		TAG_IGNORE, 0,
@@ -671,7 +704,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadAlbum = gad = MakeGadget(gui, gad, TEXT_KIND, GID_ALBUM,
-		55, 86, 300, 14, "Album:",
+		55, ROW_ALBUM, 300, 14, "Album:",
 		GTTX_Text, (ULONG)"-",
 		GTTX_Border, TRUE,
 		TAG_IGNORE, 0,
@@ -680,7 +713,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_FAST_LOWRATE,
-		22, 114, 20, 12, "Fast-lowrate",
+		22, ROW_CHECKS, 20, 12, "Fast-lr",
 		GTCB_Checked, gui->fastLowrate,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
@@ -689,7 +722,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_FAST_MEM,
-		160, 114, 20, 12, "Fast-mem",
+		160, ROW_CHECKS, 20, 12, "Fast-mem",
 		GTCB_Checked, gui->fastMem,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
@@ -698,7 +731,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_MONO,
-		278, 114, 20, 12, "Mono",
+		278, ROW_CHECKS, 20, 12, "Mono",
 		GTCB_Checked, gui->mono,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
@@ -707,7 +740,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gad = MakeGadget(gui, gad, CYCLE_KIND, GID_RATE,
-		55, 134, 98, 16, "Rate:",
+		55, ROW_CYCLES, 98, 16, "Rate:",
 		GTCY_Labels, (ULONG)kRateLabels,
 		GTCY_Active, gui->rateIndex,
 		TAG_IGNORE, 0,
@@ -716,7 +749,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gad = MakeGadget(gui, gad, CYCLE_KIND, GID_QUALITY,
-		238, 134, 112, 16, "Quality:",
+		238, ROW_CYCLES, 112, 16, "Quality:",
 		GTCY_Labels, (ULONG)kQualityLabels,
 		GTCY_Active, gui->qualityIndex,
 		TAG_IGNORE, 0,
@@ -725,7 +758,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadBuffer = gad = MakeGadget(gui, gad, SLIDER_KIND, GID_BUFFER,
-		70, 184, 220, 16, "Buffer:",
+		70, ROW_BUFFER, 220, 16, "Buffer:",
 		GTSL_Min, 1,
 		GTSL_Max, 30,
 		GTSL_Level, gui->bufferSeconds,
@@ -734,7 +767,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadPlay = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_PLAY,
-		45, 226, 72, 18, "Play",
+		45, ROW_BUTTONS, 72, 18, "Play",
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
@@ -743,7 +776,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadStop = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_STOP,
-		310, 226, 72, 18, "Stop",
+		310, ROW_BUTTONS, 72, 18, "Stop",
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
@@ -752,7 +785,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadStatus = gad = MakeGadget(gui, gad, TEXT_KIND, GID_STATUS,
-		58, 252, 350, 14, "Status:",
+		58, ROW_STATUS, 350, 14, "Status:",
 		GTTX_Text, (ULONG)gui->statusText,
 		GTTX_Border, TRUE,
 		TAG_IGNORE, 0,
@@ -877,8 +910,8 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	memset(&nw, 0, sizeof(nw));
 	nw.LeftEdge = 40;
 	nw.TopEdge = 30;
-	nw.Width = 460;
-	nw.Height = 280;
+	nw.Width = WIN_W;
+	nw.Height = WIN_H;
 	nw.DetailPen = 0;
 	nw.BlockPen = 1;
 	nw.IDCMPFlags = IDCMP_GADGETUP | IDCMP_MOUSEMOVE | IDCMP_CLOSEWINDOW |
@@ -888,10 +921,10 @@ static int GuiOpen(HelixAmp3Gui *gui)
 		WFLG_SMART_REFRESH;
 	nw.FirstGadget = gui->gadgets;
 	nw.Title = (UBYTE *)"MiniAMP3";
-	nw.MinWidth = 460;
-	nw.MinHeight = 280;
+	nw.MinWidth = WIN_W;
+	nw.MinHeight = WIN_H;
 	nw.MaxWidth = 680;
-	nw.MaxHeight = 328;
+	nw.MaxHeight = 220;
 	nw.Type = WBENCHSCREEN;
 	gui->win = OpenWindow(&nw);
 	if (!gui->win) {
@@ -936,6 +969,12 @@ static int GuiOpen(HelixAmp3Gui *gui)
 			gui->timerPort = NULL;
 		}
 	}
+	gui->donePort = CreateMsgPort();
+	if (gui->donePort) {
+		memset(&gDoneMsg, 0, sizeof(gDoneMsg));
+		gDoneMsg.mn_Length = sizeof(gDoneMsg);
+		gDoneMsg.mn_Node.ln_Type = NT_MESSAGE;
+	}
 	GT_RefreshWindow(gui->win, NULL);
 	DrawProgressFrame(gui);
 	DrawProgress(gui);
@@ -962,6 +1001,15 @@ static void GuiClose(HelixAmp3Gui *gui)
 	if (gui->timerPort) {
 		DeleteMsgPort(gui->timerPort);
 		gui->timerPort = NULL;
+	}
+	if (gui->donePort) {
+		struct Message *msg;
+
+		gDonePort = NULL;
+		while ((msg = GetMsg(gui->donePort)) != NULL)
+			;
+		DeleteMsgPort(gui->donePort);
+		gui->donePort = NULL;
 	}
 	if (gui->win && gui->menuStrip)
 		ClearMenuStrip(gui->win);
@@ -1084,15 +1132,17 @@ static void ResetDecoderStatics(void)
 
 static void PlaybackEntry(void)
 {
+	struct MsgPort *donePort;
+
 	ResetDecoderStatics();
-	gGuiPlayer.running = 1;
 	gGuiPlayer.stopRequested = 0;
 	gPlaybackInterrupted = 0;
 	HelixAmp3CliMain(gGuiPlayer.argc, gGuiPlayer.argv);
-	gGuiPlayer.running = 0;
-	Forbid();
+	donePort = gDonePort;
+	gDonePort = NULL;
 	gGuiPlayer.process = NULL;
-	Permit();
+	if (donePort)
+		PutMsg(donePort, &gDoneMsg);
 }
 
 static void StartPlayback(HelixAmp3Gui *gui)
@@ -1105,17 +1155,23 @@ static void StartPlayback(HelixAmp3Gui *gui)
 		SetStatus(gui, "Browse to an MP3 first.");
 		return;
 	}
-	if (gGuiPlayer.running || gGuiPlayer.process != NULL) {
+	if (gui->playbackActive) {
 		SetStatus(gui, "Already playing; press Stop first.");
 		return;
 	}
+	if (!gui->donePort) {
+		SetStatus(gui, "Cannot start playback: no done port.");
+		return;
+	}
 	gui->elapsedSecs = 0;
+	gui->launchBufferSecs = gui->decodeThenPlay ? 0 : gui->bufferSeconds;
 	DrawProgress(gui);
 	BuildPlaybackArgs(gui, &gGuiArgs);
 	gGuiPlayer.argc = gGuiArgs.argc;
 	gGuiPlayer.argv = gGuiArgs.argv;
 	gGuiPlayer.stopRequested = 0;
 	gPlaybackInterrupted = 0;
+	gDonePort = gui->donePort;
 
 	/* Give each playback process its own current-directory lock so relative
 	 * paths remain resolvable across Stop/Play cycles.  DupLock(NULL) is safe
@@ -1147,10 +1203,11 @@ static void StartPlayback(HelixAmp3Gui *gui)
 			Close(nilOut);
 		if (dirLock)
 			UnLock(dirLock);
+		gDonePort = NULL;
 		SetStatus(gui, "Cannot start playback process.");
 		return;
 	}
-	gui->playbackWasRunning = 1;
+	gui->playbackActive = 1;
 	SetStatus(gui, gui->decodeThenPlay ?
 		"Decoding to RAM, then playing..." :
 		"Streaming playback started.");
@@ -1158,11 +1215,12 @@ static void StartPlayback(HelixAmp3Gui *gui)
 
 static void StopPlayback(HelixAmp3Gui *gui)
 {
-	gui->elapsedSecs = 0;
-	DrawProgress(gui);
-	if (!gGuiPlayer.running || gGuiPlayer.stopRequested) {
-		SetStatus(gui, gGuiPlayer.stopRequested ?
-			"Stopping..." : "Nothing is playing.");
+	if (!gui->playbackActive) {
+		SetStatus(gui, "Nothing is playing.");
+		return;
+	}
+	if (gGuiPlayer.stopRequested) {
+		SetStatus(gui, "Stopping...");
 		return;
 	}
 	gGuiPlayer.stopRequested = 1;
@@ -1287,15 +1345,28 @@ int main(int argc, char **argv)
 		return 1;
 	while (!gui.closeRequested) {
 		ULONG timerMask = gui.timerPort ? (1UL << gui.timerPort->mp_SigBit) : 0;
-		ULONG sigs = Wait(HELIXAMP3_SIGMASK(&gui) | timerMask | SIGBREAKF_CTRL_C);
-		if (SetSignal(0, 0) & SIGBREAKF_CTRL_C)
+		ULONG doneMask = gui.donePort ? (1UL << gui.donePort->mp_SigBit) : 0;
+		ULONG sigs = Wait(HELIXAMP3_SIGMASK(&gui) | timerMask |
+			doneMask | SIGBREAKF_CTRL_C);
+		if (sigs & SIGBREAKF_CTRL_C)
 			gui.closeRequested = 1;
+		if (doneMask && (sigs & doneMask))
+			HandleDoneSignal(&gui);
 		if (timerMask && (sigs & timerMask))
 			HandleTimerSignal(&gui);
 		GuiPoll(&gui);
 	}
-	if (gGuiPlayer.running)
+	if (gui.playbackActive) {
 		StopPlayback(&gui);
+		while (gui.playbackActive && gui.donePort) {
+			ULONG doneMask = 1UL << gui.donePort->mp_SigBit;
+			ULONG sigs = Wait(doneMask | SIGBREAKF_CTRL_C);
+			if (sigs & doneMask)
+				HandleDoneSignal(&gui);
+			if (sigs & SIGBREAKF_CTRL_C)
+				break;
+		}
+	}
 	GuiClose(&gui);
 	return 0;
 }
