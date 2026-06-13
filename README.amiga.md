@@ -210,8 +210,11 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   If the requested 22050 Hz or stereo buffer set is too large for available
   memory, playback automatically retries with smaller
   half-buffers and prints the reduced byte count instead of failing immediately.
-  Playback prints the selected half-buffer duration and byte size at startup, and
-  reports total underruns, per-buffer underruns, late-buffer count, and the
+  Playback prints the selected half-buffer duration and byte size at startup.
+  Each Paula channel submission is capped at 65534 bytes, so high-rate settings
+  such as 22050 Hz automatically use shorter half-buffers instead of decoding
+  far more audio than one `CMD_WRITE` can play. Playback reports total underruns,
+  per-buffer underruns, late-buffer count, and the
   minimum measured spare time before a playing buffer ended at exit.
 - `--fast-mem` preloads the complete compressed MP3 into Fast RAM before decoding
   or playback starts. On AmigaOS builds it requests `MEMF_FAST`, so the input

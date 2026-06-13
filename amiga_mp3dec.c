@@ -116,6 +116,7 @@ extern const int STATNAME(polyCoef)[264];
 #define AMIGA_IMDCT_NBANDS 32
 #define AMIGA_POLYPHASE_NBANDS 32
 #define AMIGA_POLYPHASE_VBUF_LENGTH (17 * 2 * AMIGA_POLYPHASE_NBANDS)
+#define AMIGA_AUDIO_MAX_CHANNEL_BYTES 65534UL
 
 #define OUT_PCM16 0
 #define OUT_S8    1
@@ -4118,6 +4119,11 @@ static int AmigaAudioAllocWorkBuffers(AmigaAudioPlayer *player, int stereo,
 
 static unsigned long AlignPlaybackChunkBytes(unsigned long bytes, int stereo)
 {
+	unsigned long maxBytes;
+
+	maxBytes = AMIGA_AUDIO_MAX_CHANNEL_BYTES * (stereo ? 2UL : 1UL);
+	if (bytes > maxBytes)
+		bytes = maxBytes;
 	if (stereo && (bytes & 1UL))
 		bytes--;
 	if (bytes == 0)
