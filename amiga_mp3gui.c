@@ -1730,6 +1730,21 @@ static void HandleTimerSignal(HelixAmp3Gui *gui)
 	gui->timerPending = 0;
 	gui->timerIsArt = 0;
 
+	/* Poll the done port on every tick while playback is active so that a
+	 * fast-exiting child whose signal wake was already consumed by a previous
+	 * Wait() return does not leave the GUI permanently locked. */
+	if (gui->playbackActive && gui->donePort) {
+		struct Message *msg;
+		int gotDone = 0;
+		while ((msg = GetMsg(gui->donePort)) != NULL)
+			gotDone = 1;
+		if (gotDone && !gui->playbackDonePending) {
+			gui->playbackDonePending = 1;
+			gui->playbackStoppedByUser = gGuiPlayer.stopRequested ? 1 : 0;
+			SetStatus(gui, gui->playbackStoppedByUser ?
+				"Stopping playback process..." : "Finishing playback process...");
+		}
+	}
 	if (gui->playbackDonePending && !PlaybackProcessStillExists())
 		FinalizePlayback(gui);
 
@@ -1815,16 +1830,23 @@ static void HandleDoneSignal(HelixAmp3Gui *gui)
 	gotDone = 0;
 	while ((msg = GetMsg(gui->donePort)) != NULL)
 		gotDone = 1;
-	if (!gotDone)
+	if (!gotDone) {
+		/* No message on the port — but if playbackDonePending is already set
+		 * (polled ahead by HandleTimerSignal), still check if we can finalize. */
+		if (gui->playbackDonePending && !PlaybackProcessStillExists())
+			FinalizePlayback(gui);
 		return;
+	}
 
 	/* HelixAmp3CliMain() has returned, but the child has not necessarily
 	 * finished its DOS/runtime teardown yet.  Keep Play locked until the
 	 * playback task itself has disappeared. */
-	gui->playbackStoppedByUser = gGuiPlayer.stopRequested ? 1 : 0;
-	gui->playbackDonePending = 1;
-	SetStatus(gui, gui->playbackStoppedByUser ?
-		"Stopping playback process..." : "Finishing playback process...");
+	if (!gui->playbackDonePending) {
+		gui->playbackStoppedByUser = gGuiPlayer.stopRequested ? 1 : 0;
+		gui->playbackDonePending = 1;
+		SetStatus(gui, gui->playbackStoppedByUser ?
+			"Stopping playback process..." : "Finishing playback process...");
+	}
 
 	if (!PlaybackProcessStillExists())
 		FinalizePlayback(gui);
@@ -2653,6 +2675,23 @@ static void StopPlayback(HelixAmp3Gui *gui)
 	if (gGuiPlayer.stopRequested) {
 		SetStatus(gui, "Stopping...");
 		return;
+	}
+	/* Before signalling, poll the done port: the child may have already exited
+	 * (fast-fail race) and its done message arrived before we got here.  If so,
+	 * handle it now instead of signalling a stale process pointer. */
+	if (gui->donePort) {
+		struct Message *msg;
+		int gotDone = 0;
+		while ((msg = GetMsg(gui->donePort)) != NULL)
+			gotDone = 1;
+		if (gotDone) {
+			gui->playbackDonePending = 1;
+			gui->playbackStoppedByUser = 1;
+			SetStatus(gui, "Stopping playback process...");
+			if (!PlaybackProcessStillExists())
+				FinalizePlayback(gui);
+			return;
+		}
 	}
 	gGuiPlayer.stopRequested = 1;
 	gPlaybackInterrupted = 1;
