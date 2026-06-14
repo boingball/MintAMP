@@ -121,19 +121,17 @@ is needed.
 
 The quality cycle maps to the same playback code used by `amiga_mp3dec`:
 
-- **Fast** enables `--fast-mem` and the explicit `--play-fast-path` alias for the
-  lowest-overhead playback setup.
-- **Normal** enables `--fast-mem` but leaves the rest of the conservative default
-  playback path in place.
-- **Best** uses the baseline playback options, avoiding the extra speed-oriented
-  input preload.
+- **Fast** enables the explicit `--play-fast-path` alias for the lowest-overhead
+  playback setup.
+- **Normal** and **Best** leave the memory preload choice to the Fast-mem
+  checkbox, so unticking Fast-mem is always obeyed.
 
 The buffer slider chooses the `--buffer-seconds` value from 1 to 30 seconds, and
 the rate selector cycles through 8287, 8820, 11025, 22050, and 28600 Hz. Playback still
 uses the Paula streaming implementation inside `amiga_mp3dec`. The GUI launches
-the playback subprocess at priority 1: this is only a modest preference over the
-Workbench/GadTools event loop, not a substitute for correct buffering. Stop
-requests set the same interrupt flag used by Shell playback, signal the child,
+the playback subprocess at normal priority so CPU-bound decoding does not starve
+the Workbench/GadTools event loop. Stop requests set the same interrupt flag
+used by Shell playback, signal the child,
 and the audio wait path can abort/reap outstanding writes so the GUI remains
 responsive. During playback the status bar keeps the change-only
 `Playing - underruns: N` text visible instead of redrawing generic `Playing` on
@@ -230,9 +228,11 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   minimum measured spare time before a playing buffer ended at exit.
 - `--fast-mem` preloads the complete compressed MP3 into Fast RAM before decoding
   or playback starts. On AmigaOS builds it requests `MEMF_FAST`, so the input
-  does not consume chip RAM needed by Paula buffers. This removes filesystem and
-  slow-HDD reads from the realtime decode/refill loop and prints the allocated
-  byte count at startup. The option fails before playback if the complete input
+  does not consume chip RAM needed by Paula buffers. MiniAMP3 disables the
+  checkbox when the selected file will not fit in available Fast RAM. During
+  startup it reports that it is copying the input to Fast RAM. This removes
+  filesystem and slow-HDD reads from the realtime decode/refill loop and prints
+  the allocated byte count at startup. The option fails before playback if the complete input
   cannot be sized, read, or allocated; it never silently falls back to disk.
   Unlike `--decode-then-play`, it stores only the compressed MP3 and continues to
   decode into the normal three-slot playback queue, so it normally needs far

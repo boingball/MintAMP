@@ -60,6 +60,7 @@ typedef struct GuiPlaybackStatus {
 #define GUISTART_INPUT_OPEN            30
 #define GUISTART_INPUT_FOPEN_BEFORE    31
 #define GUISTART_INPUT_FOPEN_AFTER     32
+#define GUISTART_INPUT_PRELOAD_FASTMEM 35
 #define GUISTART_INPUT_PREPARE         40
 #define GUISTART_DECODER_ALLOC         50
 #define GUISTART_DECODER_CONFIG        60
@@ -94,6 +95,8 @@ static const char *GuiStartupStageName(int stage)
 	switch (stage) {
 	case GUISTART_INPUT_FOPEN_BEFORE: return "input fopen before";
 	case GUISTART_INPUT_FOPEN_AFTER: return "input fopen after";
+	case GUISTART_INPUT_PRELOAD_FASTMEM: return "copying input to Fast RAM";
+	case GUISTART_INPUT_PREPARE: return "input prepare";
 	case GUISTART_FASTLOWRATE_WARN_BEFORE: return "fast-lowrate warning gate before";
 	case GUISTART_FASTLOWRATE_WARN_AFTER: return "fast-lowrate warning gate after";
 	case GUISTART_PROBE_RATE: return "probing input rate";
@@ -1979,7 +1982,9 @@ static void HandleTimerSignal(HelixAmp3Gui *gui)
 				SetStatus(gui, "Playback startup is taking longer than expected.");
 				gui->startupStallShown = 1;
 			} else if (phaseChanged || stageChanged) {
-				if (stage >= GUISTART_AUDIO_SETUP)
+				if (stage == GUISTART_INPUT_PRELOAD_FASTMEM)
+					SetStatus(gui, "Copying file to Fast RAM...");
+				else if (stage >= GUISTART_AUDIO_SETUP)
 					SetStatus(gui, "Buffering...");
 				else
 					SetStatus(gui, "Starting playback...");
@@ -2649,6 +2654,83 @@ static void GuiClose(HelixAmp3Gui *gui)
 	}
 }
 
+
+static unsigned long GuiInputFileSize(const char *path)
+{
+#if defined(AMIGA_M68K)
+	BPTR fh;
+	LONG size;
+
+	fh = Open((STRPTR)path, MODE_OLDFILE);
+	if (!fh)
+		return 0;
+	if (Seek(fh, 0, OFFSET_END) < 0) {
+		Close(fh);
+		return 0;
+	}
+	size = Seek(fh, 0, OFFSET_CURRENT);
+	Close(fh);
+	return size > 0 ? (unsigned long)size : 0;
+#else
+	FILE *f;
+	long size;
+
+	f = fopen(path, "rb");
+	if (!f)
+		return 0;
+	if (fseek(f, 0, SEEK_END) != 0) {
+		fclose(f);
+		return 0;
+	}
+	size = ftell(f);
+	fclose(f);
+	return size > 0 ? (unsigned long)size : 0;
+#endif
+}
+
+static int GuiFastMemoryCanHoldFile(const char *path, unsigned long *fileSizeOut,
+	unsigned long *fastAvailOut)
+{
+	unsigned long fileSize;
+	unsigned long fastAvail;
+
+	fileSize = GuiInputFileSize(path);
+#if defined(AMIGA_M68K)
+	fastAvail = (unsigned long)AvailMem(MEMF_FAST);
+#else
+	fastAvail = (unsigned long)-1;
+#endif
+	if (fileSizeOut)
+		*fileSizeOut = fileSize;
+	if (fastAvailOut)
+		*fastAvailOut = fastAvail;
+	return fileSize > 0 && fileSize < fastAvail;
+}
+
+static void GuiDisableFastMemIfTooSmall(HelixAmp3Gui *gui)
+{
+	unsigned long fileSize;
+	unsigned long fastAvail;
+
+	if (!gui->fastMem || !gui->inputName[0])
+		return;
+	if (GuiFastMemoryCanHoldFile(gui->inputName, &fileSize, &fastAvail))
+		return;
+	gui->fastMem = 0;
+	if (gui->win && gui->gadFastMem)
+		GT_SetGadgetAttrs(gui->gadFastMem, gui->win, NULL,
+			GTCB_Checked, FALSE, TAG_DONE);
+	SaveGuiSettings(gui);
+	if (fileSize > 0 && fastAvail != (unsigned long)-1) {
+		char buf[128];
+		sprintf(buf, "Fast-mem disabled: file %lu bytes, Fast RAM %lu bytes.",
+			fileSize, fastAvail);
+		SetStatus(gui, buf);
+	} else {
+		SetStatus(gui, "Fast-mem disabled: not enough Fast RAM for this file.");
+	}
+}
+
 static void ChooseMp3(HelixAmp3Gui *gui)
 {
 	struct FileRequester *req;
@@ -2692,6 +2774,7 @@ static void ChooseMp3(HelixAmp3Gui *gui)
 			FormatReadyStatus(&gui->tags, gui->statusText, sizeof(gui->statusText));
 			SetStatus(gui, gui->statusText);
 		}
+		GuiDisableFastMemIfTooSmall(gui);
 	}
 	FreeAslRequest(req);
 }
@@ -2712,7 +2795,7 @@ static void BuildPlaybackArgs(HelixAmp3Gui *gui, HelixAmp3Args *args)
 	memset(args, 0, sizeof(*args));
 	AddArg(args, "amiga_mp3dec");
 	AddArg(args, "--play");
-	if (gui->fastMem || gui->qualityIndex == 0 || gui->qualityIndex == 1)
+	if (gui->fastMem)
 		AddArg(args, "--fast-mem");
 	if (gui->fastLowrate && strcmp(kRates[gui->rateIndex], "28600"))
 		AddArg(args, "--fast-lowrate");
@@ -2897,6 +2980,7 @@ static void StartPlayback(HelixAmp3Gui *gui)
 	gPlaybackEntryRunId = gui->playbackRunId;
 	gui->launchBufferSecs = gui->decodeThenPlay ? 0 : gui->bufferSeconds;
 	DrawProgress(gui);
+	GuiDisableFastMemIfTooSmall(gui);
 	BuildPlaybackArgs(gui, &gGuiArgs);
 	gGuiPlayer.argc = gGuiArgs.argc;
 	gGuiPlayer.argv = gGuiArgs.argv;
@@ -2920,10 +3004,9 @@ static void StartPlayback(HelixAmp3Gui *gui)
 	if (nilOut) {
 		gGuiPlayer.process = CreateNewProcTags(NP_Entry, (ULONG)PlaybackEntry,
 			NP_Name, (ULONG)"MiniAMP3 playback",
-			/* Priority 1 is intentionally modest: it gives decoding a small
-			 * preference over the GUI without replacing correct buffering or
-			 * GUI throttling, and keeps input/Stop responsive. */
-			NP_Priority, 1,
+			/* Keep playback at normal priority so CPU-bound decoding does not
+			 * starve the GadTools event loop and make Stop hard to press. */
+			NP_Priority, 0,
 			NP_StackSize, 262144,
 			NP_CurrentDir, dirLock,
 			NP_Output, nilOut,
@@ -2933,10 +3016,9 @@ static void StartPlayback(HelixAmp3Gui *gui)
 	} else {
 		gGuiPlayer.process = CreateNewProcTags(NP_Entry, (ULONG)PlaybackEntry,
 			NP_Name, (ULONG)"MiniAMP3 playback",
-			/* Priority 1 is intentionally modest: it gives decoding a small
-			 * preference over the GUI without replacing correct buffering or
-			 * GUI throttling, and keeps input/Stop responsive. */
-			NP_Priority, 1,
+			/* Keep playback at normal priority so CPU-bound decoding does not
+			 * starve the GadTools event loop and make Stop hard to press. */
+			NP_Priority, 0,
 			NP_StackSize, 262144,
 			NP_CurrentDir, dirLock,
 			NP_CopyVars, FALSE,
@@ -3032,6 +3114,7 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code)
 		gui->fastMem = !gui->fastMem;
 		GT_SetGadgetAttrs(gad, gui->win, NULL, GTCB_Checked, gui->fastMem, TAG_DONE);
 		SetStatus(gui, gui->fastMem ? "Fast memory path enabled." : "Fast memory path disabled.");
+		GuiDisableFastMemIfTooSmall(gui);
 		SaveGuiSettings(gui);
 		break;
 	case GID_MONO:

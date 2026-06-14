@@ -12,7 +12,7 @@ dd if=/dev/zero of="$tmp/no-sync.mp3" bs=1024 count=64 2>/dev/null
 "$MP3DEC" --decode-only "$tmp/no-sync.mp3" > "$tmp/disk.out"
 "$MP3DEC" --fast-mem --decode-only "$tmp/no-sync.mp3" > "$tmp/ram.out"
 
-if ! sed -n '1p' "$tmp/ram.out" | grep '^fast-mem input preload: 65536 bytes$' >/dev/null; then
+if ! sed -n '1p' "$tmp/ram.out" | grep '^fast-mem input preload: copying 65536 bytes to Fast RAM$' >/dev/null; then
 	printf '%s\n' 'FAIL: --fast-mem did not report the expected preload size' >&2
 	exit 1
 fi

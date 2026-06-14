@@ -1383,7 +1383,7 @@ static int InputSourcePreloadFastMemory(InputSource *input)
 		input->memory = memory;
 		input->memorySize = (unsigned long)fileSize;
 		input->memoryPos = 0;
-		printf("fast-mem input preload: %lu bytes\n", input->memorySize);
+		printf("fast-mem input preload: copying %lu bytes to Fast RAM\n", input->memorySize);
 		return 0;
 	}
 #endif
@@ -1408,7 +1408,7 @@ static int InputSourcePreloadFastMemory(InputSource *input)
 	input->memory = memory;
 	input->memorySize = (unsigned long)fileSize;
 	input->memoryPos = 0;
-	printf("fast-mem input preload: %lu bytes\n", input->memorySize);
+	printf("fast-mem input preload: copying %lu bytes to Fast RAM\n", input->memorySize);
 	return 0;
 }
 
@@ -3787,6 +3787,7 @@ typedef struct GuiPlaybackStatus {
 #define GUISTART_INPUT_OPEN            30
 #define GUISTART_INPUT_FOPEN_BEFORE    31
 #define GUISTART_INPUT_FOPEN_AFTER     32
+#define GUISTART_INPUT_PRELOAD_FASTMEM 35
 #define GUISTART_INPUT_PREPARE         40
 #define GUISTART_DECODER_ALLOC         50
 #define GUISTART_DECODER_CONFIG        60
@@ -3826,6 +3827,7 @@ const char *GuiStartupStageName(int stage)
 	case GUISTART_INPUT_OPEN: return "input open";
 	case GUISTART_INPUT_FOPEN_BEFORE: return "input fopen before";
 	case GUISTART_INPUT_FOPEN_AFTER: return "input fopen after";
+	case GUISTART_INPUT_PRELOAD_FASTMEM: return "copying input to Fast RAM";
 	case GUISTART_INPUT_PREPARE: return "input prepare";
 	case GUISTART_DECODER_ALLOC: return "decoder alloc";
 	case GUISTART_DECODER_CONFIG: return "decoder config";
@@ -5667,6 +5669,10 @@ int main(int argc, char **argv)
 			return 0;
 		}
 	}
+	if (opt.play)
+		gGuiPlaybackStatus.phase = GUIPLAY_PHASE_BUFFERING;
+	if (opt.fastMem)
+		GuiPublishStartupStage(GUISTART_INPUT_PRELOAD_FASTMEM);
 	if (opt.fastMem && InputSourcePreloadFastMemory(&input) != 0) {
 		fprintf(stderr, "cannot preload input into Fast RAM: %s\n", opt.inName);
 		InputSourceClose(&input);
