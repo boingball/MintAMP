@@ -13,6 +13,13 @@
 #define main HelixAmp3CliMain
 #include "amiga_mp3dec.c"
 #undef main
+#undef printf
+#undef fprintf
+#undef fputs
+#undef puts
+#undef putchar
+#undef fflush
+#undef fwrite
 #endif
 
 #if !defined(AMIGA_M68K)
@@ -56,6 +63,8 @@ typedef struct GuiPlaybackStatus {
 #define GUISTART_INPUT_PREPARE         40
 #define GUISTART_DECODER_ALLOC         50
 #define GUISTART_DECODER_CONFIG        60
+#define GUISTART_FASTLOWRATE_WARN_BEFORE 61
+#define GUISTART_FASTLOWRATE_WARN_AFTER  62
 #define GUISTART_PROBE_RATE            70
 #define GUISTART_PROBE_RATE_DONE       80
 #define GUISTART_STREAM_INIT           90
@@ -84,6 +93,8 @@ static const char *GuiStartupStageName(int stage)
 	switch (stage) {
 	case GUISTART_INPUT_FOPEN_BEFORE: return "input fopen before";
 	case GUISTART_INPUT_FOPEN_AFTER: return "input fopen after";
+	case GUISTART_FASTLOWRATE_WARN_BEFORE: return "fast-lowrate warning gate before";
+	case GUISTART_FASTLOWRATE_WARN_AFTER: return "fast-lowrate warning gate after";
 	case GUISTART_PROBE_RATE: return "probing input rate";
 	case GUISTART_PREFILL: return "prefill decode";
 	case GUISTART_AUDIO_SETUP: return "audio setup";
@@ -106,6 +117,7 @@ static const char *GuiStartupStageName(int stage)
 #endif
 /* Shared status written by the playback subprocess (amiga_mp3dec.c). */
 extern GuiPlaybackStatus gGuiPlaybackStatus;
+extern volatile int gMiniAmp3EmbeddedPlayback;
 
 #ifdef AMIGA_M68K
 #include <exec/types.h>
@@ -2727,6 +2739,7 @@ static void PlaybackEntry(void)
 	else {
 		ranDecoder = 1;
 		gGuiPlaybackStatus.startupStage = GUISTART_STREAM_INIT;
+		gMiniAmp3EmbeddedPlayback = 1;
 		HelixAmp3CliMain(gGuiPlayer.argc, gGuiPlayer.argv);
 		gGuiPlaybackStatus.startupStage = GUISTART_CLEANUP;
 	}
@@ -2734,6 +2747,12 @@ static void PlaybackEntry(void)
 		gGuiPlaybackStatus.phase = GUIPLAY_PHASE_DONE;
 		gGuiPlaybackStatus.cleanupStage = GUIPLAY_CLEANUP_COMPLETE;
 		gGuiPlaybackStatus.cleanupComplete = 1;
+	} else {
+		if (!gGuiPlaybackStatus.cleanupComplete) {
+			gGuiPlaybackStatus.cleanupStage = GUIPLAY_CLEANUP_COMPLETE;
+			gGuiPlaybackStatus.cleanupComplete = 1;
+		}
+		gMiniAmp3EmbeddedPlayback = 0;
 	}
 
 	/* Only the GUI task owns the public process/lifecycle fields.  Publish a

@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <stdarg.h>
 #ifndef AMIGA_M68K
 #include <signal.h>
 #endif
@@ -31,6 +32,80 @@
 #include "mp3dec.h"
 #include "assembly.h"
 #include "statname.h"
+
+volatile int gMiniAmp3EmbeddedPlayback;
+
+static int MiniAmp3ConsoleSuppressed(void)
+{
+	return gMiniAmp3EmbeddedPlayback != 0;
+}
+
+static int MiniAmp3Printf(const char *fmt, ...)
+{
+	int r;
+	va_list ap;
+	if (MiniAmp3ConsoleSuppressed())
+		return 0;
+	va_start(ap, fmt);
+	r = vprintf(fmt, ap);
+	va_end(ap);
+	return r;
+}
+
+static int MiniAmp3Fprintf(FILE *stream, const char *fmt, ...)
+{
+	int r;
+	va_list ap;
+	if (MiniAmp3ConsoleSuppressed() && (stream == stdout || stream == stderr))
+		return 0;
+	va_start(ap, fmt);
+	r = vfprintf(stream, fmt, ap);
+	va_end(ap);
+	return r;
+}
+
+static int MiniAmp3Fputs(const char *s, FILE *stream)
+{
+	if (MiniAmp3ConsoleSuppressed() && (stream == stdout || stream == stderr))
+		return 0;
+	return fputs(s, stream);
+}
+
+static int MiniAmp3Puts(const char *s)
+{
+	if (MiniAmp3ConsoleSuppressed())
+		return 0;
+	return puts(s);
+}
+
+static int MiniAmp3Putchar(int c)
+{
+	if (MiniAmp3ConsoleSuppressed())
+		return c;
+	return putchar(c);
+}
+
+static int MiniAmp3Fflush(FILE *stream)
+{
+	if (MiniAmp3ConsoleSuppressed() && (!stream || stream == stdout || stream == stderr))
+		return 0;
+	return fflush(stream);
+}
+
+static size_t MiniAmp3Fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream)
+{
+	if (MiniAmp3ConsoleSuppressed() && (stream == stdout || stream == stderr))
+		return nmemb;
+	return fwrite(ptr, size, nmemb, stream);
+}
+
+#define printf MiniAmp3Printf
+#define fprintf MiniAmp3Fprintf
+#define fputs MiniAmp3Fputs
+#define puts MiniAmp3Puts
+#define putchar MiniAmp3Putchar
+#define fflush MiniAmp3Fflush
+#define fwrite MiniAmp3Fwrite
 
 #if defined(AMIGA_M68K)
 /* Tell AmigaOS to provide at least 250 KB of stack for this executable. */
@@ -1278,11 +1353,17 @@ static int InputSourcePreloadFastMemory(InputSource *input)
 	size_t nRead;
 #ifdef HAVE_AMIGA_AUDIO_DEVICE
 	if (input->useAmigaDos) {
+		LONG oldPos;
 		LONG endPos;
 
 		if (!input->amigaFile)
 			return -1;
-		endPos = Seek(input->amigaFile, 0, OFFSET_END);
+		oldPos = Seek(input->amigaFile, 0, OFFSET_END);
+		if (oldPos < 0) {
+			Seek(input->amigaFile, 0, OFFSET_BEGINNING);
+			return -1;
+		}
+		endPos = Seek(input->amigaFile, 0, OFFSET_CURRENT);
 		if (endPos <= 0 || (unsigned long)endPos > (unsigned long)(size_t)-1) {
 			Seek(input->amigaFile, 0, OFFSET_BEGINNING);
 			return -1;
@@ -3709,6 +3790,8 @@ typedef struct GuiPlaybackStatus {
 #define GUISTART_INPUT_PREPARE         40
 #define GUISTART_DECODER_ALLOC         50
 #define GUISTART_DECODER_CONFIG        60
+#define GUISTART_FASTLOWRATE_WARN_BEFORE 61
+#define GUISTART_FASTLOWRATE_WARN_AFTER  62
 #define GUISTART_PROBE_RATE            70
 #define GUISTART_PROBE_RATE_DONE       80
 #define GUISTART_STREAM_INIT           90
@@ -3745,6 +3828,8 @@ const char *GuiStartupStageName(int stage)
 	case GUISTART_INPUT_PREPARE: return "input prepare";
 	case GUISTART_DECODER_ALLOC: return "decoder alloc";
 	case GUISTART_DECODER_CONFIG: return "decoder config";
+	case GUISTART_FASTLOWRATE_WARN_BEFORE: return "fast-lowrate warning gate before";
+	case GUISTART_FASTLOWRATE_WARN_AFTER: return "fast-lowrate warning gate after";
 	case GUISTART_PROBE_RATE: return "probing input rate";
 	case GUISTART_PROBE_RATE_DONE: return "input rate probed";
 	case GUISTART_STREAM_INIT: return "stream init";
@@ -5581,9 +5666,11 @@ int main(int argc, char **argv)
 		if (opt.expFdct32Quarter && stride != 4)
 			fprintf(stderr, "warning: --exp-fdct32-quarter only affects 11025 Hz stride-4 fast-lowrate output\n");
 		MP3SetFastLowrate(decoder, stride);
-		if (opt.outputRate == 22050)
+		GuiPublishStartupStage(GUISTART_FASTLOWRATE_WARN_BEFORE);
+		if (!gMiniAmp3EmbeddedPlayback && opt.outputRate == 22050)
 			fprintf(stderr,
 				"22050 requires significantly more CPU and may underrun on 030 systems.\n");
+		GuiPublishStartupStage(GUISTART_FASTLOWRATE_WARN_AFTER);
 #if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE)
 		if (opt.expReducedTaps) {
 #if defined(AMIGA_FAST_REDUCED_TAPS)
