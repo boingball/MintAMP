@@ -256,12 +256,13 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   submit/complete milestone, underrun detections, and final cleanup counts for
   completed/aborted outstanding I/O, freed buffers, and closed audio devices. The
   streaming startup path
-  allocates the playback buffers before pre-filling A and B by decoded
-  sample count (not amplitude), queues both non-empty buffers before rotation,
-  refills the completed half while the queued half is playing, and never waits on
-  an audio I/O request that has not been submitted. The newer three-buffer
-  streaming queue is temporarily disabled until Stop cleanup is proven safe on
-  real hardware. A silent first
+  allocates the playback buffers before pre-filling A, B, and C by decoded
+  sample count (not amplitude), queues the non-empty three-buffer ring before
+  rotation, decodes ahead into the most recently queued slot while Paula plays
+  the current slot and keeps the next slot queued, then waits for the active
+  slot and re-commits the freshly decoded buffer. This enabled three-buffer
+  ordering gives the decoder a full half-buffer period of slack and never waits
+  on an audio I/O request that has not been submitted. A silent first
   playback buffer is accepted so valid MP3 encoder delay, padding, or fade-ins
   can play normally; with `--debug-play`, an all-zero first buffer prints
   `first playback buffer is silent/near-silent`. Playback does not skip leading

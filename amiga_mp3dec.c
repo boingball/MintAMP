@@ -5250,6 +5250,7 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 	err = 0;
 
 	active = 0;
+	refill = (active + 2) % AMIGA_AUDIO_PLAYBACK_SLOTS;
 	while (err == 0 && !gPlaybackInterrupted &&
 		player.sent[active][0]) {
 		clock_t submittedAt;
@@ -5257,7 +5258,7 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 		unsigned long elapsedMilliseconds;
 		unsigned long activeMilliseconds;
 		long spareMilliseconds;
-		int completed;
+		int justFreed;
 		int underrun;
 		int late;
 
@@ -5268,12 +5269,27 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 		}
 #endif
 
+		/* Decode into the most recently queued slot while Paula is still
+		 * playing the current slot and has the next slot queued.  The slot
+		 * freed by the wait below becomes the target for the next pass. */
+		submittedAt = clock();
+		len[refill] = DecodeStreamFillPlaybackBuffer(&stream, opt, &player,
+			refill, buf[refill], bufBytes);
+		PrintPlaybackFillDebug(opt, refill, len[refill]);
+		if (stream.decodeError) {
+			err = -1;
+			break;
+		}
+		if (len[refill] == 0)
+			break;
+
 		underrun = AmigaAudioDone(&player, active);
 		if (AmigaAudioWait(&player, active) != 0) {
 			fprintf(stderr, "audio.device write failed\n");
 			err = -1;
 			break;
 		}
+		preparedAt = clock();
 #if defined(AMIGA_M68K)
 		if (SetSignal(0, 0) & SIGBREAKF_CTRL_C) {
 			gPlaybackInterrupted = 1;
@@ -5284,34 +5300,24 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 			printf("debug-play: CMD_WRITE completed %s\n",
 				PlaybackBufferName(active));
 
-		completed = active;
-		submittedAt = clock();
-		len[completed] = DecodeStreamFillPlaybackBuffer(&stream, opt, &player,
-			completed, buf[completed], bufBytes);
-		PrintPlaybackFillDebug(opt, completed, len[completed]);
-		if (stream.decodeError) {
-			err = -1;
-			break;
-		}
-		if (len[completed] == 0)
-			break;
-		if (AmigaAudioPreparePlaybackBuffer(&player, completed, buf[completed],
-			len[completed]) != 0 ||
-			AmigaAudioCommitPlaybackBuffer(&player, completed) != 0) {
+		if (AmigaAudioPreparePlaybackBuffer(&player, refill, buf[refill],
+			len[refill]) != 0 ||
+			AmigaAudioCommitPlaybackBuffer(&player, refill) != 0) {
 			fprintf(stderr, "playback buffer %s CMD_WRITE byte length is invalid\n",
-				PlaybackBufferName(completed));
+				PlaybackBufferName(refill));
 			err = -1;
 			break;
 		}
-		preparedAt = clock();
 		if (opt->debugPlay)
 			printf("debug-play: CMD_WRITE resubmitted %s: %lu bytes\n",
-				PlaybackBufferName(completed), len[completed]);
+				PlaybackBufferName(refill), len[refill]);
 
-		active = (active + 1) % AMIGA_AUDIO_PLAYBACK_SLOTS;
-		elapsedMilliseconds = PlaybackElapsedMilliseconds(submittedAt, preparedAt);
+		justFreed = active;
 		activeMilliseconds = PlaybackBufferDurationMilliseconds(opt, len[active],
 			playbackRate);
+		active = (active + 1) % AMIGA_AUDIO_PLAYBACK_SLOTS;
+		refill = justFreed;
+		elapsedMilliseconds = PlaybackElapsedMilliseconds(submittedAt, preparedAt);
 		spareMilliseconds = (long)activeMilliseconds - (long)elapsedMilliseconds;
 		late = (spareMilliseconds < 0) || underrun;
 		if (!stats->spareTimeMeasured || spareMilliseconds < stats->minimumSpareMilliseconds) {
@@ -5322,10 +5328,10 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 			stats->lateBuffers++;
 		if (underrun) {
 			stats->underruns++;
-			stats->underrunBuffers[completed]++;
+			stats->underrunBuffers[justFreed]++;
 			if (opt->debugPlay)
-				printf("debug-play: underrun detected before buffer %s refill submit\n",
-					PlaybackBufferName(active));
+				printf("debug-play: underrun detected before buffer %s decode-ahead wait\n",
+					PlaybackBufferName(justFreed));
 		}
 		gGuiPlaybackStatus.spareMs = spareMilliseconds;
 		gGuiPlaybackStatus.underruns = stats->underruns;
@@ -5838,6 +5844,7 @@ int main(int argc, char **argv)
 		printf("playback underruns: %lu\n", stats.underruns);
 		printf("playback underruns buffer 0: %lu\n", stats.underrunBuffers[0]);
 		printf("playback underruns buffer 1: %lu\n", stats.underrunBuffers[1]);
+		printf("playback underruns buffer 2: %lu\n", stats.underrunBuffers[2]);
 		printf("playback late buffers: %lu\n", stats.lateBuffers);
 		if (stats.spareTimeMeasured)
 			printf("playback minimum spare before buffer end: %ld ms\n",
@@ -5858,6 +5865,7 @@ int main(int argc, char **argv)
 			printf("playback underruns: %lu\n", stats.underruns);
 			printf("playback underruns buffer 0: %lu\n", stats.underrunBuffers[0]);
 			printf("playback underruns buffer 1: %lu\n", stats.underrunBuffers[1]);
+			printf("playback underruns buffer 2: %lu\n", stats.underrunBuffers[2]);
 			printf("playback late buffers: %lu\n", stats.lateBuffers);
 			if (stats.spareTimeMeasured)
 				printf("playback minimum spare before buffer end: %ld ms\n",
