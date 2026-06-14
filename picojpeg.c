@@ -447,12 +447,17 @@ static unsigned char pj_read_dri(void)
 
 static int pj_idct_descale(int x, int n)
 {
-	return (int)(((long long)x + ((long long)1 << (n - 1))) >> n);
+	/* n is 3 for reduced DC output and 5 for the final IDCT pass,
+	 * so the rounding add is at most 16 and cannot overflow here. */
+	return (x + (1 << (n - 1))) >> n;
 }
 
 static int pj_idct_multiply(int x, int c)
 {
-	return (int)(((long long)x * c) >> PJ_IDCT_CONST_BITS);
+	/* The fixed-point constants are bounded by +/-gIdctFix2613 (669).
+	 * AAN dequantisation keeps pass-1 inputs within the IDCT guard-bit
+	 * budget, so x * c fits in a signed 32-bit int without overflow. */
+	return (x * c) >> PJ_IDCT_CONST_BITS;
 }
 
 static pj_u8 pj_idct_clamp(int x)
