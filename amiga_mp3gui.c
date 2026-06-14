@@ -2554,6 +2554,7 @@ static void SyncMenuChecks(HelixAmp3Gui *gui)
 }
 
 static void StopPlayback(HelixAmp3Gui *gui);
+static void WaitForPlaybackShutdown(HelixAmp3Gui *gui);
 static void GuiClose(HelixAmp3Gui *gui);
 
 static void DrainWindowMessages(HelixAmp3Gui *gui)
@@ -2713,7 +2714,7 @@ static void GuiClose(HelixAmp3Gui *gui)
 {
 	CancelArtDecode(gui);
 	if (gui->playbackActive)
-		StopPlayback(gui);
+		WaitForPlaybackShutdown(gui);
 	if (gui->win) {
 		/* Stop Intuition from queuing new IDCMP traffic, then reply anything
 		 * already pending before the window and GadTools objects disappear.
@@ -3228,6 +3229,46 @@ static void StopPlayback(HelixAmp3Gui *gui)
 	SetStatus(gui, "Stopping...");
 }
 
+
+static void WaitForPlaybackShutdown(HelixAmp3Gui *gui)
+{
+	if (!gui->playbackActive)
+		return;
+
+	StopPlayback(gui);
+	while (gui->playbackActive) {
+		if (gui->donePort)
+			HandleDoneSignal(gui);
+
+		/* The done message can be consumed before the playback task has fully
+		 * returned to DOS.  During application shutdown there may be no further
+		 * timer or window wake-up, so poll the cleanup flags and task list here
+		 * instead of letting GuiClose() delete ports/windows that the child may
+		 * still reference. */
+		if (gui->playbackDonePending && PlaybackCanFinalize(gui)) {
+			FinalizePlayback(gui);
+			break;
+		}
+
+		if (!gui->playbackDonePending &&
+			gDoneRunId == gui->playbackRunId &&
+			gGuiPlaybackStatus.runId == gui->playbackRunId &&
+			gGuiPlaybackStatus.cleanupComplete &&
+			!PlaybackProcessStillExists()) {
+			gui->playbackDonePending = 1;
+			gui->playbackStoppedByUser = 1;
+			FinalizePlayback(gui);
+			break;
+		}
+
+		gGuiPlayer.stopRequested = 1;
+		gPlaybackInterrupted = 1;
+		if (gGuiPlayer.process)
+			Signal((struct Task *)gGuiPlayer.process, SIGBREAKF_CTRL_C);
+		Delay(1);
+	}
+}
+
 static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code)
 {
 	if (!gad)
@@ -3452,30 +3493,8 @@ int main(int argc, char **argv)
 			HandleTimerSignal(&gui);
 		GuiPoll(&gui);
 	}
-	if (gui.playbackActive) {
-		StopPlayback(&gui);
-		while (gui.playbackActive && gui.donePort) {
-			ULONG doneMask = 1UL << gui.donePort->mp_SigBit;
-			ULONG timerMask = gui.timerPort ?
-				(1UL << gui.timerPort->mp_SigBit) : 0;
-			ULONG sigs = Wait(doneMask | timerMask | SIGBREAKF_CTRL_C);
-
-			if (sigs & SIGBREAKF_CTRL_C) {
-				/* Do not tear down the done port while the playback process can
-				 * still post gDoneMsg to it.  Keep the shutdown path deterministic
-				 * and keep nudging the child until it acknowledges Stop.
-				 */
-				gGuiPlayer.stopRequested = 1;
-				gPlaybackInterrupted = 1;
-				if (gGuiPlayer.process)
-					Signal((struct Task *)gGuiPlayer.process, SIGBREAKF_CTRL_C);
-			}
-			if (sigs & doneMask)
-				HandleDoneSignal(&gui);
-			if (timerMask && (sigs & timerMask))
-				HandleTimerSignal(&gui);
-		}
-	}
+	if (gui.playbackActive)
+		WaitForPlaybackShutdown(&gui);
 	SaveGuiSettings(&gui);
 	GuiClose(&gui);
 	return 0;
