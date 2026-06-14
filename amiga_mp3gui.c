@@ -285,6 +285,7 @@ typedef struct HelixAmp3Gui {
 	struct Gadget  *gadStars[5];
 	struct Gadget  *gadStatus;
 	struct Gadget  *gadBuffer;
+	struct Gadget  *gadFastMem;
 	struct Gadget  *gadPlay;
 	struct Gadget  *gadStop;
 	struct VisualInfo *visualInfo;
@@ -2298,7 +2299,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 	if (!gad)
 		return -1;
 
-	gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_FAST_MEM,
+	gui->gadFastMem = gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_FAST_MEM,
 		GUI_MARGIN_L + 150, ROW_CHECKS, 20, 12, "Fast-mem",
 		GTCB_Checked, gui->fastMem,
 		TAG_IGNORE, 0,
