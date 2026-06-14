@@ -203,7 +203,11 @@ extern volatile int gMiniAmp3EmbeddedPlayback;
 #define ITEMNUM_DTP       0
 #define ITEMNUM_BENCH     1
 #define ITEMNUM_ARTWORK   2
-#define ITEMNUM_PROGRESS  3
+#define ITEMNUM_ARTCACHE  3
+#define ITEMNUM_ARTCOLOR  4
+#define ITEMNUM_ARTREFRESH 5
+#define ITEMNUM_ARTCLEAN  6
+#define ITEMNUM_PROGRESS  7
 
 enum {
 	GID_FILE = 1,
@@ -291,6 +295,9 @@ typedef struct HelixAmp3Gui {
 	struct VisualInfo *visualInfo;
 	struct Menu *menuStrip;
 	int artEnabled;
+	int artCacheEnabled;
+	int artColorEnabled;
+	int artCacheBypass;
 	int artValid;
 	int artLoading;
 	unsigned char artGreyBuf[ART_W * ART_H];
@@ -426,6 +433,14 @@ static struct NewMenu myNewMenus[] = {
 		(APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_BENCH) },
 	{ NM_ITEM,  (STRPTR)"Artwork",          0, CHECKIT | MENUTOGGLE, 0,
 		(APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_ARTWORK) },
+	{ NM_ITEM,  (STRPTR)"Artwork Cache",    0, CHECKIT | MENUTOGGLE, 0,
+		(APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_ARTCACHE) },
+	{ NM_ITEM,  (STRPTR)"Colour Artwork",   0, CHECKIT | MENUTOGGLE, 0,
+		(APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_ARTCOLOR) },
+	{ NM_ITEM,  (STRPTR)"Refresh Artwork",  0, 0, 0,
+		(APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_ARTREFRESH) },
+	{ NM_ITEM,  (STRPTR)"Clean Artwork Cache",0, 0, 0,
+		(APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_ARTCLEAN) },
 	{ NM_ITEM,  (STRPTR)"Progress Bar",     0, CHECKIT | MENUTOGGLE, 0,
 		(APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_PROGRESS) },
 	{ NM_END,   NULL,                       0, 0, 0, 0 }
@@ -534,6 +549,8 @@ static void SaveGuiSettings(HelixAmp3Gui *gui)
 	SaveEnvInt("DecodeThenPlay", gui->decodeThenPlay);
 	SaveEnvInt("Bench", gui->bench);
 	SaveEnvInt("Artwork", gui->artEnabled);
+	SaveEnvInt("ArtworkCache", gui->artCacheEnabled);
+	SaveEnvInt("ArtworkColour", gui->artColorEnabled);
 	SaveEnvInt("ProgressBar", gui->progressEnabled);
 	SaveEnvString("LastDrawer", gui->lastDrawer);
 }
@@ -1457,6 +1474,7 @@ static int DecodeJpegToGrey(const unsigned char *jpegData, unsigned long jpegByt
 
 static void DrawArtPanel(HelixAmp3Gui *gui);
 static void HandleDoneSignal(HelixAmp3Gui *gui);
+static void SaveArtworkCache(HelixAmp3Gui *gui);
 
 static int JpegGreySample(const pjpeg_image_info_t *info, int off)
 {
@@ -1498,6 +1516,7 @@ static void FinishArtDecode(HelixAmp3Gui *gui, int ok)
 		}
 		memcpy(gui->artGreyBuf, st->greyOut, ART_W * ART_H);
 		gui->artValid = 1;
+		SaveArtworkCache(gui);
 	}
 	st->active = 0;
 	gui->artLoading = 0;
@@ -1568,6 +1587,117 @@ static void PumpArtDecode(HelixAmp3Gui *gui)
 	}
 }
 
+static void ArtworkCacheName(HelixAmp3Gui *gui, char *dst, size_t dstSize)
+{
+	const char *base;
+	char safe[80];
+	int i;
+	int j;
+
+	EnvName(dst, dstSize, "ArtCache");
+	base = gui->inputName + strlen(gui->inputName);
+	while (base > gui->inputName && base[-1] != '/' && base[-1] != ':')
+		base--;
+	for (i = 0, j = 0; base[i] && j < (int)sizeof(safe) - 1; i++) {
+		unsigned char c = (unsigned char)base[i];
+		if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+			(c >= '0' && c <= '9'))
+			safe[j++] = (char)c;
+		else if (c == '.')
+			safe[j++] = '_';
+	}
+	safe[j] = '\0';
+	if (!safe[0])
+		SafeCopy(safe, sizeof(safe), "art");
+	strncat(dst, "/", dstSize - strlen(dst) - 1);
+	strncat(dst, safe, dstSize - strlen(dst) - 1);
+	strncat(dst, ".grey64", dstSize - strlen(dst) - 1);
+}
+
+static int LoadArtworkCache(HelixAmp3Gui *gui)
+{
+	char path[HELIXAMP3_MAX_PATH];
+	FILE *f;
+	unsigned char hdr[8];
+
+	if (!gui->artCacheEnabled || gui->artCacheBypass || !gui->inputName[0])
+		return 0;
+	ArtworkCacheName(gui, path, sizeof(path));
+	f = fopen(path, "rb");
+	if (!f)
+		return 0;
+	if (fread(hdr, 1, sizeof(hdr), f) == sizeof(hdr) &&
+		memcmp(hdr, "M3AG64\0", 7) == 0 && hdr[7] == 1 &&
+		fread(gui->artGreyBuf, 1, ART_W * ART_H, f) == ART_W * ART_H) {
+		fclose(f);
+		gui->artValid = 1;
+		gui->artLoading = 0;
+		return 1;
+	}
+	fclose(f);
+	return 0;
+}
+
+static void SaveArtworkCache(HelixAmp3Gui *gui)
+{
+	char dir[64];
+	char path[HELIXAMP3_MAX_PATH];
+	FILE *f;
+	static const unsigned char hdr[8] = { 'M','3','A','G','6','4','\0', 1 };
+
+	if (!gui->artCacheEnabled || !gui->inputName[0] || !gui->artValid)
+		return;
+	EnvName(dir, sizeof(dir), "ArtCache");
+	CreateDir((STRPTR)dir);
+	ArtworkCacheName(gui, path, sizeof(path));
+	f = fopen(path, "wb");
+	if (!f)
+		return;
+	fwrite(hdr, 1, sizeof(hdr), f);
+	fwrite(gui->artGreyBuf, 1, ART_W * ART_H, f);
+	fclose(f);
+}
+
+static void CleanArtworkCache(HelixAmp3Gui *gui)
+{
+	char dir[64];
+	BPTR lock;
+	struct FileInfoBlock *fib;
+	int removed = 0;
+
+	EnvName(dir, sizeof(dir), "ArtCache");
+	lock = Lock((STRPTR)dir, ACCESS_READ);
+	if (!lock) {
+		SetStatus(gui, "Artwork cache is empty.");
+		return;
+	}
+	fib = (struct FileInfoBlock *)AllocDosObject(DOS_FIB, NULL);
+	if (fib && Examine(lock, fib)) {
+		while (ExNext(lock, fib)) {
+			char path[HELIXAMP3_MAX_PATH];
+			int len = strlen(fib->fib_FileName);
+
+			if (fib->fib_DirEntryType >= 0 || len < 7 ||
+				strcmp(fib->fib_FileName + len - 7, ".grey64") != 0)
+				continue;
+			SafeCopy(path, sizeof(path), dir);
+			strncat(path, "/", sizeof(path) - strlen(path) - 1);
+			strncat(path, fib->fib_FileName, sizeof(path) - strlen(path) - 1);
+			if (DeleteFile((STRPTR)path))
+				removed++;
+		}
+	}
+	if (fib)
+		FreeDosObject(DOS_FIB, fib);
+	UnLock(lock);
+	if (removed) {
+		char msg[64];
+		sprintf(msg, "Removed %d cached artwork file(s).", removed);
+		SetStatus(gui, msg);
+	} else
+		SetStatus(gui, "No cached artwork files to remove.");
+}
+
 static void StartArtDecode(HelixAmp3Gui *gui)
 {
 	ArtDecodeState *st = &gui->artDecode;
@@ -1577,6 +1707,10 @@ static void StartArtDecode(HelixAmp3Gui *gui)
 	memset(st, 0, sizeof(*st));
 	gui->artValid = 0;
 	gui->artLoading = 0;
+	if (LoadArtworkCache(gui)) {
+		DrawArtPanel(gui);
+		return;
+	}
 	if (!gui->tags.artData || gui->tags.artBytes <= 4 || gui->tags.artIsPng) {
 		DrawArtPanel(gui);
 		return;
@@ -1647,6 +1781,9 @@ static void DrawArtPanel(HelixAmp3Gui *gui)
 				pens[0] = dri->dri_Pens[SHADOWPEN];
 				pens[1] = dri->dri_Pens[BACKGROUNDPEN];
 				pens[2] = dri->dri_Pens[SHINEPEN];
+				if (gui->artColorEnabled && gui->win->WScreen->ViewPort.ColorMap &&
+					gui->win->WScreen->BitMap.Depth >= 2)
+					pens[2] = 3;
 				FreeScreenDrawInfo(gui->win->WScreen, dri);
 			} else {
 				pens[0] = 0;
@@ -2408,6 +2545,10 @@ static void SyncMenuChecks(HelixAmp3Gui *gui)
 	SetMenuItemChecked(gui, MENUNUM_PLAYBACK, ITEMNUM_BENCH, gui->bench);
 	SetMenuItemChecked(gui, MENUNUM_PLAYBACK, ITEMNUM_ARTWORK,
 		gui->artEnabled);
+	SetMenuItemChecked(gui, MENUNUM_PLAYBACK, ITEMNUM_ARTCACHE,
+		gui->artCacheEnabled);
+	SetMenuItemChecked(gui, MENUNUM_PLAYBACK, ITEMNUM_ARTCOLOR,
+		gui->artColorEnabled);
 	SetMenuItemChecked(gui, MENUNUM_PLAYBACK, ITEMNUM_PROGRESS,
 		gui->progressEnabled);
 }
@@ -2439,6 +2580,8 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	gui->decodeThenPlay = LoadEnvInt("DecodeThenPlay", 0, 0, 1);
 	gui->bench = LoadEnvInt("Bench", 0, 0, 1);
 	gui->artEnabled = LoadEnvInt("Artwork", 1, 0, 1);
+	gui->artCacheEnabled = LoadEnvInt("ArtworkCache", 1, 0, 1);
+	gui->artColorEnabled = LoadEnvInt("ArtworkColour", 0, 0, 1);
 	gui->progressEnabled = LoadEnvInt("ProgressBar", 0, 0, 1);
 	LoadEnvString("LastDrawer", gui->lastDrawer, sizeof(gui->lastDrawer));
 	SafeCopy(gui->statusText, sizeof(gui->statusText), "Ready.");
@@ -3234,6 +3377,31 @@ static void GuiPoll(HelixAmp3Gui *gui)
 						SaveGuiSettings(gui);
 					} else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_ARTWORK)
 						SetArtworkEnabled(gui, !gui->artEnabled);
+					else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_ARTCACHE) {
+						gui->artCacheEnabled = !gui->artCacheEnabled;
+						SetMenuItemChecked(gui, MENUNUM_PLAYBACK, ITEMNUM_ARTCACHE,
+							gui->artCacheEnabled);
+						SetStatus(gui, gui->artCacheEnabled ?
+							"Artwork cache enabled." : "Artwork cache disabled.");
+						SaveGuiSettings(gui);
+					} else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_ARTCOLOR) {
+						gui->artColorEnabled = !gui->artColorEnabled;
+						SetMenuItemChecked(gui, MENUNUM_PLAYBACK, ITEMNUM_ARTCOLOR,
+							gui->artColorEnabled);
+						DrawArtPanel(gui);
+						SetStatus(gui, gui->artColorEnabled ?
+							"Colour artwork pens enabled." :
+							"Black and white artwork pens enabled.");
+						SaveGuiSettings(gui);
+					} else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_ARTREFRESH) {
+						gui->artCacheBypass = 1;
+						UpdateArtDisplay(gui);
+						gui->artCacheBypass = 0;
+						if (gui->artDecode.active)
+							SendTimerRequest(gui, ART_TIMER_MICROS);
+						SetStatus(gui, "Artwork refreshed.");
+					} else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_ARTCLEAN)
+						CleanArtworkCache(gui);
 					else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_PROGRESS) {
 						gui->progressEnabled = !gui->progressEnabled;
 						SetMenuItemChecked(gui, MENUNUM_PLAYBACK, ITEMNUM_PROGRESS,
