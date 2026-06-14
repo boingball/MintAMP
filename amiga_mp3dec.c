@@ -4220,7 +4220,9 @@ static int AmigaAudioOpenOne(AmigaAudioPlayer *player, int ch,
 	player->req[1][ch] = (struct IOAudio *)CreateIORequest(player->port,
 		sizeof(struct IOAudio));
 	GuiPublishStartupStage(GUISTART_CREATE_IOREQUESTS);
-	if (!player->req[0][ch] || !player->req[1][ch])
+	player->req[2][ch] = (struct IOAudio *)CreateIORequest(player->port,
+		sizeof(struct IOAudio));
+	if (!player->req[0][ch] || !player->req[1][ch] || !player->req[2][ch])
 		return -1;
 	player->req[0][ch]->ioa_Request.io_Message.mn_Node.ln_Pri = ADALLOC_MINPREC;
 	player->req[0][ch]->ioa_Data = (UBYTE *)channels;
