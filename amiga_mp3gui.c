@@ -23,6 +23,7 @@ typedef struct GuiPlaybackStatus {
 	volatile unsigned long underruns;
 	volatile unsigned long decodedFrames;
 	volatile int           sampleRate;
+	volatile unsigned long halfBufferMs;
 } GuiPlaybackStatus;
 #define GUIPLAY_PHASE_IDLE      0
 #define GUIPLAY_PHASE_BUFFERING 1
@@ -1712,13 +1713,16 @@ static void HandleTimerSignal(HelixAmp3Gui *gui)
 		int rate = gGuiPlaybackStatus.sampleRate;
 		unsigned long underruns = gGuiPlaybackStatus.underruns;
 		long spareMs = gGuiPlaybackStatus.spareMs;
+		unsigned long halfBufferMs = gGuiPlaybackStatus.halfBufferMs;
 
 		/* Derive audio position from decoded frames rather than wall-clock ticks.
-		 * Each MP3 frame = 1152 samples.  Subtract bufferSeconds for pipeline lag.
-		 * Fall back to incrementing elapsedSecs by 1 if no frame data yet. */
+		 * Each MP3 frame = 1152 samples.  Subtract the selected half-buffer
+		 * duration for pipeline lag, falling back to the requested slider value
+		 * until the playback subprocess publishes the actual duration. */
 		if (frames > 0 && rate > 0) {
 			long audioSecs = (long)((frames * 1152UL) / (unsigned long)rate);
-			audioSecs -= gui->bufferSeconds;
+			audioSecs -= halfBufferMs ?
+				(long)((halfBufferMs + 999UL) / 1000UL) : gui->bufferSeconds;
 			if (audioSecs < 0)
 				audioSecs = 0;
 			if (gui->totalSecs > 0 && audioSecs > gui->totalSecs)
@@ -1731,7 +1735,10 @@ static void HandleTimerSignal(HelixAmp3Gui *gui)
 		switch (phase) {
 		case GUIPLAY_PHASE_BUFFERING: {
 			char buf[64];
-			sprintf(buf, "Buffering... (%ds)", gui->bufferSeconds);
+			if (halfBufferMs)
+				sprintf(buf, "Buffering... (%lums half-buffer)", halfBufferMs);
+			else
+				sprintf(buf, "Buffering... (%ds requested)", gui->bufferSeconds);
 			SetStatus(gui, buf);
 			break;
 		}

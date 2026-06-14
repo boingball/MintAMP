@@ -215,9 +215,12 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   half-buffers and prints the reduced byte count instead of failing immediately.
   Playback prints the selected half-buffer duration and byte size at startup.
   Each Paula channel submission is capped at 65534 bytes, so high-rate settings
-  such as 22050 Hz automatically use shorter half-buffers in both streaming
-  playback and `--decode-then-play` instead of decoding far more audio than one
-  `CMD_WRITE` can play. Playback reports total underruns,
+  such as 22050 Hz or 28600 Hz automatically use shorter half-buffers in both
+  streaming playback and `--decode-then-play` instead of decoding far more audio
+  than one `CMD_WRITE` can play. When this cap shortens the requested depth,
+  playback prints the maximum half-buffer duration for the selected rate; for
+  example, mono 28600 Hz is limited to about 2291 ms per half-buffer. Playback
+  reports total underruns,
   per-buffer underruns, late-buffer count, and the
   minimum measured spare time before a playing buffer ended at exit.
 - `--fast-mem` preloads the complete compressed MP3 into Fast RAM before decoding

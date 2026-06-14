@@ -3587,6 +3587,7 @@ typedef struct GuiPlaybackStatus {
 	volatile unsigned long underruns;        /* running total underrun count */
 	volatile unsigned long decodedFrames;    /* MP3 frames decoded so far */
 	volatile int           sampleRate;       /* effective output sample rate (Hz) */
+	volatile unsigned long halfBufferMs;     /* selected playback half-buffer duration */
 } GuiPlaybackStatus;
 
 #define GUIPLAY_PHASE_IDLE      0   /* not playing */
@@ -4181,6 +4182,19 @@ static unsigned long PlaybackRequestedChunkBytes(const DecodeOptions *opt,
 		(unsigned long)opt->bufferSeconds * (opt->stereo ? 2UL : 1UL);
 }
 
+static unsigned long PlaybackMaxHalfBufferMilliseconds(const DecodeOptions *opt,
+	int playbackRate)
+{
+	unsigned long channels;
+	unsigned long maxBytes;
+
+	if (playbackRate <= 0)
+		return 0;
+	channels = opt->stereo ? 2UL : 1UL;
+	maxBytes = PlaybackMaxChunkBytes(opt->stereo);
+	return ((maxBytes / channels) * 1000UL) / (unsigned long)playbackRate;
+}
+
 static int PlaybackHalfBufferSamples(const DecodeOptions *opt,
 	unsigned long chunkBytes)
 {
@@ -4506,6 +4520,10 @@ static int AmigaPlayWholeBuffer(const signed char *pcm, unsigned long totalBytes
 	}
 	printf("PAL audio period: %u\n", period);
 	chunkBytes = PlaybackRequestedChunkBytes(opt, PlaybackOutputSampleRate(opt, stats));
+	if (chunkBytes > PlaybackMaxChunkBytes(opt->stereo))
+		printf("requested %d second half-buffer exceeds audio.device per-write limit; maximum at this rate is %lu ms\n",
+			opt->bufferSeconds, PlaybackMaxHalfBufferMilliseconds(opt,
+				PlaybackOutputSampleRate(opt, stats)));
 	if (AmigaSetupPlaybackBuffers(&player, opt, period, chunkBytes, 1UL, 0,
 		buf, &chunkBytes, &cleanupStatus) != 0) {
 		goto cleanup;
@@ -4660,6 +4678,9 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 	PrintFastLowrateOutputRateDifference(opt, playbackRate);
 	printf("play output rate: %d Hz\n", playbackRate);
 	requestedBytes = PlaybackRequestedChunkBytes(opt, playbackRate);
+	if (requestedBytes > PlaybackMaxChunkBytes(opt->stereo))
+		printf("requested %d second half-buffer exceeds audio.device per-write limit; maximum at this rate is %lu ms\n",
+			opt->bufferSeconds, PlaybackMaxHalfBufferMilliseconds(opt, playbackRate));
 	printf("PAL audio period: %u\n", period);
 	/* Mono validates a decoded frame before allocating playback buffers. */
 	startupLen = 0;
@@ -4678,6 +4699,7 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 	}
 	halfMilliseconds = PlaybackBufferDurationMilliseconds(opt, bufBytes,
 		playbackRate);
+	gGuiPlaybackStatus.halfBufferMs = halfMilliseconds;
 	printf("playback half-buffer: %lu ms, %lu bytes\n", halfMilliseconds,
 		bufBytes);
 	PrintPlaybackDebugStartup(opt, playbackRate, period, requestedBytes,
