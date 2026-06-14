@@ -853,6 +853,78 @@ static int IMDCT36(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int b
 	return IMDCT36_TEST_ACTIVE(xCurr, xPrev, y, btCurr, btPrev, blockIdx, gb);
 }
 
+#if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_M68K_IMDCT_THIN_OUTPUT)
+static __inline int IMDCTThinBlockSelected(const BlockCount *bc, int i)
+{
+	if (!bc->imdctThinActive)
+		return 1;
+	/* stride-4: polyphase reads every 4th subband starting at the phase offset */
+	return ((i % bc->imdctThinStride) == (bc->imdctThinPhase % bc->imdctThinStride));
+}
+
+static int IMDCT36_ThinSkip(int *xCurr, int *xPrev, int gb)
+{
+	int i, es, xBuf[18];
+	int acc1, acc2;
+	int xo, xe, c, *xp;
+	const int *cp;
+
+	acc1 = acc2 = 0;
+	xCurr += 17;
+
+	/* 7 gb is always adequate for antialias + accumulator loop + idct9 */
+	if (gb < 7) {
+		/* preserve the reference guard-bit path's in-place xPrev scaling */
+		es = 7 - gb;
+		for (i = 8; i >= 0; i--) {
+			acc1 = ((*xCurr--) >> es) - acc1;
+			acc2 = acc1 - acc2;
+			acc1 = ((*xCurr--) >> es) - acc1;
+			xBuf[i+9] = acc2;	/* odd */
+			xBuf[i+0] = acc1;	/* even */
+			xPrev[i] >>= es;
+		}
+	} else {
+		es = 0;
+		(void)es;
+		/* max gain = 18, assume adequate guard bits */
+		for (i = 8; i >= 0; i--) {
+			acc1 = (*xCurr--) - acc1;
+			acc2 = acc1 - acc2;
+			acc1 = (*xCurr--) - acc1;
+			xBuf[i+9] = acc2;	/* odd */
+			xBuf[i+0] = acc1;	/* even */
+		}
+	}
+	/* xEven[0] and xOdd[0] scaled by 0.5 */
+	xBuf[9] >>= 1;
+	xBuf[0] >>= 1;
+
+	/* always run both 9-point IDCTs so xPrev matches IMDCT36 */
+	idct9(xBuf+0);	/* even */
+	idct9(xBuf+9);	/* odd */
+
+	xp = xBuf + 8;
+	cp = c18 + 8;
+	for (i = 9; i > 0; i--) {
+		c = *cp--;	xo = *(xp + 9);		xe = *xp--;
+		/* gain 2 int bits here */
+		xo = MULSHIFT32(c, xo);			/* 2*c18*xOdd (mul by 2 implicit in scaling) */
+		xe >>= 2;
+
+		*xPrev++ = xe + xo;			/* symmetry - xPrev[i] = xPrev[17-i] for long blocks */
+	}
+
+	return 0;
+}
+#else
+static __inline int IMDCTThinBlockSelected(const BlockCount *bc, int i)
+{
+	(void)bc; (void)i;
+	return 1;
+}
+#endif
+
 static int c3_0 = 0x6ed9eba1;	/* format = Q31, cos(pi/6) */
 static int c6[3] = { 0x7ba3751d, 0x5a82799a, 0x2120fb83 };	/* format = Q31, cos(((0:2) + 0.5) * (pi/6)) */
 
@@ -1027,9 +1099,6 @@ static int HybridTransform(int *xCurr, int *xPrev, int y[BLOCK_SIZE][NBANDS], Si
 	prevType = bc->prevType;
 	prevWinSwitch = bc->prevWinSwitch;
 	currWinSwitch = bc->currWinSwitch;
-	(void)bc->imdctThinActive;
-	(void)bc->imdctThinStride;
-	(void)bc->imdctThinPhase;
 
 	/* do long blocks, if any */
 	if (!mixedBlock && prevWinSwitch == 0) {
@@ -1037,7 +1106,14 @@ static int HybridTransform(int *xCurr, int *xPrev, int y[BLOCK_SIZE][NBANDS], Si
 		prevWinIdx = prevType;
 		for(i = 0; i < bc->nBlocksLong; i++) {
 			/* do 36-point IMDCT, including windowing and overlap-add */
+#if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_M68K_IMDCT_THIN_OUTPUT)
+			if (IMDCTThinBlockSelected(bc, i))
+				mOut |= IMDCT36(xCurr, xPrev, &(y[0][i]), currWinIdx, prevWinIdx, i, bc->gbIn);
+			else
+				mOut |= IMDCT36_ThinSkip(xCurr, xPrev, bc->gbIn);
+#else
 			mOut |= IMDCT36(xCurr, xPrev, &(y[0][i]), currWinIdx, prevWinIdx, i, bc->gbIn);
+#endif
 			xCurr += 18;
 			xPrev += 9;
 		}
@@ -1055,7 +1131,14 @@ static int HybridTransform(int *xCurr, int *xPrev, int y[BLOCK_SIZE][NBANDS], Si
 			/* do 36-point IMDCT, including windowing and overlap-add.
 			 * Mixed/transition-window long blocks deliberately stay on the C reference path.
 			 */
+#if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_M68K_IMDCT_THIN_OUTPUT)
+			if (IMDCTThinBlockSelected(bc, i))
+				mOut |= IMDCT36_C_REFERENCE(xCurr, xPrev, &(y[0][i]), currWinIdx, prevWinIdx, i, bc->gbIn);
+			else
+				mOut |= IMDCT36_ThinSkip(xCurr, xPrev, bc->gbIn);
+#else
 			mOut |= IMDCT36_C_REFERENCE(xCurr, xPrev, &(y[0][i]), currWinIdx, prevWinIdx, i, bc->gbIn);
+#endif
 			xCurr += 18;
 			xPrev += 9;
 		}
