@@ -257,11 +257,13 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   completed/aborted outstanding I/O, freed buffers, and closed audio devices. The
   streaming startup path
   allocates the playback buffers before pre-filling A, B, and C by decoded
-  sample count (not amplitude), queues the non-empty three-buffer ring before
-  rotation, waits for the oldest slot before reusing that slot's chip DMA
-  buffer, then refills and re-commits it while the other queued slots keep
-  Paula fed. This three-buffer ordering preserves decode-ahead slack without
-  overwriting audio.device data that has not played yet. A silent first
+  sample count (not amplitude). Mono remains a true three-request
+  `audio.device` ring: A, B, and C can all be submitted as live DMA requests.
+  Stereo uses only two submitted DMA pairs, A and B, plus one Fast RAM
+  decode-ahead buffer C; C is never submitted to `audio.device`, and its prepared
+  left/right data is copied into whichever A/B chip pair has completed and been
+  WaitIO-reaped. This preserves stereo decode-ahead slack without keeping six
+  outstanding stereo I/O requests alive. A silent first
   playback buffer is accepted so valid MP3 encoder delay, padding, or fade-ins
   can play normally; with `--debug-play`, an all-zero first buffer prints
   `first playback buffer is silent/near-silent`. Playback does not skip leading
