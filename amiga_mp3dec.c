@@ -5250,11 +5250,10 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 	err = 0;
 
 	active = 0;
-	refill = (active + 2) % AMIGA_AUDIO_PLAYBACK_SLOTS;
 	while (err == 0 && !gPlaybackInterrupted &&
 		player.sent[active][0]) {
-		clock_t submittedAt;
-		clock_t preparedAt;
+		clock_t waitStartedAt;
+		clock_t refillFinishedAt;
 		unsigned long elapsedMilliseconds;
 		unsigned long activeMilliseconds;
 		long spareMilliseconds;
@@ -5269,27 +5268,17 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 		}
 #endif
 
-		/* Decode into the most recently queued slot while Paula is still
-		 * playing the current slot and has the next slot queued.  The slot
-		 * freed by the wait below becomes the target for the next pass. */
-		submittedAt = clock();
-		len[refill] = DecodeStreamFillPlaybackBuffer(&stream, opt, &player,
-			refill, buf[refill], bufBytes);
-		PrintPlaybackFillDebug(opt, refill, len[refill]);
-		if (stream.decodeError) {
-			err = -1;
-			break;
-		}
-		if (len[refill] == 0)
-			break;
-
+		/* Wait for the oldest queued slot before reusing any of its buffers.
+		 * The initial three-slot ring means two other chip buffers remain
+		 * queued while this slot is refilled, preserving decode-ahead slack
+		 * without overwriting audio.device DMA data that has not played yet. */
+		waitStartedAt = clock();
 		underrun = AmigaAudioDone(&player, active);
 		if (AmigaAudioWait(&player, active) != 0) {
 			fprintf(stderr, "audio.device write failed\n");
 			err = -1;
 			break;
 		}
-		preparedAt = clock();
 #if defined(AMIGA_M68K)
 		if (SetSignal(0, 0) & SIGBREAKF_CTRL_C) {
 			gPlaybackInterrupted = 1;
@@ -5300,24 +5289,37 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 			printf("debug-play: CMD_WRITE completed %s\n",
 				PlaybackBufferName(active));
 
-		if (AmigaAudioPreparePlaybackBuffer(&player, refill, buf[refill],
-			len[refill]) != 0 ||
-			AmigaAudioCommitPlaybackBuffer(&player, refill) != 0) {
-			fprintf(stderr, "playback buffer %s CMD_WRITE byte length is invalid\n",
-				PlaybackBufferName(refill));
+		justFreed = active;
+		activeMilliseconds = PlaybackBufferDurationMilliseconds(opt,
+			len[justFreed], playbackRate);
+		len[justFreed] = DecodeStreamFillPlaybackBuffer(&stream, opt, &player,
+			justFreed, buf[justFreed], bufBytes);
+		PrintPlaybackFillDebug(opt, justFreed, len[justFreed]);
+		if (stream.decodeError) {
 			err = -1;
 			break;
 		}
+		if (len[justFreed] == 0) {
+			active = (active + 1) % AMIGA_AUDIO_PLAYBACK_SLOTS;
+			break;
+		}
+
+		if (AmigaAudioPreparePlaybackBuffer(&player, justFreed, buf[justFreed],
+			len[justFreed]) != 0 ||
+			AmigaAudioCommitPlaybackBuffer(&player, justFreed) != 0) {
+			fprintf(stderr, "playback buffer %s CMD_WRITE byte length is invalid\n",
+				PlaybackBufferName(justFreed));
+			err = -1;
+			break;
+		}
+		refillFinishedAt = clock();
 		if (opt->debugPlay)
 			printf("debug-play: CMD_WRITE resubmitted %s: %lu bytes\n",
-				PlaybackBufferName(refill), len[refill]);
+				PlaybackBufferName(justFreed), len[justFreed]);
 
-		justFreed = active;
-		activeMilliseconds = PlaybackBufferDurationMilliseconds(opt, len[active],
-			playbackRate);
 		active = (active + 1) % AMIGA_AUDIO_PLAYBACK_SLOTS;
-		refill = justFreed;
-		elapsedMilliseconds = PlaybackElapsedMilliseconds(submittedAt, preparedAt);
+		elapsedMilliseconds = PlaybackElapsedMilliseconds(waitStartedAt,
+			refillFinishedAt);
 		spareMilliseconds = (long)activeMilliseconds - (long)elapsedMilliseconds;
 		late = (spareMilliseconds < 0) || underrun;
 		if (!stats->spareTimeMeasured || spareMilliseconds < stats->minimumSpareMilliseconds) {
@@ -5330,7 +5332,7 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 			stats->underruns++;
 			stats->underrunBuffers[justFreed]++;
 			if (opt->debugPlay)
-				printf("debug-play: underrun detected before buffer %s decode-ahead wait\n",
+				printf("debug-play: underrun detected before buffer %s refill wait\n",
 					PlaybackBufferName(justFreed));
 		}
 		gGuiPlaybackStatus.spareMs = spareMilliseconds;
