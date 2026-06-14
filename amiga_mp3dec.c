@@ -172,6 +172,7 @@ typedef struct DecodeOptions {
 	int stereo;
 	int decodeThenPlay;
 	int playLifecycleTest;
+	int audioOpenSilentTest;
 	int bufferSeconds;
 	int fastMem;
 	int info;
@@ -632,6 +633,11 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->decodeThenPlay = 1;
 			opt->outFormat = OUT_S8;
 			opt->mono = 1;
+		} else if (!strcmp(argv[i], "--selftest-audio-open-silent")) {
+			opt->audioOpenSilentTest = 1;
+			opt->play = 1;
+			opt->outFormat = OUT_S8;
+			opt->mono = 1;
 		} else if (!strcmp(argv[i], "--selftest-play-cleanup") ||
 			!strcmp(argv[i], "--play-lifecycle-test")) {
 			opt->play = 1;
@@ -804,7 +810,7 @@ if (opt->selftestMulshift ||
 
 	ApplyQualityOptions(opt);
 
-	if (opt->playLifecycleTest)
+	if (opt->playLifecycleTest || opt->audioOpenSilentTest)
 		return 0;
 
 	if (!opt->inName || (!opt->outName && !opt->noOutput && !opt->play && !opt->info))
@@ -3591,6 +3597,14 @@ typedef struct GuiPlaybackStatus {
 	volatile unsigned long runId;          /* playback generation that owns this status */
 	volatile int           cleanupComplete;/* audio.device and buffers fully released */
 	volatile int           cleanupStage;   /* GUIPLAY_CLEANUP_* diagnostic stage */
+	volatile int           startupStage;   /* GUISTART_* diagnostic stage */
+	volatile int           requestedRate;
+	volatile int           effectiveRate;
+	volatile unsigned int  paulaPeriod;
+	volatile unsigned long requestedBytes;
+	volatile unsigned long tryBytes;
+	volatile int           lastError;
+	volatile int           openDeviceResult;
 } GuiPlaybackStatus;
 
 #define GUIPLAY_PHASE_IDLE      0   /* not playing */
@@ -3606,7 +3620,101 @@ typedef struct GuiPlaybackStatus {
 #define GUIPLAY_CLEANUP_BUFFERS_FREED 3
 #define GUIPLAY_CLEANUP_COMPLETE      4
 
+#define GUISTART_NONE                  0
+#define GUISTART_CHILD_ENTERED         10
+#define GUISTART_ARGS_READY            20
+#define GUISTART_INPUT_OPEN            30
+#define GUISTART_INPUT_PREPARE         40
+#define GUISTART_DECODER_ALLOC         50
+#define GUISTART_DECODER_CONFIG        60
+#define GUISTART_PROBE_RATE            70
+#define GUISTART_PROBE_RATE_DONE       80
+#define GUISTART_STREAM_INIT           90
+#define GUISTART_PREFILL               100
+#define GUISTART_PREFILL_DONE          110
+#define GUISTART_AUDIO_SETUP           120
+#define GUISTART_CREATE_PORT           130
+#define GUISTART_ALLOC_CHIP_BUFFERS    140
+#define GUISTART_CREATE_IOREQUESTS     150
+#define GUISTART_OPEN_DEVICE           160
+#define GUISTART_OPEN_DEVICE_DONE      170
+#define GUISTART_ALLOC_WORK_BUFFERS    180
+#define GUISTART_AUDIO_SETUP_DONE      190
+#define GUISTART_FILL_BUFFER_A         200
+#define GUISTART_FILL_BUFFER_A_DONE    210
+#define GUISTART_FILL_BUFFER_B         220
+#define GUISTART_FILL_BUFFER_B_DONE    230
+#define GUISTART_PREPARE_A             240
+#define GUISTART_PREPARE_B             250
+#define GUISTART_COMMIT_A              260
+#define GUISTART_PLAYING               270
+#define GUISTART_FAILED                900
+#define GUISTART_CLEANUP               910
+
+const char *GuiStartupStageName(int stage)
+{
+	switch (stage) {
+	case GUISTART_NONE: return "none";
+	case GUISTART_CHILD_ENTERED: return "child entered";
+	case GUISTART_ARGS_READY: return "args ready";
+	case GUISTART_INPUT_OPEN: return "input open";
+	case GUISTART_INPUT_PREPARE: return "input prepare";
+	case GUISTART_DECODER_ALLOC: return "decoder alloc";
+	case GUISTART_DECODER_CONFIG: return "decoder config";
+	case GUISTART_PROBE_RATE: return "probing input rate";
+	case GUISTART_PROBE_RATE_DONE: return "input rate probed";
+	case GUISTART_STREAM_INIT: return "stream init";
+	case GUISTART_PREFILL: return "prefill decode";
+	case GUISTART_PREFILL_DONE: return "prefill done";
+	case GUISTART_AUDIO_SETUP: return "audio setup";
+	case GUISTART_CREATE_PORT: return "creating msg port";
+	case GUISTART_ALLOC_CHIP_BUFFERS: return "allocating chip buffers";
+	case GUISTART_CREATE_IOREQUESTS: return "creating IO requests";
+	case GUISTART_OPEN_DEVICE: return "opening audio.device";
+	case GUISTART_OPEN_DEVICE_DONE: return "audio.device opened";
+	case GUISTART_ALLOC_WORK_BUFFERS: return "allocating work buffers";
+	case GUISTART_AUDIO_SETUP_DONE: return "audio setup done";
+	case GUISTART_FILL_BUFFER_A: return "filling playback buffer A";
+	case GUISTART_FILL_BUFFER_A_DONE: return "buffer A filled";
+	case GUISTART_FILL_BUFFER_B: return "filling playback buffer B";
+	case GUISTART_FILL_BUFFER_B_DONE: return "buffer B filled";
+	case GUISTART_PREPARE_A: return "preparing buffer A";
+	case GUISTART_PREPARE_B: return "preparing buffer B";
+	case GUISTART_COMMIT_A: return "submitting first buffer";
+	case GUISTART_PLAYING: return "playing";
+	case GUISTART_FAILED: return "failed";
+	case GUISTART_CLEANUP: return "cleanup";
+	default: return "unknown";
+	}
+}
+
 GuiPlaybackStatus gGuiPlaybackStatus;
+
+static void GuiPublishStartupStage(int stage)
+{
+	FILE *log;
+	gGuiPlaybackStatus.startupStage = stage;
+	log = fopen("T:MiniAMP3-startup.log", "a");
+	if (!log)
+		log = fopen("MiniAMP3-startup.log", "a");
+	if (log) {
+		fprintf(log,
+			"runId=%lu stage=%d name=%s requestedRate=%d effectiveRate=%d period=%u requestedBytes=%lu tryBytes=%lu openDeviceResult=%d interrupted=%d task=%p process=%p\n",
+			gGuiPlaybackStatus.runId, stage, GuiStartupStageName(stage),
+			gGuiPlaybackStatus.requestedRate, gGuiPlaybackStatus.effectiveRate,
+			gGuiPlaybackStatus.paulaPeriod, gGuiPlaybackStatus.requestedBytes,
+			gGuiPlaybackStatus.tryBytes, gGuiPlaybackStatus.openDeviceResult,
+			gPlaybackInterrupted,
+#if defined(AMIGA_M68K) && defined(HAVE_AMIGA_AUDIO_DEVICE)
+			(void *)FindTask(NULL), (void *)FindTask(NULL)
+#else
+			(void *)0, (void *)0
+#endif
+		);
+		fflush(log);
+		fclose(log);
+	}
+}
 
 #if !defined(AMIGA_M68K)
 static void PlaybackSignalHandler(int signum)
@@ -3860,8 +3968,10 @@ static void AmigaAudioClose(AmigaAudioPlayer *player,
 static int AmigaAudioOpenOne(AmigaAudioPlayer *player, int ch,
 	const UBYTE *channels, unsigned long channelCount)
 {
+	GuiPublishStartupStage(GUISTART_CREATE_IOREQUESTS);
 	player->req[0][ch] = (struct IOAudio *)CreateIORequest(player->port,
 		sizeof(struct IOAudio));
+	GuiPublishStartupStage(GUISTART_CREATE_IOREQUESTS);
 	player->req[1][ch] = (struct IOAudio *)CreateIORequest(player->port,
 		sizeof(struct IOAudio));
 	if (!player->req[0][ch] || !player->req[1][ch])
@@ -3869,7 +3979,11 @@ static int AmigaAudioOpenOne(AmigaAudioPlayer *player, int ch,
 	player->req[0][ch]->ioa_Request.io_Message.mn_Node.ln_Pri = ADALLOC_MINPREC;
 	player->req[0][ch]->ioa_Data = (UBYTE *)channels;
 	player->req[0][ch]->ioa_Length = channelCount;
-	if (OpenDevice(AUDIONAME, 0, (struct IORequest *)player->req[0][ch], 0) != 0)
+	GuiPublishStartupStage(GUISTART_OPEN_DEVICE);
+	gGuiPlaybackStatus.openDeviceResult = OpenDevice(AUDIONAME, 0,
+		(struct IORequest *)player->req[0][ch], 0);
+	GuiPublishStartupStage(GUISTART_OPEN_DEVICE_DONE);
+	if (gGuiPlaybackStatus.openDeviceResult != 0)
 		return -1;
 	player->deviceOpen[ch] = 1;
 	{
@@ -3897,6 +4011,7 @@ static int AmigaAudioOpen(AmigaAudioPlayer *player, unsigned int period,
 	memset(player, 0, sizeof(*player));
 	player->period = period;
 	player->stereo = stereo;
+	GuiPublishStartupStage(GUISTART_CREATE_PORT);
 	player->port = CreateMsgPort();
 	if (!player->port)
 		return -1;
@@ -3906,6 +4021,7 @@ static int AmigaAudioOpen(AmigaAudioPlayer *player, unsigned int period,
 			player->splitBytes = 1;
 		for (i = 0; i < 2; i++) {
 			for (ch = 0; ch < 2; ch++) {
+				GuiPublishStartupStage(GUISTART_ALLOC_CHIP_BUFFERS);
 				player->splitBuf[i][ch] = AmigaAllocGuarded(player->splitBytes, 1,
 					&player->splitBase[i][ch]);
 				if (!player->splitBuf[i][ch]) {
@@ -3922,6 +4038,7 @@ static int AmigaAudioOpen(AmigaAudioPlayer *player, unsigned int period,
 	} else {
 		player->splitBytes = maxBytes;
 		for (i = 0; i < 2; i++) {
+			GuiPublishStartupStage(GUISTART_ALLOC_CHIP_BUFFERS);
 			player->splitBuf[i][0] = AmigaAllocGuarded(player->splitBytes, 1,
 				&player->splitBase[i][0]);
 			if (!player->splitBuf[i][0]) {
@@ -4452,10 +4569,14 @@ static int AmigaSetupPlaybackBuffers(AmigaAudioPlayer *player,
 		tryBytes = minBytes;
 
 	while (tryBytes >= minBytes) {
+		gGuiPlaybackStatus.tryBytes = tryBytes;
+		GuiPublishStartupStage(GUISTART_AUDIO_SETUP);
 		if (AmigaAudioOpen(player, period, opt->stereo, tryBytes) == 0) {
 			int workReady;
 
 			workReady = 0;
+			if (!directPlanar)
+				GuiPublishStartupStage(GUISTART_ALLOC_WORK_BUFFERS);
 			if (!directPlanar &&
 				AmigaAudioAllocWorkBuffers(player, opt->stereo, tryBytes) == 0) {
 				if (opt->stereo) {
@@ -4469,6 +4590,7 @@ static int AmigaSetupPlaybackBuffers(AmigaAudioPlayer *player,
 				}
 			}
 			if (directPlanar || workReady) {
+				GuiPublishStartupStage(GUISTART_AUDIO_SETUP_DONE);
 				*chunkBytes = tryBytes;
 				if (tryBytes != requestedBytes)
 					printf("play buffer reduced to %lu bytes per half-buffer\n",
@@ -4490,6 +4612,39 @@ static int AmigaSetupPlaybackBuffers(AmigaAudioPlayer *player,
 	fprintf(stderr, "cannot allocate audio buffers (requested %lu bytes per half-buffer)\n",
 		requestedBytes);
 	return -1;
+}
+
+static int AmigaAudioOpenSilentSelftest(const DecodeOptions *opt)
+{
+	AmigaAudioPlayer player;
+	PlaybackCleanupStatus cleanupStatus;
+	signed char *buf[2];
+	unsigned long chunkBytes;
+	unsigned int period;
+	int err;
+
+	memset(&player, 0, sizeof(player));
+	PlaybackCleanupStatusInit(&cleanupStatus);
+	buf[0] = NULL;
+	buf[1] = NULL;
+	gGuiPlaybackStatus.requestedRate = opt->outputRate;
+	gGuiPlaybackStatus.effectiveRate = opt->outputRate;
+	period = AmigaPalAudioPeriod(opt->outputRate);
+	gGuiPlaybackStatus.paulaPeriod = period;
+	gGuiPlaybackStatus.requestedBytes = 256UL;
+	err = AmigaSetupPlaybackBuffers(&player, opt, period, 256UL, 1UL, 0,
+		buf, &chunkBytes, &cleanupStatus);
+	if (err == 0) {
+		memset(buf[0], 0, (size_t)chunkBytes);
+		if (AmigaAudioPreparePlaybackBuffer(&player, 0, buf[0], chunkBytes) != 0 ||
+			AmigaAudioCommitPlaybackBuffer(&player, 0) != 0 ||
+			AmigaAudioWait(&player, 0) != 0)
+			err = -1;
+	}
+	printf("audio-open-silent-test: rate=%d period=%u bytes=%lu result=%d openDevice=%d\n",
+		opt->outputRate, period, chunkBytes, err, gGuiPlaybackStatus.openDeviceResult);
+	AmigaAudioClose(&player, &cleanupStatus);
+	return err;
 }
 
 static void AmigaPlaybackCopyInterleavedToWork(AmigaAudioPlayer *player,
@@ -4604,6 +4759,7 @@ static int AmigaPlayWholeBuffer(const signed char *pcm, unsigned long totalBytes
 	}
 	err = 0;
 cleanup:
+	GuiPublishStartupStage(err == 0 ? GUISTART_CLEANUP : GUISTART_FAILED);
 	gGuiPlaybackStatus.phase = GUIPLAY_PHASE_STOPPING;
 	gGuiPlaybackStatus.cleanupComplete = 0;
 	AmigaAudioClose(&player, &cleanupStatus);
@@ -4700,14 +4856,19 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 	buf[0] = NULL;
 	buf[1] = NULL;
 	err = -1;
+	GuiPublishStartupStage(GUISTART_PROBE_RATE);
 	inputSampleRate = ProbeInputSampleRate(input, decoder, stats);
+	GuiPublishStartupStage(GUISTART_PROBE_RATE_DONE);
 	playbackRate = EffectiveOutputSampleRate(opt, inputSampleRate);
 	if (playbackRate <= 0)
 		playbackRate = opt->outputRate > 0 ? opt->outputRate : 8287;
 	stats->outputSampleRate = playbackRate;
 	gGuiPlaybackStatus.sampleRate = playbackRate;
+	gGuiPlaybackStatus.effectiveRate = playbackRate;
+	GuiPublishStartupStage(GUISTART_STREAM_INIT);
 	DecodeStreamInit(&stream, input, decoder, stats, timing);
 	period = AmigaPalAudioPeriod(playbackRate);
+	gGuiPlaybackStatus.paulaPeriod = period;
 	PrintFastLowrateOutputRateDifference(opt, playbackRate);
 	printf("play output rate: %d Hz\n", playbackRate);
 	requestedBytes = PlaybackRequestedChunkBytes(opt, playbackRate);
@@ -4718,13 +4879,17 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 	/* Mono validates a decoded frame before allocating playback buffers. */
 	startupLen = 0;
 	if (!opt->stereo) {
+		GuiPublishStartupStage(GUISTART_PREFILL);
 		startupLen = DecodeStreamFillPlaybackPrefill(&stream, opt, startupBuf,
 			OUTBUF_SAMPS, 1UL);
+		GuiPublishStartupStage(GUISTART_PREFILL_DONE);
 		if (stream.decodeError || startupLen == 0) {
 			fprintf(stderr, "no decoded samples; audio.device playback not started\n");
 			goto cleanup;
 		}
 	}
+	GuiPublishStartupStage(GUISTART_AUDIO_SETUP);
+	gGuiPlaybackStatus.requestedBytes = requestedBytes;
 	if (AmigaSetupPlaybackBuffers(&player, opt, period, requestedBytes,
 		opt->stereo ? 2UL : startupLen, 0, buf, &bufBytes,
 		&cleanupStatus) != 0) {
@@ -4741,6 +4906,7 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 	/* Fill both halves before the first CMD_WRITE starts playback. */
 	gGuiPlaybackStatus.phase = GUIPLAY_PHASE_BUFFERING;
 	playbackChannels = opt->stereo ? 2UL : 1UL;
+	GuiPublishStartupStage(GUISTART_FILL_BUFFER_A);
 	if (opt->stereo) {
 		len[0] = DecodeStreamFillPlaybackBuffer(&stream, opt, &player, 0,
 			buf[0], bufBytes);
@@ -4751,6 +4917,7 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 			len[0] += (unsigned long)DecodeStreamFillS8(&stream, opt,
 				buf[0] + len[0], (int)(bufBytes - len[0]));
 	}
+	GuiPublishStartupStage(GUISTART_FILL_BUFFER_A_DONE);
 	PrintPlaybackFillDebug(opt, 0, len[0]);
 	if (stream.decodeError) {
 		goto cleanup;
@@ -4762,8 +4929,10 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 		fprintf(stderr, "first playback buffer fill produced zero CMD_WRITE bytes\n");
 		goto cleanup;
 	}
+	GuiPublishStartupStage(GUISTART_FILL_BUFFER_B);
 	len[1] = DecodeStreamFillPlaybackBuffer(&stream, opt, &player, 1,
 		buf[1], bufBytes);
+	GuiPublishStartupStage(GUISTART_FILL_BUFFER_B_DONE);
 	PrintPlaybackFillDebug(opt, 1, len[1]);
 	if (stream.decodeError) {
 		goto cleanup;
@@ -4772,6 +4941,7 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 	/* Prepare both prefilled requests, then start only the first one.  The
 	 * second buffer is copied into chip RAM now, so after WaitIO completes the
 	 * next loop can BeginIO it immediately before any decode or CopyMem work. */
+	GuiPublishStartupStage(GUISTART_PREPARE_A);
 	if (AmigaAudioPreparePlaybackBuffer(&player, 0, buf[0], len[0]) != 0) {
 		fprintf(stderr, "playback buffer A CMD_WRITE byte length is invalid\n");
 		err = -1;
@@ -4779,16 +4949,19 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 		err = 0;
 	}
 	if (err == 0 && len[1] > 0) {
+		GuiPublishStartupStage(GUISTART_PREPARE_B);
 		if (AmigaAudioPreparePlaybackBuffer(&player, 1, buf[1], len[1]) != 0) {
 			fprintf(stderr, "playback buffer B CMD_WRITE byte length is invalid\n");
 			err = -1;
 		}
 	}
 	if (err == 0) {
+		GuiPublishStartupStage(GUISTART_COMMIT_A);
 		if (AmigaAudioCommitPlaybackBuffer(&player, 0) != 0) {
 			fprintf(stderr, "playback buffer A CMD_WRITE byte length is invalid\n");
 			err = -1;
 		} else {
+			GuiPublishStartupStage(GUISTART_PLAYING);
 			gGuiPlaybackStatus.phase = GUIPLAY_PHASE_PLAYING;
 			if (opt->debugPlay)
 				printf("debug-play: CMD_WRITE submitted A: %lu bytes\n", len[0]);
@@ -4956,7 +5129,9 @@ static int AmigaPlayLifecycleTest(const DecodeOptions *opt)
 		buf[0] = NULL;
 		buf[1] = NULL;
 		printf("play cleanup self-test pass %d/5\n", pass + 1);
-		if (AmigaSetupPlaybackBuffers(&player, opt, period, requestedBytes,
+		GuiPublishStartupStage(GUISTART_AUDIO_SETUP);
+	gGuiPlaybackStatus.requestedBytes = requestedBytes;
+	if (AmigaSetupPlaybackBuffers(&player, opt, period, requestedBytes,
 			opt->stereo ? 2UL : 1UL, 0, buf, &chunkBytes, &cleanupStatus) != 0) {
 			PrintPlaybackCleanupStatus(opt, &cleanupStatus);
 			err = -1;
@@ -5159,6 +5334,11 @@ int main(int argc, char **argv)
 		AmigaFreeNormalizedArgs(&normalized);
 		return selftestErr;
 	}
+	if (opt.audioOpenSilentTest) {
+		int audioTestErr = AmigaAudioOpenSilentSelftest(&opt);
+		AmigaFreeNormalizedArgs(&normalized);
+		return audioTestErr == 0 ? 0 : 1;
+	}
 	if (opt.playLifecycleTest) {
 		int playTestErr;
 		/* Preserve any GUI stop request that may have arrived before the
@@ -5174,6 +5354,7 @@ int main(int argc, char **argv)
 		return playTestErr == 0 ? 0 : 1;
 	}
 
+	GuiPublishStartupStage(GUISTART_ARGS_READY);
 	if (opt.outName && OutputNameIsDirectory(opt.outName)) {
 		resolvedOutName = BuildDirectoryOutputName(opt.outName, opt.inName, &opt);
 		if (!resolvedOutName) {
@@ -5191,6 +5372,8 @@ int main(int argc, char **argv)
 	memset(&rateState, 0, sizeof(rateState));
 	memset(&info, 0, sizeof(info));
 
+	GuiPublishStartupStage(GUISTART_INPUT_OPEN);
+	gGuiPlaybackStatus.requestedRate = opt.outputRate;
 	infile = fopen(opt.inName, "rb");
 	if (!infile) {
 		fprintf(stderr, "cannot open input: %s\n", opt.inName);
@@ -5215,6 +5398,7 @@ int main(int argc, char **argv)
 		AmigaFreeNormalizedArgs(&normalized);
 		return 1;
 	}
+	GuiPublishStartupStage(GUISTART_INPUT_PREPARE);
 	if (InputSourcePrepareMp3(&input) != 0) {
 		fprintf(stderr, "cannot inspect MP3 input: %s\n", opt.inName);
 		InputSourceClose(&input);
@@ -5237,6 +5421,7 @@ int main(int argc, char **argv)
 		}
 	}
 
+	GuiPublishStartupStage(GUISTART_DECODER_ALLOC);
 	decoder = MP3InitDecoder();
 	if (!decoder) {
 		fprintf(stderr, "MP3InitDecoder failed\n");
@@ -5251,6 +5436,7 @@ int main(int argc, char **argv)
 
 	if (opt.stereo)
 		fprintf(stderr, "Stereo playback needs significantly more CPU and may underrun on 030.\n");
+	GuiPublishStartupStage(GUISTART_DECODER_CONFIG);
 
 	MP3SetOutputMono(decoder, opt.mono && !opt.stereo);
 	if (opt.expPoly) {
@@ -5313,6 +5499,7 @@ int main(int argc, char **argv)
 			"28600 PAL-top playback uses normal post-decode decimation and may underrun on 030 systems.\n");
 
 	if (opt.play) {
+		GuiPublishStartupStage(GUISTART_STREAM_INIT);
 		int playErr;
 		TimingStats *playTiming;
 		playTiming = opt.bench ? &timing : NULL;

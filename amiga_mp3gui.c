@@ -27,6 +27,14 @@ typedef struct GuiPlaybackStatus {
 	volatile unsigned long runId;
 	volatile int           cleanupComplete;
 	volatile int           cleanupStage;
+	volatile int           startupStage;
+	volatile int           requestedRate;
+	volatile int           effectiveRate;
+	volatile unsigned int  paulaPeriod;
+	volatile unsigned long requestedBytes;
+	volatile unsigned long tryBytes;
+	volatile int           lastError;
+	volatile int           openDeviceResult;
 } GuiPlaybackStatus;
 #define GUIPLAY_PHASE_IDLE      0
 #define GUIPLAY_PHASE_BUFFERING 1
@@ -39,6 +47,58 @@ typedef struct GuiPlaybackStatus {
 #define GUIPLAY_CLEANUP_DEVICE_CLOSED 2
 #define GUIPLAY_CLEANUP_BUFFERS_FREED 3
 #define GUIPLAY_CLEANUP_COMPLETE      4
+#define GUISTART_NONE                  0
+#define GUISTART_CHILD_ENTERED         10
+#define GUISTART_ARGS_READY            20
+#define GUISTART_INPUT_OPEN            30
+#define GUISTART_INPUT_PREPARE         40
+#define GUISTART_DECODER_ALLOC         50
+#define GUISTART_DECODER_CONFIG        60
+#define GUISTART_PROBE_RATE            70
+#define GUISTART_PROBE_RATE_DONE       80
+#define GUISTART_STREAM_INIT           90
+#define GUISTART_PREFILL               100
+#define GUISTART_PREFILL_DONE          110
+#define GUISTART_AUDIO_SETUP           120
+#define GUISTART_CREATE_PORT           130
+#define GUISTART_ALLOC_CHIP_BUFFERS    140
+#define GUISTART_CREATE_IOREQUESTS     150
+#define GUISTART_OPEN_DEVICE           160
+#define GUISTART_OPEN_DEVICE_DONE      170
+#define GUISTART_ALLOC_WORK_BUFFERS    180
+#define GUISTART_AUDIO_SETUP_DONE      190
+#define GUISTART_FILL_BUFFER_A         200
+#define GUISTART_FILL_BUFFER_A_DONE    210
+#define GUISTART_FILL_BUFFER_B         220
+#define GUISTART_FILL_BUFFER_B_DONE    230
+#define GUISTART_PREPARE_A             240
+#define GUISTART_PREPARE_B             250
+#define GUISTART_COMMIT_A              260
+#define GUISTART_PLAYING               270
+#define GUISTART_FAILED                900
+#define GUISTART_CLEANUP               910
+static const char *GuiStartupStageName(int stage)
+{
+	switch (stage) {
+	case GUISTART_PROBE_RATE: return "probing input rate";
+	case GUISTART_PREFILL: return "prefill decode";
+	case GUISTART_AUDIO_SETUP: return "audio setup";
+	case GUISTART_CREATE_PORT: return "creating msg port";
+	case GUISTART_ALLOC_CHIP_BUFFERS: return "allocating chip buffers";
+	case GUISTART_CREATE_IOREQUESTS: return "creating IO requests";
+	case GUISTART_OPEN_DEVICE: return "opening audio.device";
+	case GUISTART_ALLOC_WORK_BUFFERS: return "allocating work buffers";
+	case GUISTART_FILL_BUFFER_A: return "filling playback buffer A";
+	case GUISTART_FILL_BUFFER_B: return "filling playback buffer B";
+	case GUISTART_PREPARE_A: return "preparing buffer A";
+	case GUISTART_PREPARE_B: return "preparing buffer B";
+	case GUISTART_COMMIT_A: return "submitting first buffer";
+	case GUISTART_PLAYING: return "playing";
+	case GUISTART_FAILED: return "failed";
+	case GUISTART_CLEANUP: return "cleanup";
+	default: return "starting";
+	}
+}
 #endif
 /* Shared status written by the playback subprocess (amiga_mp3dec.c). */
 extern GuiPlaybackStatus gGuiPlaybackStatus;
@@ -242,6 +302,9 @@ typedef struct HelixAmp3Gui {
 	unsigned long playbackRunId;
 	unsigned long playbackDoneRunId;
 	int lastCleanupStage;
+	int lastStartupStage;
+	int startupStageStableTicks;
+	int startupStallShown;
 	int   totalSecs;
 	int   elapsedSecs;
 	int   launchBufferSecs;
@@ -1806,8 +1869,25 @@ static void HandleTimerSignal(HelixAmp3Gui *gui)
 
 		switch (phase) {
 		case GUIPLAY_PHASE_BUFFERING: {
-			char buf[64];
-			if (halfBufferMs)
+			char buf[128];
+			int stage = gGuiPlaybackStatus.startupStage;
+			if (stage != gui->lastStartupStage) {
+				gui->lastStartupStage = stage;
+				gui->startupStageStableTicks = 0;
+				gui->startupStallShown = 0;
+			} else if (stage != GUISTART_PLAYING) {
+				gui->startupStageStableTicks++;
+			}
+			if (gui->startupStageStableTicks >= 5 && !gui->startupStallShown) {
+				sprintf(buf, "Startup stalled at: %s r%d/%d run%lu st%d",
+					GuiStartupStageName(stage), gGuiPlaybackStatus.requestedRate,
+					gGuiPlaybackStatus.effectiveRate, gGuiPlaybackStatus.runId, stage);
+				gui->startupStallShown = 1;
+			} else if (stage > GUISTART_NONE) {
+				sprintf(buf, "Starting: %s r%d/%d run%lu st%d",
+					GuiStartupStageName(stage), gGuiPlaybackStatus.requestedRate,
+					gGuiPlaybackStatus.effectiveRate, gGuiPlaybackStatus.runId, stage);
+			} else if (halfBufferMs)
 				sprintf(buf, "Buffering... (%lums half-buffer)", halfBufferMs);
 			else
 				sprintf(buf, "Buffering... (%ds requested)", gui->bufferSeconds);
@@ -2582,19 +2662,22 @@ static void PlaybackEntry(void)
 	 */
 	stopBeforeStart = gGuiPlayer.stopRequested;
 	ranDecoder = 0;
+	gGuiPlaybackStatus.startupStage = GUISTART_CHILD_ENTERED;
 
 	/* A freshly-created Process can inherit a pending Ctrl-C condition from
 	 * DOS startup/runtime handling.  Clear only our playback interrupt bit
 	 * before entering the decoder; StopPlayback() can set it again afterwards. */
 	SetSignal(0, SIGBREAKF_CTRL_C);
 	ResetCliParser();
+	gGuiPlaybackStatus.startupStage = GUISTART_ARGS_READY;
 	ResetDecoderStatics();
+	gGuiPlaybackStatus.runId = gPlaybackEntryRunId;
+	gGuiPlaybackStatus.startupStage = GUISTART_DECODER_CONFIG;
 
 	/* MP3ResetStatics() may also touch command-line/playback globals in some
 	 * decoder revisions, so establish the parser's initial state immediately
 	 * before calling the renamed main() as well. */
 	ResetCliParser();
-	gGuiPlaybackStatus.runId = gPlaybackEntryRunId;
 
 	/* Stop may arrive while ResetDecoderStatics() is running.  Re-check the
 	 * shared request afterwards so the reset cannot erase an early Stop. */
@@ -2602,7 +2685,9 @@ static void PlaybackEntry(void)
 		gPlaybackInterrupted = 1;
 	else {
 		ranDecoder = 1;
+		gGuiPlaybackStatus.startupStage = GUISTART_STREAM_INIT;
 		HelixAmp3CliMain(gGuiPlayer.argc, gGuiPlayer.argv);
+		gGuiPlaybackStatus.startupStage = GUISTART_CLEANUP;
 	}
 	if (!ranDecoder) {
 		gGuiPlaybackStatus.phase = GUIPLAY_PHASE_DONE;
@@ -2683,6 +2768,9 @@ static void StartPlayback(HelixAmp3Gui *gui)
 	gui->playbackRunId = ++gPlaybackRunCounter;
 	gui->playbackDoneRunId = 0;
 	gui->lastCleanupStage = GUIPLAY_CLEANUP_NONE;
+	gui->lastStartupStage = GUISTART_NONE;
+	gui->startupStageStableTicks = 0;
+	gui->startupStallShown = 0;
 	gGuiPlaybackStatus.runId = gui->playbackRunId;
 	gPlaybackEntryRunId = gui->playbackRunId;
 	gui->launchBufferSecs = gui->decodeThenPlay ? 0 : gui->bufferSeconds;
@@ -2701,7 +2789,11 @@ static void StartPlayback(HelixAmp3Gui *gui)
 	 */
 	thisProc = (struct Process *)FindTask(NULL);
 	dirLock = DupLock(thisProc ? thisProc->pr_CurrentDir : (BPTR)0);
+#ifdef NDEBUG
 	nilOut = Open((STRPTR)"NIL:", MODE_NEWFILE);
+#else
+	nilOut = (BPTR)0;
+#endif
 
 	if (nilOut) {
 		gGuiPlayer.process = CreateNewProcTags(NP_Entry, (ULONG)PlaybackEntry,
