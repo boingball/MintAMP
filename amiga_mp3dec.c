@@ -4665,6 +4665,11 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 
 	memset(&player, 0, sizeof(player));
 	PlaybackCleanupStatusInit(&cleanupStatus);
+	/* Publish an immediate child-side state before any probing or
+	 * audio.device setup can block.  This keeps the GUI from sitting on
+	 * its optimistic launch message and proves the new playback process
+	 * accepted the start request. */
+	gGuiPlaybackStatus.phase = GUIPLAY_PHASE_BUFFERING;
 	buf[0] = NULL;
 	buf[1] = NULL;
 	err = -1;
@@ -4673,6 +4678,7 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 	if (playbackRate <= 0)
 		playbackRate = opt->outputRate > 0 ? opt->outputRate : 8287;
 	stats->outputSampleRate = playbackRate;
+	gGuiPlaybackStatus.sampleRate = playbackRate;
 	DecodeStreamInit(&stream, input, decoder, stats, timing);
 	period = AmigaPalAudioPeriod(playbackRate);
 	PrintFastLowrateOutputRateDifference(opt, playbackRate);
@@ -5126,7 +5132,8 @@ int main(int argc, char **argv)
 	}
 	if (opt.playLifecycleTest) {
 		int playTestErr;
-		gPlaybackInterrupted = 0;
+		/* Preserve any GUI stop request that may have arrived before the
+		 * lifecycle test reaches its playback loop. */
 #ifndef AMIGA_M68K
 		signal(SIGINT, PlaybackSignalHandler);
 #endif
@@ -5280,7 +5287,12 @@ int main(int argc, char **argv)
 		int playErr;
 		TimingStats *playTiming;
 		playTiming = opt.bench ? &timing : NULL;
-		gPlaybackInterrupted = 0;
+		/* Do not clear gPlaybackInterrupted here.  The MiniAMP3 GUI can
+		 * signal Stop after PlaybackEntry() resets decoder statics but before
+		 * this play block is reached; clearing the flag at this late point
+		 * loses that stop request and leaves the old child holding audio.device
+		 * while the GUI waits to start the next song/rate.  Fresh CLI starts and
+		 * GUI launches already reset the flag before entering main(). */
 #ifndef AMIGA_M68K
 		signal(SIGINT, PlaybackSignalHandler);
 #endif
