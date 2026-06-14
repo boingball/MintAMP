@@ -2554,6 +2554,17 @@ static void StartPlayback(HelixAmp3Gui *gui)
 			"Already playing; press Stop first.");
 		return;
 	}
+	/* A stopped playback task can still be unwinding audio.device buffers for a
+	 * short time after the GUI state has been cleared.  Starting a new decoder
+	 * while the old task is still closing the Paula channels is most visible
+	 * after changing the requested output rate: the new child can block before
+	 * publishing its first buffering/playing status, leaving the window stuck on
+	 * "Streaming playback started.".  Treat the task name as the final arbiter
+	 * and require the old child to disappear before launching another one. */
+	if (PlaybackProcessStillExists()) {
+		SetStatus(gui, "Previous playback process is still exiting.");
+		return;
+	}
 	if (!gui->donePort) {
 		SetStatus(gui, "Cannot start playback: no done port.");
 		return;
@@ -2661,6 +2672,12 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code)
 		ChooseMp3(gui);
 		break;
 	case GID_FAST_LOWRATE:
+		if (gui->playbackActive || gui->playbackDonePending) {
+			GT_SetGadgetAttrs(gad, gui->win, NULL,
+				GTCB_Checked, gui->fastLowrate, TAG_DONE);
+			SetStatus(gui, "Stop playback before changing rate mode.");
+			break;
+		}
 		gui->fastLowrate = !gui->fastLowrate;
 		GT_SetGadgetAttrs(gad, gui->win, NULL, GTCB_Checked, gui->fastLowrate, TAG_DONE);
 		SetStatus(gui, gui->fastLowrate ? "Fast-lowrate enabled." : "Fast-lowrate disabled.");
@@ -2673,12 +2690,24 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code)
 		SaveGuiSettings(gui);
 		break;
 	case GID_MONO:
+		if (gui->playbackActive || gui->playbackDonePending) {
+			GT_SetGadgetAttrs(gad, gui->win, NULL,
+				GTCB_Checked, gui->mono, TAG_DONE);
+			SetStatus(gui, "Stop playback before changing channel mode.");
+			break;
+		}
 		gui->mono = !gui->mono;
 		GT_SetGadgetAttrs(gad, gui->win, NULL, GTCB_Checked, gui->mono, TAG_DONE);
 		SetStatus(gui, gui->mono ? "Mono output enabled." : "Stereo output enabled.");
 		SaveGuiSettings(gui);
 		break;
 	case GID_RATE:
+		if (gui->playbackActive || gui->playbackDonePending) {
+			GT_SetGadgetAttrs(gad, gui->win, NULL,
+				GTCY_Active, gui->rateIndex, TAG_DONE);
+			SetStatus(gui, "Stop playback before changing output rate.");
+			break;
+		}
 		gui->rateIndex = code;
 		if (gui->rateIndex < 0 || gui->rateIndex > 4)
 			gui->rateIndex = 2;
