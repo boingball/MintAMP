@@ -91,7 +91,10 @@ builds retain the safe two-byte C fallback.
 Playback resources are owned by one audio-player lifecycle and released through a
 single cleanup path. `--debug-cleanup` reports reaped/aborted writes, device and
 Exec object deletion, Chip/work-buffer release, debug-build canary checks, and
-input-file closure. `--selftest-play-cleanup` repeats a tiny silent
+input-file closure. `MINIAMP3_DEBUG` builds also emit AmigaDOS `Printf()`
+cleanup trace lines for each submitted slot/channel, including `CheckIO`,
+`AbortIO`, `WaitIO`, device close, request deletion, buffer frees, and cleanup
+invocation count. `--selftest-play-cleanup` repeats a tiny silent
 `audio.device` submission and complete teardown five times; the older
 `--play-lifecycle-test` spelling remains as an alias.
 
@@ -235,8 +238,9 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   the allocated byte count at startup. The option fails before playback if the complete input
   cannot be sized, read, or allocated; it never silently falls back to disk.
   Unlike `--decode-then-play`, it stores only the compressed MP3 and continues to
-  decode into the normal three-slot playback queue, so it normally needs far
-  less RAM. It intentionally preloads synchronously: background HDD I/O on a
+  decode into the normal two-slot playback queue while Stop cleanup is
+  being validated on real hardware, so it normally needs less RAM than
+  `--decode-then-play`. It intentionally preloads synchronously: background HDD I/O on a
   CPU-limited 68030 could still steal decode time at unpredictable points.
   For slow disks, start with `--play --fast-mem`; if decode-time spikes can still
   exhaust the queued audio, also increase `--buffer-seconds` toward 10.
@@ -248,14 +252,16 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
 - `--debug-play` prints startup diagnostics for Paula streaming, including the
   actual output rate, PAL period, requested buffer depth, selected half-buffer
   samples/bytes, chip submission buffer addresses/sizes, optional stereo work
-  buffer addresses/sizes, buffer A/B/C fill samples/bytes, queued A/B `CMD_WRITE` startup, every A/B/C `CMD_WRITE`
+  buffer addresses/sizes, buffer A/B fill samples/bytes, queued A/B `CMD_WRITE` startup, every A/B `CMD_WRITE`
   submit/complete milestone, underrun detections, and final cleanup counts for
   completed/aborted outstanding I/O, freed buffers, and closed audio devices. The
   streaming startup path
-  allocates the playback buffers before pre-filling A, B, and C by decoded
+  allocates the playback buffers before pre-filling A and B by decoded
   sample count (not amplitude), queues both non-empty buffers before rotation,
   refills the completed half while the queued half is playing, and never waits on
-  an audio I/O request that has not been submitted. A silent first
+  an audio I/O request that has not been submitted. The newer three-buffer
+  streaming queue is temporarily disabled until Stop cleanup is proven safe on
+  real hardware. A silent first
   playback buffer is accepted so valid MP3 encoder delay, padding, or fade-ins
   can play normally; with `--debug-play`, an all-zero first buffer prints
   `first playback buffer is silent/near-silent`. Playback does not skip leading
