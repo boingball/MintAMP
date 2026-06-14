@@ -258,11 +258,10 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   streaming startup path
   allocates the playback buffers before pre-filling A, B, and C by decoded
   sample count (not amplitude), queues the non-empty three-buffer ring before
-  rotation, decodes ahead into the most recently queued slot while Paula plays
-  the current slot and keeps the next slot queued, then waits for the active
-  slot and re-commits the freshly decoded buffer. This enabled three-buffer
-  ordering gives the decoder a full half-buffer period of slack and never waits
-  on an audio I/O request that has not been submitted. A silent first
+  rotation, waits for the oldest slot before reusing that slot's chip DMA
+  buffer, then refills and re-commits it while the other queued slots keep
+  Paula fed. This three-buffer ordering preserves decode-ahead slack without
+  overwriting audio.device data that has not played yet. A silent first
   playback buffer is accepted so valid MP3 encoder delay, padding, or fade-ins
   can play normally; with `--debug-play`, an all-zero first buffer prints
   `first playback buffer is silent/near-silent`. Playback does not skip leading
