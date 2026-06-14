@@ -4436,13 +4436,59 @@ static int AmigaAudioWaitOne(AmigaAudioPlayer *player, int index, int ch)
 	return err;
 }
 
+static int AmigaAudioAbortSent(AmigaAudioPlayer *player, int index, int ch)
+{
+	struct IORequest *req;
+	int err;
+
+	req = (struct IORequest *)player->req[index][ch];
+	if (!req || !player->sent[index][ch])
+		return 0;
+	if (!CheckIO(req))
+		AbortIO(req);
+	err = WaitIO(req);
+	if (!err)
+		err = player->req[index][ch]->ioa_Request.io_Error;
+	player->sent[index][ch] = 0;
+	return err;
+}
+
+static int AmigaAudioAbortOutstanding(AmigaAudioPlayer *player)
+{
+	int i;
+	int ch;
+	int err;
+
+	err = 0;
+	for (i = 0; i < AMIGA_AUDIO_PLAYBACK_SLOTS; i++) {
+		for (ch = 0; ch < 2; ch++) {
+			int err2 = AmigaAudioAbortSent(player, i, ch);
+			if (!err)
+				err = err2;
+		}
+	}
+	return err;
+}
+
 static int AmigaAudioWait(AmigaAudioPlayer *player, int index)
 {
 	int err;
 
+	/* Stop can arrive while high-rate stereo has multiple Paula writes queued.
+	 * Abort and reap the whole ring before returning so cleanup never closes an
+	 * audio.device unit or frees a chip buffer that its paired channel may still
+	 * be DMA-reading. */
+	if (gPlaybackInterrupted)
+		return AmigaAudioAbortOutstanding(player);
 	err = 0;
 	if (player->sent[index][0])
 		err = AmigaAudioWaitOne(player, index, 0);
+	if (gPlaybackInterrupted) {
+		int err2 = AmigaAudioAbortOutstanding(player);
+		if (!err)
+			err = err2;
+		return err;
+	}
 	if (player->stereo && player->sent[index][1]) {
 		int err2 = AmigaAudioWaitOne(player, index, 1);
 		if (!err)
