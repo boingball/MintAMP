@@ -1991,7 +1991,7 @@ static void HandleTimerSignal(HelixAmp3Gui *gui)
 			if (underruns != gui->lastUnderrunCount) {
 				char buf[64];
 				gui->lastUnderrunCount = underruns;
-				sprintf(buf, "Underrun! (total: %lu)", underruns);
+				sprintf(buf, "Playing - underruns: %lu", underruns);
 				SetStatus(gui, buf);
 			}
 			break;
@@ -2029,7 +2029,12 @@ static void HandleTimerSignal(HelixAmp3Gui *gui)
 #else
 			if (phaseChanged) {
 				gui->lastDisplayedSpareMs = spareMs;
-				SetStatus(gui, "Playing");
+				{
+					char buf[64];
+					sprintf(buf, "Playing - underruns: %lu", underruns);
+					gui->lastUnderrunCount = underruns;
+					SetStatus(gui, buf);
+				}
 			}
 #endif
 			break;
@@ -2915,7 +2920,10 @@ static void StartPlayback(HelixAmp3Gui *gui)
 	if (nilOut) {
 		gGuiPlayer.process = CreateNewProcTags(NP_Entry, (ULONG)PlaybackEntry,
 			NP_Name, (ULONG)"MiniAMP3 playback",
-			NP_Priority, 5,
+			/* Priority 1 is intentionally modest: it gives decoding a small
+			 * preference over the GUI without replacing correct buffering or
+			 * GUI throttling, and keeps input/Stop responsive. */
+			NP_Priority, 1,
 			NP_StackSize, 262144,
 			NP_CurrentDir, dirLock,
 			NP_Output, nilOut,
@@ -2925,7 +2933,10 @@ static void StartPlayback(HelixAmp3Gui *gui)
 	} else {
 		gGuiPlayer.process = CreateNewProcTags(NP_Entry, (ULONG)PlaybackEntry,
 			NP_Name, (ULONG)"MiniAMP3 playback",
-			NP_Priority, 5,
+			/* Priority 1 is intentionally modest: it gives decoding a small
+			 * preference over the GUI without replacing correct buffering or
+			 * GUI throttling, and keeps input/Stop responsive. */
+			NP_Priority, 1,
 			NP_StackSize, 262144,
 			NP_CurrentDir, dirLock,
 			NP_CopyVars, FALSE,

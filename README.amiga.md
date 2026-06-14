@@ -130,9 +130,14 @@ The quality cycle maps to the same playback code used by `amiga_mp3dec`:
 
 The buffer slider chooses the `--buffer-seconds` value from 1 to 30 seconds, and
 the rate selector cycles through 8287, 8820, 11025, 22050, and 28600 Hz. Playback still
-uses the Paula streaming implementation inside `amiga_mp3dec`, so Stop requests
-the same interrupt flag used by Shell playback and exits after the streaming
-loop notices the request.
+uses the Paula streaming implementation inside `amiga_mp3dec`. The GUI launches
+the playback subprocess at priority 1: this is only a modest preference over the
+Workbench/GadTools event loop, not a substitute for correct buffering. Stop
+requests set the same interrupt flag used by Shell playback, signal the child,
+and the audio wait path can abort/reap outstanding writes so the GUI remains
+responsive. During playback the status bar keeps the change-only
+`Playing - underruns: N` text visible instead of redrawing generic `Playing` on
+each timer tick.
 
 A separate library can still be added later if multiple frontends need to share
 higher-level application code. For now, `amiga_mp3gui.c` includes the existing
@@ -230,7 +235,7 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   byte count at startup. The option fails before playback if the complete input
   cannot be sized, read, or allocated; it never silently falls back to disk.
   Unlike `--decode-then-play`, it stores only the compressed MP3 and continues to
-  decode into the normal double-buffered playback path, so it normally needs far
+  decode into the normal three-slot playback queue, so it normally needs far
   less RAM. It intentionally preloads synchronously: background HDD I/O on a
   CPU-limited 68030 could still steal decode time at unpredictable points.
   For slow disks, start with `--play --fast-mem`; if decode-time spikes can still
@@ -243,11 +248,11 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
 - `--debug-play` prints startup diagnostics for Paula streaming, including the
   actual output rate, PAL period, requested buffer depth, selected half-buffer
   samples/bytes, chip submission buffer addresses/sizes, optional stereo work
-  buffer addresses/sizes, buffer A/B fill samples/bytes, every A/B `CMD_WRITE`
+  buffer addresses/sizes, buffer A/B/C fill samples/bytes, queued A/B `CMD_WRITE` startup, every A/B/C `CMD_WRITE`
   submit/complete milestone, underrun detections, and final cleanup counts for
   completed/aborted outstanding I/O, freed buffers, and closed audio devices. The
   streaming startup path
-  allocates the playback buffers before pre-filling both A and B by decoded
+  allocates the playback buffers before pre-filling A, B, and C by decoded
   sample count (not amplitude), queues both non-empty buffers before rotation,
   refills the completed half while the queued half is playing, and never waits on
   an audio I/O request that has not been submitted. A silent first
