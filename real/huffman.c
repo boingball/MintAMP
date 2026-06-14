@@ -505,8 +505,12 @@ static int DecodeHuffmanQuads(int *vwxy, int nVals, int tabIdx, int bitsLeft, un
 		/* refill cache - assumes cachedBits <= 16 */
 		if (bitsLeft >= 16) {
 			/* load 2 new bytes into left-justified cache */
+#if HUFFMAN_PAIRS_HAS_AMIGA_M68K_ASM
+			cache |= HUFFMAN_LOADBE16_FAST(buf, bitsLeft) << (16 - cachedBits);
+#else
 			cache |= LOADBE16(buf) << (16 - cachedBits);
 			buf += 2;
+#endif
 			cachedBits += 16;
 			bitsLeft -= 16;
 		} else {
@@ -535,7 +539,7 @@ static int DecodeHuffmanQuads(int *vwxy, int nVals, int tabIdx, int bitsLeft, un
 			y = GetCWYQ(cw);	if(y) {ApplySign(y, cache); cache <<= 1; cachedBits--;}
 
 			/* ran out of bits - okay (means we're done) */
-			if (cachedBits < padBits)
+			if (cachedBits <= padBits)
 				return i;
 
 			*vwxy++ = v;
