@@ -2554,10 +2554,15 @@ static void PlaybackEntry(void)
 
 	/* Only the GUI task owns the public process/lifecycle fields.  Publish a
 	 * completion message and let HandleDoneSignal() clear them after it has
-	 * actually received that message. */
+	 * actually received that message.
+	 * Re-assert the node type immediately before PutMsg: StartPlayback()
+	 * reinitialises gDoneMsg before launching, but guard here as well in case
+	 * any future code path reaches PutMsg without going through StartPlayback. */
 	donePort = gDonePort;
-	if (donePort)
+	if (donePort) {
+		gDoneMsg.mn_Node.ln_Type = NT_MESSAGE;
 		PutMsg(donePort, &gDoneMsg);
+	}
 }
 
 static void StartPlayback(HelixAmp3Gui *gui)
@@ -2593,13 +2598,21 @@ static void StartPlayback(HelixAmp3Gui *gui)
 	}
 	/* Drain any stale done message from a previous cycle before launching.
 	 * gDoneMsg is a single static Exec message node, so it must not remain
-	 * queued when the next playback subprocess exits and posts it again. */
+	 * queued when the next playback subprocess exits and posts it again.
+	 * Re-initialise the node fields here: some AmigaOS exec implementations
+	 * write NT_FREEMSG (0) into ln_Type when a message is removed from a port
+	 * via GetMsg(), which would cause PutMsg() to silently mishandle the node
+	 * on the second and subsequent play cycles, leaving the GUI permanently
+	 * stuck on "Streaming playback started." */
 	{
 		struct Message *stale;
 
 		while ((stale = GetMsg(gui->donePort)) != NULL)
 			;
 	}
+	memset(&gDoneMsg, 0, sizeof(gDoneMsg));
+	gDoneMsg.mn_Length = sizeof(gDoneMsg);
+	gDoneMsg.mn_Node.ln_Type = NT_MESSAGE;
 	CancelArtDecode(gui);
 	DrawArtPanel(gui);
 	gui->elapsedSecs = 0;
