@@ -581,7 +581,6 @@ static void ApplyQualityOptions(DecodeOptions *opt)
 		opt->expReducedTaps = 1;
 		/* fall through */
 	case 2:
-		opt->expImdctThin = 1;
 		opt->expPoly = 1;
 		break;
 	case 3:
@@ -1875,17 +1874,17 @@ static int SelftestQuality(void)
 	memset(&opt, 0, sizeof(opt));
 	opt.quality = 0;
 	opt.qualitySpecified = 1;
-	failures += QualitySelftestExpect("quality0", opt, 1, 1, 1, 1, 1, 0) != 0;
+	failures += QualitySelftestExpect("quality0", opt, 1, 1, 0, 1, 1, 0) != 0;
 
 	memset(&opt, 0, sizeof(opt));
 	opt.quality = 1;
 	opt.qualitySpecified = 1;
-	failures += QualitySelftestExpect("quality1", opt, 1, 0, 1, 1, 0, 1) != 0;
+	failures += QualitySelftestExpect("quality1", opt, 1, 0, 0, 1, 0, 1) != 0;
 
 	memset(&opt, 0, sizeof(opt));
 	opt.quality = 2;
 	opt.qualitySpecified = 1;
-	failures += QualitySelftestExpect("quality2", opt, 0, 0, 1, 1, 0, 2) != 0;
+	failures += QualitySelftestExpect("quality2", opt, 0, 0, 0, 1, 0, 2) != 0;
 
 	memset(&opt, 0, sizeof(opt));
 	opt.quality = 3;
@@ -5237,7 +5236,7 @@ int main(int argc, char **argv)
 		}
 		if (opt.expImdctThin) {
 #if defined(AMIGA_M68K_IMDCT_THIN_OUTPUT)
-			fprintf(stderr, "warning: --exp-imdct-thin enables experimental IMDCT output-thinning bookkeeping for stride-4 mono fast-lowrate\n");
+			fprintf(stderr, "warning: --exp-imdct-thin is disabled because stride-4 playback needs every IMDCT subband for full FDCT32 synthesis\n");
 #else
 			fprintf(stderr, "warning: --exp-imdct-thin requested, but this build lacks AMIGA_M68K_IMDCT_THIN_OUTPUT\n");
 #endif

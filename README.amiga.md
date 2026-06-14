@@ -299,14 +299,14 @@ the individual `--exp-*` flags available for fine-grained override. If
 `--quality` is omitted, `--fast-lowrate --rate 11025` defaults to quality 1; all
 other invocations default to quality 3.
 
-- `--quality 0` (fastest) enables reduced taps, quarter-rate FDCT32, thinned
-  IMDCT output, fast polyphase, and the optional Huffman ASM refill path. The
+- `--quality 0` (fastest) enables reduced taps, quarter-rate FDCT32, fast
+  polyphase, and the optional Huffman ASM refill path. The
   Huffman shortcut is limited to this level because its ASM path has known
   bit-accounting edge cases; in builds without the Huffman m68k ASM path it
   silently falls back to the normal C Huffman decoder.
-- `--quality 1` (fast) enables reduced taps, thinned IMDCT output, and fast
-  polyphase. This is the automatic default for `--fast-lowrate --rate 11025`.
-- `--quality 2` (balanced) enables thinned IMDCT output and fast polyphase.
+- `--quality 1` (fast) enables reduced taps and fast polyphase. This is the
+  automatic default for `--fast-lowrate --rate 11025`.
+- `--quality 2` (balanced) enables fast polyphase without reduced taps.
 - `--quality 3` (accurate) enables no approximations and is equivalent to the
   original decoder behavior.
 

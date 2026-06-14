@@ -318,15 +318,14 @@ static int IMDCTThinOutputCanActivate(const MP3DecInfo *mp3DecInfo)
 {
 #if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_M68K_IMDCT_THIN_OUTPUT)
 	/*
-	 * Enable only the stride-4 mono fast-lowrate case covered by the selftest.
-	 * The currently proven mask retains every IMDCT time/subband output that the
-	 * existing full FDCT32 stride-4 path can still read, so state and checksum
-	 * semantics remain identical while the runtime experiment is explicitly on.
+	 * Keep the IMDCT36 thinning experiment compiled for selftests only.  Stride-4
+	 * fast-lowrate still feeds the normal FDCT32 synthesis, and each emitted PCM
+	 * sample depends on all 32 IMDCT subbands for that time slot.  Skipping the
+	 * non-phase subbands leaves stale/zero spectral inputs in FDCT32 and produces
+	 * garbled playback, so runtime decode must remain on the full IMDCT path until
+	 * a matching sparse FDCT32/polyphase path exists.
 	 */
-	if (mp3DecInfo && mp3DecInfo->expImdctThin &&
-		mp3DecInfo->fastLowrateStride == 4 &&
-		mp3DecInfo->outputMono && mp3DecInfo->nChans <= 2)
-		return 1;
+	(void)mp3DecInfo;
 #else
 	(void)mp3DecInfo;
 #endif
