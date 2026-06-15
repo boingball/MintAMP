@@ -124,6 +124,8 @@
 #define FDCT32Quarter			STATNAME(FDCT32Quarter)
 #define FDCT32_C_REFERENCE	STATNAME(FDCT32_C_REFERENCE)
 #define FDCT32_HAS_AMIGA_M68K_ASM_RUNTIME STATNAME(FDCT32_HAS_AMIGA_M68K_ASM_RUNTIME)
+#define FDCT32Half_TEST_ACTIVE STATNAME(FDCT32Half_TEST_ACTIVE)
+#define FDCT32Half_AMIGA_M68K_ASM_RUNTIME STATNAME(FDCT32Half_AMIGA_M68K_ASM_RUNTIME)
 #define AntiAlias_C_REFERENCE STATNAME(AntiAlias_C_REFERENCE)
 #define AntiAlias_TEST_ACTIVE STATNAME(AntiAlias_TEST_ACTIVE)
 #define AntiAlias_HAS_AMIGA_M68K_ASM_RUNTIME STATNAME(AntiAlias_HAS_AMIGA_M68K_ASM_RUNTIME)
@@ -321,6 +323,8 @@ void FDCT32Half(int *x, int *d, int offset, int oddBlock, int gb);
 void FDCT32Quarter(int *x, int *d, int offset, int oddBlock, int gb, int phase, int stride);
 void FDCT32_C_REFERENCE(int *x, int *d, int offset, int oddBlock, int gb);
 int FDCT32_HAS_AMIGA_M68K_ASM_RUNTIME(void);
+void FDCT32Half_TEST_ACTIVE(int *x, int *d, int offset, int oddBlock, int gb);
+int FDCT32Half_AMIGA_M68K_ASM_RUNTIME(void);
 
 /* imdct.c selftest hooks */
 int IMDCT36_C_REFERENCE(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb);

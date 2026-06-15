@@ -348,9 +348,12 @@ amiga_mp3dec --quality 0 --play --fast-mem --fast-lowrate --rate 11025 --mono so
   entry point, so `AMIGA_M68K_ASM_FDCT32` builds can prove the optional asm
   multiply path preserves the C operation order and fixed-point outputs.
 - `--selftest-fdct32half` compares `FDCT32Half`'s stride-2 even-row stores
-  against the full `FDCT32` output, so `AMIGA_M68K_ASM_FDCT32` builds can prove
-  the optional half-rate asm path preserves the C operation order and fixed-point
-  outputs.
+  against the full `FDCT32` output across every offset, odd/even block, and
+  guard-bit value.  `FDCT32Half` defaults to the safe C reference; the m68k asm
+  half path is tested only when both `AMIGA_M68K_ASM_FDCT32` and the experimental
+  `AMIGA_M68K_ASM_FDCT32_HALF_EXPERIMENTAL` flag are compiled in.  Add
+  `--selftest-verbose` to print every mismatch instead of the first mismatch per
+  failing case.
 - `--selftest-imdct` compares the C IMDCT36 reference with the active IMDCT
   entry point over zero, random, edge-value, common long-window, and fallback
   window cases.
@@ -432,8 +435,11 @@ decoded frame count and output sample count.
    `CLZ_AMIGA_M68K_ASM` wrapper and rely on the builtin guarded by the same zero
    check.
 
-4. `AMIGA_M68K_ASM_FDCT32` is an opt-in, exact FDCT32 arithmetic path for
-   68020+ GNU m68k builds, tuned for the 68030.  It keeps `FDCT32_C_REFERENCE`
+4. `AMIGA_M68K_ASM_FDCT32` is an opt-in, exact full `FDCT32` arithmetic path for
+   68020+ GNU m68k builds, tuned for the 68030.  It does not enable the
+   experimental `FDCT32Half` asm path by itself; use
+   `AMIGA_M68K_ASM_FDCT32_HALF_EXPERIMENTAL` only for focused real-hardware
+   investigation.  It keeps `FDCT32_C_REFERENCE`
    callable and routes the normal `FDCT32` entry point through an
    operation-order-preserving transform.  The fully unrolled first radix-4
    pass is one register-scheduled machine-code region: butterfly values remain

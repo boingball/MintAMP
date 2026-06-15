@@ -568,11 +568,7 @@ void FDCT32_C_REFERENCE(int *buf, int *dest, int offset, int oddBlock, int gb)
  *              so the high half and two of the four first-pass multiplies per group
  *              can be skipped while remaining bit-identical to FDCT32.
  **************************************************************************************/
-#if FDCT32_HAS_AMIGA_M68K_ASM
-#define FDCT32_HALF_MULSHIFT32(x, y) FDCT32_AMIGA_M68K_MULSHIFT32((x), (y))
-#else
 #define FDCT32_HALF_MULSHIFT32(x, y) FDCT32_MULSHIFT32((x), (y))
-#endif
 
 static void FDCT32Half_C_REFERENCE(int *buf, int *dest, int offset, int oddBlock, int gb)
 {
@@ -695,14 +691,28 @@ static void FDCT32Half_AMIGA_M68K_ASM(int *buf, int *dest, int offset, int oddBl
 }
 #endif
 
-void FDCT32Half(int *buf, int *dest, int offset, int oddBlock, int gb)
+int FDCT32Half_AMIGA_M68K_ASM_RUNTIME(void)
 {
-#if FDCT32_HAS_AMIGA_M68K_ASM
+#if FDCT32_HAS_AMIGA_M68K_ASM && defined(AMIGA_M68K_ASM_FDCT32_HALF_EXPERIMENTAL)
+	return 1;
+#else
+	return 0;
+#endif
+}
+
+void FDCT32Half_TEST_ACTIVE(int *buf, int *dest, int offset, int oddBlock, int gb)
+{
+#if FDCT32_HAS_AMIGA_M68K_ASM && defined(AMIGA_M68K_ASM_FDCT32_HALF_EXPERIMENTAL)
 	if (gb >= 6) {
 		FDCT32Half_AMIGA_M68K_ASM(buf, dest, offset, oddBlock, gb);
 		return;
 	}
 #endif
+	FDCT32Half_C_REFERENCE(buf, dest, offset, oddBlock, gb);
+}
+
+void FDCT32Half(int *buf, int *dest, int offset, int oddBlock, int gb)
+{
 	FDCT32Half_C_REFERENCE(buf, dest, offset, oddBlock, gb);
 }
 
