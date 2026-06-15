@@ -293,23 +293,36 @@ static __inline void FreqInvertOdd(int *y)
 
 static int IMDCTApplySubbandCap(const MP3DecInfo *mp3DecInfo, BlockCount *bc)
 {
-	if (bc)
+	int activeSubbands;
+
+	if (bc) {
 		bc->subbandCapActive = 0;
-#if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_FAST_SUBBAND_CAP)
-	/* Cap subbands to 16 for stride-4/5 (11025/8820 Hz) mono output.
-	 * Subbands 16-31 are filtered out by the polyphase window at these
-	 * output rates and contribute nothing audible. Inspired by MPEGA
-	 * library's freq_div=2 / sb_max=SBLIMIT/2 fast path.
-	 * nBlocksLong must also be capped to keep AntiAlias consistent. */
-	if (mp3DecInfo && bc && mp3DecInfo->fastLowrateStride >= 4) {
-		if (bc->nBlocksTotal > 16) bc->nBlocksTotal = 16;
-		if (bc->nBlocksLong  > 16) bc->nBlocksLong  = 16;
-		if (bc->nBlocksPrev  > 16) bc->nBlocksPrev  = 16;
+		bc->activeSubbands = NBANDS;
+	}
+	if (!mp3DecInfo || !bc)
+		return 0;
+
+	activeSubbands = mp3DecInfo->fastLowrateActiveSubbands;
+	if (activeSubbands <= 0) activeSubbands = NBANDS;
+	if (activeSubbands > NBANDS) activeSubbands = NBANDS;
+
+	if (mp3DecInfo->superfastLowrate && mp3DecInfo->fastLowrateStride == 4) {
+		if (bc->nBlocksTotal > activeSubbands) bc->nBlocksTotal = activeSubbands;
+		if (bc->nBlocksLong  > activeSubbands) bc->nBlocksLong  = activeSubbands;
+		if (bc->nBlocksPrev  > activeSubbands) bc->nBlocksPrev  = activeSubbands;
+		bc->activeSubbands = activeSubbands;
 		bc->subbandCapActive = 1;
 		return 1;
 	}
-#else
-	(void)mp3DecInfo;
+#if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_FAST_SUBBAND_CAP)
+	if (mp3DecInfo->fastLowrateStride >= 4) {
+		if (bc->nBlocksTotal > 16) bc->nBlocksTotal = 16;
+		if (bc->nBlocksLong  > 16) bc->nBlocksLong  = 16;
+		if (bc->nBlocksPrev  > 16) bc->nBlocksPrev  = 16;
+		bc->activeSubbands = 16;
+		bc->subbandCapActive = 1;
+		return 1;
+	}
 #endif
 	return 0;
 }
@@ -1195,6 +1208,17 @@ static int HybridTransform(int *xCurr, int *xPrev, int y[BLOCK_SIZE][NBANDS], Si
 			*yp = 0;
 			yp += NBANDS;
 		}
+	}
+
+	if (bc->subbandCapActive && bc->activeSubbands < NBANDS) {
+		int row, band;
+		for (row = 0; row < BLOCK_SIZE; row++)
+			for (band = bc->activeSubbands; band < NBANDS; band++)
+				y[row][band] = 0;
+		MP3AddDecodeCoreIMDCTSubbands((unsigned long)nBlocksOut,
+			(unsigned long)(NBANDS - bc->activeSubbands));
+	} else {
+		MP3AddDecodeCoreIMDCTSubbands((unsigned long)nBlocksOut, 0);
 	}
 
 	bc->gbOut = CLZ(mOut) - 1;

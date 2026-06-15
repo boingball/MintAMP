@@ -98,6 +98,8 @@ typedef struct _MP3DecInfo {
 	int fastLowrateStride;
 	int fastLowratePhase;
 	int fastLowrateOutputSamps;
+	int fastLowrateActiveSubbands;
+	int superfastLowrate;
 	int fastLowrateDebugCount;
 	int outputMono;
 	int expImdctThin;

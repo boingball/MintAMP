@@ -120,6 +120,17 @@ void MP3AddDecodeCoreProfile(int bucket, clock_t elapsed)
 #endif
 }
 
+void MP3AddDecodeCoreIMDCTSubbands(unsigned long executed, unsigned long skipped)
+{
+#ifdef AMIGA_PROFILE_DECODE
+	gDecodeCoreProfile.imdctSubbandsExecuted += executed;
+	gDecodeCoreProfile.imdctSubbandsSkipped += skipped;
+#else
+	(void)executed;
+	(void)skipped;
+#endif
+}
+
 /**************************************************************************************
  * Function:    MP3InitDecoder
  *
@@ -196,6 +207,15 @@ int MP3FindSyncWord(unsigned char *buf, int nBytes)
 	return -1;
 }
 
+static int MP3FastLowrateActiveSubbandsForStride(int stride)
+{
+	if (stride >= 4)
+		return 8;
+	if (stride == 2)
+		return 16;
+	return 32;
+}
+
 void MP3SetFastLowrate(HMP3Decoder hMP3Decoder, int stride)
 {
 	MP3DecInfo *mp3DecInfo = (MP3DecInfo *)hMP3Decoder;
@@ -205,9 +225,29 @@ void MP3SetFastLowrate(HMP3Decoder hMP3Decoder, int stride)
 	if (stride < 2)
 		stride = 1;
 	mp3DecInfo->fastLowrateStride = stride;
+	mp3DecInfo->fastLowrateActiveSubbands = MP3FastLowrateActiveSubbandsForStride(stride);
 	mp3DecInfo->fastLowratePhase = 0;
 	mp3DecInfo->fastLowrateOutputSamps = 0;
 	mp3DecInfo->fastLowrateDebugCount = 0;
+}
+
+void MP3SetSuperfastLowrate(HMP3Decoder hMP3Decoder, int enabled)
+{
+	MP3DecInfo *mp3DecInfo = (MP3DecInfo *)hMP3Decoder;
+
+	if (!mp3DecInfo)
+		return;
+	mp3DecInfo->superfastLowrate = enabled ? 1 : 0;
+	if (mp3DecInfo->superfastLowrate) {
+		MP3SetFastLowrate(hMP3Decoder, 4);
+		mp3DecInfo->fastLowrateActiveSubbands = 8;
+	}
+}
+
+int MP3SuperfastLowrateEnabled(HMP3Decoder hMP3Decoder)
+{
+	MP3DecInfo *mp3DecInfo = (MP3DecInfo *)hMP3Decoder;
+	return mp3DecInfo ? mp3DecInfo->superfastLowrate : 0;
 }
 
 

@@ -266,6 +266,7 @@ typedef struct _BlockCount {
 	int imdctThinStride;
 	int imdctThinPhase;
 	int subbandCapActive;
+	int activeSubbands;
 } BlockCount;
 
 /* max bits in scalefactors = 5, so use char's to save space */
@@ -317,7 +318,7 @@ void IntensityProcMPEG2(int x[MAX_NCHAN][MAX_NSAMP], int nSamps, FrameHeader *fh
 // about 1 ms faster in RAM, but very large
 void FDCT32(int *x, int *d, int offset, int oddBlock, int gb);
 void FDCT32Half(int *x, int *d, int offset, int oddBlock, int gb);
-void FDCT32Quarter(int *x, int *d, int offset, int oddBlock, int gb);
+void FDCT32Quarter(int *x, int *d, int offset, int oddBlock, int gb, int phase, int stride);
 void FDCT32_C_REFERENCE(int *x, int *d, int offset, int oddBlock, int gb);
 int FDCT32_HAS_AMIGA_M68K_ASM_RUNTIME(void);
 

@@ -115,7 +115,7 @@ static const char amigaStackCookie[] __attribute__((used)) = "$STACK:250000";
 void STATNAME(FDCT32)(int *x, int *d, int offset, int oddBlock, int gb);
 void STATNAME(FDCT32_C_REFERENCE)(int *x, int *d, int offset, int oddBlock, int gb);
 void STATNAME(FDCT32Half)(int *x, int *d, int offset, int oddBlock, int gb);
-void STATNAME(FDCT32Quarter)(int *x, int *d, int offset, int oddBlock, int gb);
+void STATNAME(FDCT32Quarter)(int *x, int *d, int offset, int oddBlock, int gb, int phase, int stride);
 int STATNAME(FDCT32_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
 void STATNAME(AntiAlias_C_REFERENCE)(int *x, int nBfly);
 void STATNAME(AntiAlias_TEST_ACTIVE)(int *x, int nBfly);
@@ -233,6 +233,7 @@ typedef struct DecodeOptions {
 	int checksum;
 	int outputRate;
 	int fastLowrate;
+	int superfastLowrate;
 	int quality;
 	int qualitySpecified;
 	int expPoly;
@@ -593,6 +594,7 @@ static void PrintUsage(const char *prog)
 	printf("  --rate HZ    output/downsample rate: 28600, 22050, 11025, 8820, or 8287 Hz\n");
 	printf("               28600/22050 playback is experimental/high CPU and may underrun\n");
 	printf("  --fast-lowrate lower-quality Amiga conversion; requires --rate\n");
+	printf("  --superfast-lowrate experimental sparse stride-4/8-subband 11025 Hz mode\n");
 	printf("                 22050, 11025, 8820, or 8287 and can skip discarded synthesis samples\n");
 	printf("  --quality N set quality/speed level (0 fastest, 1 fast, 2 balanced, 3 accurate)\n");
 	printf("               default: 1 for --fast-lowrate --rate 11025, otherwise 3\n");
@@ -784,6 +786,10 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->checksum = 1;
 		} else if (!strcmp(argv[i], "--fast-lowrate")) {
 			opt->fastLowrate = 1;
+		} else if (!strcmp(argv[i], "--superfast-lowrate")) {
+			opt->fastLowrate = 1;
+			opt->superfastLowrate = 1;
+			opt->outputRate = 11025;
 		} else if (!strcmp(argv[i], "--exp-poly")) {
 			opt->expPoly = 1;
 		} else if (!strcmp(argv[i], "--exp-huff")) {
@@ -2386,7 +2392,7 @@ static int SelftestImdct(void)
 	int btPrev;
 	int blockIdx;
 	int gb;
-
+	
 	failures = 0;
 	fallbackCases = 0;
 	seed = 0x27182818UL;
@@ -2805,6 +2811,7 @@ static int SelftestFdct32Quarter(void)
 		int offset;
 		int oddBlock;
 		int gb;
+		int phase;
 		int oddBase;
 		int evenBase;
 		int delayOff;
@@ -2813,6 +2820,7 @@ static int SelftestFdct32Quarter(void)
 		offset = (int)(i & 7UL);
 		oddBlock = (int)((i >> 3) & 1UL);
 		gb = (int)((i >> 4) & 7UL);
+		phase = (int)((i >> 7) & 3UL);
 		for (j = 0; j < 32; j++) {
 			seed = seed * 1664525UL + 1013904223UL;
 			if (j < 8)
@@ -2840,7 +2848,7 @@ static int SelftestFdct32Quarter(void)
 		active[8] = 16 + delayOff + evenBase + 64 * 12;
 
 		AMIGA_FDCT32_HALF(hbuf, hdest, offset, oddBlock, gb);
-		AMIGA_FDCT32_QUARTER(qbuf, qdest, offset, oddBlock, gb);
+		AMIGA_FDCT32_QUARTER(qbuf, qdest, offset, oddBlock, gb, phase, 4);
 
 		for (j = 0; j < ACTIVE; j++) {
 			int idx = active[j];
@@ -5870,14 +5878,18 @@ int main(int argc, char **argv)
 	MP3SetExperimentalHuffman(opt.expHuff);
 	MP3SetExperimentalIMDCTThin(decoder, opt.expImdctThin);
 	MP3SetExperimentalReducedTaps(opt.expReducedTaps);
-	MP3SetExperimentalFDCT32Quarter(opt.expFdct32Quarter);
+	MP3SetExperimentalFDCT32Quarter(opt.expFdct32Quarter || opt.superfastLowrate);
 	if (opt.fastLowrate) {
 		int stride = FastLowrateStrideForOutputRate(opt.outputRate);
 		if (opt.expReducedTaps && stride != 4)
 			fprintf(stderr, "warning: --exp-reduced-taps only affects 11025 Hz stride-4 fast-lowrate output\n");
 		if (opt.expFdct32Quarter && stride != 4)
 			fprintf(stderr, "warning: --exp-fdct32-quarter only affects 11025 Hz stride-4 fast-lowrate output\n");
+		if (opt.superfastLowrate && stride != 4)
+			fprintf(stderr, "warning: --superfast-lowrate requires 11025 Hz stride-4 output; forcing sparse setup may be unsafe for other rates\n");
 		MP3SetFastLowrate(decoder, stride);
+		if (opt.superfastLowrate)
+			MP3SetSuperfastLowrate(decoder, 1);
 		GuiPublishStartupStage(GUISTART_FASTLOWRATE_WARN_BEFORE);
 		if (!gMiniAmp3EmbeddedPlayback && opt.outputRate == 22050)
 			fprintf(stderr,
@@ -6282,6 +6294,8 @@ int main(int argc, char **argv)
 					ClocksToSeconds(coreProfile.subbandDct32));
 				printf("timing core polyphase: %.3f s\n",
 					ClocksToSeconds(coreProfile.polyphase));
+				printf("core IMDCT subbands: executed=%lu skipped=%lu\n",
+					coreProfile.imdctSubbandsExecuted, coreProfile.imdctSubbandsSkipped);
 			}
 		}
 		printf("timing frame decode: %.3f s\n", ClocksToSeconds(timing.frameDecode));
@@ -6303,3 +6317,4 @@ int main(int argc, char **argv)
 
 	return verifyError ? 1 : 0;
 }
+

@@ -635,8 +635,21 @@ void FDCT32Half(int *buf, int *dest, int offset, int oddBlock, int gb)
  *
  * Notes:       this reuses FDCT32Half's first pass and first radix-8 group, then
  *              scatters only the quarter-rate rows consumed by stride-4 output.
+ *
+ *              Stride-4 polyphase consumes PCM sample rows:
+ *                phase 0: 0,4,8,12,16,20,24,28
+ *                phase 1: 3,7,11,15,19,23,27,31
+ *                phase 2: 2,6,10,14,18,22,26,30
+ *                phase 3: 1,5,9,13,17,21,25,29
+ *              For oddBlock=0 the call exposes dest+offset and dest+VBUF_LENGTH;
+ *              for oddBlock=1 it exposes dest+VBUF_LENGTH+offset and dest.
+ *              delayOff=(offset-oddBlock)&7 selects the companion FIFO lane.
+ *              The sparse scatter clears both exposed quarter-rate lanes before
+ *              writing all rows that any phase can read; phase is still accepted
+ *              explicitly so future narrower scatter tables can be keyed without
+ *              changing the ABI.
  **************************************************************************************/
-void FDCT32Quarter(int *buf, int *dest, int offset, int oddBlock, int gb)
+void FDCT32Quarter(int *buf, int *dest, int offset, int oddBlock, int gb, int phase, int stride)
 {
 #if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_FAST_FDCT32_QUARTER)
 	int i, s, es, oddBase, evenBase, delayOff, clipBits;
@@ -646,6 +659,9 @@ void FDCT32Quarter(int *buf, int *dest, int offset, int oddBlock, int gb)
 	int *d;
 	static const unsigned char firstPassShift[8] = { 1, 1, 1, 1, 1, 2, 2, 4 };
 
+	phase &= (stride - 1);
+	if (phase >= stride)
+		return;
 	es = 0;
 	if (gb < 6) {
 		es = 6 - gb;
@@ -750,6 +766,8 @@ void FDCT32Quarter(int *buf, int *dest, int offset, int oddBlock, int gb)
 	(void)offset;
 	(void)oddBlock;
 	(void)gb;
+	(void)phase;
+	(void)stride;
 #endif
 }
 

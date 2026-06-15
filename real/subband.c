@@ -49,14 +49,13 @@
 static void FDCT32FastLowrate(int *x, int *d, int offset, int oddBlock, int gb,
 	int stride, int phase)
 {
-	(void)phase;
 #if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE)
 	if (stride == 2) {
 		FDCT32Half(x, d, offset, oddBlock, gb);
 		return;
 	}
 	if (stride == 4 && MP3ExperimentalFDCT32QuarterEnabled()) {
-		FDCT32Quarter(x, d, offset, oddBlock, gb);
+		FDCT32Quarter(x, d, offset, oddBlock, gb, phase, stride);
 		return;
 	}
 #else

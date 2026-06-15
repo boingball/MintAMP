@@ -129,6 +129,8 @@ typedef struct _MP3DecodeCoreProfile {
 	clock_t imdct;
 	clock_t subbandDct32;
 	clock_t polyphase;
+	unsigned long imdctSubbandsExecuted;
+	unsigned long imdctSubbandsSkipped;
 } MP3DecodeCoreProfile;
 
 typedef struct _MP3FastLowrateGranuleDebug {
@@ -163,6 +165,8 @@ int MP3GetNextFrameInfo(HMP3Decoder hMP3Decoder, MP3FrameInfo *mp3FrameInfo, uns
 int MP3FindSyncWord(unsigned char *buf, int nBytes);
 void MP3SetFastLowrate(HMP3Decoder hMP3Decoder, int stride);
 int MP3GetFastLowrateStride(HMP3Decoder hMP3Decoder);
+void MP3SetSuperfastLowrate(HMP3Decoder hMP3Decoder, int enabled);
+int MP3SuperfastLowrateEnabled(HMP3Decoder hMP3Decoder);
 void MP3SetExperimentalIMDCTThin(HMP3Decoder hMP3Decoder, int enabled);
 int MP3ExperimentalIMDCTThinActive(HMP3Decoder hMP3Decoder);
 void MP3SetExperimentalPolyphase(int enabled);
@@ -183,6 +187,7 @@ void MP3ResetDecodeCoreProfile(void);
 void MP3GetDecodeCoreProfile(MP3DecodeCoreProfile *profile);
 int MP3DecodeCoreProfileIsEnabled(void);
 void MP3AddDecodeCoreProfile(int bucket, clock_t elapsed);
+void MP3AddDecodeCoreIMDCTSubbands(unsigned long executed, unsigned long skipped);
 
 #ifdef __cplusplus
 }
