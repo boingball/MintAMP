@@ -216,6 +216,7 @@ enum {
 	GID_ARTIST,
 	GID_ALBUM,
 	GID_FAST_LOWRATE,
+	GID_SUPERFAST_LOWRATE,
 	GID_FAST_MEM,
 	GID_MONO,
 	GID_RATE,
@@ -317,6 +318,7 @@ typedef struct HelixAmp3Gui {
 	char  fileInfoText[128];
 	char  ratingText[16];
 	int   fastLowrate;
+	int   superfastLowrate;
 	int   fastMem;
 	int   mono;
 	int   rateIndex;
@@ -541,6 +543,7 @@ static void SaveEnvInt(const char *key, int value)
 static void SaveGuiSettings(HelixAmp3Gui *gui)
 {
 	SaveEnvInt("FastLowrate", gui->fastLowrate);
+	SaveEnvInt("SuperfastLowrate", gui->superfastLowrate);
 	SaveEnvInt("FastMem", gui->fastMem);
 	SaveEnvInt("Mono", gui->mono);
 	SaveEnvInt("RateIndex", gui->rateIndex);
@@ -2436,8 +2439,17 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 	if (!gad)
 		return -1;
 
+	gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_SUPERFAST_LOWRATE,
+		GUI_MARGIN_L + 116, ROW_CHECKS, 20, 12, "Superfast",
+		GTCB_Checked, gui->superfastLowrate,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
 	gui->gadFastMem = gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_FAST_MEM,
-		GUI_MARGIN_L + 150, ROW_CHECKS, 20, 12, "Fast-mem",
+		GUI_MARGIN_L + 240, ROW_CHECKS, 20, 12, "Fast-mem",
 		GTCB_Checked, gui->fastMem,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
@@ -2446,7 +2458,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_MONO,
-		GUI_MARGIN_L + 280, ROW_CHECKS, 20, 12, "Mono",
+		GUI_MARGIN_L + 390, ROW_CHECKS, 20, 12, "Mono",
 		GTCB_Checked, gui->mono,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
@@ -2573,6 +2585,7 @@ static int GuiOpen(HelixAmp3Gui *gui)
 
 	memset(gui, 0, sizeof(*gui));
 	gui->fastLowrate = LoadEnvInt("FastLowrate", 1, 0, 1);
+	gui->superfastLowrate = LoadEnvInt("SuperfastLowrate", 0, 0, 1);
 	gui->fastMem = LoadEnvInt("FastMem", 1, 0, 1);
 	gui->mono = LoadEnvInt("Mono", 1, 0, 1);
 	gui->rateIndex = LoadEnvInt("RateIndex", 2, 0, 4);
@@ -2942,12 +2955,15 @@ static void BuildPlaybackArgs(HelixAmp3Gui *gui, HelixAmp3Args *args)
 	AddArg(args, "--play");
 	if (gui->fastMem)
 		AddArg(args, "--fast-mem");
-	if (gui->fastLowrate && strcmp(kRates[gui->rateIndex], "28600"))
+	if (gui->superfastLowrate) {
+		AddArg(args, "--superfast-lowrate");
+	} else if (gui->fastLowrate && strcmp(kRates[gui->rateIndex], "28600")) {
 		AddArg(args, "--fast-lowrate");
+	}
 	if (gui->mono)
 		AddArg(args, "--mono");
 	AddArg(args, "--rate");
-	AddArg(args, kRates[gui->rateIndex]);
+	AddArg(args, gui->superfastLowrate ? "11025" : kRates[gui->rateIndex]);
 	AddArg(args, "--buffer-seconds");
 	sprintf(num, "%d", gui->bufferSeconds);
 	AddArg(args, num);
@@ -3287,6 +3303,23 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code)
 		gui->fastLowrate = !gui->fastLowrate;
 		GT_SetGadgetAttrs(gad, gui->win, NULL, GTCB_Checked, gui->fastLowrate, TAG_DONE);
 		SetStatus(gui, gui->fastLowrate ? "Fast-lowrate enabled." : "Fast-lowrate disabled.");
+		SaveGuiSettings(gui);
+		break;
+	case GID_SUPERFAST_LOWRATE:
+		if (gui->playbackActive || gui->playbackDonePending) {
+			GT_SetGadgetAttrs(gad, gui->win, NULL,
+				GTCB_Checked, gui->superfastLowrate, TAG_DONE);
+			SetStatus(gui, "Stop playback before changing superfast mode.");
+			break;
+		}
+		gui->superfastLowrate = !gui->superfastLowrate;
+		if (gui->superfastLowrate)
+			gui->rateIndex = 2;
+		GT_SetGadgetAttrs(gad, gui->win, NULL,
+			GTCB_Checked, gui->superfastLowrate, TAG_DONE);
+		SetStatus(gui, gui->superfastLowrate ?
+			"Superfast enabled; playback will use 11025 Hz." :
+			"Superfast disabled.");
 		SaveGuiSettings(gui);
 		break;
 	case GID_FAST_MEM:
