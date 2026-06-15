@@ -130,7 +130,10 @@ The quality cycle maps to the same playback code used by `amiga_mp3dec`:
   checkbox, so unticking Fast-mem is always obeyed.
 
 The buffer slider chooses the `--buffer-seconds` value from 1 to 30 seconds, and
-the rate selector cycles through 8287, 8820, 11025, 22050, and 28600 Hz. Playback still
+the rate selector cycles through 8287, 8820, 11025, 22050, and 28600 Hz.
+Superfast is a fast-lowrate variant rather than a separate exclusive mode; when
+Superfast is ticked the rate selector narrows to its supported 11025 and 22050 Hz
+choices. Playback still
 uses the Paula streaming implementation inside `amiga_mp3dec`. The GUI launches
 the playback subprocess at normal priority so CPU-bound decoding does not starve
 the Workbench/GadTools event loop. Stop requests set the same interrupt flag
