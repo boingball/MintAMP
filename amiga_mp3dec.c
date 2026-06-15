@@ -2376,7 +2376,7 @@ static int SelftestFdct32Half(void)
 	}
 
 	printf("FDCT32Half asm requested: %s\n",
-#if defined(AMIGA_M68K_ASM_FDCT32) && defined(AMIGA_M68K_ASM_FDCT32_HALF_EXPERIMENTAL)
+#if defined(AMIGA_M68K_ASM_FDCT32) && !defined(AMIGA_FORCE_FDCT32_HALF_C)
 		"yes"
 #else
 		"no"

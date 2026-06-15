@@ -697,7 +697,7 @@ static void FDCT32Half_AMIGA_M68K_ASM(int *buf, int *dest, int offset, int oddBl
 }
 #endif
 
-#if FDCT32_HAS_AMIGA_M68K_ASM && defined(AMIGA_M68K_ASM_FDCT32_HALF_EXPERIMENTAL) && defined(AMIGA_M68K_ASM_FDCT32_HALF_COMPARE_DURING_DECODE)
+#if FDCT32_HAS_AMIGA_M68K_ASM && !defined(AMIGA_FORCE_FDCT32_HALF_C) && defined(AMIGA_M68K_ASM_FDCT32_HALF_COMPARE_DURING_DECODE)
 volatile unsigned long FDCT32Half_AMIGA_M68K_ASM_COMPARE_MISMATCHES;
 
 static void FDCT32Half_AMIGA_M68K_ASM_COMPARE_REQUIRED(const int *cDest, const int *aDest, int offset, int oddBlock)
@@ -723,7 +723,7 @@ static void FDCT32Half_AMIGA_M68K_ASM_COMPARE_REQUIRED(const int *cDest, const i
 
 int FDCT32Half_AMIGA_M68K_ASM_RUNTIME(void)
 {
-#if FDCT32_HAS_AMIGA_M68K_ASM && defined(AMIGA_M68K_ASM_FDCT32_HALF_EXPERIMENTAL)
+#if FDCT32_HAS_AMIGA_M68K_ASM && !defined(AMIGA_FORCE_FDCT32_HALF_C)
 	return 1;
 #else
 	return 0;
@@ -732,7 +732,7 @@ int FDCT32Half_AMIGA_M68K_ASM_RUNTIME(void)
 
 void FDCT32Half_TEST_ACTIVE(int *buf, int *dest, int offset, int oddBlock, int gb)
 {
-#if FDCT32_HAS_AMIGA_M68K_ASM && defined(AMIGA_M68K_ASM_FDCT32_HALF_EXPERIMENTAL)
+#if FDCT32_HAS_AMIGA_M68K_ASM && !defined(AMIGA_FORCE_FDCT32_HALF_C)
 	if (gb >= 6) {
 		FDCT32Half_AMIGA_M68K_ASM(buf, dest, offset, oddBlock, gb);
 		return;
@@ -743,7 +743,7 @@ void FDCT32Half_TEST_ACTIVE(int *buf, int *dest, int offset, int oddBlock, int g
 
 void FDCT32Half(int *buf, int *dest, int offset, int oddBlock, int gb)
 {
-#if FDCT32_HAS_AMIGA_M68K_ASM && defined(AMIGA_M68K_ASM_FDCT32_HALF_EXPERIMENTAL) && defined(AMIGA_M68K_ASM_FDCT32_HALF_COMPARE_DURING_DECODE)
+#if FDCT32_HAS_AMIGA_M68K_ASM && !defined(AMIGA_FORCE_FDCT32_HALF_C) && defined(AMIGA_M68K_ASM_FDCT32_HALF_COMPARE_DURING_DECODE)
 	int i;
 	int asmBuf[32];
 	int asmDest[2 * VBUF_LENGTH];
@@ -756,7 +756,7 @@ void FDCT32Half(int *buf, int *dest, int offset, int oddBlock, int gb)
 	FDCT32Half_AMIGA_M68K_ASM_COMPARE_REQUIRED(dest, asmDest, offset, oddBlock);
 	return;
 #endif
-#if FDCT32_HAS_AMIGA_M68K_ASM && defined(AMIGA_M68K_ASM_FDCT32_HALF_EXPERIMENTAL) && defined(AMIGA_M68K_ASM_FDCT32_HALF_VALIDATED)
+#if FDCT32_HAS_AMIGA_M68K_ASM && !defined(AMIGA_FORCE_FDCT32_HALF_C)
 	if (gb >= 6) {
 		FDCT32Half_AMIGA_M68K_ASM(buf, dest, offset, oddBlock, gb);
 		return;

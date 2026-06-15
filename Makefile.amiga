@@ -39,7 +39,7 @@ FAST030_CFLAGS := -m68030 $(STD) -O3 -fomit-frame-pointer
 FAST030_TARGET := amiga_mp3dec.fastexp
 FAST030_HALFASM_TEST_TARGET := amiga_mp3dec.fdcthalf-test
 GUI_HALFASM_TEST_TARGET := miniamp3.fdcthalf-test
-HALFASM_TEST_CPPFLAGS := -DAMIGA_M68K_ASM_FDCT32 -DAMIGA_M68K_ASM_FDCT32_HALF_EXPERIMENTAL
+HALFASM_TEST_CPPFLAGS := -DAMIGA_M68K_ASM_FDCT32
 FAST030_ASM_SOURCES := real/amiga_m68k_polyphase.S
 AMIGA_HUNK_FAST_PREFERRED := python3 tools/amiga_fast_preferred_hunks.py
 

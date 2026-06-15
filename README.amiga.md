@@ -349,11 +349,11 @@ amiga_mp3dec --quality 0 --play --fast-mem --fast-lowrate --rate 11025 --mono so
   multiply path preserves the C operation order and fixed-point outputs.
 - `--selftest-fdct32half` compares `FDCT32Half`'s stride-2 even-row stores
   against the full `FDCT32` output across every offset, odd/even block, and
-  guard-bit value.  `FDCT32Half` defaults to the safe C reference; the m68k asm
-  half path is tested only when both `AMIGA_M68K_ASM_FDCT32` and the experimental
-  `AMIGA_M68K_ASM_FDCT32_HALF_EXPERIMENTAL` flag are compiled in.  Add
-  `--selftest-verbose` to print every mismatch instead of the first mismatch per
-  failing case.
+  guard-bit value.  In normal optimized 68020+/68030 `AMIGA_M68K_ASM_FDCT32`
+  builds, the validated m68k `FDCT32Half` asm path is requested and active when
+  the target supports it and guard bits are safe; lower guard-bit cases still
+  fall back to `FDCT32Half_C_REFERENCE`.  Add `--selftest-verbose` to print every
+  mismatch instead of the first mismatch per failing case.
 - `--selftest-imdct` compares the C IMDCT36 reference with the active IMDCT
   entry point over zero, random, edge-value, common long-window, and fallback
   window cases.
@@ -436,10 +436,11 @@ decoded frame count and output sample count.
    check.
 
 4. `AMIGA_M68K_ASM_FDCT32` is an opt-in, exact full `FDCT32` arithmetic path for
-   68020+ GNU m68k builds, tuned for the 68030.  It does not enable the
-   experimental `FDCT32Half` asm path by itself; use
-   `AMIGA_M68K_ASM_FDCT32_HALF_EXPERIMENTAL` only for focused real-hardware
-   investigation.  It keeps `FDCT32_C_REFERENCE`
+   68020+ GNU m68k builds, tuned for the 68030.  It also enables the validated
+   `FDCT32Half` m68k assembly implementation as the normal optimized stride-2
+   path on supported 68020+/68030 targets when guard bits are safe, while
+   retaining the C fallback for unsupported targets and low-guard-bit inputs.
+   It keeps `FDCT32_C_REFERENCE` and `FDCT32Half_C_REFERENCE`
    callable and routes the normal `FDCT32` entry point through an
    operation-order-preserving transform.  The fully unrolled first radix-4
    pass is one register-scheduled machine-code region: butterfly values remain
@@ -557,6 +558,26 @@ decoded frame count and output sample count.
    `AMIGA_PROFILE_DECODE`, `timing core subband/dct32` between the C reference
    and ASM binaries.  If any PCM checksum differs, do not define
    `AMIGA_M68K_ASM_FDCT32` for the default build.
+
+   Define `AMIGA_FORCE_FDCT32_HALF_C` when you want to keep the full `FDCT32` asm
+   path but force `FDCT32Half()` back to `FDCT32Half_C_REFERENCE` for regression
+   testing or benchmarks.  A normal optimized build should report
+   `FDCT32Half asm requested: yes`, `FDCT32Half asm active: yes`, and
+   `FDCT32Half selftest failures: 0` from `--selftest-fdct32half`; the forced-C
+   comparison build should keep failures at zero while reporting the half asm
+   inactive.
+
+   ```sh
+   make -f Makefile.amiga clean
+   make -f Makefile.amiga fast030
+   amiga_mp3dec.fastexp --selftest-fdct32half --selftest-verbose
+   amiga_mp3dec.fastexp --bench --no-output --fast-lowrate --rate 22050 --checksum song.mp3
+
+   make -f Makefile.amiga clean
+   make -f Makefile.amiga fast030 EXTRA_CFLAGS=-DAMIGA_FORCE_FDCT32_HALF_C
+   amiga_mp3dec.fastexp --selftest-fdct32half --selftest-verbose
+   amiga_mp3dec.fastexp --bench --no-output --fast-lowrate --rate 22050 --checksum song.mp3
+   ```
 
 10. `AMIGA_FAST_POLYPHASE` is an opt-in Amiga/m68k polyphase synthesis path
    for 68020+ builds.  It keeps the original implementation available when the
