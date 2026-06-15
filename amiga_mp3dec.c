@@ -219,6 +219,7 @@ typedef struct DecodeOptions {
 	int selftestClz;
 	int selftestFdct32;
 	int selftestFdct32Half;
+	int selftestFdct32HalfDebug;
 	int selftestVerbose;
 	int selftestImdct;
 	int selftestImdctThin;
@@ -615,6 +616,7 @@ static void PrintUsage(const char *prog)
 	printf("  --selftest-clz compare C and optional m68k bfffo CLZ helpers\n");
 	printf("  --selftest-fdct32 compare C reference and optional m68k asm FDCT32 path\n");
 	printf("  --selftest-fdct32half compare FDCT32Half even-row stores against full FDCT32\n");
+	printf("  --selftest-fdct32half-debug print first FDCT32Half mismatch dependencies\n");
 	printf("  --selftest-verbose print every selftest mismatch instead of the first only\n");
 	printf("  --selftest-imdct compare C reference and optional m68k asm long IMDCT path\n");
 	printf("  --selftest-imdct-thin compare full and requested thinned IMDCT output paths\n");
@@ -760,6 +762,9 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->selftestFdct32 = 1;
 		} else if (!strcmp(argv[i], "--selftest-fdct32half")) {
 			opt->selftestFdct32Half = 1;
+		} else if (!strcmp(argv[i], "--selftest-fdct32half-debug")) {
+			opt->selftestFdct32Half = 1;
+			opt->selftestFdct32HalfDebug = 1;
 		} else if (!strcmp(argv[i], "--selftest-verbose")) {
 			opt->selftestVerbose = 1;
 		} else if (!strcmp(argv[i], "--selftest-imdct")) {
@@ -2173,6 +2178,64 @@ static int SelftestFastLowrate(void)
 
 
 static int gSelftestVerbose;
+static int gSelftestFdct32HalfDebug;
+
+static const char *DescribeFdct32HalfDest(int destIndex, int offset, int oddBlock, int *row, const char **expr)
+{
+	int oddBase = oddBlock ? AMIGA_POLYPHASE_VBUF_LENGTH : 0;
+	int evenBase = oddBlock ? 0 : AMIGA_POLYPHASE_VBUF_LENGTH;
+	int delayOff = (offset - oddBlock) & 7;
+	int highBase = offset + oddBase;
+	int lowBase = 16 + delayOff + evenBase;
+	static const char *highExpr[8] = {
+		"buf[1]", "buf[9]+buf[13]", "buf[5]", "buf[13]+buf[11]",
+		"buf[3]", "buf[11]+buf[15]", "buf[7]", "buf[15]"
+	};
+	static const char *lowExpr[8] = {
+		"buf[1]", "buf[14]+buf[9]", "buf[6]", "buf[10]+buf[14]",
+		"buf[2]", "buf[12]+buf[10]", "buf[4]", "buf[8]+buf[12]"
+	};
+	int k;
+	if (destIndex == 64 * 16 + delayOff + evenBase || destIndex == 64 * 16 + delayOff + evenBase + 8) {
+		*row = 0;
+		*expr = "buf[0]";
+		return "CENTRE";
+	}
+	for (k = 0; k < 8; k++) {
+		if (destIndex == highBase + 128 * k || destIndex == highBase + 128 * k + 8) {
+			*row = 16 + 2 * k;
+			*expr = highExpr[k];
+			return "HIGH";
+		}
+		if (destIndex == lowBase + 128 * k || destIndex == lowBase + 128 * k + 8) {
+			*row = 16 - 2 * k;
+			*expr = lowExpr[k];
+			return "LOW";
+		}
+	}
+	*row = -1;
+	*expr = "unmapped destination";
+	return "UNKNOWN";
+}
+
+static void PrintFdct32HalfDebug(unsigned long index, int destIndex, int offset, int oddBlock, int gb,
+	const int *cbuf, const int *hbuf, const int *xbuf, int fullValue, int cHalfValue, int asmHalfValue)
+{
+	int row;
+	const char *expr;
+	const char *lane = DescribeFdct32HalfDest(destIndex, offset, oddBlock, &row, &expr);
+	printf("FDCT32Half debug first mismatch: case=%lu offset=%d oddBlock=%d gb=%d dest=%d lane=%s row=%d\n",
+		index, offset, oddBlock, gb, destIndex, lane, row);
+	printf("  C half=%ld asm half=%ld full FDCT32=%ld dependency=%s\n",
+		(long)cHalfValue, (long)asmHalfValue, (long)fullValue, expr);
+	printf("  C intermediate buf[0..15]:");
+	for (row = 0; row < 16; row++) printf(" %ld", (long)hbuf[row]);
+	printf("\n  asm intermediate buf[0..15]:");
+	for (row = 0; row < 16; row++) printf(" %ld", (long)xbuf[row]);
+	printf("\n  full intermediate buf[0..31]:");
+	for (row = 0; row < 32; row++) printf(" %ld", (long)cbuf[row]);
+	printf("\n");
+}
 
 static int TestFdct32Case(unsigned long index, unsigned long seed, int offset,
 	int oddBlock, int gb)
@@ -2241,6 +2304,8 @@ static int TestFdct32Case(unsigned long index, unsigned long seed, int offset,
 		if (xdest[i] != hdest[i]) {
 			printf("FDCT32 half asm dest mismatch %lu[%d]: C=%ld asm=%ld offset=%d odd=%d gb=%d\n",
 				index, i, (long)hdest[i], (long)xdest[i], offset, oddBlock, gb);
+			if (gSelftestFdct32HalfDebug)
+				PrintFdct32HalfDebug(index, i, offset, oddBlock, gb, cbuf, hbuf, xbuf, cdest[i], hdest[i], xdest[i]);
 			failed = 1;
 			if (!gSelftestVerbose) return -1;
 		}
@@ -5741,7 +5806,8 @@ int main(int argc, char **argv)
 	}
 	if (opt.selftestFdct32Half) {
 		int selftestErr;
-		gSelftestVerbose = opt.selftestVerbose;
+		gSelftestVerbose = opt.selftestVerbose || opt.selftestFdct32HalfDebug;
+		gSelftestFdct32HalfDebug = opt.selftestFdct32HalfDebug;
 		selftestErr = SelftestFdct32Half();
 		AmigaFreeNormalizedArgs(&normalized);
 		return selftestErr;
