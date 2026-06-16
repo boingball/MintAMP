@@ -195,7 +195,13 @@ extern volatile int gMiniAmp3EmbeddedPlayback;
 #define TIME_W          80
 #define TIMER_TICK_MICROS 1000000UL
 #define ART_TIMER_MICROS 20000UL
-#define ART_MCUS_PER_PUMP 4
+#define ART_MCUS_PER_PUMP 16
+#ifndef MINIAMP3_ART_REDUCED_JPEG
+#define MINIAMP3_ART_REDUCED_JPEG 1
+#endif
+#ifndef MINIAMP3_ART_COMPARE_JPEG
+#define MINIAMP3_ART_COMPARE_JPEG 0
+#endif
 
 #define MENUNUM_PROJECT   0
 #define MENUNUM_PLAYBACK  1
@@ -258,6 +264,12 @@ typedef struct ArtDecodeState {
 	unsigned long greyAccum[ART_W * ART_H];
 	unsigned short greyCount[ART_W * ART_H];
 	unsigned char greyOut[ART_W * ART_H];
+	int reduce;
+	unsigned long pumpCount;
+	unsigned long decodeMicros;
+	unsigned long processMicros;
+	unsigned long startSecs;
+	unsigned long startMicros;
 } ArtDecodeState;
 
 typedef struct Mp3Tags {
@@ -1423,6 +1435,104 @@ static unsigned char pjpeg_cb(unsigned char *buf, unsigned char buf_size,
 	return 0;
 }
 
+
+static void ArtNow(unsigned long *secs, unsigned long *micros)
+{
+#if defined(AMIGA_M68K)
+	ULONG s;
+	ULONG u;
+	CurrentTime(&s, &u);
+	*secs = (unsigned long)s;
+	*micros = (unsigned long)u;
+#else
+	*secs = 0;
+	*micros = 0;
+#endif
+}
+
+static unsigned long ArtElapsedMicros(unsigned long startSecs, unsigned long startMicros)
+{
+	unsigned long secs;
+	unsigned long micros;
+	ArtNow(&secs, &micros);
+	if (secs < startSecs)
+		return 0;
+	if (micros < startMicros) {
+		if (secs == startSecs)
+			return 0;
+		secs--;
+		micros += 1000000UL;
+	}
+	return (secs - startSecs) * 1000000UL + (micros - startMicros);
+}
+
+static const char *JpegScanTypeName(int scanType)
+{
+	switch (scanType) {
+	case PJPG_GRAYSCALE: return "grayscale";
+	case PJPG_YH1V1: return "YH1V1";
+	case PJPG_YH2V1: return "YH2V1";
+	case PJPG_YH1V2: return "YH1V2";
+	case PJPG_YH2V2: return "YH2V2";
+	default: return "?";
+	}
+}
+
+static void ArtAccumSample(unsigned long *accum, unsigned short *count,
+	int dst, int grey, unsigned long weight)
+{
+	if (!weight)
+		return;
+	accum[dst] += (unsigned long)grey * weight;
+	if ((unsigned long)count[dst] + weight > 0xffffUL)
+		count[dst] = 0xffff;
+	else
+		count[dst] = (unsigned short)(count[dst] + weight);
+}
+
+static void ArtAccumReducedBlock(const pjpeg_image_info_t *info,
+	unsigned long *accum, unsigned short *count, int outW, int outH,
+	int srcX0, int srcY0, int blockW, int blockH, int grey)
+{
+	int srcX1 = srcX0 + blockW;
+	int srcY1 = srcY0 + blockH;
+	int dstX0;
+	int dstX1;
+	int dstY0;
+	int dstY1;
+	int dy;
+	if (srcX0 >= info->m_width || srcY0 >= info->m_height)
+		return;
+	if (srcX1 > info->m_width)
+		srcX1 = info->m_width;
+	if (srcY1 > info->m_height)
+		srcY1 = info->m_height;
+	dstX0 = (srcX0 * outW) / info->m_width;
+	dstX1 = ((srcX1 * outW) + info->m_width - 1) / info->m_width;
+	dstY0 = (srcY0 * outH) / info->m_height;
+	dstY1 = ((srcY1 * outH) + info->m_height - 1) / info->m_height;
+	if (dstX1 > outW) dstX1 = outW;
+	if (dstY1 > outH) dstY1 = outH;
+	for (dy = dstY0; dy < dstY1; dy++) {
+		int cellY0 = (dy * info->m_height + outH - 1) / outH;
+		int cellY1 = ((dy + 1) * info->m_height + outH - 1) / outH;
+		int oy0 = cellY0 > srcY0 ? cellY0 : srcY0;
+		int oy1 = cellY1 < srcY1 ? cellY1 : srcY1;
+		int dx;
+		if (oy1 <= oy0)
+			continue;
+		for (dx = dstX0; dx < dstX1; dx++) {
+			int cellX0 = (dx * info->m_width + outW - 1) / outW;
+			int cellX1 = ((dx + 1) * info->m_width + outW - 1) / outW;
+			int ox0 = cellX0 > srcX0 ? cellX0 : srcX0;
+			int ox1 = cellX1 < srcX1 ? cellX1 : srcX1;
+			if (ox1 > ox0)
+				ArtAccumSample(accum, count, dy * outW + dx, grey,
+					(unsigned long)(ox1 - ox0) * (unsigned long)(oy1 - oy0));
+		}
+	}
+}
+
 static int McuSampleOffset(const pjpeg_image_info_t *info, int x, int y)
 {
 	int blockX = x / 8;
@@ -1433,8 +1543,11 @@ static int McuSampleOffset(const pjpeg_image_info_t *info, int x, int y)
 	return block * 64 + (y & 7) * 8 + (x & 7);
 }
 
-static int DecodeJpegToGrey(const unsigned char *jpegData, unsigned long jpegBytes,
-	unsigned char *greyOut, int outW, int outH, int isPng)
+static int JpegGreySample(const pjpeg_image_info_t *info, int off);
+
+static int DecodeJpegToGreyMode(const unsigned char *jpegData, unsigned long jpegBytes,
+	unsigned char *greyOut, int outW, int outH, int isPng, int reduce,
+	unsigned long *elapsedMicros)
 {
 	pjpeg_image_info_t info;
 	PjpegSrc src;
@@ -1443,21 +1556,24 @@ static int DecodeJpegToGrey(const unsigned char *jpegData, unsigned long jpegByt
 	unsigned char yMap[MAX_JPEG_DIM];
 	static unsigned long greyAccum[ART_W * ART_H];
 	static unsigned short greyCount[ART_W * ART_H];
+	unsigned long t0s;
+	unsigned long t0u;
 	int mcuIndex;
 	int i;
 
+	if (elapsedMicros)
+		*elapsedMicros = 0;
 	if (isPng || !jpegData || jpegBytes <= 4 || !greyOut ||
 		outW <= 0 || outW > ART_W || outH <= 0 || outH > ART_H)
 		return -1;
+	ArtNow(&t0s, &t0u);
 	src.data = jpegData;
 	src.pos = 0;
 	src.size = jpegBytes;
 	memset(greyOut, 0x80, (size_t)(outW * outH));
 	memset(greyAccum, 0, sizeof(greyAccum));
 	memset(greyCount, 0, sizeof(greyCount));
-	/* Full MCU decoding gives the tiny artwork thumbnail enough source
-	 * samples to preserve cover edges and faces instead of block averages. */
-	status = pjpeg_decode_init(&info, pjpeg_cb, &src, 0);
+	status = pjpeg_decode_init(&info, pjpeg_cb, &src, reduce ? 1 : 0);
 	if (status != 0 || info.m_width <= 0 || info.m_height <= 0 ||
 		info.m_width > MAX_JPEG_DIM || info.m_height > MAX_JPEG_DIM)
 		return -1;
@@ -1479,7 +1595,17 @@ static int DecodeJpegToGrey(const unsigned char *jpegData, unsigned long jpegByt
 			return -1;
 		mcuX = (mcuIndex % info.m_MCUSPerRow) * info.m_MCUWidth;
 		mcuY = (mcuIndex / info.m_MCUSPerRow) * info.m_MCUHeight;
-		for (y = 0; y < info.m_MCUHeight; y++) {
+		if (reduce) {
+			int by;
+			int bx;
+			for (by = 0; by < info.m_MCUHeight; by += 8) {
+				for (bx = 0; bx < info.m_MCUWidth; bx += 8) {
+					int off = McuSampleOffset(&info, bx, by);
+					ArtAccumReducedBlock(&info, greyAccum, greyCount, outW, outH,
+						mcuX + bx, mcuY + by, 8, 8, JpegGreySample(&info, off));
+				}
+			}
+		} else for (y = 0; y < info.m_MCUHeight; y++) {
 			int srcY = mcuY + y;
 			int dstY;
 			int x;
@@ -1489,27 +1615,10 @@ static int DecodeJpegToGrey(const unsigned char *jpegData, unsigned long jpegByt
 			dstY = yMap[srcY];
 			for (x = 0; x < info.m_MCUWidth; x++) {
 				int srcX = mcuX + x;
-				int dstX;
-				int off;
-				int g;
-
 				if (srcX >= info.m_width)
 					continue;
-				dstX = xMap[srcX];
-				off = McuSampleOffset(&info, x, y);
-				if (info.m_comps == 1)
-					g = info.m_pMCUBufR[off];
-				else
-					g = ((int)info.m_pMCUBufR[off] * 30 +
-						(int)info.m_pMCUBufG[off] * 59 +
-						(int)info.m_pMCUBufB[off] * 11) / 100;
-				{
-					int dst = dstY * outW + dstX;
-
-					greyAccum[dst] += (unsigned long)g;
-					if (greyCount[dst] != 0xffff)
-						greyCount[dst]++;
-				}
+				ArtAccumSample(greyAccum, greyCount, dstY * outW + xMap[srcX],
+					JpegGreySample(&info, McuSampleOffset(&info, x, y)), 1);
 			}
 		}
 	}
@@ -1518,7 +1627,16 @@ static int DecodeJpegToGrey(const unsigned char *jpegData, unsigned long jpegByt
 			greyOut[i] = (unsigned char)((greyAccum[i] +
 				(greyCount[i] / 2)) / greyCount[i]);
 	}
+	if (elapsedMicros)
+		*elapsedMicros = ArtElapsedMicros(t0s, t0u);
 	return 0;
+}
+
+static int DecodeJpegToGrey(const unsigned char *jpegData, unsigned long jpegBytes,
+	unsigned char *greyOut, int outW, int outH, int isPng)
+{
+	return DecodeJpegToGreyMode(jpegData, jpegBytes, greyOut, outW, outH,
+		isPng, MINIAMP3_ART_REDUCED_JPEG, NULL);
 }
 
 
@@ -1561,6 +1679,12 @@ static void FinishArtDecode(HelixAmp3Gui *gui, int ok)
 	int i;
 
 	if (ok) {
+#ifdef MINIAMP3_DEBUG
+		unsigned long totalMicros = ArtElapsedMicros(st->startSecs, st->startMicros);
+		Printf("artwork done: reduce=%s pumps=%lu decode_us=%lu process_us=%lu total_us=%lu cache=miss\n",
+			st->reduce ? "yes" : "no", st->pumpCount, st->decodeMicros,
+			st->processMicros, totalMicros);
+#endif
 		for (i = 0; i < ART_W * ART_H; i++) {
 			if (st->greyCount[i])
 				st->greyOut[i] = (unsigned char)((st->greyAccum[i] +
@@ -1593,17 +1717,22 @@ static void PumpArtDecode(HelixAmp3Gui *gui)
 
 	if (!st->active)
 		return;
+	st->pumpCount++;
 	for (pumped = 0; pumped < ART_MCUS_PER_PUMP && st->active; pumped++) {
 		unsigned char status;
 		int mcuX;
 		int mcuY;
 		int y;
+		unsigned long t0s;
+		unsigned long t0u;
 
 		if (st->mcuIndex >= st->totalMcus) {
 			FinishArtDecode(gui, 1);
 			break;
 		}
+		ArtNow(&t0s, &t0u);
 		status = pjpeg_decode_mcu();
+		st->decodeMicros += ArtElapsedMicros(t0s, t0u);
 		if (status == PJPG_NO_MORE_BLOCKS) {
 			FinishArtDecode(gui, 1);
 			break;
@@ -1615,7 +1744,19 @@ static void PumpArtDecode(HelixAmp3Gui *gui)
 		mcuX = (st->mcuIndex % st->info.m_MCUSPerRow) * st->info.m_MCUWidth;
 		mcuY = (st->mcuIndex / st->info.m_MCUSPerRow) * st->info.m_MCUHeight;
 		st->mcuIndex++;
-		for (y = 0; y < st->info.m_MCUHeight; y++) {
+		ArtNow(&t0s, &t0u);
+		if (st->reduce) {
+			int by;
+			int bx;
+			for (by = 0; by < st->info.m_MCUHeight; by += 8) {
+				for (bx = 0; bx < st->info.m_MCUWidth; bx += 8) {
+					int off = McuSampleOffset(&st->info, bx, by);
+					ArtAccumReducedBlock(&st->info, st->greyAccum,
+						st->greyCount, ART_W, ART_H, mcuX + bx,
+						mcuY + by, 8, 8, JpegGreySample(&st->info, off));
+				}
+			}
+		} else for (y = 0; y < st->info.m_MCUHeight; y++) {
 			int srcY = mcuY + y;
 			int dstY;
 			int x;
@@ -1630,12 +1771,11 @@ static void PumpArtDecode(HelixAmp3Gui *gui)
 				if (srcX >= st->info.m_width)
 					continue;
 				dst = dstY * ART_W + st->xMap[srcX];
-				st->greyAccum[dst] += (unsigned long)JpegGreySample(&st->info,
-					McuSampleOffset(&st->info, x, y));
-				if (st->greyCount[dst] != 0xffff)
-					st->greyCount[dst]++;
+				ArtAccumSample(st->greyAccum, st->greyCount, dst,
+					JpegGreySample(&st->info, McuSampleOffset(&st->info, x, y)), 1);
 			}
 		}
+		st->processMicros += ArtElapsedMicros(t0s, t0u);
 	}
 }
 
@@ -1760,6 +1900,9 @@ static void StartArtDecode(HelixAmp3Gui *gui)
 	gui->artValid = 0;
 	gui->artLoading = 0;
 	if (LoadArtworkCache(gui)) {
+#ifdef MINIAMP3_DEBUG
+		Printf("artwork cache=hit bytes=%lu\n", gui->tags.artBytes);
+#endif
 		DrawArtPanel(gui);
 		return;
 	}
@@ -1768,9 +1911,40 @@ static void StartArtDecode(HelixAmp3Gui *gui)
 		return;
 	}
 	memset(st->greyOut, 0x80, sizeof(st->greyOut));
+	st->reduce = MINIAMP3_ART_REDUCED_JPEG ? 1 : 0;
+	ArtNow(&st->startSecs, &st->startMicros);
+#if MINIAMP3_ART_COMPARE_JPEG
+	{
+		static unsigned char fullGrey[ART_W * ART_H];
+		static unsigned char reducedGrey[ART_W * ART_H];
+		unsigned long fullUs;
+		unsigned long reducedUs;
+		unsigned long sumDiff = 0;
+		int maxDiff = 0;
+		int diffPixels = 0;
+		int n;
+		if (DecodeJpegToGreyMode(gui->tags.artData, gui->tags.artBytes,
+			fullGrey, ART_W, ART_H, gui->tags.artIsPng, 0, &fullUs) == 0 &&
+			DecodeJpegToGreyMode(gui->tags.artData, gui->tags.artBytes,
+			reducedGrey, ART_W, ART_H, gui->tags.artIsPng, 1, &reducedUs) == 0) {
+			for (n = 0; n < ART_W * ART_H; n++) {
+				int d = (int)fullGrey[n] - (int)reducedGrey[n];
+				if (d < 0) d = -d;
+				if (d) diffPixels++;
+				if (d > maxDiff) maxDiff = d;
+				sumDiff += (unsigned long)d;
+			}
+#ifdef MINIAMP3_DEBUG
+			Printf("artwork compare: max_luma_diff=%d avg_luma_diff=%lu diff_pixels=%d full_us=%lu reduced_us=%lu\n",
+				maxDiff, (sumDiff + (ART_W * ART_H / 2)) / (ART_W * ART_H),
+				diffPixels, fullUs, reducedUs);
+#endif
+		}
+	}
+#endif
 	st->src.data = gui->tags.artData;
 	st->src.size = gui->tags.artBytes;
-	status = pjpeg_decode_init(&st->info, pjpeg_cb, &st->src, 0);
+	status = pjpeg_decode_init(&st->info, pjpeg_cb, &st->src, st->reduce);
 	if (status != 0 || st->info.m_width <= 0 || st->info.m_height <= 0 ||
 		st->info.m_width > MAX_JPEG_DIM || st->info.m_height > MAX_JPEG_DIM) {
 		DrawArtPanel(gui);
@@ -1781,6 +1955,16 @@ static void StartArtDecode(HelixAmp3Gui *gui)
 	for (i = 0; i < st->info.m_height; i++)
 		st->yMap[i] = (unsigned char)((i * ART_H) / st->info.m_height);
 	st->totalMcus = st->info.m_MCUSPerRow * st->info.m_MCUSPerCol;
+#ifdef MINIAMP3_DEBUG
+	Printf("artwork JPEG: %dx%d bytes=%lu sampling=%s mcu=%dx%d total_mcus=%d reduce=%s cache=miss pump_limit=%d source_pixels=%lu reduced_blocks=%lu\n",
+		st->info.m_width, st->info.m_height, gui->tags.artBytes,
+		JpegScanTypeName(st->info.m_scanType), st->info.m_MCUWidth,
+		st->info.m_MCUHeight, st->totalMcus, st->reduce ? "yes" : "no",
+		ART_MCUS_PER_PUMP, (unsigned long)st->info.m_width *
+		(unsigned long)st->info.m_height, (unsigned long)st->totalMcus *
+		(unsigned long)(st->info.m_MCUWidth / 8) *
+		(unsigned long)(st->info.m_MCUHeight / 8));
+#endif
 	st->active = 1;
 	gui->artLoading = 1;
 	SetStatus(gui, "Loading artwork...");
