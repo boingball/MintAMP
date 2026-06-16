@@ -143,6 +143,26 @@ int STATNAME(PolyphaseStereoFastLowrateStride4_C_REFERENCE)(short *pcm, int *vbu
 int STATNAME(PolyphaseStereoFastLowrateStride4_TEST_ACTIVE)(short *pcm, int *vbuf, const int *coefBase, int phase);
 int STATNAME(PolyphaseMonoFastLowrateStride4Reduced_TEST_ACTIVE)(short *pcm, int *vbuf, const int *coefBase, int phase);
 int STATNAME(PolyphaseStereoFastLowrateStride4Reduced_TEST_ACTIVE)(short *pcm, int *vbuf, const int *coefBase, int phase);
+#if defined(AMIGA_M68K) && defined(AMIGA_M68K_ASM_POLYPHASE)
+extern void StereoFastPolyphaseStride4Half_Amiga_m68k(short *pcm, int *vbuf,
+	const int *coefBase, int phase) __asm__("StereoFastPolyphaseStride4Half_Amiga_m68k")
+	__attribute__((weak));
+extern void StereoFastPolyphaseStride4Phase0_Amiga_m68k(short *pcm, int *vbuf,
+	const int *coefBase) __asm__("StereoFastPolyphaseStride4Phase0_Amiga_m68k")
+	__attribute__((weak));
+extern void StereoFastPolyphaseStride4Phase1_Amiga_m68k(short *pcm, int *vbuf,
+	const int *coefBase) __asm__("StereoFastPolyphaseStride4Phase1_Amiga_m68k")
+	__attribute__((weak));
+extern void StereoFastPolyphaseStride4Phase2_Amiga_m68k(short *pcm, int *vbuf,
+	const int *coefBase) __asm__("StereoFastPolyphaseStride4Phase2_Amiga_m68k")
+	__attribute__((weak));
+extern void StereoFastPolyphaseStride4Phase3_Amiga_m68k(short *pcm, int *vbuf,
+	const int *coefBase) __asm__("StereoFastPolyphaseStride4Phase3_Amiga_m68k")
+	__attribute__((weak));
+extern volatile unsigned long StereoFastPolyphaseStride4Half_Amiga_m68k_PhaseCounts[4]
+	__asm__("StereoFastPolyphaseStride4Half_Amiga_m68k_PhaseCounts")
+	__attribute__((weak));
+#endif
 int STATNAME(AmigaM68KPolyphaseMonoFast_IsActive)(void);
 int STATNAME(AmigaM68KPolyphaseMonoFastStride2_IsActive)(void);
 int STATNAME(DecodeHuffmanPairs_C_REFERENCE)(int *xy, int nVals, int tabIdx, int bitsLeft, unsigned char *buf, int bitOffset);
@@ -2986,6 +3006,147 @@ static int TestPolyphaseStride4StereoCase(unsigned long index, unsigned long see
 	return 0;
 }
 
+#if defined(AMIGA_M68K) && defined(AMIGA_M68K_ASM_POLYPHASE)
+static void InitPolyphaseStride4StereoDiagnosticVector(int *vbuf, short *pcm,
+	unsigned long seed, int pattern, int phase)
+{
+	int i;
+	int lane;
+
+	for (i = 0; i < AMIGA_POLYPHASE_VBUF_LENGTH; i++) {
+		seed = seed * 1664525UL + 1013904223UL;
+		if (pattern == 0)
+			vbuf[i] = 0;
+		else if (pattern == 1)
+			vbuf[i] = ((int)seed) >> 9;
+		else if (pattern == 2)
+			vbuf[i] = (i & 1) ? 0x03ffffff : (int)0xfc000000UL;
+		else if (pattern == 3)
+			vbuf[i] = (i == (phase * 41 + 17)) ? 0x02000000 : 0;
+		else {
+			lane = i & 63;
+			vbuf[i] = (lane < 32) ?
+				(int)(0x01000000 + ((i * 97) & 0x000fffff)) :
+				(int)(0xff000000UL + ((i * 193) & 0x000fffff));
+		}
+	}
+	for (i = 0; i < AMIGA_POLYPHASE_NBANDS * 2; i++)
+		pcm[i] = (short)(0x7300 + i);
+}
+
+static int PolyphaseStride4StereoDiagnosticMatches(const short *refPcm,
+	const int *refVbuf, int refCount, const short *testPcm,
+	const int *testVbuf, int testCount)
+{
+	int i;
+
+	if (testCount != refCount)
+		return 0;
+	for (i = 0; i < AMIGA_POLYPHASE_NBANDS * 2; i++) {
+		if (testPcm[i] != refPcm[i])
+			return 0;
+	}
+	for (i = 0; i < AMIGA_POLYPHASE_VBUF_LENGTH; i++) {
+		if (testVbuf[i] != refVbuf[i])
+			return 0;
+	}
+	return 1;
+}
+
+static void SelftestPolyphaseStride4StereoKernelMapping(void)
+{
+	static int baseVbuf[AMIGA_POLYPHASE_VBUF_LENGTH];
+	static int refVbuf[AMIGA_POLYPHASE_VBUF_LENGTH];
+	static int kernelVbuf[4][AMIGA_POLYPHASE_VBUF_LENGTH];
+	static int dispatcherVbuf[AMIGA_POLYPHASE_VBUF_LENGTH];
+	static short basePcm[AMIGA_POLYPHASE_NBANDS * 2];
+	static short refPcm[AMIGA_POLYPHASE_NBANDS * 2];
+	static short kernelPcm[4][AMIGA_POLYPHASE_NBANDS * 2];
+	static short dispatcherPcm[AMIGA_POLYPHASE_NBANDS * 2];
+	int matches[4][4];
+	int dispatcherMatches[4];
+	int phase;
+	int kernel;
+	int i;
+	int refCount;
+	int dispatcherCount;
+	void (*kernelFns[4])(short *, int *, const int *);
+
+	if (!StereoFastPolyphaseStride4Half_Amiga_m68k ||
+		!StereoFastPolyphaseStride4Phase0_Amiga_m68k ||
+		!StereoFastPolyphaseStride4Phase1_Amiga_m68k ||
+		!StereoFastPolyphaseStride4Phase2_Amiga_m68k ||
+		!StereoFastPolyphaseStride4Phase3_Amiga_m68k)
+		return;
+
+	kernelFns[0] = StereoFastPolyphaseStride4Phase0_Amiga_m68k;
+	kernelFns[1] = StereoFastPolyphaseStride4Phase1_Amiga_m68k;
+	kernelFns[2] = StereoFastPolyphaseStride4Phase2_Amiga_m68k;
+	kernelFns[3] = StereoFastPolyphaseStride4Phase3_Amiga_m68k;
+
+	for (phase = 0; phase < 4; phase++) {
+		for (kernel = 0; kernel < 4; kernel++)
+			matches[phase][kernel] = 1;
+		dispatcherMatches[phase] = 1;
+	}
+
+	if (StereoFastPolyphaseStride4Half_Amiga_m68k_PhaseCounts) {
+		for (phase = 0; phase < 4; phase++)
+			StereoFastPolyphaseStride4Half_Amiga_m68k_PhaseCounts[phase] = 0;
+	}
+
+	for (phase = 0; phase < 4; phase++) {
+		for (i = 0; i < 5; i++) {
+			InitPolyphaseStride4StereoDiagnosticVector(baseVbuf, basePcm,
+				0x2468ace0UL + (unsigned long)i * 0x10203UL, i, phase);
+			memcpy(refVbuf, baseVbuf, sizeof(refVbuf));
+			memcpy(refPcm, basePcm, sizeof(refPcm));
+			refCount = AMIGA_POLYPHASE_STEREO_FAST_STRIDE4_C_REFERENCE(refPcm,
+				refVbuf, AMIGA_POLY_COEF, phase);
+			for (kernel = 0; kernel < 4; kernel++) {
+				memcpy(kernelVbuf[kernel], baseVbuf, sizeof(baseVbuf));
+				memcpy(kernelPcm[kernel], basePcm, sizeof(basePcm));
+				kernelFns[kernel](kernelPcm[kernel], kernelVbuf[kernel],
+					AMIGA_POLY_COEF);
+				if (!PolyphaseStride4StereoDiagnosticMatches(refPcm, refVbuf,
+					refCount, kernelPcm[kernel], kernelVbuf[kernel], 16))
+					matches[phase][kernel] = 0;
+			}
+			memcpy(dispatcherVbuf, baseVbuf, sizeof(baseVbuf));
+			memcpy(dispatcherPcm, basePcm, sizeof(basePcm));
+			StereoFastPolyphaseStride4Half_Amiga_m68k(dispatcherPcm,
+				dispatcherVbuf, AMIGA_POLY_COEF, phase);
+			dispatcherCount = 16;
+			if (!PolyphaseStride4StereoDiagnosticMatches(refPcm, refVbuf,
+				refCount, dispatcherPcm, dispatcherVbuf, dispatcherCount))
+				dispatcherMatches[phase] = 0;
+		}
+	}
+
+	printf("Polyphase stride4 stereo direct kernel mapping diagnostic:\n");
+	for (phase = 0; phase < 4; phase++) {
+		printf("logical phase %d: kernel0=%s kernel1=%s kernel2=%s kernel3=%s dispatcher=%s\n",
+			phase,
+			matches[phase][0] ? "yes" : "no",
+			matches[phase][1] ? "yes" : "no",
+			matches[phase][2] ? "yes" : "no",
+			matches[phase][3] ? "yes" : "no",
+			dispatcherMatches[phase] ? "yes" : "no");
+	}
+	if (StereoFastPolyphaseStride4Half_Amiga_m68k_PhaseCounts) {
+		printf("Polyphase stride4 stereo dispatcher phase counts: phase0=%lu phase1=%lu phase2=%lu phase3=%lu\n",
+			StereoFastPolyphaseStride4Half_Amiga_m68k_PhaseCounts[0],
+			StereoFastPolyphaseStride4Half_Amiga_m68k_PhaseCounts[1],
+			StereoFastPolyphaseStride4Half_Amiga_m68k_PhaseCounts[2],
+			StereoFastPolyphaseStride4Half_Amiga_m68k_PhaseCounts[3]);
+	}
+}
+#else
+static void SelftestPolyphaseStride4StereoKernelMapping(void)
+{
+}
+#endif
+
 static int SelftestPolyphaseStride4Stereo(void)
 {
 	unsigned long i;
@@ -3014,6 +3175,7 @@ static int SelftestPolyphaseStride4Stereo(void)
 		}
 	}
 
+	SelftestPolyphaseStride4StereoKernelMapping();
 	printf("Polyphase stride4 stereo selftest patterns: zero, impulse, alternating extremes, left/right asymmetric, deterministic random\n");
 	printf("Polyphase stride4 stereo selftest cases: %lu\n", i * 4UL);
 	printf("Polyphase stride4 stereo selftest failures: %lu\n", failures);

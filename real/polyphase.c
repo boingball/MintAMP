@@ -1643,12 +1643,12 @@ int PolyphaseStereoFastLowrate(short *pcm, int *vbuf, const int *coefBase, int s
 			return PolyphaseStereoFastLowrateStride4Reduced(pcm, vbuf, coefBase,
 				localPhase);
 #endif
-#if defined(AMIGA_M68K_ASM_POLYPHASE)
-		if (StereoFastPolyphaseStride4Half_Amiga_m68k_IsActive()) {
-			StereoFastPolyphaseStride4Half_Amiga_m68k(pcm, vbuf, coefBase, localPhase);
-			return 16;
-		}
-#endif
+		/*
+		 * Keep the experimental m68k stride-4 stereo dispatcher out of
+		 * normal playback until its exact phase/kernel mapping is proven by
+		 * the explicit selftest.  The dispatcher remains callable through
+		 * PolyphaseStereoFastLowrateStride4_TEST_ACTIVE for diagnostics.
+		 */
 		return PolyphaseStereoFastLowrateStride4(pcm, vbuf, coefBase, localPhase);
 	}
 	if (stride == 5) {

@@ -17,6 +17,7 @@
 	.globl	StereoFastPolyphaseStride4Phase1_Amiga_m68k
 	.globl	StereoFastPolyphaseStride4Phase2_Amiga_m68k
 	.globl	StereoFastPolyphaseStride4Phase3_Amiga_m68k
+	.globl	StereoFastPolyphaseStride4Half_Amiga_m68k_PhaseCounts
 /* void AmigaM68KPolyphaseMonoFast(short *pcm, int *vbuf, const int *coefBase)
  * 4(%sp)  = pcm
  * 8(%sp)  = vbuf
@@ -445,19 +446,26 @@ StereoFastPolyphaseStride2Phase0_Amiga_m68k:
  * Dispatches the stride-4 half-rate stereo phase to the exact phase-specific
  * kernels below.  The phase-specific kernels preserve the C reference sample
  * order and left/right channel addressing; no mono-only symmetry is assumed.
- * The assembly kernel suffixes describe their compact sample lists, not the
- * runtime logical phase value: logical phases 1 and 3 use the oppositely
- * numbered sample lists in fastLowrateStride4Samples[], so keep that cross-map.
+ * The assembly kernel suffixes describe the compact sample lists in
+ * fastLowrateStride4Samples[], so logical phase N dispatches to PhaseN.
  */
 StereoFastPolyphaseStride4Half_Amiga_m68k:
 	move.l	16(%sp),%d0		| phase (before callee register save)
+	cmp.l	#3,%d0
+	bhi.s	0f
+	lea	StereoFastPolyphaseStride4Half_Amiga_m68k_PhaseCounts,%a0
+	move.l	%d0,%d1
+	lsl.l	#2,%d1
+	addq.l	#1,(%a0,%d1.l)
+0:
+	tst.l	%d0
 	beq	StereoFastPolyphaseStride4Phase0_Amiga_m68k
 	cmp.l	#1,%d0
-	beq	StereoFastPolyphaseStride4Phase3_Amiga_m68k
+	beq	StereoFastPolyphaseStride4Phase1_Amiga_m68k
 	cmp.l	#2,%d0
 	beq	StereoFastPolyphaseStride4Phase2_Amiga_m68k
 	cmp.l	#3,%d0
-	beq	StereoFastPolyphaseStride4Phase1_Amiga_m68k
+	beq	StereoFastPolyphaseStride4Phase3_Amiga_m68k
 	rts
 
 
@@ -548,5 +556,11 @@ StereoFastPolyphaseStride4Phase3_Amiga_m68k:
 	movem.l	(%sp)+,%d2-%d7/%a2-%a6
 	rts
 
+	.even
+	.data
+	.even
+StereoFastPolyphaseStride4Half_Amiga_m68k_PhaseCounts:
+	.long	0,0,0,0
+	.text
 	.even
 #endif /* AMIGA_M68K_ASM_POLYPHASE */
