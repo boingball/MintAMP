@@ -1351,10 +1351,19 @@ int PolyphaseStereoFastLowrateStride2_TEST_ACTIVE(short *pcm, int *vbuf, const i
 	return PolyphaseStereoFastLowrateStride2_C_REFERENCE(pcm, vbuf, coefBase);
 }
 
+int StereoFastPolyphaseStride4Half_Amiga_m68k_IsActive(void)
+{
+#if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_M68K_ASM_POLYPHASE)
+	return StereoFastPolyphaseStride4Half_Amiga_m68k ? 1 : 0;
+#else
+	return 0;
+#endif
+}
+
 int StereoFastPolyphaseStride4Phase0_Amiga_m68k_IsActive(void)
 {
 #if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_M68K_ASM_POLYPHASE)
-	return StereoFastPolyphaseStride4Phase0_Amiga_m68k ? 1 : 0;
+	return StereoFastPolyphaseStride4Half_Amiga_m68k_IsActive();
 #else
 	return 0;
 #endif
@@ -1474,11 +1483,13 @@ int PolyphaseStereoFastLowrateStride4_C_REFERENCE(short *pcm, int *vbuf,
 int PolyphaseStereoFastLowrateStride4_TEST_ACTIVE(short *pcm, int *vbuf,
 	const int *coefBase, int phase)
 {
-#if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE)
-	return PolyphaseStereoFastLowrateStride4(pcm, vbuf, coefBase, phase);
-#else
-	return PolyphaseStereoFastLowrateStride4_C_REFERENCE(pcm, vbuf, coefBase, phase);
+#if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_M68K_ASM_POLYPHASE)
+	if (StereoFastPolyphaseStride4Half_Amiga_m68k_IsActive()) {
+		StereoFastPolyphaseStride4Half_Amiga_m68k(pcm, vbuf, coefBase, phase);
+		return 16;
+	}
 #endif
+	return PolyphaseStereoFastLowrateStride4_C_REFERENCE(pcm, vbuf, coefBase, phase);
 }
 
 
@@ -1631,6 +1642,12 @@ int PolyphaseStereoFastLowrate(short *pcm, int *vbuf, const int *coefBase, int s
 		if (MP3ExperimentalReducedTapsEnabled())
 			return PolyphaseStereoFastLowrateStride4Reduced(pcm, vbuf, coefBase,
 				localPhase);
+#endif
+#if defined(AMIGA_M68K_ASM_POLYPHASE)
+		if (StereoFastPolyphaseStride4Half_Amiga_m68k_IsActive()) {
+			StereoFastPolyphaseStride4Half_Amiga_m68k(pcm, vbuf, coefBase, localPhase);
+			return 16;
+		}
 #endif
 		return PolyphaseStereoFastLowrateStride4(pcm, vbuf, coefBase, localPhase);
 	}
