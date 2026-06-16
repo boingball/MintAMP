@@ -217,6 +217,7 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
 - `--play-fast-path` is accepted as an explicit alias for `--play`; the normal
   `--play` mode already uses this reduced-overhead streaming path.
 - `--volume N` sets the `audio.device` request volume for playback, from 0 to 100 percent (default 100). The implementation maps this integer range to `ioa_Volume` 0-64 with rounded integer arithmetic; both stereo channel requests receive the exact same value. Live GUI changes are observed by the playback task through a volatile percent plus sequence counter and are applied to the next submitted buffer, so latency is bounded by the queued-buffer duration and active writes are not aborted just to change volume.
+- `--selftest-startup-volume` verifies the startup volume mapping used for the first playback requests without playing audio: 0% maps to `ioa_Volume` 0, 50% to 32, and 100% to 64 for both mono and stereo request setup.
 - `--buffer-seconds N` chooses the requested playback depth for each half of the
   `--play` double buffer; the default is 4 seconds for safer 030 playback. Values
   must be positive integers; values above 10 seconds are clamped to 10 seconds.

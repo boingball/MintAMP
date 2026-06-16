@@ -266,6 +266,7 @@ typedef struct DecodeOptions {
 	int decodeThenPlay;
 	int playLifecycleTest;
 	int audioOpenSilentTest;
+	int startupVolumeSelftest;
 	int bufferSeconds;
 	int volumePercent;
 	int fastMem;
@@ -603,6 +604,7 @@ static void PrintUsage(const char *prog)
 	printf("  --play-fast-path accepted alias; --play already uses reduced-overhead playback\n");
 	printf("  --decode-then-play decode whole MP3 to RAM, then play (debug for --play)\n");
 	printf("  --selftest-play-cleanup open/submit/cleanup audio.device five times\n");
+	printf("  --selftest-startup-volume verify startup CMD_WRITE volume setup\n");
 	printf("  --play-lifecycle-test legacy alias for --selftest-play-cleanup\n");
 	printf("  --buffer-seconds N playback seconds per half-buffer (default 4, clamped 1-10)\n");
 	printf("  --volume N   audio.device master volume percent for --play (0-100, default 100)\n");
@@ -780,6 +782,8 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->play = 1;
 			opt->outFormat = OUT_S8;
 			opt->mono = 1;
+		} else if (!strcmp(argv[i], "--selftest-startup-volume")) {
+			opt->startupVolumeSelftest = 1;
 		} else if (!strcmp(argv[i], "--selftest-play-cleanup") ||
 			!strcmp(argv[i], "--play-lifecycle-test")) {
 			opt->play = 1;
@@ -2175,6 +2179,44 @@ static int SelftestQuality(void)
 	printf("Quality selftest failures: %d\n", failures);
 	if (!failures)
 		printf("Quality selftest passed\n");
+	return failures ? -1 : 0;
+}
+
+static int SelftestStartupVolume(void)
+{
+	static const int percents[] = { 0, 50, 100 };
+	static const UWORD expected[] = { 0, 32, 64 };
+	int failures = 0;
+	int stereo;
+	unsigned int i;
+
+	for (stereo = 0; stereo <= 1; stereo++) {
+		for (i = 0; i < sizeof(percents) / sizeof(percents[0]); i++) {
+			UWORD mapped = VolumePercentToAudioDevice(percents[i]);
+			UWORD request0 = mapped;
+			UWORD request1 = mapped;
+			if (mapped != expected[i]) {
+				fprintf(stderr,
+					"startup volume selftest %s %d%% mapped %u expected %u\n",
+					stereo ? "stereo" : "mono", percents[i],
+					(unsigned int)mapped, (unsigned int)expected[i]);
+				failures++;
+			}
+			if (request0 != mapped || (stereo && request1 != mapped)) {
+				fprintf(stderr,
+					"startup volume selftest %s %d%% request mismatch ch0=%u ch1=%u mapped=%u\n",
+					stereo ? "stereo" : "mono", percents[i],
+					(unsigned int)request0, (unsigned int)request1,
+					(unsigned int)mapped);
+				failures++;
+			}
+			printf("startup volume selftest: %s %d%% -> ioa_Volume %u%s\n",
+				stereo ? "stereo" : "mono", percents[i],
+				(unsigned int)mapped,
+				stereo ? " on both channel requests" : "");
+		}
+	}
+	printf("startup volume selftest failures: %d\n", failures);
 	return failures ? -1 : 0;
 }
 
@@ -4355,6 +4397,8 @@ typedef struct AmigaAudioPlayer {
 	int debugCleanup;
 	int stopping;
 	int outputStride;
+	int debugPlay;
+	int startupVolumeDebugPrinted;
 	unsigned long cleanupInvocationCount;
 	UWORD requestVolume;
 	unsigned short lastVolumePercent;
@@ -4627,7 +4671,7 @@ static int AmigaAudioOpenOne(AmigaAudioPlayer *player, int ch,
 }
 
 static int AmigaAudioOpen(AmigaAudioPlayer *player, unsigned int period,
-	int stereo, unsigned long maxBytes)
+	int stereo, unsigned long maxBytes, int initialVolumePercent)
 {
 	UBYTE monoChannels[] = { 1, 2, 4, 8 };
 	UBYTE leftChannels[] = { 1, 8 };
@@ -4638,9 +4682,13 @@ static int AmigaAudioOpen(AmigaAudioPlayer *player, unsigned int period,
 	memset(player, 0, sizeof(*player));
 	player->period = period;
 	player->stereo = stereo;
-	player->lastVolumePercent = gMiniAmp3RequestedVolume > 100 ? 100 : gMiniAmp3RequestedVolume;
+	if (initialVolumePercent < 0)
+		initialVolumePercent = 0;
+	if (initialVolumePercent > 100)
+		initialVolumePercent = 100;
+	player->lastVolumePercent = (unsigned short)initialVolumePercent;
 	player->lastVolumeSequence = gMiniAmp3VolumeSequence;
-	player->requestVolume = VolumePercentToAudioDevice(player->lastVolumePercent);
+	player->requestVolume = VolumePercentToAudioDevice(initialVolumePercent);
 	GuiPublishStartupStage(GUISTART_CREATE_PORT);
 	player->port = CreateMsgPort();
 	if (!player->port)
@@ -4710,10 +4758,42 @@ static void AmigaAudioPrepareOne(AmigaAudioPlayer *player, int index,
 	req->ioa_Cycles = 1;
 }
 
+static void AmigaAudioPrintStartupVolumeDebug(AmigaAudioPlayer *player,
+	int index)
+{
+	if (!player || !player->debugPlay || player->startupVolumeDebugPrinted)
+		return;
+	player->startupVolumeDebugPrinted = 1;
+	printf("debug-play: parsed --volume percent: %u\n",
+		(unsigned int)player->lastVolumePercent);
+	printf("debug-play: shared requested percent: %u\n",
+		(unsigned int)(gMiniAmp3RequestedVolume > 100 ? 100 :
+			gMiniAmp3RequestedVolume));
+	printf("debug-play: mapped ioa_Volume: %u\n",
+		(unsigned int)player->requestVolume);
+	if (player->stereo) {
+		printf("debug-play: request A channel 0 ioa_Volume: %u\n",
+			(unsigned int)player->req[index][0]->ioa_Volume);
+		printf("debug-play: request A channel 1 ioa_Volume: %u\n",
+			(unsigned int)player->req[index][1]->ioa_Volume);
+		printf("debug-play: request flags: ch0=0x%lx ch1=0x%lx\n",
+			(unsigned long)player->req[index][0]->ioa_Request.io_Flags,
+			(unsigned long)player->req[index][1]->ioa_Request.io_Flags);
+	} else {
+		printf("debug-play: request A channel 0 ioa_Volume: %u\n",
+			(unsigned int)player->req[index][0]->ioa_Volume);
+		printf("debug-play: request flags: 0x%lx\n",
+			(unsigned long)player->req[index][0]->ioa_Request.io_Flags);
+	}
+}
+
 static void AmigaAudioCommitOne(AmigaAudioPlayer *player, int index, int ch)
 {
 	if (gPlaybackInterrupted || player->stopping)
 		return;
+	player->req[index][ch]->ioa_Request.io_Command = CMD_WRITE;
+	player->req[index][ch]->ioa_Request.io_Flags |= ADIOF_PERVOL;
+	player->req[index][ch]->ioa_Volume = player->requestVolume;
 	player->sent[index][ch] = 1;
 	BeginIO((struct IORequest *)player->req[index][ch]);
 }
@@ -4781,7 +4861,7 @@ static void AmigaAudioRefreshRequestedVolume(AmigaAudioPlayer *player)
 	percent = gMiniAmp3RequestedVolume;
 	if (percent > 100)
 		percent = 100;
-	if (seq != player->lastVolumeSequence || percent != player->lastVolumePercent) {
+	if (seq != player->lastVolumeSequence) {
 		player->lastVolumeSequence = seq;
 		player->lastVolumePercent = percent;
 		player->requestVolume = VolumePercentToAudioDevice(percent);
@@ -4808,6 +4888,7 @@ static int AmigaAudioCommit(AmigaAudioPlayer *player, int index)
 		return -1;
 	AmigaAudioRefreshRequestedVolume(player);
 	AmigaAudioApplyPreparedVolume(player, index);
+	AmigaAudioPrintStartupVolumeDebug(player, index);
 	if (player->stereo) {
 		AmigaAudioCommitOne(player, index, 1);
 		AmigaAudioCommitOne(player, index, 0);
@@ -4961,6 +5042,8 @@ typedef struct AmigaAudioPlayer {
 	int debugCleanup;
 	int stopping;
 	int outputStride;
+	int debugPlay;
+	int startupVolumeDebugPrinted;
 	UWORD requestVolume;
 	unsigned short lastVolumePercent;
 	unsigned long lastVolumeSequence;
@@ -4982,12 +5065,13 @@ static void AmigaAudioClose(AmigaAudioPlayer *player,
 	gGuiPlaybackStatus.cleanupComplete = 1;
 }
 static int AmigaAudioOpen(AmigaAudioPlayer *player, unsigned int period,
-	int stereo, unsigned long maxBytes)
+	int stereo, unsigned long maxBytes, int initialVolumePercent)
 {
 	(void)player;
 	(void)period;
 	(void)stereo;
 	(void)maxBytes;
+	(void)initialVolumePercent;
 	fprintf(stderr, "--play requires an AmigaOS audio.device build\n");
 	return -1;
 }
@@ -5000,6 +5084,9 @@ static int AmigaAudioPrepare(AmigaAudioPlayer *player, int index,
 	player->prepared[index] = 1;
 	return 0;
 }
+static void AmigaAudioPrintStartupVolumeDebug(AmigaAudioPlayer *player,
+	int index)
+{ (void)player; (void)index; }
 static int AmigaAudioCommit(AmigaAudioPlayer *player, int index)
 {
 	if (!player->prepared[index])
@@ -5357,10 +5444,11 @@ static int AmigaSetupPlaybackBuffers(AmigaAudioPlayer *player,
 	while (tryBytes >= minBytes) {
 		gGuiPlaybackStatus.tryBytes = tryBytes;
 		GuiPublishStartupStage(GUISTART_AUDIO_SETUP);
-		if (AmigaAudioOpen(player, period, opt->stereo, tryBytes) == 0) {
+		if (AmigaAudioOpen(player, period, opt->stereo, tryBytes, opt->volumePercent) == 0) {
 			int workReady;
 
 			player->debugCleanup = opt->debugCleanup;
+			player->debugPlay = opt->debugPlay;
 			player->outputStride = opt->fastLowrate ?
 				FastLowrateStrideForOutputRate(opt->outputRate) : 1;
 			workReady = 0;
@@ -6218,6 +6306,11 @@ int main(int argc, char **argv)
 		int selftestErr = SelftestQuality();
 		AmigaFreeNormalizedArgs(&normalized);
 		return selftestErr;
+	}
+	if (opt.startupVolumeSelftest) {
+		int selftestErr = SelftestStartupVolume();
+		AmigaFreeNormalizedArgs(&normalized);
+		return selftestErr == 0 ? 0 : 1;
 	}
 	if (opt.audioOpenSilentTest) {
 		int audioTestErr = AmigaAudioOpenSilentSelftest(&opt);
