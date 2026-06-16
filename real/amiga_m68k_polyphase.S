@@ -445,16 +445,19 @@ StereoFastPolyphaseStride2Phase0_Amiga_m68k:
  * Dispatches the stride-4 half-rate stereo phase to the exact phase-specific
  * kernels below.  The phase-specific kernels preserve the C reference sample
  * order and left/right channel addressing; no mono-only symmetry is assumed.
+ * The assembly kernel suffixes describe their compact sample lists, not the
+ * runtime logical phase value: logical phases 1 and 3 use the oppositely
+ * numbered sample lists in fastLowrateStride4Samples[], so keep that cross-map.
  */
 StereoFastPolyphaseStride4Half_Amiga_m68k:
 	move.l	16(%sp),%d0		| phase (before callee register save)
 	beq	StereoFastPolyphaseStride4Phase0_Amiga_m68k
 	cmp.l	#1,%d0
-	beq	StereoFastPolyphaseStride4Phase1_Amiga_m68k
+	beq	StereoFastPolyphaseStride4Phase3_Amiga_m68k
 	cmp.l	#2,%d0
 	beq	StereoFastPolyphaseStride4Phase2_Amiga_m68k
 	cmp.l	#3,%d0
-	beq	StereoFastPolyphaseStride4Phase3_Amiga_m68k
+	beq	StereoFastPolyphaseStride4Phase1_Amiga_m68k
 	rts
 
 
