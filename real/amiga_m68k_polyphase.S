@@ -290,7 +290,10 @@ MonoFastPolyphaseStride4_Amiga_m68k:
  *   %d3 = L accumulator
  *   %d5 = R accumulator
  *   %d0, %d1, %d2 = scratch
- * R channel at %a1 + 2048 (512 ints * 4 bytes).
+ * C keeps each stereo row as 32 left ints followed by 32 right ints.
+ * For row/pair P, L base is vbuf + 64*P ints and R base is
+ * vbuf + 64*P + 32 ints, so the right-channel byte offset from the
+ * left row base is 128, not a whole 512-int half-buffer.
  */
 
 .macro STEREO_PROD_ADD voff, coff, lacc, racc
@@ -299,7 +302,7 @@ MonoFastPolyphaseStride4_Amiga_m68k:
 	asl.l	#6,%d1
 	muls.l	%d1,%d2:%d0
 	add.l	%d2,\lacc
-	move.l	\voff+2048(%a1),%d0
+	move.l	\voff+128(%a1),%d0
 	muls.l	%d1,%d2:%d0
 	add.l	%d2,\racc
 .endm
@@ -310,7 +313,7 @@ MonoFastPolyphaseStride4_Amiga_m68k:
 	asl.l	#6,%d1
 	muls.l	%d1,%d2:%d0
 	sub.l	%d2,\lacc
-	move.l	\voff+2048(%a1),%d0
+	move.l	\voff+128(%a1),%d0
 	muls.l	%d1,%d2:%d0
 	sub.l	%d2,\racc
 .endm

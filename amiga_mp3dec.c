@@ -2934,6 +2934,8 @@ static int TestPolyphaseStride2StereoCase(unsigned long index, unsigned long see
 		case 4: cvbuf[i] = (i & 1) ? 0x03ffffff : (int)0xfc000000UL; break;
 		case 5: cvbuf[i] = (i & 32) ? 0 : (((int)seed) >> 9); break;
 		case 6: cvbuf[i] = (i & 32) ? (((int)seed) >> 9) : 0; break;
+		case 8: cvbuf[i] = (i & 32) ? 0 : (0x00100000 + ((i & 31) << 12)); break;
+		case 9: cvbuf[i] = (i & 32) ? (0xffe00000 + ((i & 31) << 11)) : 0; break;
 		default: cvbuf[i] = (i & 32) ? (((int)(seed ^ 0x55aa33ccUL)) >> 8) : (((int)seed) >> 10); break;
 		}
 		avbuf[i] = cvbuf[i];
@@ -2960,8 +2962,18 @@ static int TestPolyphaseStride2StereoCase(unsigned long index, unsigned long see
 	}
 	for (i = 0; i < 40; i++) {
 		if (apcm[i] != cpcm[i]) {
+			int j;
 			printf("PolyphaseStereoFast stride2 output/sentinel mismatch %lu[%d]: first=%ld second=%ld pattern=%d\n",
 				index, i, (long)cpcm[i], (long)apcm[i], pattern);
+			printf("PolyphaseStereoFast stride2 diagnostic: expected L0=%ld actual L0=%ld expected R0=%ld actual R0=%ld\n",
+				(long)cpcm[4], (long)apcm[4], (long)cpcm[5], (long)apcm[5]);
+			printf("PolyphaseStereoFast stride2 diagnostic: left vbuf base=%p right vbuf base=%p phase=0 vindex=0\n",
+				(void *)cvbuf, (void *)(cvbuf + 32));
+			printf("PolyphaseStereoFast stride2 expected/actual packed LR samples:\n");
+			for (j = 0; j < 32; j++)
+				printf("  [%02d] expected=%ld actual=%ld%s\n", j,
+					(long)cpcm[4 + j], (long)apcm[4 + j],
+					(j & 1) ? " R" : " L");
 			return -1;
 		}
 	}
@@ -2977,6 +2989,10 @@ static int SelftestPolyphaseStride2Stereo(void)
 
 	failures = 0;
 	seed = 0x66260700UL;
+	if (TestPolyphaseStride2StereoCase(0, seed, 8) != 0)
+		failures++;
+	if (TestPolyphaseStride2StereoCase(1, seed ^ 0x13579bdfUL, 9) != 0)
+		failures++;
 	for (i = 0; i < 512UL; i++) {
 		seed = seed * 1664525UL + 1013904223UL;
 		pattern = (i < 8UL) ? (int)i : 1;
