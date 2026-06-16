@@ -151,12 +151,12 @@ extern volatile int gMiniAmp3EmbeddedPlayback;
 #include "picojpeg.h"
 
 #define HELIXAMP3_MAX_PATH 256
-#define HELIXAMP3_ARGC_MAX 18
+#define HELIXAMP3_ARGC_MAX 20
 #define HELIXAMP3_SIGMASK(gui) (1UL << (gui)->win->UserPort->mp_SigBit)
 #define GUI_ENV_PREFIX  "ENVARC:MiniAMP3"
 
 #define GUI_WIN_W       560    /* inner width; wide enough for all controls */
-#define GUI_WIN_H       320    /* inner height */
+#define GUI_WIN_H       338    /* inner height */
 
 #define GUI_MARGIN_L     8     /* left margin */
 #define GUI_MARGIN_R     8     /* right margin */
@@ -181,10 +181,11 @@ extern volatile int gMiniAmp3EmbeddedPlayback;
 #define ROW_CHECKS      (GUI_TOP_Y + 7 * GUI_ROW_H + 4)
 #define ROW_CYCLES      (GUI_TOP_Y + 8 * GUI_ROW_H + 4)
 #define ROW_BUFFER      (GUI_TOP_Y + 9 * GUI_ROW_H + 4)
-#define ROW_PROGRESS    (GUI_TOP_Y + 10 * GUI_ROW_H + 8)
-#define ROW_BUTTONS     (GUI_TOP_Y + 11 * GUI_ROW_H + 12)
-#define ROW_STATUS      (GUI_TOP_Y + 12 * GUI_ROW_H + 12)
-#define ROW_FILEINFO    (GUI_TOP_Y + 13 * GUI_ROW_H + 12)
+#define ROW_VOLUME      (GUI_TOP_Y + 10 * GUI_ROW_H + 4)
+#define ROW_PROGRESS    (GUI_TOP_Y + 11 * GUI_ROW_H + 8)
+#define ROW_BUTTONS     (GUI_TOP_Y + 12 * GUI_ROW_H + 12)
+#define ROW_STATUS      (GUI_TOP_Y + 13 * GUI_ROW_H + 12)
+#define ROW_FILEINFO    (GUI_TOP_Y + 14 * GUI_ROW_H + 12)
 
 #define PROG_X          (GUI_MARGIN_L + 8)
 #define PROG_W          (GUI_WIN_W - PROG_X - 90 - GUI_MARGIN_R)
@@ -221,6 +222,7 @@ enum {
 	GID_MONO,
 	GID_RATE,
 	GID_BUFFER,
+	GID_VOLUME,
 	GID_QUALITY,
 	GID_PLAY,
 	GID_STOP,
@@ -292,6 +294,7 @@ typedef struct HelixAmp3Gui {
 	struct Gadget  *gadStars[5];
 	struct Gadget  *gadStatus;
 	struct Gadget  *gadBuffer;
+	struct Gadget  *gadVolume;
 	struct Gadget  *gadFastLowrate;
 	struct Gadget  *gadRate;
 	struct Gadget  *gadFastMem;
@@ -327,6 +330,7 @@ typedef struct HelixAmp3Gui {
 	int   mono;
 	int   rateIndex;
 	int   bufferSeconds;
+	int   volumePercent;
 	int   qualityIndex;
 	int   decodeThenPlay;
 	int   bench;
@@ -573,6 +577,7 @@ static void SaveGuiSettings(HelixAmp3Gui *gui)
 	SaveEnvInt("Mono", gui->mono);
 	SaveEnvInt("RateIndex", gui->rateIndex);
 	SaveEnvInt("BufferSeconds", gui->bufferSeconds);
+	SaveEnvInt("Volume", gui->volumePercent);
 	SaveEnvInt("QualityIndex", gui->qualityIndex);
 	SaveEnvInt("DecodeThenPlay", gui->decodeThenPlay);
 	SaveEnvInt("Bench", gui->bench);
@@ -2538,6 +2543,16 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 	if (!gad)
 		return -1;
 
+	gui->gadVolume = gad = MakeGadget(gui, gad, SLIDER_KIND, GID_VOLUME,
+		GUI_MARGIN_L + 62, ROW_VOLUME,
+		GUI_WIN_W - GUI_MARGIN_L - GUI_MARGIN_R - 80, 16, "Volume",
+		GTSL_Min, 0,
+		GTSL_Max, 100,
+		GTSL_Level, gui->volumePercent,
+		GTSL_LevelFormat, (ULONG)"%ld%%");
+	if (!gad)
+		return -1;
+
 	gui->gadPlay = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_PLAY,
 		GUI_MARGIN_L + 120, ROW_BUTTONS, 80, 18, "Play",
 		TAG_IGNORE, 0,
@@ -2639,6 +2654,9 @@ static int GuiOpen(HelixAmp3Gui *gui)
 			gui->rateIndex = 2;
 	}
 	gui->bufferSeconds = LoadEnvInt("BufferSeconds", 10, 1, 30);
+	gui->volumePercent = LoadEnvInt("Volume", 100, 0, 100);
+	gMiniAmp3RequestedVolume = (unsigned short)gui->volumePercent;
+	gMiniAmp3VolumeSequence++;
 	gui->qualityIndex = LoadEnvInt("QualityIndex", 0, 0, 2);
 	gui->decodeThenPlay = LoadEnvInt("DecodeThenPlay", 0, 0, 1);
 	gui->bench = LoadEnvInt("Bench", 0, 0, 1);
@@ -3017,6 +3035,9 @@ static void BuildPlaybackArgs(HelixAmp3Gui *gui, HelixAmp3Args *args)
 	AddArg(args, kRates[gui->rateIndex]);
 	AddArg(args, "--buffer-seconds");
 	sprintf(num, "%d", gui->bufferSeconds);
+	AddArg(args, num);
+	AddArg(args, "--volume");
+	sprintf(num, "%d", gui->volumePercent);
 	AddArg(args, num);
 	if (gui->qualityIndex == 0)
 		AddArg(args, "--play-fast-path");
@@ -3508,6 +3529,18 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code)
 			GTSL_Level, gui->bufferSeconds,
 			TAG_DONE);
 		SetStatus(gui, "Buffer depth updated.");
+		SaveGuiSettings(gui);
+		break;
+	case GID_VOLUME:
+		gui->volumePercent = code;
+		if (gui->volumePercent < 0)
+			gui->volumePercent = 0;
+		if (gui->volumePercent > 100)
+			gui->volumePercent = 100;
+		GT_SetGadgetAttrs(gui->gadVolume, gui->win, NULL,
+			GTSL_Level, gui->volumePercent, TAG_DONE);
+		gMiniAmp3RequestedVolume = (unsigned short)gui->volumePercent;
+		gMiniAmp3VolumeSequence++;
 		SaveGuiSettings(gui);
 		break;
 	case GID_STAR1:

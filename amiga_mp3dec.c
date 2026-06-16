@@ -267,6 +267,7 @@ typedef struct DecodeOptions {
 	int playLifecycleTest;
 	int audioOpenSilentTest;
 	int bufferSeconds;
+	int volumePercent;
 	int fastMem;
 	int info;
 	int noMonoMSSideSkip;
@@ -604,6 +605,7 @@ static void PrintUsage(const char *prog)
 	printf("  --selftest-play-cleanup open/submit/cleanup audio.device five times\n");
 	printf("  --play-lifecycle-test legacy alias for --selftest-play-cleanup\n");
 	printf("  --buffer-seconds N playback seconds per half-buffer (default 4, clamped 1-10)\n");
+	printf("  --volume N   audio.device master volume percent for --play (0-100, default 100)\n");
 	printf("  --fast-mem   preload the compressed MP3 into Fast RAM before decoding/playback\n");
 	printf("  --decode-only decode frames only; skip PCM conversion and output\n");
 	printf("  --no-output  run conversion/compression paths but discard output bytes\n");
@@ -673,6 +675,37 @@ static int ParseBufferSecondsOption(const char *arg, int *outSeconds)
 	return 0;
 }
 
+static int ParseVolumeOption(const char *arg, int *outPercent)
+{
+	char *end;
+	long value;
+
+	if (!arg || !arg[0])
+		return -1;
+	value = strtol(arg, &end, 10);
+	if (end == arg || *end != '\0' || value < 0 || value > 100)
+		return -1;
+	*outPercent = (int)value;
+	return 0;
+}
+
+#ifndef HAVE_AMIGA_AUDIO_DEVICE
+typedef unsigned short UWORD;
+#endif
+#define AMIGA_AUDIO_DEVICE_MAX_VOLUME 64U
+
+static UWORD VolumePercentToAudioDevice(int percent)
+{
+	if (percent < 0)
+		percent = 0;
+	if (percent > 100)
+		percent = 100;
+	return (UWORD)(((unsigned int)percent * AMIGA_AUDIO_DEVICE_MAX_VOLUME + 50U) / 100U);
+}
+
+volatile unsigned short gMiniAmp3RequestedVolume = 100;
+volatile unsigned long gMiniAmp3VolumeSequence;
+
 static void ApplyQualityOptions(DecodeOptions *opt)
 {
 	int quality;
@@ -709,6 +742,7 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 	opt->quality = 3;
 	opt->qualitySpecified = 0;
 	opt->bufferSeconds = 4;
+	opt->volumePercent = 100;
 
 	for (i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--mono")) {
@@ -757,6 +791,13 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 				return -1;
 			if (ParseBufferSecondsOption(argv[i], &opt->bufferSeconds) != 0) {
 				fprintf(stderr, "--buffer-seconds requires a positive integer (1-10 seconds)\n");
+				return -1;
+			}
+		} else if (!strcmp(argv[i], "--volume")) {
+			if (++i >= argc)
+				return -1;
+			if (ParseVolumeOption(argv[i], &opt->volumePercent) != 0) {
+				fprintf(stderr, "--volume requires an integer from 0 to 100\n");
 				return -1;
 			}
 		} else if (!strcmp(argv[i], "--fast-mem")) {
@@ -4315,6 +4356,9 @@ typedef struct AmigaAudioPlayer {
 	int stopping;
 	int outputStride;
 	unsigned long cleanupInvocationCount;
+	UWORD requestVolume;
+	unsigned short lastVolumePercent;
+	unsigned long lastVolumeSequence;
 } AmigaAudioPlayer;
 
 static int PlaybackBufferCanaryOk(const void *base, unsigned long bytes)
@@ -4416,6 +4460,7 @@ static void AmigaAudioClose(AmigaAudioPlayer *player,
 	AmigaAudioCleanupTrace4(player, "cleanup begin count=%lu outputRate=%ld stride=%ld\n",
 		player->cleanupInvocationCount, (unsigned long)gGuiPlaybackStatus.sampleRate,
 		(unsigned long)player->outputStride, 0);
+	AmigaAudioCleanupTrace(player, "volume control request: none allocated (next-buffer ioa_Volume updates)\n");
 	gGuiPlaybackStatus.cleanupStage = GUIPLAY_CLEANUP_ABORT_REAP;
 	/* No request, device, port, or DMA buffer is destroyed until every write
 	 * has either completed or has been aborted and reaped with WaitIO. */
@@ -4593,6 +4638,9 @@ static int AmigaAudioOpen(AmigaAudioPlayer *player, unsigned int period,
 	memset(player, 0, sizeof(*player));
 	player->period = period;
 	player->stereo = stereo;
+	player->lastVolumePercent = gMiniAmp3RequestedVolume > 100 ? 100 : gMiniAmp3RequestedVolume;
+	player->lastVolumeSequence = gMiniAmp3VolumeSequence;
+	player->requestVolume = VolumePercentToAudioDevice(player->lastVolumePercent);
 	GuiPublishStartupStage(GUISTART_CREATE_PORT);
 	player->port = CreateMsgPort();
 	if (!player->port)
@@ -4658,7 +4706,7 @@ static void AmigaAudioPrepareOne(AmigaAudioPlayer *player, int index,
 	req->ioa_Data = (UBYTE *)buf;
 	req->ioa_Length = len;
 	req->ioa_Period = player->period;
-	req->ioa_Volume = 64;
+	req->ioa_Volume = player->requestVolume;
 	req->ioa_Cycles = 1;
 }
 
@@ -4722,6 +4770,34 @@ static int AmigaAudioPrepare(AmigaAudioPlayer *player, int index,
 	return 0;
 }
 
+static void AmigaAudioRefreshRequestedVolume(AmigaAudioPlayer *player)
+{
+	unsigned long seq;
+	unsigned short percent;
+
+	if (!player || player->stopping || player->cleanupStarted)
+		return;
+	seq = gMiniAmp3VolumeSequence;
+	percent = gMiniAmp3RequestedVolume;
+	if (percent > 100)
+		percent = 100;
+	if (seq != player->lastVolumeSequence || percent != player->lastVolumePercent) {
+		player->lastVolumeSequence = seq;
+		player->lastVolumePercent = percent;
+		player->requestVolume = VolumePercentToAudioDevice(percent);
+	}
+}
+
+static void AmigaAudioApplyPreparedVolume(AmigaAudioPlayer *player, int index)
+{
+	if (!player || !player->prepared[index])
+		return;
+	if (player->req[index][0])
+		player->req[index][0]->ioa_Volume = player->requestVolume;
+	if (player->stereo && player->req[index][1])
+		player->req[index][1]->ioa_Volume = player->requestVolume;
+}
+
 static int AmigaAudioCommit(AmigaAudioPlayer *player, int index)
 {
 	if (AmigaPlaybackStopRequested(NULL, "before first buffer submission"))
@@ -4730,6 +4806,8 @@ static int AmigaAudioCommit(AmigaAudioPlayer *player, int index)
 		return -1;
 	if (!player->prepared[index])
 		return -1;
+	AmigaAudioRefreshRequestedVolume(player);
+	AmigaAudioApplyPreparedVolume(player, index);
 	if (player->stereo) {
 		AmigaAudioCommitOne(player, index, 1);
 		AmigaAudioCommitOne(player, index, 0);
@@ -4883,6 +4961,9 @@ typedef struct AmigaAudioPlayer {
 	int debugCleanup;
 	int stopping;
 	int outputStride;
+	UWORD requestVolume;
+	unsigned short lastVolumePercent;
+	unsigned long lastVolumeSequence;
 } AmigaAudioPlayer;
 static void AmigaAudioClose(AmigaAudioPlayer *player,
 	PlaybackCleanupStatus *status)
@@ -5221,6 +5302,11 @@ static void PrintPlaybackDebugStartup(const DecodeOptions *opt,
 	printf("debug-play: actual output rate: %d Hz\n", playbackRate);
 	printf("debug-play: PAL period: %u\n", period);
 	printf("debug-play: requested buffer seconds: %d\n", opt->bufferSeconds);
+	printf("debug-play: requested volume percent: %d\n", opt->volumePercent);
+	printf("debug-play: mapped audio.device volume: %u (range 0-%u)\n", (unsigned int)VolumePercentToAudioDevice(opt->volumePercent), (unsigned int)AMIGA_AUDIO_DEVICE_MAX_VOLUME);
+	printf("debug-play: initial request volume: %u\n", (unsigned int)player->requestVolume);
+	printf("debug-play: live volume update method: next CMD_WRITE buffer ioa_Volume; no active writes aborted\n");
+	printf("debug-play: volume update sequence count: %lu\n", gMiniAmp3VolumeSequence);
 	printf("debug-play: requested half-buffer bytes: %lu\n", requestedBytes);
 	printf("debug-play: selected half-buffer samples: %d\n",
 		PlaybackHalfBufferSamples(opt, chunkBytes));
@@ -6404,6 +6490,8 @@ int main(int argc, char **argv)
 #ifndef AMIGA_M68K
 		signal(SIGINT, PlaybackSignalHandler);
 #endif
+		gMiniAmp3RequestedVolume = (unsigned short)opt.volumePercent;
+		gMiniAmp3VolumeSequence++;
 		gTiming = playTiming;
 		MP3SetDecodeCoreProfileEnabled(opt.bench);
 		if (opt.bench) {

@@ -129,8 +129,7 @@ The quality cycle maps to the same playback code used by `amiga_mp3dec`:
 - **Normal** and **Best** leave the memory preload choice to the Fast-mem
   checkbox, so unticking Fast-mem is always obeyed.
 
-The buffer slider chooses the `--buffer-seconds` value from 1 to 30 seconds, and
-the rate selector cycles through 8287, 8820, 11025, 22050, and 28600 Hz.
+The buffer slider chooses the `--buffer-seconds` value from 1 to 30 seconds. The Volume slider stores `ENVARC:MiniAMP3/Volume` as 0-100% and maps it to `audio.device` `ioa_Volume` 0-64, so 0% is silent and 100% preserves the previous full-volume request value. Volume changes are shared with the embedded playback subprocess and applied to the next safe `CMD_WRITE` submission without changing PCM samples. The GUI rate selector cycles through 8287, 8820, 11025, 22050, and 28600 Hz.
 Superfast is a fast-lowrate variant rather than a separate exclusive mode; when
 Superfast is ticked the rate selector narrows to its supported 11025 and 22050 Hz
 choices. Playback still
@@ -157,7 +156,7 @@ source while reusing the public decoder and Paula playback implementation.
 ```sh
 amiga_mp3dec [options] infile.mp3 outfile
 amiga_mp3dec --info infile.mp3
-amiga_mp3dec --play [--stereo] [--rate 8287|8820|11025|22050|28600] [--quality 0|1|2|3] [--buffer-seconds N] [--fast-mem] infile.mp3
+amiga_mp3dec --play [--stereo] [--rate 8287|8820|11025|22050|28600] [--quality 0|1|2|3] [--buffer-seconds N] [--volume N] [--fast-mem] infile.mp3
 amiga_mp3dec --selftest-play-cleanup [--debug-cleanup] [--buffer-seconds N]
 ```
 
@@ -217,6 +216,7 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   underrun on 030.`
 - `--play-fast-path` is accepted as an explicit alias for `--play`; the normal
   `--play` mode already uses this reduced-overhead streaming path.
+- `--volume N` sets the `audio.device` request volume for playback, from 0 to 100 percent (default 100). The implementation maps this integer range to `ioa_Volume` 0-64 with rounded integer arithmetic; both stereo channel requests receive the exact same value. Live GUI changes are observed by the playback task through a volatile percent plus sequence counter and are applied to the next submitted buffer, so latency is bounded by the queued-buffer duration and active writes are not aborted just to change volume.
 - `--buffer-seconds N` chooses the requested playback depth for each half of the
   `--play` double buffer; the default is 4 seconds for safer 030 playback. Values
   must be positive integers; values above 10 seconds are clamped to 10 seconds.
@@ -256,7 +256,7 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   can enable the detailed GUI startup log, watchdog text, task/process pointers,
   and embedded audio-open diagnostics by building with `-DMINIAMP3_DEBUG`, for
   example `make -f Makefile.amiga gui EXTRA_CFLAGS=-DMINIAMP3_DEBUG`.
-- `--debug-play` prints startup diagnostics for Paula streaming, including the
+- `--debug-play` prints startup diagnostics for Paula streaming, including the requested volume percent, mapped `ioa_Volume`, initial request volume, selected live-update method, volume sequence count, and the
   actual output rate, PAL period, requested buffer depth, selected half-buffer
   samples/bytes, chip submission buffer addresses/sizes, optional stereo work
   buffer addresses/sizes, buffer A/B fill samples/bytes, queued A/B `CMD_WRITE` startup, every A/B `CMD_WRITE`
