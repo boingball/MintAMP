@@ -2365,6 +2365,16 @@ else
 	else
 		ng.ng_Flags = PLACETEXT_LEFT;
 	ng.ng_VisualInfo = gui->visualInfo;
+	if (kind == SLIDER_KIND)
+		return CreateGadget(kind, prev, &ng,
+			GA_Immediate, TRUE,
+			GA_RelVerify, TRUE,
+			tag1, value1,
+			tag2, value2,
+			tag3, value3,
+			tag4, value4,
+			TAG_DONE);
+
 	return CreateGadget(kind, prev, &ng,
 		tag1, value1,
 		tag2, value2,
@@ -3412,7 +3422,74 @@ static void WaitForPlaybackShutdown(HelixAmp3Gui *gui)
 	}
 }
 
-static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code)
+static int GetSliderLevel(HelixAmp3Gui *gui, struct Gadget *gad, int fallback)
+{
+	ULONG level = (ULONG)fallback;
+
+	if (gad && gui->win)
+		GT_GetGadgetAttrs(gad, gui->win, NULL,
+			GTSL_Level, (ULONG)&level,
+			TAG_DONE);
+	return (int)level;
+}
+
+static void SetGuiVolume(HelixAmp3Gui *gui, int percent, int persist,
+	ULONG classValue, UWORD code)
+{
+	int oldPercent = gui->volumePercent;
+	char text[64];
+
+	if (percent < 0)
+		percent = 0;
+	if (percent > 100)
+		percent = 100;
+	gui->volumePercent = percent;
+	GT_SetGadgetAttrs(gui->gadVolume, gui->win, NULL,
+		GTSL_Level, gui->volumePercent, TAG_DONE);
+	if (gui->volumePercent != oldPercent) {
+		gMiniAmp3RequestedVolume = (unsigned short)gui->volumePercent;
+		gMiniAmp3VolumeSequence++;
+	}
+	if (gui->volumePercent == 0)
+		SetStatus(gui, "Volume muted.");
+	else {
+		sprintf(text, "Volume set to %d%%.", gui->volumePercent);
+		SetStatus(gui, text);
+	}
+#ifdef MINIAMP3_DEBUG
+	Printf("volume slider event class=%lu message code=%lu actual GTSL_Level=%ld shared volume=%lu sequence=%lu playback active=%s\n",
+		(unsigned long)classValue, (unsigned long)code, (long)gui->volumePercent,
+		(unsigned long)gMiniAmp3RequestedVolume,
+		(unsigned long)gMiniAmp3VolumeSequence,
+		gui->playbackActive ? "yes" : "no");
+#endif
+	if (persist)
+		SaveGuiSettings(gui);
+}
+
+static void SetGuiBuffer(HelixAmp3Gui *gui, int seconds, int persist)
+{
+	if (gui->playbackActive || gui->playbackDonePending) {
+		GT_SetGadgetAttrs(gui->gadBuffer, gui->win, NULL,
+			GTSL_Level, gui->bufferSeconds, TAG_DONE);
+		SetStatus(gui, "Stop playback before changing buffer depth.");
+		return;
+	}
+	if (seconds < 1)
+		seconds = 1;
+	if (seconds > 30)
+		seconds = 30;
+	gui->bufferSeconds = seconds;
+	GT_SetGadgetAttrs(gui->gadBuffer, gui->win, NULL,
+		GTSL_Level, gui->bufferSeconds,
+		TAG_DONE);
+	SetStatus(gui, "Buffer depth updated.");
+	if (persist)
+		SaveGuiSettings(gui);
+}
+
+static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
+	ULONG classValue, int persist)
 {
 	if (!gad)
 		return;
@@ -3514,34 +3591,11 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code)
 		SaveGuiSettings(gui);
 		break;
 	case GID_BUFFER:
-		if (gui->playbackActive || gui->playbackDonePending) {
-			GT_SetGadgetAttrs(gui->gadBuffer, gui->win, NULL,
-				GTSL_Level, gui->bufferSeconds, TAG_DONE);
-			SetStatus(gui, "Stop playback before changing buffer depth.");
-			break;
-		}
-		gui->bufferSeconds = code;
-		if (gui->bufferSeconds < 1)
-			gui->bufferSeconds = 1;
-		if (gui->bufferSeconds > 30)
-			gui->bufferSeconds = 30;
-		GT_SetGadgetAttrs(gui->gadBuffer, gui->win, NULL,
-			GTSL_Level, gui->bufferSeconds,
-			TAG_DONE);
-		SetStatus(gui, "Buffer depth updated.");
-		SaveGuiSettings(gui);
+		SetGuiBuffer(gui, GetSliderLevel(gui, gui->gadBuffer, code), persist);
 		break;
 	case GID_VOLUME:
-		gui->volumePercent = code;
-		if (gui->volumePercent < 0)
-			gui->volumePercent = 0;
-		if (gui->volumePercent > 100)
-			gui->volumePercent = 100;
-		GT_SetGadgetAttrs(gui->gadVolume, gui->win, NULL,
-			GTSL_Level, gui->volumePercent, TAG_DONE);
-		gMiniAmp3RequestedVolume = (unsigned short)gui->volumePercent;
-		gMiniAmp3VolumeSequence++;
-		SaveGuiSettings(gui);
+		SetGuiVolume(gui, GetSliderLevel(gui, gui->gadVolume, code), persist,
+			classValue, code);
 		break;
 	case GID_STAR1:
 	case GID_STAR2:
@@ -3662,10 +3716,12 @@ static void GuiPoll(HelixAmp3Gui *gui)
 				menuCode = item ? item->NextSelect : MENUNULL;
 			}
 		} else if (classValue == IDCMP_GADGETUP) {
-			HandleGuiAction(gui, gad, code);
+			HandleGuiAction(gui, gad, code, classValue, TRUE);
 		} else if (classValue == IDCMP_MOUSEMOVE) {
-			if (gad && gad->GadgetID == GID_BUFFER)
-				HandleGuiAction(gui, gad, code);
+			if (gad &&
+				(gad->GadgetID == GID_BUFFER ||
+				gad->GadgetID == GID_VOLUME))
+				HandleGuiAction(gui, gad, code, classValue, FALSE);
 		}
 	}
 }
