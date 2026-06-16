@@ -3011,6 +3011,8 @@ static void BuildPlaybackArgs(HelixAmp3Gui *gui, HelixAmp3Args *args)
 	}
 	if (gui->mono)
 		AddArg(args, "--mono");
+	else
+		AddArg(args, "--stereo");
 	AddArg(args, "--rate");
 	AddArg(args, kRates[gui->rateIndex]);
 	AddArg(args, "--buffer-seconds");
@@ -3025,6 +3027,31 @@ static void BuildPlaybackArgs(HelixAmp3Gui *gui, HelixAmp3Args *args)
 	AddArg(args, gui->inputName);
 	args->argv[args->argc] = NULL;
 }
+
+#ifdef MINIAMP3_DEBUG
+static void DebugPrintPlaybackArgs(const char *label, const HelixAmp3Args *args)
+{
+	int i;
+	printf("miniamp3-debug: %s argc=%d", label, args->argc);
+	for (i = 0; i < args->argc; i++)
+		printf(" %s", args->argv[i]);
+	printf("\n");
+}
+
+static void DebugSelftestPlaybackChannelArgs(HelixAmp3Gui *gui)
+{
+	HelixAmp3Gui copy;
+	HelixAmp3Args testArgs;
+
+	copy = *gui;
+	copy.mono = 1;
+	BuildPlaybackArgs(&copy, &testArgs);
+	DebugPrintPlaybackArgs("BuildPlaybackArgs mono checked", &testArgs);
+	copy.mono = 0;
+	BuildPlaybackArgs(&copy, &testArgs);
+	DebugPrintPlaybackArgs("BuildPlaybackArgs mono unchecked", &testArgs);
+}
+#endif
 
 /* HelixAmp3CliMain() is a renamed command-line main() and is invoked more
  * than once by the GUI.  The C runtime getopt parser is process-global, so
@@ -3056,6 +3083,8 @@ static void PlaybackEntry(void)
 {
 	struct MsgPort *donePort;
 	int stopBeforeStart;
+	int earlyStop;
+	ULONG pending;
 	int ranDecoder;
 
 	/* StartPlayback() already clears the stop flags before CreateNewProcTags().
@@ -3066,17 +3095,34 @@ static void PlaybackEntry(void)
 	 * run while the GUI is stuck in "Stopping...".
 	 */
 	stopBeforeStart = gGuiPlayer.stopRequested;
+	pending = SetSignal(0, 0);
 	ranDecoder = 0;
 	gGuiPlaybackStatus.startupStage = GUISTART_CHILD_ENTERED;
-
-	/* A freshly-created Process can inherit a pending Ctrl-C condition from
-	 * DOS startup/runtime handling.  Clear only our playback interrupt bit
-	 * before entering the decoder; StopPlayback() can set it again afterwards. */
-	SetSignal(0, SIGBREAKF_CTRL_C);
+	earlyStop = stopBeforeStart || gGuiPlayer.stopRequested ||
+		gPlaybackInterrupted || (pending & SIGBREAKF_CTRL_C);
+#ifdef MINIAMP3_DEBUG
+	if (earlyStop)
+		printf("miniamp3-debug: early Stop sampled before child entry\n");
+	if (pending & SIGBREAKF_CTRL_C)
+		printf("miniamp3-debug: Ctrl-C pending before reset\n");
+#endif
+	if (earlyStop)
+		gPlaybackInterrupted = 1;
 	ResetCliParser();
 	gGuiPlaybackStatus.startupStage = GUISTART_ARGS_READY;
-	ResetDecoderStatics();
+	if (gGuiPlayer.stopRequested || gPlaybackInterrupted)
+		earlyStop = 1;
+	if (!earlyStop)
+		ResetDecoderStatics();
 	gGuiPlaybackStatus.runId = gPlaybackEntryRunId;
+	if (stopBeforeStart || gGuiPlayer.stopRequested || gPlaybackInterrupted ||
+		(pending & SIGBREAKF_CTRL_C)) {
+		earlyStop = 1;
+		gPlaybackInterrupted = 1;
+#ifdef MINIAMP3_DEBUG
+		printf("miniamp3-debug: Stop observed after reset\n");
+#endif
+	}
 	gGuiPlaybackStatus.startupStage = GUISTART_DECODER_CONFIG;
 
 	/* MP3ResetStatics() may also touch command-line/playback globals in some
@@ -3086,9 +3132,13 @@ static void PlaybackEntry(void)
 
 	/* Stop may arrive while ResetDecoderStatics() is running.  Re-check the
 	 * shared request afterwards so the reset cannot erase an early Stop. */
-	if (stopBeforeStart || gGuiPlayer.stopRequested)
+	if (stopBeforeStart || gGuiPlayer.stopRequested || gPlaybackInterrupted ||
+		(pending & SIGBREAKF_CTRL_C)) {
 		gPlaybackInterrupted = 1;
-	else {
+#ifdef MINIAMP3_DEBUG
+		printf("miniamp3-debug: decoder main skipped\n");
+#endif
+	} else {
 		ranDecoder = 1;
 		gGuiPlaybackStatus.startupStage = GUISTART_STREAM_INIT;
 		gMiniAmp3EmbeddedPlayback = 1;
@@ -3118,6 +3168,9 @@ static void PlaybackEntry(void)
 	if (donePort) {
 		gDoneMsg.mn_Node.ln_Type = NT_MESSAGE;
 		PutMsg(donePort, &gDoneMsg);
+#ifdef MINIAMP3_DEBUG
+		printf("miniamp3-debug: done message posted\n");
+#endif
 	}
 }
 
@@ -3192,6 +3245,10 @@ static void StartPlayback(HelixAmp3Gui *gui)
 	DrawProgress(gui);
 	GuiDisableFastMemIfTooSmall(gui);
 	BuildPlaybackArgs(gui, &gGuiArgs);
+#ifdef MINIAMP3_DEBUG
+	DebugSelftestPlaybackChannelArgs(gui);
+	DebugPrintPlaybackArgs("BuildPlaybackArgs selected", &gGuiArgs);
+#endif
 	gGuiPlayer.argc = gGuiArgs.argc;
 	gGuiPlayer.argv = gGuiArgs.argv;
 	gGuiPlayer.stopRequested = 0;

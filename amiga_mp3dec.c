@@ -4183,6 +4183,24 @@ static void GuiPublishStartupStage(int stage)
 #endif
 }
 
+static int AmigaPlaybackStopRequested(const DecodeOptions *opt, const char *where)
+{
+#if defined(AMIGA_M68K)
+	ULONG pending = SetSignal(0, 0);
+	if (pending & SIGBREAKF_CTRL_C)
+		gPlaybackInterrupted = 1;
+#endif
+	if (gPlaybackInterrupted) {
+#if defined(MINIAMP3_DEBUG)
+		printf("miniamp3-debug: Stop observed %s\n", where);
+#endif
+		if (opt && opt->debugCleanup)
+			printf("debug-cleanup: Stop observed %s\n", where);
+		return 1;
+	}
+	return 0;
+}
+
 #if !defined(AMIGA_M68K)
 static void PlaybackSignalHandler(int signum)
 {
@@ -4532,6 +4550,8 @@ static int AmigaAudioOpenOne(AmigaAudioPlayer *player, int ch,
 		int openDeviceResult;
 
 		GuiPublishStartupStage(GUISTART_OPEN_DEVICE);
+		if (AmigaPlaybackStopRequested(NULL, "before opening audio.device"))
+			return -1;
 		openDeviceResult = OpenDevice(AUDIONAME, 0,
 			(struct IORequest *)player->req[0][ch], 0);
 #ifdef MINIAMP3_DEBUG
@@ -4704,6 +4724,8 @@ static int AmigaAudioPrepare(AmigaAudioPlayer *player, int index,
 
 static int AmigaAudioCommit(AmigaAudioPlayer *player, int index)
 {
+	if (AmigaPlaybackStopRequested(NULL, "before first buffer submission"))
+		return -1;
 	if (gPlaybackInterrupted || player->stopping)
 		return -1;
 	if (!player->prepared[index])
@@ -5554,8 +5576,12 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 	len[2] = 0;
 	err = -1;
 	GuiPublishStartupStage(GUISTART_PROBE_RATE);
+	if (AmigaPlaybackStopRequested(opt, "before input rate probe"))
+		goto cleanup;
 	inputSampleRate = ProbeInputSampleRate(input, decoder, stats);
 	GuiPublishStartupStage(GUISTART_PROBE_RATE_DONE);
+	if (AmigaPlaybackStopRequested(opt, "after input rate probe"))
+		goto cleanup;
 	playbackRate = EffectiveOutputSampleRate(opt, inputSampleRate);
 	if (playbackRate <= 0)
 		playbackRate = opt->outputRate > 0 ? opt->outputRate : 8287;
@@ -5563,7 +5589,11 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 	gGuiPlaybackStatus.sampleRate = playbackRate;
 	gGuiPlaybackStatus.effectiveRate = playbackRate;
 	GuiPublishStartupStage(GUISTART_STREAM_INIT);
+	if (AmigaPlaybackStopRequested(opt, "before stream init"))
+		goto cleanup;
 	DecodeStreamInit(&stream, input, decoder, stats, timing);
+	if (AmigaPlaybackStopRequested(opt, "after stream init"))
+		goto cleanup;
 	period = AmigaPalAudioPeriod(playbackRate);
 	gGuiPlaybackStatus.paulaPeriod = period;
 	PrintFastLowrateOutputRateDifference(opt, playbackRate);
@@ -5577,15 +5607,21 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 	startupLen = 0;
 	if (!opt->stereo) {
 		GuiPublishStartupStage(GUISTART_PREFILL);
+		if (AmigaPlaybackStopRequested(opt, "before prefill"))
+			goto cleanup;
 		startupLen = DecodeStreamFillPlaybackPrefill(&stream, opt, startupBuf,
 			OUTBUF_SAMPS, 1UL);
 		GuiPublishStartupStage(GUISTART_PREFILL_DONE);
+		if (AmigaPlaybackStopRequested(opt, "after prefill"))
+			goto cleanup;
 		if (stream.decodeError || startupLen == 0) {
 			fprintf(stderr, "no decoded samples; audio.device playback not started\n");
 			goto cleanup;
 		}
 	}
 	GuiPublishStartupStage(GUISTART_AUDIO_SETUP);
+	if (AmigaPlaybackStopRequested(opt, "before audio setup"))
+		goto cleanup;
 	gGuiPlaybackStatus.requestedBytes = requestedBytes;
 	if (AmigaSetupPlaybackBuffers(&player, opt, period, requestedBytes,
 		opt->stereo ? 2UL : startupLen, 0, buf, &bufBytes,
@@ -5595,6 +5631,8 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 	halfMilliseconds = PlaybackBufferDurationMilliseconds(opt, bufBytes,
 		playbackRate);
 	gGuiPlaybackStatus.halfBufferMs = halfMilliseconds;
+	if (AmigaPlaybackStopRequested(opt, "after audio setup"))
+		goto cleanup;
 	printf("playback half-buffer: %lu ms, %lu bytes\n", halfMilliseconds,
 		bufBytes);
 	PrintPlaybackDebugStartup(opt, playbackRate, period, requestedBytes,
@@ -6134,6 +6172,11 @@ int main(int argc, char **argv)
 	memset(&info, 0, sizeof(info));
 
 	GuiPublishStartupStage(GUISTART_INPUT_OPEN);
+	if (opt.play && AmigaPlaybackStopRequested(&opt, "before input open")) {
+		free(resolvedOutName);
+		AmigaFreeNormalizedArgs(&normalized);
+		return 1;
+	}
 	gGuiPlaybackStatus.requestedRate = opt.outputRate;
 #ifdef HAVE_AMIGA_AUDIO_DEVICE
 	if (opt.play) {
@@ -6173,6 +6216,13 @@ int main(int argc, char **argv)
 	}
 	if (opt.play)
 		gGuiPlaybackStatus.phase = GUIPLAY_PHASE_BUFFERING;
+	if (opt.play && AmigaPlaybackStopRequested(&opt, "after input open")) {
+		InputSourceClose(&input);
+		CloseInputFile(&infile, opt.debugCleanup);
+		free(resolvedOutName);
+		AmigaFreeNormalizedArgs(&normalized);
+		return 1;
+	}
 	if (opt.fastMem)
 		GuiPublishStartupStage(GUISTART_INPUT_PRELOAD_FASTMEM);
 	if (opt.fastMem && InputSourcePreloadFastMemory(&input) != 0) {
@@ -6183,7 +6233,21 @@ int main(int argc, char **argv)
 		AmigaFreeNormalizedArgs(&normalized);
 		return 1;
 	}
+	if (opt.play && AmigaPlaybackStopRequested(&opt, "after input preload")) {
+		InputSourceClose(&input);
+		CloseInputFile(&infile, opt.debugCleanup);
+		free(resolvedOutName);
+		AmigaFreeNormalizedArgs(&normalized);
+		return 1;
+	}
 	GuiPublishStartupStage(GUISTART_INPUT_PREPARE);
+	if (opt.play && AmigaPlaybackStopRequested(&opt, "before input prepare")) {
+		InputSourceClose(&input);
+		CloseInputFile(&infile, opt.debugCleanup);
+		free(resolvedOutName);
+		AmigaFreeNormalizedArgs(&normalized);
+		return 1;
+	}
 	if (InputSourcePrepareMp3(&input) != 0) {
 		fprintf(stderr, "cannot inspect MP3 input: %s\n", opt.inName);
 		InputSourceClose(&input);
@@ -6206,7 +6270,21 @@ int main(int argc, char **argv)
 		}
 	}
 
+	if (opt.play && AmigaPlaybackStopRequested(&opt, "after input prepare")) {
+		InputSourceClose(&input);
+		CloseInputFile(&infile, opt.debugCleanup);
+		free(resolvedOutName);
+		AmigaFreeNormalizedArgs(&normalized);
+		return 1;
+	}
 	GuiPublishStartupStage(GUISTART_DECODER_ALLOC);
+	if (opt.play && AmigaPlaybackStopRequested(&opt, "before decoder alloc")) {
+		InputSourceClose(&input);
+		CloseInputFile(&infile, opt.debugCleanup);
+		free(resolvedOutName);
+		AmigaFreeNormalizedArgs(&normalized);
+		return 1;
+	}
 	decoder = MP3InitDecoder();
 	if (!decoder) {
 		fprintf(stderr, "MP3InitDecoder failed\n");
@@ -6222,6 +6300,16 @@ int main(int argc, char **argv)
 	if (opt.stereo)
 		fprintf(stderr, "Stereo playback needs significantly more CPU and may underrun on 030.\n");
 	GuiPublishStartupStage(GUISTART_DECODER_CONFIG);
+	if (opt.play && AmigaPlaybackStopRequested(&opt, "before decoder config")) {
+		MP3FreeDecoder(decoder);
+		InputSourceClose(&input);
+		CloseInputFile(&infile, opt.debugCleanup);
+		if (outfile)
+			fclose(outfile);
+		free(resolvedOutName);
+		AmigaFreeNormalizedArgs(&normalized);
+		return 1;
+	}
 
 	MP3SetOutputMono(decoder, opt.mono && !opt.stereo && !opt.noMonoMSSideSkip);
 	MP3SetMonoMSSideSkip(decoder, !opt.noMonoMSSideSkip);
@@ -6292,9 +6380,20 @@ int main(int argc, char **argv)
 			"28600 PAL-top playback uses normal post-decode decimation and may underrun on 030 systems.\n");
 
 	if (opt.play) {
-		GuiPublishStartupStage(GUISTART_STREAM_INIT);
 		int playErr;
 		TimingStats *playTiming;
+
+		GuiPublishStartupStage(GUISTART_STREAM_INIT);
+		if (AmigaPlaybackStopRequested(&opt, "immediately before playback")) {
+			MP3FreeDecoder(decoder);
+			InputSourceClose(&input);
+			CloseInputFile(&infile, opt.debugCleanup);
+			if (outfile)
+				fclose(outfile);
+			free(resolvedOutName);
+			AmigaFreeNormalizedArgs(&normalized);
+			return 1;
+		}
 		playTiming = opt.bench ? &timing : NULL;
 		/* Do not clear gPlaybackInterrupted here.  The MiniAMP3 GUI can
 		 * signal Stop after PlaybackEntry() resets decoder statics but before
