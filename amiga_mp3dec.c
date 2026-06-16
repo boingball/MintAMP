@@ -4902,8 +4902,14 @@ static int AmigaAudioCommit(AmigaAudioPlayer *player, int index)
 	AmigaAudioApplyPreparedVolume(player, index);
 	AmigaAudioPrintStartupVolumeDebug(player, index);
 	if (player->stereo) {
+#if defined(AMIGA_M68K)
+		Forbid();
+#endif
 		AmigaAudioCommitOne(player, index, 1);
 		AmigaAudioCommitOne(player, index, 0);
+#if defined(AMIGA_M68K)
+		Permit();
+#endif
 	} else {
 		AmigaAudioCommitOne(player, index, 0);
 	}
