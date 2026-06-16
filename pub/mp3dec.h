@@ -196,6 +196,10 @@ int MP3GetFastLowrateDebug(HMP3Decoder hMP3Decoder,
 	MP3FastLowrateGranuleDebug *debug, int maxDebug);
 
 void MP3SetDecodeCoreProfileEnabled(int enabled);
+void MP3SetForceStereoStride2PolyphaseC(int enabled);
+int MP3ForceStereoStride2PolyphaseC(void);
+void MP3GetStereoStride2PolyphaseCounters(unsigned long *asmCalls, unsigned long *cCalls);
+void MP3ResetStereoStride2PolyphaseCounters(void);
 void MP3ResetDecodeCoreProfile(void);
 void MP3GetDecodeCoreProfile(MP3DecodeCoreProfile *profile);
 int MP3DecodeCoreProfileIsEnabled(void);

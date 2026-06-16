@@ -64,6 +64,9 @@
 
 #if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE)
 static int gExperimentalPolyphaseEnabled;
+static int gForceStereoStride2C;
+static unsigned long gStereoStride2AsmCalls;
+static unsigned long gStereoStride2CCalls;
 #if defined(AMIGA_FAST_REDUCED_TAPS)
 static int gExperimentalReducedTapsEnabled;
 #endif
@@ -79,6 +82,30 @@ void MP3SetExperimentalPolyphase(int enabled)
 int MP3ExperimentalPolyphaseEnabled(void)
 {
 	return gExperimentalPolyphaseEnabled;
+}
+
+void MP3SetForceStereoStride2PolyphaseC(int enabled)
+{
+	gForceStereoStride2C = enabled ? 1 : 0;
+}
+
+int MP3ForceStereoStride2PolyphaseC(void)
+{
+	return gForceStereoStride2C;
+}
+
+void MP3GetStereoStride2PolyphaseCounters(unsigned long *asmCalls, unsigned long *cCalls)
+{
+	if (asmCalls)
+		*asmCalls = gStereoStride2AsmCalls;
+	if (cCalls)
+		*cCalls = gStereoStride2CCalls;
+}
+
+void MP3ResetStereoStride2PolyphaseCounters(void)
+{
+	gStereoStride2AsmCalls = 0;
+	gStereoStride2CCalls = 0;
 }
 
 void MP3SetExperimentalReducedTaps(int enabled)
@@ -124,6 +151,8 @@ void AmigaResetPolyphaseStatics(void)
 	 * in-process GUI playback starts from the same polyphase state each time.
 	 */
 	gExperimentalPolyphaseEnabled = 0;
+	gForceStereoStride2C = 0;
+	MP3ResetStereoStride2PolyphaseCounters();
 #if defined(AMIGA_FAST_REDUCED_TAPS)
 	gExperimentalReducedTapsEnabled = 0;
 #endif
@@ -140,6 +169,28 @@ void MP3SetExperimentalPolyphase(int enabled)
 int MP3ExperimentalPolyphaseEnabled(void)
 {
 	return 0;
+}
+
+void MP3SetForceStereoStride2PolyphaseC(int enabled)
+{
+	(void)enabled;
+}
+
+int MP3ForceStereoStride2PolyphaseC(void)
+{
+	return 0;
+}
+
+void MP3GetStereoStride2PolyphaseCounters(unsigned long *asmCalls, unsigned long *cCalls)
+{
+	if (asmCalls)
+		*asmCalls = 0;
+	if (cCalls)
+		*cCalls = 0;
+}
+
+void MP3ResetStereoStride2PolyphaseCounters(void)
+{
 }
 
 void MP3SetExperimentalReducedTaps(int enabled)
@@ -181,6 +232,9 @@ extern void AmigaM68KPolyphaseMonoFastStride2(short *pcm, int *vbuf,
 	__attribute__((weak));
 extern void MonoFastPolyphaseStride4_Amiga_m68k(short *pcm, int *vbuf,
 	const int *coefBase) __asm__("MonoFastPolyphaseStride4_Amiga_m68k")
+	__attribute__((weak));
+extern int StereoFastPolyphaseStride2Phase0_Amiga_m68k(short *pcm, int *vbuf,
+	const int *coefBase) __asm__("StereoFastPolyphaseStride2Phase0_Amiga_m68k")
 	__attribute__((weak));
 extern int StereoFastPolyphaseStride4Phase0_Amiga_m68k(short *pcm, int *vbuf,
 	const int *coefBase) __asm__("StereoFastPolyphaseStride4Phase0_Amiga_m68k")
@@ -1140,6 +1194,13 @@ static int PolyphaseStereoFastLowrateCompact(short *pcm, int *vbuf,
 	return count * 2;
 }
 
+static int PolyphaseStereoFastLowrateStride2_C(short *pcm, int *vbuf,
+	const int *coefBase)
+{
+	return PolyphaseStereoFastLowrateCompact(pcm, vbuf, coefBase,
+		fastLowrateStride2Samples, 16);
+}
+
 static int PolyphaseStereoFastLowrateStride4(short *pcm, int *vbuf,
 	const int *coefBase, int phase)
 {
@@ -1251,6 +1312,43 @@ int MonoFastPolyphaseStride4_Amiga_m68k_IsActive(void)
 #else
 	return 0;
 #endif
+}
+
+int StereoFastPolyphaseStride2Phase0_Amiga_m68k_IsActive(void)
+{
+#if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_M68K_ASM_POLYPHASE)
+	return StereoFastPolyphaseStride2Phase0_Amiga_m68k ? 1 : 0;
+#else
+	return 0;
+#endif
+}
+
+int StereoFastPolyphaseStride2_HAS_AMIGA_M68K_ASM_RUNTIME(void)
+{
+	return StereoFastPolyphaseStride2Phase0_Amiga_m68k_IsActive();
+}
+
+int PolyphaseStereoFastLowrateStride2_C_REFERENCE(short *pcm, int *vbuf, const int *coefBase)
+{
+#if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE)
+	return PolyphaseStereoFastLowrateCompact(pcm, vbuf, coefBase,
+		fastLowrateStride2Samples, 16);
+#else
+	int phase = 0;
+	return PolyphaseStereoFastLowrate(pcm, vbuf, coefBase, 2, &phase);
+#endif
+}
+
+int PolyphaseStereoFastLowrateStride2_TEST_ACTIVE(short *pcm, int *vbuf, const int *coefBase)
+{
+#if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_M68K_ASM_POLYPHASE)
+	if (!MP3ForceStereoStride2PolyphaseC() &&
+		StereoFastPolyphaseStride2Phase0_Amiga_m68k_IsActive()) {
+		StereoFastPolyphaseStride2Phase0_Amiga_m68k(pcm, vbuf, coefBase);
+		return 32;
+	}
+#endif
+	return PolyphaseStereoFastLowrateStride2_C_REFERENCE(pcm, vbuf, coefBase);
 }
 
 int StereoFastPolyphaseStride4Phase0_Amiga_m68k_IsActive(void)
@@ -1516,8 +1614,16 @@ int PolyphaseStereoFastLowrate(short *pcm, int *vbuf, const int *coefBase, int s
 	localPhase = *phase;
 	if (stride == 2 && localPhase == 0) {
 		*phase = PolyphaseAdvanceLowratePhase(localPhase, stride);
-		return PolyphaseStereoFastLowrateList(pcm, vbuf, coefBase,
-			fastLowrateStride2Samples, 16);
+#if defined(AMIGA_M68K_ASM_POLYPHASE)
+		if (!MP3ForceStereoStride2PolyphaseC() &&
+			StereoFastPolyphaseStride2Phase0_Amiga_m68k_IsActive()) {
+			gStereoStride2AsmCalls++;
+			StereoFastPolyphaseStride2Phase0_Amiga_m68k(pcm, vbuf, coefBase);
+			return 32;
+		}
+#endif
+		gStereoStride2CCalls++;
+		return PolyphaseStereoFastLowrateStride2_C(pcm, vbuf, coefBase);
 	}
 	if (stride == 4) {
 		*phase = PolyphaseAdvanceLowratePhase(localPhase, stride);
