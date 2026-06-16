@@ -136,6 +136,9 @@ int STATNAME(PolyphaseMonoFastLowrateStride2_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
 int STATNAME(PolyphaseMonoFastLowrateStride4_C_REFERENCE)(short *pcm, int *vbuf, const int *coefBase);
 int STATNAME(PolyphaseMonoFastLowrateStride4_TEST_ACTIVE)(short *pcm, int *vbuf, const int *coefBase);
 int STATNAME(PolyphaseMonoFastLowrateStride4_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
+int STATNAME(PolyphaseStereoFastLowrateStride2_C_REFERENCE)(short *pcm, int *vbuf, const int *coefBase);
+int STATNAME(PolyphaseStereoFastLowrateStride2_TEST_ACTIVE)(short *pcm, int *vbuf, const int *coefBase);
+int STATNAME(StereoFastPolyphaseStride2_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
 int STATNAME(PolyphaseStereoFastLowrateStride4_C_REFERENCE)(short *pcm, int *vbuf, const int *coefBase, int phase);
 int STATNAME(PolyphaseStereoFastLowrateStride4_TEST_ACTIVE)(short *pcm, int *vbuf, const int *coefBase, int phase);
 int STATNAME(PolyphaseMonoFastLowrateStride4Reduced_TEST_ACTIVE)(short *pcm, int *vbuf, const int *coefBase, int phase);
@@ -175,6 +178,9 @@ extern const int STATNAME(polyCoef)[264];
 #define AMIGA_POLYPHASE_MONO_FAST_STRIDE4_C_REFERENCE STATNAME(PolyphaseMonoFastLowrateStride4_C_REFERENCE)
 #define AMIGA_POLYPHASE_MONO_FAST_STRIDE4_TEST_ACTIVE STATNAME(PolyphaseMonoFastLowrateStride4_TEST_ACTIVE)
 #define AMIGA_POLYPHASE_MONO_FAST_STRIDE4_HAS_ASM STATNAME(PolyphaseMonoFastLowrateStride4_HAS_AMIGA_M68K_ASM_RUNTIME)
+#define AMIGA_POLYPHASE_STEREO_FAST_STRIDE2_C_REFERENCE STATNAME(PolyphaseStereoFastLowrateStride2_C_REFERENCE)
+#define AMIGA_POLYPHASE_STEREO_FAST_STRIDE2_TEST_ACTIVE STATNAME(PolyphaseStereoFastLowrateStride2_TEST_ACTIVE)
+#define AMIGA_POLYPHASE_STEREO_FAST_STRIDE2_HAS_ASM STATNAME(StereoFastPolyphaseStride2_HAS_AMIGA_M68K_ASM_RUNTIME)
 #define AMIGA_POLYPHASE_STEREO_FAST_STRIDE4_C_REFERENCE STATNAME(PolyphaseStereoFastLowrateStride4_C_REFERENCE)
 #define AMIGA_POLYPHASE_STEREO_FAST_STRIDE4_TEST_ACTIVE STATNAME(PolyphaseStereoFastLowrateStride4_TEST_ACTIVE)
 #define AMIGA_POLYPHASE_MONO_FAST_STRIDE4_REDUCED_TEST_ACTIVE STATNAME(PolyphaseMonoFastLowrateStride4Reduced_TEST_ACTIVE)
@@ -229,6 +235,8 @@ typedef struct DecodeOptions {
 	int selftestPolyphaseStride2;
 	int selftestPolyphaseStride4;
 	int selftestPolyphaseStride4Stereo;
+	int selftestPolyphaseStride2Stereo;
+	int forceCPolyphaseStride2Stereo;
 	int selftestFastLowrate;
 	int selftestReducedTaps;
 	int selftestFdct32Quarter;
@@ -627,6 +635,8 @@ static void PrintUsage(const char *prog)
 	printf("  --selftest-polyphase-stride2 compare C and optional asm stride-2 mono polyphase paths\n");
 	printf("  --selftest-polyphase-stride4 compare C and optional asm stride-4 mono polyphase paths\n");
 	printf("  --selftest-polyphase-stride4-stereo compare stereo stride-4 compact polyphase output\n");
+	printf("  --selftest-polyphase-stride2-stereo compare stereo stride-2 compact polyphase output\n");
+	printf("  --force-c-polyphase-stride2-stereo benchmark stereo stride-2 C fallback in this binary\n");
 	printf("  --selftest-fastlowrate compare synthetic stride decimation paths\n");
 	printf("  --selftest-reduced-taps compare full and reduced stride-4 dewindow paths\n");
 	printf("  --selftest-fdct32-quarter inspect lossy stride-4 quarter-rate FDCT32 scatter\n");
@@ -785,6 +795,10 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->selftestPolyphaseStride4 = 1;
 		} else if (!strcmp(argv[i], "--selftest-polyphase-stride4-stereo")) {
 			opt->selftestPolyphaseStride4Stereo = 1;
+		} else if (!strcmp(argv[i], "--selftest-polyphase-stride2-stereo")) {
+			opt->selftestPolyphaseStride2Stereo = 1;
+		} else if (!strcmp(argv[i], "--force-c-polyphase-stride2-stereo")) {
+			opt->forceCPolyphaseStride2Stereo = 1;
 		} else if (!strcmp(argv[i], "--selftest-fastlowrate")) {
 			opt->selftestFastLowrate = 1;
 		} else if (!strcmp(argv[i], "--selftest-reduced-taps")) {
@@ -876,6 +890,7 @@ if (opt->selftestMulshift ||
     opt->selftestPolyphaseStride2 ||
     opt->selftestPolyphaseStride4 ||
     opt->selftestPolyphaseStride4Stereo ||
+    opt->selftestPolyphaseStride2Stereo ||
     opt->selftestFastLowrate ||
     opt->selftestReducedTaps ||
     opt->selftestFdct32Quarter ||
@@ -2895,6 +2910,91 @@ static int SelftestPolyphaseStride4Stereo(void)
 
 	printf("Polyphase stride4 stereo selftest cases: %lu\n", i * 4UL);
 	printf("Polyphase stride4 stereo selftest failures: %lu\n", failures);
+	return failures ? 1 : 0;
+}
+
+
+static int TestPolyphaseStride2StereoCase(unsigned long index, unsigned long seed, int pattern)
+{
+	static int cvbuf[AMIGA_POLYPHASE_VBUF_LENGTH];
+	static int avbuf[AMIGA_POLYPHASE_VBUF_LENGTH];
+	static short cpcm[40];
+	static short apcm[40];
+	int ccount;
+	int acount;
+	int i;
+
+	for (i = 0; i < AMIGA_POLYPHASE_VBUF_LENGTH; i++) {
+		seed = seed * 1664525UL + 1013904223UL;
+		switch (pattern) {
+		case 0: cvbuf[i] = 0; break;
+		case 1: cvbuf[i] = ((int)seed) >> 9; break;
+		case 2: cvbuf[i] = 0x03ffffff; break;
+		case 3: cvbuf[i] = (int)0xfc000000UL; break;
+		case 4: cvbuf[i] = (i & 1) ? 0x03ffffff : (int)0xfc000000UL; break;
+		case 5: cvbuf[i] = (i & 32) ? 0 : (((int)seed) >> 9); break;
+		case 6: cvbuf[i] = (i & 32) ? (((int)seed) >> 9) : 0; break;
+		default: cvbuf[i] = (i & 32) ? (((int)(seed ^ 0x55aa33ccUL)) >> 8) : (((int)seed) >> 10); break;
+		}
+		avbuf[i] = cvbuf[i];
+	}
+	for (i = 0; i < 40; i++) {
+		cpcm[i] = (short)(0x7300 + i);
+		apcm[i] = (short)(0x7300 + i);
+	}
+
+	ccount = AMIGA_POLYPHASE_STEREO_FAST_STRIDE2_C_REFERENCE(cpcm + 4, cvbuf, AMIGA_POLY_COEF);
+	acount = AMIGA_POLYPHASE_STEREO_FAST_STRIDE2_TEST_ACTIVE(apcm + 4, avbuf, AMIGA_POLY_COEF);
+
+	if (ccount != 32 || acount != 32) {
+		printf("PolyphaseStereoFast stride2 count mismatch %lu: first=%d second=%d pattern=%d\n",
+			index, ccount, acount, pattern);
+		return -1;
+	}
+	for (i = 0; i < AMIGA_POLYPHASE_VBUF_LENGTH; i++) {
+		if (avbuf[i] != cvbuf[i]) {
+			printf("PolyphaseStereoFast stride2 vbuf mismatch %lu[%d]: first=%ld second=%ld pattern=%d\n",
+				index, i, (long)cvbuf[i], (long)avbuf[i], pattern);
+			return -1;
+		}
+	}
+	for (i = 0; i < 40; i++) {
+		if (apcm[i] != cpcm[i]) {
+			printf("PolyphaseStereoFast stride2 output/sentinel mismatch %lu[%d]: first=%ld second=%ld pattern=%d\n",
+				index, i, (long)cpcm[i], (long)apcm[i], pattern);
+			return -1;
+		}
+	}
+	return 0;
+}
+
+static int SelftestPolyphaseStride2Stereo(void)
+{
+	unsigned long i;
+	unsigned long failures;
+	unsigned long seed;
+	int pattern;
+
+	failures = 0;
+	seed = 0x66260700UL;
+	for (i = 0; i < 512UL; i++) {
+		seed = seed * 1664525UL + 1013904223UL;
+		pattern = (i < 8UL) ? (int)i : 1;
+		if (TestPolyphaseStride2StereoCase(i, seed, pattern) != 0)
+			failures++;
+	}
+
+	printf("Polyphase stride2 stereo asm requested: %s\n",
+#ifdef AMIGA_M68K_ASM_POLYPHASE
+		"yes"
+#else
+		"no"
+#endif
+	);
+	printf("Polyphase stride2 stereo asm active: %s\n",
+		AMIGA_POLYPHASE_STEREO_FAST_STRIDE2_HAS_ASM() ? "yes" : "no");
+	printf("Polyphase stride2 stereo selftest cases: %lu\n", i);
+	printf("Polyphase stride2 stereo selftest failures: %lu\n", failures);
 	return failures ? 1 : 0;
 }
 
@@ -6110,6 +6210,8 @@ int main(int argc, char **argv)
 #endif
 	}
 	MP3SetExperimentalPolyphase(opt.expPoly);
+	MP3SetForceStereoStride2PolyphaseC(opt.forceCPolyphaseStride2Stereo);
+	MP3ResetStereoStride2PolyphaseCounters();
 	MP3SetExperimentalHuffman(opt.expHuff);
 	MP3SetExperimentalIMDCTThin(decoder, opt.expImdctThin);
 	MP3SetExperimentalReducedTaps(opt.expReducedTaps);
@@ -6528,6 +6630,14 @@ int main(int argc, char **argv)
 					ClocksToSeconds(coreProfile.subbandDct32));
 				printf("timing core polyphase: %.3f s\n",
 					ClocksToSeconds(coreProfile.polyphase));
+				{
+					unsigned long s2Asm = 0, s2C = 0;
+					MP3GetStereoStride2PolyphaseCounters(&s2Asm, &s2C);
+					printf("stereo stride-2 polyphase: %s\n",
+						s2Asm ? "asm" : "C");
+					printf("stereo stride-2 polyphase calls: asm=%lu C=%lu\n",
+						s2Asm, s2C);
+				}
 				printf("core IMDCT subbands: executed=%lu skipped=%lu\n",
 					coreProfile.imdctSubbandsExecuted, coreProfile.imdctSubbandsSkipped);
 				printf("mono M/S side-channel skip: eligible=%lu huffman=%lu dequant=%lu imdct=%lu synthesis=%lu\n",

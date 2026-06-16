@@ -11,6 +11,7 @@
 	.globl	AmigaM68KPolyphaseMonoFast
 	.globl	AmigaM68KPolyphaseMonoFastStride2
 	.globl	MonoFastPolyphaseStride4_Amiga_m68k
+	.globl	StereoFastPolyphaseStride2Phase0_Amiga_m68k
 	.globl	StereoFastPolyphaseStride4Phase0_Amiga_m68k
 	.globl	StereoFastPolyphaseStride4Phase1_Amiga_m68k
 	.globl	StereoFastPolyphaseStride4Phase2_Amiga_m68k
@@ -401,6 +402,40 @@ MonoFastPolyphaseStride4_Amiga_m68k:
 	CLIP_STORE %d3,\poff
 	CLIP_STORE %d5,\poff+2
 .endm
+
+
+/* void StereoFastPolyphaseStride2Phase0_Amiga_m68k(short *pcm, int *vbuf, const int *coefBase)
+ * Caller contract: stride-2 low-rate synthesis never advances away from phase 0
+ * because 32 %% 2 == 0.  This single phase emits logical sample rows
+ * 0,2,4,...,30 as 16 contiguous interleaved stereo pairs:
+ * L0,R0,L2,R2,...,L30,R30 (32 shorts total).
+ */
+StereoFastPolyphaseStride2Phase0_Amiga_m68k:
+	movem.l	%d2-%d7/%a2-%a6,-(%sp)
+	move.l	48(%sp),%a0		| pcm
+	move.l	52(%sp),%a1		| vbuf
+	move.l	56(%sp),%a2		| coefBase
+
+	STEREO_SAMPLE0 0
+	STEREO_PAIR_LO 2,4
+	STEREO_PAIR_LO 4,8
+	STEREO_PAIR_LO 6,12
+	STEREO_PAIR_LO 8,16
+	STEREO_PAIR_LO 10,20
+	STEREO_PAIR_LO 12,24
+	STEREO_PAIR_LO 14,28
+	STEREO_SAMPLE16 32
+	STEREO_PAIR_HI 14,36
+	STEREO_PAIR_HI 12,40
+	STEREO_PAIR_HI 10,44
+	STEREO_PAIR_HI 8,48
+	STEREO_PAIR_HI 6,52
+	STEREO_PAIR_HI 4,56
+	STEREO_PAIR_HI 2,60
+
+	movem.l	(%sp)+,%d2-%d7/%a2-%a6
+	rts
+
 
 /* void StereoFastPolyphaseStride4Phase0_Amiga_m68k(short *pcm, int *vbuf, const int *coefBase)
  * Outputs stride-4 phase-0 samples: 0, 4, 8, 12, 16, 20, 24, 28
