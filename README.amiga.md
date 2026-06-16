@@ -321,7 +321,8 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   Pure mid/side joint-stereo mono output also advances over the unused coded
   side-channel Huffman payload, removing a bitrate-sensitive decode cost.
   `--bench` reports the huffman, dequant, stereo/post, imdct, subband/dct32,
-  and polyphase buckets used to profile that path.
+  and polyphase buckets used to profile that path, plus stereo stride-2 and
+  stride-4 polyphase ASM/C call counters when decode-core profiling is enabled.
 - `--debug-fastlowrate` prints one line per decoded frame/granule with the
   full-rate sample count, low-rate samples emitted, cumulative low-rate samples,
   and destination offset range used for contiguous placement.

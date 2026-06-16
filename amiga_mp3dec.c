@@ -139,6 +139,9 @@ int STATNAME(PolyphaseMonoFastLowrateStride4_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
 int STATNAME(PolyphaseStereoFastLowrateStride2_C_REFERENCE)(short *pcm, int *vbuf, const int *coefBase);
 int STATNAME(PolyphaseStereoFastLowrateStride2_TEST_ACTIVE)(short *pcm, int *vbuf, const int *coefBase);
 int STATNAME(StereoFastPolyphaseStride2_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
+int STATNAME(StereoFastPolyphaseStride4_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
+void MP3GetStereoStride4PolyphaseCounters(unsigned long *asmCalls, unsigned long *cCalls);
+void MP3ResetStereoStride4PolyphaseCounters(void);
 int STATNAME(PolyphaseStereoFastLowrateStride4_C_REFERENCE)(short *pcm, int *vbuf, const int *coefBase, int phase);
 int STATNAME(PolyphaseStereoFastLowrateStride4_TEST_ACTIVE)(short *pcm, int *vbuf, const int *coefBase, int phase);
 int STATNAME(PolyphaseMonoFastLowrateStride4Reduced_TEST_ACTIVE)(short *pcm, int *vbuf, const int *coefBase, int phase);
@@ -201,6 +204,7 @@ extern const int STATNAME(polyCoef)[264];
 #define AMIGA_POLYPHASE_STEREO_FAST_STRIDE2_C_REFERENCE STATNAME(PolyphaseStereoFastLowrateStride2_C_REFERENCE)
 #define AMIGA_POLYPHASE_STEREO_FAST_STRIDE2_TEST_ACTIVE STATNAME(PolyphaseStereoFastLowrateStride2_TEST_ACTIVE)
 #define AMIGA_POLYPHASE_STEREO_FAST_STRIDE2_HAS_ASM STATNAME(StereoFastPolyphaseStride2_HAS_AMIGA_M68K_ASM_RUNTIME)
+#define AMIGA_POLYPHASE_STEREO_FAST_STRIDE4_HAS_ASM STATNAME(StereoFastPolyphaseStride4_HAS_AMIGA_M68K_ASM_RUNTIME)
 #define AMIGA_POLYPHASE_STEREO_FAST_STRIDE4_C_REFERENCE STATNAME(PolyphaseStereoFastLowrateStride4_C_REFERENCE)
 #define AMIGA_POLYPHASE_STEREO_FAST_STRIDE4_TEST_ACTIVE STATNAME(PolyphaseStereoFastLowrateStride4_TEST_ACTIVE)
 #define AMIGA_POLYPHASE_MONO_FAST_STRIDE4_REDUCED_TEST_ACTIVE STATNAME(PolyphaseMonoFastLowrateStride4Reduced_TEST_ACTIVE)
@@ -6708,6 +6712,7 @@ int main(int argc, char **argv)
 	MP3SetExperimentalPolyphase(opt.expPoly);
 	MP3SetForceStereoStride2PolyphaseC(opt.forceCPolyphaseStride2Stereo);
 	MP3ResetStereoStride2PolyphaseCounters();
+	MP3ResetStereoStride4PolyphaseCounters();
 	MP3SetExperimentalHuffman(opt.expHuff);
 	MP3SetExperimentalIMDCTThin(decoder, opt.expImdctThin);
 	MP3SetExperimentalReducedTaps(opt.expReducedTaps);
@@ -7146,6 +7151,14 @@ int main(int argc, char **argv)
 						s2Asm ? "asm" : "C");
 					printf("stereo stride-2 polyphase calls: asm=%lu C=%lu\n",
 						s2Asm, s2C);
+				}
+				{
+					unsigned long s4Asm = 0, s4C = 0;
+					MP3GetStereoStride4PolyphaseCounters(&s4Asm, &s4C);
+					printf("stereo stride-4 polyphase: %s\n",
+						s4Asm ? "asm" : "C");
+					printf("stereo stride-4 polyphase calls: asm=%lu C=%lu\n",
+						s4Asm, s4C);
 				}
 				printf("core IMDCT subbands: executed=%lu skipped=%lu\n",
 					coreProfile.imdctSubbandsExecuted, coreProfile.imdctSubbandsSkipped);

@@ -67,6 +67,8 @@ static int gExperimentalPolyphaseEnabled;
 static int gForceStereoStride2C;
 static unsigned long gStereoStride2AsmCalls;
 static unsigned long gStereoStride2CCalls;
+static unsigned long gStereoStride4AsmCalls;
+static unsigned long gStereoStride4CCalls;
 #if defined(AMIGA_FAST_REDUCED_TAPS)
 static int gExperimentalReducedTapsEnabled;
 #endif
@@ -106,6 +108,20 @@ void MP3ResetStereoStride2PolyphaseCounters(void)
 {
 	gStereoStride2AsmCalls = 0;
 	gStereoStride2CCalls = 0;
+}
+
+void MP3GetStereoStride4PolyphaseCounters(unsigned long *asmCalls, unsigned long *cCalls)
+{
+	if (asmCalls)
+		*asmCalls = gStereoStride4AsmCalls;
+	if (cCalls)
+		*cCalls = gStereoStride4CCalls;
+}
+
+void MP3ResetStereoStride4PolyphaseCounters(void)
+{
+	gStereoStride4AsmCalls = 0;
+	gStereoStride4CCalls = 0;
 }
 
 void MP3SetExperimentalReducedTaps(int enabled)
@@ -153,6 +169,7 @@ void AmigaResetPolyphaseStatics(void)
 	gExperimentalPolyphaseEnabled = 0;
 	gForceStereoStride2C = 0;
 	MP3ResetStereoStride2PolyphaseCounters();
+	MP3ResetStereoStride4PolyphaseCounters();
 #if defined(AMIGA_FAST_REDUCED_TAPS)
 	gExperimentalReducedTapsEnabled = 0;
 #endif
@@ -190,6 +207,18 @@ void MP3GetStereoStride2PolyphaseCounters(unsigned long *asmCalls, unsigned long
 }
 
 void MP3ResetStereoStride2PolyphaseCounters(void)
+{
+}
+
+void MP3GetStereoStride4PolyphaseCounters(unsigned long *asmCalls, unsigned long *cCalls)
+{
+	if (asmCalls)
+		*asmCalls = 0;
+	if (cCalls)
+		*cCalls = 0;
+}
+
+void MP3ResetStereoStride4PolyphaseCounters(void)
 {
 }
 
@@ -1328,6 +1357,11 @@ int StereoFastPolyphaseStride2_HAS_AMIGA_M68K_ASM_RUNTIME(void)
 	return StereoFastPolyphaseStride2Phase0_Amiga_m68k_IsActive();
 }
 
+int StereoFastPolyphaseStride4_HAS_AMIGA_M68K_ASM_RUNTIME(void)
+{
+	return StereoFastPolyphaseStride4Half_Amiga_m68k_IsActive();
+}
+
 int PolyphaseStereoFastLowrateStride2_C_REFERENCE(short *pcm, int *vbuf, const int *coefBase)
 {
 #if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE)
@@ -1638,17 +1672,15 @@ int PolyphaseStereoFastLowrate(short *pcm, int *vbuf, const int *coefBase, int s
 	}
 	if (stride == 4) {
 		*phase = PolyphaseAdvanceLowratePhase(localPhase, stride);
-#if defined(AMIGA_FAST_REDUCED_TAPS)
-		if (MP3ExperimentalReducedTapsEnabled())
-			return PolyphaseStereoFastLowrateStride4Reduced(pcm, vbuf, coefBase,
+#if defined(AMIGA_M68K_ASM_POLYPHASE)
+		if (StereoFastPolyphaseStride4Half_Amiga_m68k_IsActive()) {
+			gStereoStride4AsmCalls++;
+			StereoFastPolyphaseStride4Half_Amiga_m68k(pcm, vbuf, coefBase,
 				localPhase);
+			return 16;
+		}
 #endif
-		/*
-		 * Keep the experimental m68k stride-4 stereo dispatcher out of
-		 * normal playback until its exact phase/kernel mapping is proven by
-		 * the explicit selftest.  The dispatcher remains callable through
-		 * PolyphaseStereoFastLowrateStride4_TEST_ACTIVE for diagnostics.
-		 */
+		gStereoStride4CCalls++;
 		return PolyphaseStereoFastLowrateStride4(pcm, vbuf, coefBase, localPhase);
 	}
 	if (stride == 5) {
