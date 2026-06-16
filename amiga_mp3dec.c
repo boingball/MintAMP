@@ -2931,15 +2931,29 @@ static int TestPolyphaseStride4StereoCase(unsigned long index, unsigned long see
 	int ccount;
 	int acount;
 	int i;
+	int lane;
 
 	for (i = 0; i < AMIGA_POLYPHASE_VBUF_LENGTH; i++) {
 		seed = seed * 1664525UL + 1013904223UL;
-		if (pattern == 0)
+		if (pattern == 0) {
 			cvbuf[i] = 0;
-		else if (pattern == 1)
+		} else if (pattern == 1) {
 			cvbuf[i] = ((int)seed) >> 9;
-		else
+		} else if (pattern == 2) {
 			cvbuf[i] = (i & 1) ? 0x03ffffff : (int)0xfc000000UL;
+		} else if (pattern == 3) {
+			cvbuf[i] = (i == (int)((index + (unsigned long)phase * 37UL) %
+				AMIGA_POLYPHASE_VBUF_LENGTH)) ? 0x02000000 : 0;
+		} else {
+			/* Left/right asymmetric stereo addressing check: every 64-int
+			 * block stores 32 left entries followed by 32 right entries.
+			 */
+			lane = i & 63;
+			if (lane < 32)
+				cvbuf[i] = (int)(0x01000000 + ((i * 97) & 0x000fffff));
+			else
+				cvbuf[i] = (int)(0xff000000UL + ((i * 193) & 0x000fffff));
+		}
 		avbuf[i] = cvbuf[i];
 	}
 	for (i = 0; i < AMIGA_POLYPHASE_NBANDS * 2; i++) {
@@ -2984,13 +2998,23 @@ static int SelftestPolyphaseStride4Stereo(void)
 	seed = 0x57721566UL;
 	for (i = 0; i < 500UL; i++) {
 		seed = seed * 1664525UL + 1013904223UL;
-		pattern = (i < 8UL) ? 0 : ((i < 16UL) ? 2 : 1);
+		if (i < 8UL)
+			pattern = 0;
+		else if (i < 16UL)
+			pattern = 3;
+		else if (i < 24UL)
+			pattern = 2;
+		else if (i < 32UL)
+			pattern = 4;
+		else
+			pattern = 1;
 		for (phase = 0; phase < 4; phase++) {
 			if (TestPolyphaseStride4StereoCase(i, seed, pattern, phase) != 0)
 				failures++;
 		}
 	}
 
+	printf("Polyphase stride4 stereo selftest patterns: zero, impulse, alternating extremes, left/right asymmetric, deterministic random\n");
 	printf("Polyphase stride4 stereo selftest cases: %lu\n", i * 4UL);
 	printf("Polyphase stride4 stereo selftest failures: %lu\n", failures);
 	return failures ? 1 : 0;
