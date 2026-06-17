@@ -1430,6 +1430,15 @@ int StereoFastPolyphaseStride4Phase3_Amiga_m68k_IsActive(void)
 #endif
 }
 
+int StereoFastPolyphaseStride5_Amiga_m68k_IsActive(void)
+{
+#if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_M68K_ASM_POLYPHASE)
+	return StereoFastPolyphaseStride5_Amiga_m68k ? 1 : 0;
+#else
+	return 0;
+#endif
+}
+
 int PolyphaseMonoFast_HAS_AMIGA_M68K_ASM_RUNTIME(void)
 {
 	return AmigaM68KPolyphaseMonoFast_IsActive();
@@ -1526,6 +1535,26 @@ int PolyphaseStereoFastLowrateStride4_TEST_ACTIVE(short *pcm, int *vbuf,
 	return PolyphaseStereoFastLowrateStride4_C_REFERENCE(pcm, vbuf, coefBase, phase);
 }
 
+
+int PolyphaseStereoFastLowrateStride5_C_REFERENCE(short *pcm, int *vbuf,
+	const int *coefBase, int phase)
+{
+#if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE)
+	return PolyphaseStereoFastLowrateStride5(pcm, vbuf, coefBase, phase);
+#else
+	return PolyphaseStereoFastLowrate(pcm, vbuf, coefBase, 5, &phase);
+#endif
+}
+
+int PolyphaseStereoFastLowrateStride5_TEST_ACTIVE(short *pcm, int *vbuf,
+	const int *coefBase, int phase)
+{
+#if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_M68K_ASM_POLYPHASE)
+	if (StereoFastPolyphaseStride5_Amiga_m68k_IsActive())
+		return StereoFastPolyphaseStride5_Amiga_m68k(pcm, vbuf, coefBase, phase);
+#endif
+	return PolyphaseStereoFastLowrateStride5_C_REFERENCE(pcm, vbuf, coefBase, phase);
+}
 
 int PolyphaseMonoFastLowrateStride4Reduced_TEST_ACTIVE(short *pcm, int *vbuf,
 	const int *coefBase, int phase)
@@ -1684,7 +1713,14 @@ int PolyphaseStereoFastLowrate(short *pcm, int *vbuf, const int *coefBase, int s
 		return PolyphaseStereoFastLowrateStride4(pcm, vbuf, coefBase, localPhase);
 	}
 	if (stride == 5) {
-		produced = PolyphaseStereoFastLowrateStride5(pcm, vbuf, coefBase, localPhase);
+#if defined(AMIGA_M68K_ASM_POLYPHASE)
+		if (StereoFastPolyphaseStride5_Amiga_m68k_IsActive())
+			produced = StereoFastPolyphaseStride5_Amiga_m68k(pcm, vbuf,
+				coefBase, localPhase);
+		else
+#endif
+			produced = PolyphaseStereoFastLowrateStride5(pcm, vbuf,
+				coefBase, localPhase);
 		localPhase += 2;
 		if (localPhase >= 5)
 			localPhase -= 5;

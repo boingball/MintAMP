@@ -313,3 +313,49 @@ with:
 amiga_mp3dec.before --decode-only --bench --checksum --fast-lowrate --rate 22050 song.mp3
 amiga_mp3dec.after  --decode-only --bench --checksum --fast-lowrate --rate 22050 song.mp3
 ```
+
+## Stereo stride-5 (8820/8287 Hz) polyphase m68k ASM
+
+Stereo fast-lowrate previously had m68k assembly only for stride 2 (22050 Hz)
+and stride 4 (11025 Hz); the stride-5 stereo path (8820 Hz, and the 8287 Hz
+fast-lowrate stride) fell back to the C `PolyphaseStereoFastLowrateStride5`
+helper.  `real/amiga_m68k_polyphase.S` now provides
+`StereoFastPolyphaseStride5_Amiga_m68k`, a phase dispatcher plus five
+phase-specific kernels that emit the same interleaved L/R sample lists as the C
+reference:
+
+| phase | emitted sample rows | emitted shorts |
+| ---: | --- | ---: |
+| 0 | 0, 5, 10, 15, 20, 25, 30 | 14 |
+| 1 | 4, 9, 14, 19, 24, 29 | 12 |
+| 2 | 3, 8, 13, 18, 23, 28 | 12 |
+| 3 | 2, 7, 12, 17, 22, 27 | 12 |
+| 4 | 1, 6, 11, 16, 21, 26, 31 | 14 |
+
+The kernels reuse the existing `STEREO_SAMPLE0`, `STEREO_SAMPLE16`,
+`STEREO_PAIR_LO`, and `STEREO_PAIR_HI` macros that already back the validated
+stride-2 and stride-4 stereo kernels, so every coefficient load, vbuf load,
+multiply, accumulator order, and clip/store matches the C helpers
+`PolyphaseStereoFastSample0/16/Lo/Hi` exactly.  The runtime dispatch in
+`PolyphaseStereoFastLowrate()` selects the assembly path when the weak symbol is
+linked and falls back to the C path otherwise.
+
+Verify equivalence on the target with:
+
+```sh
+amiga_mp3dec.fastexp --selftest-polyphase-stride5-stereo
+```
+
+The selftest compares the C reference and the active assembly output sample for
+sample across all five phases, both produced counts, and several vbuf patterns
+(zero, impulse, alternating extremes, left/right asymmetric, deterministic
+random), and confirms the FIFO buffer is left unmodified.  Final stereo timing
+for 8820/8287 Hz output must still be measured on 68030 hardware:
+
+```sh
+amiga_mp3dec.before --decode-only --bench --checksum --fast-lowrate --rate 8820 song.mp3
+amiga_mp3dec.after  --decode-only --bench --checksum --fast-lowrate --rate 8820 song.mp3
+```
+
+(Decode a stereo file without `--mono` so the stereo synthesis path runs;
+`--stereo` itself is a `--play` streaming option, not a decode flag.)

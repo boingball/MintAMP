@@ -144,6 +144,9 @@ void MP3GetStereoStride4PolyphaseCounters(unsigned long *asmCalls, unsigned long
 void MP3ResetStereoStride4PolyphaseCounters(void);
 int STATNAME(PolyphaseStereoFastLowrateStride4_C_REFERENCE)(short *pcm, int *vbuf, const int *coefBase, int phase);
 int STATNAME(PolyphaseStereoFastLowrateStride4_TEST_ACTIVE)(short *pcm, int *vbuf, const int *coefBase, int phase);
+int STATNAME(PolyphaseStereoFastLowrateStride5_C_REFERENCE)(short *pcm, int *vbuf, const int *coefBase, int phase);
+int STATNAME(PolyphaseStereoFastLowrateStride5_TEST_ACTIVE)(short *pcm, int *vbuf, const int *coefBase, int phase);
+int STATNAME(StereoFastPolyphaseStride5_Amiga_m68k_IsActive)(void);
 int STATNAME(PolyphaseMonoFastLowrateStride4Reduced_TEST_ACTIVE)(short *pcm, int *vbuf, const int *coefBase, int phase);
 int STATNAME(PolyphaseStereoFastLowrateStride4Reduced_TEST_ACTIVE)(short *pcm, int *vbuf, const int *coefBase, int phase);
 #if defined(AMIGA_M68K) && defined(AMIGA_M68K_ASM_POLYPHASE)
@@ -207,6 +210,9 @@ extern const int STATNAME(polyCoef)[264];
 #define AMIGA_POLYPHASE_STEREO_FAST_STRIDE4_HAS_ASM STATNAME(StereoFastPolyphaseStride4_HAS_AMIGA_M68K_ASM_RUNTIME)
 #define AMIGA_POLYPHASE_STEREO_FAST_STRIDE4_C_REFERENCE STATNAME(PolyphaseStereoFastLowrateStride4_C_REFERENCE)
 #define AMIGA_POLYPHASE_STEREO_FAST_STRIDE4_TEST_ACTIVE STATNAME(PolyphaseStereoFastLowrateStride4_TEST_ACTIVE)
+#define AMIGA_POLYPHASE_STEREO_FAST_STRIDE5_C_REFERENCE STATNAME(PolyphaseStereoFastLowrateStride5_C_REFERENCE)
+#define AMIGA_POLYPHASE_STEREO_FAST_STRIDE5_TEST_ACTIVE STATNAME(PolyphaseStereoFastLowrateStride5_TEST_ACTIVE)
+#define AMIGA_POLYPHASE_STEREO_FAST_STRIDE5_IS_ACTIVE STATNAME(StereoFastPolyphaseStride5_Amiga_m68k_IsActive)
 #define AMIGA_POLYPHASE_MONO_FAST_STRIDE4_REDUCED_TEST_ACTIVE STATNAME(PolyphaseMonoFastLowrateStride4Reduced_TEST_ACTIVE)
 #define AMIGA_POLYPHASE_STEREO_FAST_STRIDE4_REDUCED_TEST_ACTIVE STATNAME(PolyphaseStereoFastLowrateStride4Reduced_TEST_ACTIVE)
 #define AMIGA_M68K_POLYPHASE_MONO_FAST_IS_ACTIVE STATNAME(AmigaM68KPolyphaseMonoFast_IsActive)
@@ -260,6 +266,7 @@ typedef struct DecodeOptions {
 	int selftestPolyphaseStride4;
 	int selftestPolyphaseStride4Stereo;
 	int selftestPolyphaseStride2Stereo;
+	int selftestPolyphaseStride5Stereo;
 	int forceCPolyphaseStride2Stereo;
 	int selftestFastLowrate;
 	int selftestReducedTaps;
@@ -664,6 +671,7 @@ static void PrintUsage(const char *prog)
 	printf("  --selftest-polyphase-stride4 compare C and optional asm stride-4 mono polyphase paths\n");
 	printf("  --selftest-polyphase-stride4-stereo compare stereo stride-4 compact polyphase output\n");
 	printf("  --selftest-polyphase-stride2-stereo compare stereo stride-2 compact polyphase output\n");
+	printf("  --selftest-polyphase-stride5-stereo compare stereo stride-5 compact polyphase output\n");
 	printf("  --force-c-polyphase-stride2-stereo benchmark stereo stride-2 C fallback in this binary\n");
 	printf("  --selftest-fastlowrate compare synthetic stride decimation paths\n");
 	printf("  --selftest-reduced-taps compare full and reduced stride-4 dewindow paths\n");
@@ -866,6 +874,8 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->selftestPolyphaseStride4Stereo = 1;
 		} else if (!strcmp(argv[i], "--selftest-polyphase-stride2-stereo")) {
 			opt->selftestPolyphaseStride2Stereo = 1;
+		} else if (!strcmp(argv[i], "--selftest-polyphase-stride5-stereo")) {
+			opt->selftestPolyphaseStride5Stereo = 1;
 		} else if (!strcmp(argv[i], "--force-c-polyphase-stride2-stereo")) {
 			opt->forceCPolyphaseStride2Stereo = 1;
 		} else if (!strcmp(argv[i], "--selftest-fastlowrate")) {
@@ -960,6 +970,7 @@ if (opt->selftestMulshift ||
     opt->selftestPolyphaseStride4 ||
     opt->selftestPolyphaseStride4Stereo ||
     opt->selftestPolyphaseStride2Stereo ||
+    opt->selftestPolyphaseStride5Stereo ||
     opt->selftestFastLowrate ||
     opt->selftestReducedTaps ||
     opt->selftestFdct32Quarter ||
@@ -3284,6 +3295,118 @@ static int SelftestPolyphaseStride2Stereo(void)
 		AMIGA_POLYPHASE_STEREO_FAST_STRIDE2_HAS_ASM() ? "yes" : "no");
 	printf("Polyphase stride2 stereo selftest cases: %lu\n", i);
 	printf("Polyphase stride2 stereo selftest failures: %lu\n", failures);
+	return failures ? 1 : 0;
+}
+
+
+static const int kStride5StereoExpectedCounts[5] = { 14, 12, 12, 12, 14 };
+
+static int TestPolyphaseStride5StereoCase(unsigned long index, unsigned long seed, int pattern, int phase)
+{
+	static int cvbuf[AMIGA_POLYPHASE_VBUF_LENGTH];
+	static int avbuf[AMIGA_POLYPHASE_VBUF_LENGTH];
+	static short cpcm[AMIGA_POLYPHASE_NBANDS * 2];
+	static short apcm[AMIGA_POLYPHASE_NBANDS * 2];
+	int ccount;
+	int acount;
+	int expected;
+	int i;
+	int lane;
+
+	for (i = 0; i < AMIGA_POLYPHASE_VBUF_LENGTH; i++) {
+		seed = seed * 1664525UL + 1013904223UL;
+		if (pattern == 0) {
+			cvbuf[i] = 0;
+		} else if (pattern == 1) {
+			cvbuf[i] = ((int)seed) >> 9;
+		} else if (pattern == 2) {
+			cvbuf[i] = (i & 1) ? 0x03ffffff : (int)0xfc000000UL;
+		} else if (pattern == 3) {
+			cvbuf[i] = (i == (int)((index + (unsigned long)phase * 37UL) %
+				AMIGA_POLYPHASE_VBUF_LENGTH)) ? 0x02000000 : 0;
+		} else {
+			/* Left/right asymmetric stereo addressing check: every 64-int
+			 * block stores 32 left entries followed by 32 right entries.
+			 */
+			lane = i & 63;
+			if (lane < 32)
+				cvbuf[i] = (int)(0x01000000 + ((i * 97) & 0x000fffff));
+			else
+				cvbuf[i] = (int)(0xff000000UL + ((i * 193) & 0x000fffff));
+		}
+		avbuf[i] = cvbuf[i];
+	}
+	for (i = 0; i < AMIGA_POLYPHASE_NBANDS * 2; i++) {
+		cpcm[i] = (short)(0x7200 + i);
+		apcm[i] = (short)(0x7200 + i);
+	}
+
+	ccount = AMIGA_POLYPHASE_STEREO_FAST_STRIDE5_C_REFERENCE(cpcm, cvbuf, AMIGA_POLY_COEF, phase);
+	acount = AMIGA_POLYPHASE_STEREO_FAST_STRIDE5_TEST_ACTIVE(apcm, avbuf, AMIGA_POLY_COEF, phase);
+
+	expected = kStride5StereoExpectedCounts[phase];
+	if (ccount != expected || acount != expected) {
+		printf("PolyphaseStereoFast stride5 count mismatch %lu phase=%d: first=%d second=%d expected=%d pattern=%d\n",
+			index, phase, ccount, acount, expected, pattern);
+		return -1;
+	}
+	for (i = 0; i < AMIGA_POLYPHASE_VBUF_LENGTH; i++) {
+		if (avbuf[i] != cvbuf[i]) {
+			printf("PolyphaseStereoFast stride5 vbuf mismatch %lu phase=%d[%d]: first=%ld second=%ld pattern=%d\n",
+				index, phase, i, (long)cvbuf[i], (long)avbuf[i], pattern);
+			return -1;
+		}
+	}
+	for (i = 0; i < AMIGA_POLYPHASE_NBANDS * 2; i++) {
+		if (apcm[i] != cpcm[i]) {
+			printf("PolyphaseStereoFast stride5 output mismatch %lu phase=%d[%d]: first=%ld second=%ld pattern=%d\n",
+				index, phase, i, (long)cpcm[i], (long)apcm[i], pattern);
+			return -1;
+		}
+	}
+	return 0;
+}
+
+static int SelftestPolyphaseStride5Stereo(void)
+{
+	unsigned long i;
+	unsigned long failures;
+	unsigned long seed;
+	int pattern;
+	int phase;
+
+	failures = 0;
+	seed = 0x41c64e6dUL;
+	for (i = 0; i < 500UL; i++) {
+		seed = seed * 1664525UL + 1013904223UL;
+		if (i < 8UL)
+			pattern = 0;
+		else if (i < 16UL)
+			pattern = 3;
+		else if (i < 24UL)
+			pattern = 2;
+		else if (i < 32UL)
+			pattern = 4;
+		else
+			pattern = 1;
+		for (phase = 0; phase < 5; phase++) {
+			if (TestPolyphaseStride5StereoCase(i, seed, pattern, phase) != 0)
+				failures++;
+		}
+	}
+
+	printf("Polyphase stride5 stereo asm requested: %s\n",
+#ifdef AMIGA_M68K_ASM_POLYPHASE
+		"yes"
+#else
+		"no"
+#endif
+	);
+	printf("Polyphase stride5 stereo asm active: %s\n",
+		AMIGA_POLYPHASE_STEREO_FAST_STRIDE5_IS_ACTIVE() ? "yes" : "no");
+	printf("Polyphase stride5 stereo selftest patterns: zero, impulse, alternating extremes, left/right asymmetric, deterministic random\n");
+	printf("Polyphase stride5 stereo selftest cases: %lu\n", i * 5UL);
+	printf("Polyphase stride5 stereo selftest failures: %lu\n", failures);
 	return failures ? 1 : 0;
 }
 
@@ -6472,6 +6595,11 @@ int main(int argc, char **argv)
 	}
 	if (opt.selftestPolyphaseStride2Stereo) {
 		int selftestErr = SelftestPolyphaseStride2Stereo();
+		AmigaFreeNormalizedArgs(&normalized);
+		return selftestErr;
+	}
+	if (opt.selftestPolyphaseStride5Stereo) {
+		int selftestErr = SelftestPolyphaseStride5Stereo();
 		AmigaFreeNormalizedArgs(&normalized);
 		return selftestErr;
 	}

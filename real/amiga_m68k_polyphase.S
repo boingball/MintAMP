@@ -18,6 +18,8 @@
 	.globl	StereoFastPolyphaseStride4Phase2_Amiga_m68k
 	.globl	StereoFastPolyphaseStride4Phase3_Amiga_m68k
 	.globl	StereoFastPolyphaseStride4Half_Amiga_m68k_PhaseCounts
+	.globl	StereoFastPolyphaseStride5_Amiga_m68k
+	.globl	StereoFastPolyphaseStride5_Amiga_m68k_PhaseCounts
 /* void AmigaM68KPolyphaseMonoFast(short *pcm, int *vbuf, const int *coefBase)
  * 4(%sp)  = pcm
  * 8(%sp)  = vbuf
@@ -556,11 +558,140 @@ StereoFastPolyphaseStride4Phase3_Amiga_m68k:
 	movem.l	(%sp)+,%d2-%d7/%a2-%a6
 	rts
 
+
+/* int StereoFastPolyphaseStride5_Amiga_m68k(short *pcm, int *vbuf, const int *coefBase, int phase)
+ * Stride-5 (8820/8287 Hz) stereo fast-lowrate synthesis.  Dispatches the five
+ * logical phases to phase-specific kernels that reproduce the C reference
+ * PolyphaseStereoFastLowrateStride5 sample lists and left/right addressing
+ * exactly.  Returns the number of emitted interleaved shorts in %d0: 14 for
+ * phases 0 and 4 (7 stereo pairs), 12 for phases 1, 2 and 3 (6 stereo pairs).
+ */
+StereoFastPolyphaseStride5_Amiga_m68k:
+	move.l	16(%sp),%d0		| phase (before callee register save)
+	cmp.l	#4,%d0
+	bhi.s	0f
+	lea	StereoFastPolyphaseStride5_Amiga_m68k_PhaseCounts,%a0
+	move.l	%d0,%d1
+	lsl.l	#2,%d1
+	addq.l	#1,(%a0,%d1.l)
+0:
+	tst.l	%d0
+	beq	StereoFastPolyphaseStride5Phase0_Amiga_m68k
+	cmp.l	#1,%d0
+	beq	StereoFastPolyphaseStride5Phase1_Amiga_m68k
+	cmp.l	#2,%d0
+	beq	StereoFastPolyphaseStride5Phase2_Amiga_m68k
+	cmp.l	#3,%d0
+	beq	StereoFastPolyphaseStride5Phase3_Amiga_m68k
+	cmp.l	#4,%d0
+	beq	StereoFastPolyphaseStride5Phase4_Amiga_m68k
+	moveq	#0,%d0
+	rts
+
+
+/* phase 0 samples: 0, 5, 10, 15, 20, 25, 30 (7 pairs) */
+StereoFastPolyphaseStride5Phase0_Amiga_m68k:
+	movem.l	%d2-%d7/%a2-%a6,-(%sp)
+	move.l	48(%sp),%a0		| pcm
+	move.l	52(%sp),%a1		| vbuf
+	move.l	56(%sp),%a2		| coefBase
+
+	STEREO_SAMPLE0 0
+	STEREO_PAIR_LO 5,4
+	STEREO_PAIR_LO 10,8
+	STEREO_PAIR_LO 15,12
+	STEREO_PAIR_HI 12,16
+	STEREO_PAIR_HI 7,20
+	STEREO_PAIR_HI 2,24
+
+	moveq	#14,%d0
+	movem.l	(%sp)+,%d2-%d7/%a2-%a6
+	rts
+
+
+/* phase 1 samples: 4, 9, 14, 19, 24, 29 (6 pairs) */
+StereoFastPolyphaseStride5Phase1_Amiga_m68k:
+	movem.l	%d2-%d7/%a2-%a6,-(%sp)
+	move.l	48(%sp),%a0		| pcm
+	move.l	52(%sp),%a1		| vbuf
+	move.l	56(%sp),%a2		| coefBase
+
+	STEREO_PAIR_LO 4,0
+	STEREO_PAIR_LO 9,4
+	STEREO_PAIR_LO 14,8
+	STEREO_PAIR_HI 13,12
+	STEREO_PAIR_HI 8,16
+	STEREO_PAIR_HI 3,20
+
+	moveq	#12,%d0
+	movem.l	(%sp)+,%d2-%d7/%a2-%a6
+	rts
+
+
+/* phase 2 samples: 3, 8, 13, 18, 23, 28 (6 pairs) */
+StereoFastPolyphaseStride5Phase2_Amiga_m68k:
+	movem.l	%d2-%d7/%a2-%a6,-(%sp)
+	move.l	48(%sp),%a0		| pcm
+	move.l	52(%sp),%a1		| vbuf
+	move.l	56(%sp),%a2		| coefBase
+
+	STEREO_PAIR_LO 3,0
+	STEREO_PAIR_LO 8,4
+	STEREO_PAIR_LO 13,8
+	STEREO_PAIR_HI 14,12
+	STEREO_PAIR_HI 9,16
+	STEREO_PAIR_HI 4,20
+
+	moveq	#12,%d0
+	movem.l	(%sp)+,%d2-%d7/%a2-%a6
+	rts
+
+
+/* phase 3 samples: 2, 7, 12, 17, 22, 27 (6 pairs) */
+StereoFastPolyphaseStride5Phase3_Amiga_m68k:
+	movem.l	%d2-%d7/%a2-%a6,-(%sp)
+	move.l	48(%sp),%a0		| pcm
+	move.l	52(%sp),%a1		| vbuf
+	move.l	56(%sp),%a2		| coefBase
+
+	STEREO_PAIR_LO 2,0
+	STEREO_PAIR_LO 7,4
+	STEREO_PAIR_LO 12,8
+	STEREO_PAIR_HI 15,12
+	STEREO_PAIR_HI 10,16
+	STEREO_PAIR_HI 5,20
+
+	moveq	#12,%d0
+	movem.l	(%sp)+,%d2-%d7/%a2-%a6
+	rts
+
+
+/* phase 4 samples: 1, 6, 11, 16, 21, 26, 31 (7 pairs) */
+StereoFastPolyphaseStride5Phase4_Amiga_m68k:
+	movem.l	%d2-%d7/%a2-%a6,-(%sp)
+	move.l	48(%sp),%a0		| pcm
+	move.l	52(%sp),%a1		| vbuf
+	move.l	56(%sp),%a2		| coefBase
+
+	STEREO_PAIR_LO 1,0
+	STEREO_PAIR_LO 6,4
+	STEREO_PAIR_LO 11,8
+	STEREO_SAMPLE16 12
+	STEREO_PAIR_HI 11,16
+	STEREO_PAIR_HI 6,20
+	STEREO_PAIR_HI 1,24
+
+	moveq	#14,%d0
+	movem.l	(%sp)+,%d2-%d7/%a2-%a6
+	rts
+
 	.even
 	.data
 	.even
 StereoFastPolyphaseStride4Half_Amiga_m68k_PhaseCounts:
 	.long	0,0,0,0
+StereoFastPolyphaseStride5_Amiga_m68k_PhaseCounts:
+	.long	0,0,0,0,0
 	.text
 	.even
 #endif /* AMIGA_M68K_ASM_POLYPHASE */
