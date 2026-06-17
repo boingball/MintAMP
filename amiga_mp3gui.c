@@ -704,6 +704,77 @@ static unsigned long PicImageOffset(const unsigned char *payload,
 	return pos <= payloadBytes ? pos : payloadBytes;
 }
 
+
+static const char *Id3v1GenreName(unsigned int genre)
+{
+	static const char *const names[] = {
+		"Blues", "Classic Rock", "Country", "Dance", "Disco", "Funk",
+		"Grunge", "Hip-Hop", "Jazz", "Metal", "New Age", "Oldies",
+		"Other", "Pop", "R&B", "Rap", "Reggae", "Rock", "Techno",
+		"Industrial", "Alternative", "Ska", "Death Metal", "Pranks",
+		"Soundtrack", "Euro-Techno", "Ambient", "Trip-Hop", "Vocal",
+		"Jazz+Funk", "Fusion", "Trance", "Classical", "Instrumental",
+		"Acid", "House", "Game", "Sound Clip", "Gospel", "Noise",
+		"AlternRock", "Bass", "Soul", "Punk", "Space", "Meditative",
+		"Instrumental Pop", "Instrumental Rock", "Ethnic", "Gothic",
+		"Darkwave", "Techno-Industrial", "Electronic", "Pop-Folk",
+		"Eurodance", "Dream", "Southern Rock", "Comedy", "Cult",
+		"Gangsta", "Top 40", "Christian Rap", "Pop/Funk", "Jungle",
+		"Native American", "Cabaret", "New Wave", "Psychedelic", "Rave",
+		"Showtunes", "Trailer", "Lo-Fi", "Tribal", "Acid Punk",
+		"Acid Jazz", "Polka", "Retro", "Musical", "Rock & Roll",
+		"Hard Rock", "Folk", "Folk-Rock", "National Folk", "Swing",
+		"Fast Fusion", "Bebop", "Latin", "Revival", "Celtic",
+		"Bluegrass", "Avantgarde", "Gothic Rock", "Progressive Rock",
+		"Psychedelic Rock", "Symphonic Rock", "Slow Rock", "Big Band",
+		"Chorus", "Easy Listening", "Acoustic", "Humour", "Speech",
+		"Chanson", "Opera", "Chamber Music", "Sonata", "Symphony",
+		"Booty Bass", "Primus", "Porn Groove", "Satire", "Slow Jam",
+		"Club", "Tango", "Samba", "Folklore", "Ballad", "Power Ballad",
+		"Rhythmic Soul", "Freestyle", "Duet", "Punk Rock", "Drum Solo",
+		"A Cappella", "Euro-House", "Dance Hall", "Goa", "Drum & Bass",
+		"Club-House", "Hardcore", "Terror", "Indie", "BritPop",
+		"Negerpunk", "Polsk Punk", "Beat", "Christian Gangsta Rap",
+		"Heavy Metal", "Black Metal", "Crossover", "Contemporary Christian",
+		"Christian Rock", "Merengue", "Salsa", "Thrash Metal", "Anime",
+		"JPop", "Synthpop", "Christmas", "Art Rock", "Baroque", "Bhangra",
+		"Big Beat", "Breakbeat", "Chillout", "Downtempo", "Dub", "EBM",
+		"Eclectic", "Electro", "Electroclash", "Emo", "Experimental",
+		"Garage", "Global", "IDM", "Illbient", "Industro-Goth", "Jam Band",
+		"Krautrock", "Leftfield", "Lounge", "Math Rock", "New Romantic",
+		"Nu-Breakz", "Post-Punk", "Post-Rock", "Psytrance", "Shoegaze",
+		"Space Rock", "Trop Rock", "World Music", "Neoclassical",
+		"Audiobook", "Audio Theatre", "Neue Deutsche Welle", "Podcast",
+		"Indie Rock", "G-Funk", "Dubstep", "Garage Rock", "Psybient"
+	};
+
+	return (genre < (sizeof(names) / sizeof(names[0]))) ? names[genre] : NULL;
+}
+
+static void NormalizeId3Genre(char *genre, size_t genreSize)
+{
+	char *p;
+	char *end;
+	unsigned long value;
+	const char *name;
+
+	if (!genre || genreSize == 0 || !genre[0])
+		return;
+	p = genre;
+	if (*p == '(')
+		p++;
+	if (*p < '0' || *p > '9')
+		return;
+	value = strtoul(p, &end, 10);
+	if (*end == ')')
+		end++;
+	if (*end != '\0' || value == 255)
+		return;
+	name = Id3v1GenreName((unsigned int)value);
+	if (name)
+		SafeCopy(genre, genreSize, name);
+}
+
 static void StripTrailing(char *s)
 {
 	int n;
@@ -896,8 +967,14 @@ static void ReadId3v1(FILE *f, Mp3Tags *tags)
 		CopyId3v1TextField(tags->album, sizeof(tags->album), buf + 63, 30);
 	if (!tags->track[0] && buf[125] == 0 && buf[126] != 0)
 		sprintf(tags->track, "%u", (unsigned int)buf[126]);
-	if (!tags->genre[0] && buf[127] != 255)
-		sprintf(tags->genre, "ID3 genre %u", (unsigned int)buf[127]);
+	if (!tags->genre[0] && buf[127] != 255) {
+		const char *genreName = Id3v1GenreName((unsigned int)buf[127]);
+
+		if (genreName)
+			SafeCopy(tags->genre, sizeof(tags->genre), genreName);
+		else
+			sprintf(tags->genre, "ID3 genre %u", (unsigned int)buf[127]);
+	}
 }
 
 
@@ -1124,6 +1201,7 @@ static void ReadId3v2Frames(FILE *f, Mp3Tags *tags, const unsigned char *hdr, in
 		long payloadPos;
 		long remain;
 		char *target;
+		size_t targetSize;
 
 		if (version == 2) {
 			if (fread(fh, 1, 6, f) != 6)
@@ -1181,16 +1259,23 @@ static void ReadId3v2Frames(FILE *f, Mp3Tags *tags, const unsigned char *hdr, in
 		}
 
 		target = NULL;
-		if ((version == 2 && strcmp(id, "TT2") == 0) || strcmp(id, "TIT2") == 0)
+		targetSize = 0;
+		if ((version == 2 && strcmp(id, "TT2") == 0) || strcmp(id, "TIT2") == 0) {
 			target = tags->title;
-		else if ((version == 2 && strcmp(id, "TP1") == 0) || strcmp(id, "TPE1") == 0)
+			targetSize = sizeof(tags->title);
+		} else if ((version == 2 && strcmp(id, "TP1") == 0) || strcmp(id, "TPE1") == 0) {
 			target = tags->artist;
-		else if ((version == 2 && strcmp(id, "TAL") == 0) || strcmp(id, "TALB") == 0)
+			targetSize = sizeof(tags->artist);
+		} else if ((version == 2 && strcmp(id, "TAL") == 0) || strcmp(id, "TALB") == 0) {
 			target = tags->album;
-		else if ((version == 2 && strcmp(id, "TRK") == 0) || strcmp(id, "TRCK") == 0)
+			targetSize = sizeof(tags->album);
+		} else if ((version == 2 && strcmp(id, "TRK") == 0) || strcmp(id, "TRCK") == 0) {
 			target = tags->track;
-		else if ((version == 2 && strcmp(id, "TCO") == 0) || strcmp(id, "TCON") == 0)
+			targetSize = sizeof(tags->track);
+		} else if ((version == 2 && strcmp(id, "TCO") == 0) || strcmp(id, "TCON") == 0) {
 			target = tags->genre;
+			targetSize = sizeof(tags->genre);
+		}
 		if (strcmp(id, "POPM") == 0) {
 			unsigned char popm[96];
 			long n = frameSize;
@@ -1207,8 +1292,11 @@ static void ReadId3v2Frames(FILE *f, Mp3Tags *tags, const unsigned char *hdr, in
 			long n = frameSize;
 			if (n > (long)sizeof(text))
 				n = (long)sizeof(text);
-			if (fread(text, 1, (size_t)n, f) == (size_t)n)
-				CopyId3v2TextField(target, 64, text, n);
+			if (fread(text, 1, (size_t)n, f) == (size_t)n) {
+				CopyId3v2TextField(target, targetSize, text, n);
+				if (target == tags->genre)
+					NormalizeId3Genre(target, sizeof(tags->genre));
+			}
 		} else {
 			if (fseek(f, frameSize, SEEK_CUR) != 0)
 				break;
