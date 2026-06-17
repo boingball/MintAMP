@@ -448,25 +448,44 @@ static const STRPTR kRateLabels[] = {
 	NULL
 };
 
-static const STRPTR kSuperfastRateLabels[] = {
+static const STRPTR kSuperfastMonoRateLabels[] = {
+	(STRPTR)"8287",
+	(STRPTR)"8820",
 	(STRPTR)"11025",
 	(STRPTR)"22050",
 	NULL
 };
 
-static int SuperfastActiveFromRateIndex(int rateIndex)
+static const STRPTR kSuperfastStereoRateLabels[] = {
+	(STRPTR)"8820",
+	(STRPTR)"11025",
+	(STRPTR)"22050",
+	NULL
+};
+
+static const STRPTR *SuperfastRateLabels(int mono)
 {
-	return rateIndex == 3 ? 1 : 0;
+	return mono ? kSuperfastMonoRateLabels : kSuperfastStereoRateLabels;
 }
 
-static int RateIndexFromSuperfastActive(int active)
+static int SuperfastActiveFromRateIndex(int rateIndex, int mono)
 {
-	return active == 1 ? 3 : 2;
+	return mono ? rateIndex : rateIndex - 1;
 }
 
-static int RateIndexSupportsSuperfast(int rateIndex)
+static int RateIndexFromSuperfastActive(int active, int mono)
 {
-	return rateIndex == 2 || rateIndex == 3;
+	return mono ? active : active + 1;
+}
+
+static int RateIndexSupportsSuperfast(int rateIndex, int mono)
+{
+	return rateIndex >= (mono ? 0 : 1) && rateIndex <= 3;
+}
+
+static int DefaultSuperfastRateIndex(int mono)
+{
+	return mono ? 0 : 1;
 }
 
 static const STRPTR kQualityLabels[] = {
@@ -2740,8 +2759,8 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 
 	gui->gadRate = gad = MakeGadget(gui, gad, CYCLE_KIND, GID_RATE,
 		GUI_MARGIN_L + 48, ROW_CYCLES, 80, 16, "Rate:",
-		GTCY_Labels, (ULONG)(gui->superfastLowrate ? kSuperfastRateLabels : kRateLabels),
-		GTCY_Active, gui->superfastLowrate ? SuperfastActiveFromRateIndex(gui->rateIndex) : gui->rateIndex,
+		GTCY_Labels, (ULONG)(gui->superfastLowrate ? SuperfastRateLabels(gui->mono) : kRateLabels),
+		GTCY_Active, gui->superfastLowrate ? SuperfastActiveFromRateIndex(gui->rateIndex, gui->mono) : gui->rateIndex,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0);
 	if (!gad)
@@ -2873,8 +2892,8 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	gui->rateIndex = LoadEnvInt("RateIndex", 2, 0, 4);
 	if (gui->superfastLowrate) {
 		gui->fastLowrate = 1;
-		if (!RateIndexSupportsSuperfast(gui->rateIndex))
-			gui->rateIndex = 2;
+		if (!RateIndexSupportsSuperfast(gui->rateIndex, gui->mono))
+			gui->rateIndex = DefaultSuperfastRateIndex(gui->mono);
 	}
 	gui->bufferSeconds = LoadEnvInt("BufferSeconds", 10, 1, 30);
 	gui->volumePercent = LoadEnvInt("Volume", 100, 0, 100);
@@ -3265,6 +3284,7 @@ static void BuildPlaybackArgs(HelixAmp3Gui *gui, HelixAmp3Args *args)
 	if (gui->fastMem)
 		AddArg(args, "--fast-mem");
 	if (gui->superfastLowrate) {
+		AddArg(args, "--fast-lowrate");
 		AddArg(args, "--superfast-lowrate");
 	} else if (gui->fastLowrate && strcmp(kRates[gui->rateIndex], "28600")) {
 		AddArg(args, "--fast-lowrate");
@@ -3817,8 +3837,8 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 		gui->superfastLowrate = !gui->superfastLowrate;
 		if (gui->superfastLowrate) {
 			gui->fastLowrate = 1;
-			if (!RateIndexSupportsSuperfast(gui->rateIndex))
-				gui->rateIndex = 2;
+			if (!RateIndexSupportsSuperfast(gui->rateIndex, gui->mono))
+				gui->rateIndex = DefaultSuperfastRateIndex(gui->mono);
 		}
 		GT_SetGadgetAttrs(gad, gui->win, NULL,
 			GTCB_Checked, gui->superfastLowrate, TAG_DONE);
@@ -3827,14 +3847,12 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 				GTCB_Checked, gui->fastLowrate, TAG_DONE);
 		if (gui->gadRate)
 			GT_SetGadgetAttrs(gui->gadRate, gui->win, NULL,
-				GTCY_Labels, (ULONG)(gui->superfastLowrate ? kSuperfastRateLabels : kRateLabels),
+				GTCY_Labels, (ULONG)(gui->superfastLowrate ? SuperfastRateLabels(gui->mono) : kRateLabels),
 				GTCY_Active, gui->superfastLowrate ?
-					SuperfastActiveFromRateIndex(gui->rateIndex) : gui->rateIndex,
+					SuperfastActiveFromRateIndex(gui->rateIndex, gui->mono) : gui->rateIndex,
 				TAG_DONE);
 		SetStatus(gui, gui->superfastLowrate ?
-			(strcmp(kRates[gui->rateIndex], "22050") == 0 ?
-			"Superfast enabled: 22050 Hz stride-2, 16 bands, FDCT32Half." :
-			"Superfast enabled: 11025 Hz stride-4, 8 bands, FDCT32Quarter.") :
+			"Superfast enabled for 8287/8820/11025/22050 Hz (8287 mono-only)." :
 			"Superfast disabled; all output rates are available.");
 		SaveGuiSettings(gui);
 		break;
@@ -3859,7 +3877,15 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 			break;
 		}
 		gui->mono = !gui->mono;
+		if (gui->superfastLowrate && !RateIndexSupportsSuperfast(gui->rateIndex, gui->mono))
+			gui->rateIndex = DefaultSuperfastRateIndex(gui->mono);
 		GT_SetGadgetAttrs(gad, gui->win, NULL, GTCB_Checked, gui->mono, TAG_DONE);
+		if (gui->gadRate)
+			GT_SetGadgetAttrs(gui->gadRate, gui->win, NULL,
+				GTCY_Labels, (ULONG)(gui->superfastLowrate ? SuperfastRateLabels(gui->mono) : kRateLabels),
+				GTCY_Active, gui->superfastLowrate ?
+					SuperfastActiveFromRateIndex(gui->rateIndex, gui->mono) : gui->rateIndex,
+				TAG_DONE);
 		SetStatus(gui, gui->mono ? "Mono output enabled." : "Stereo output enabled.");
 		SaveGuiSettings(gui);
 		break;
@@ -3867,13 +3893,13 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 		if (gui->playbackActive || gui->playbackDonePending) {
 			GT_SetGadgetAttrs(gad, gui->win, NULL,
 				GTCY_Active, gui->superfastLowrate ?
-					SuperfastActiveFromRateIndex(gui->rateIndex) : gui->rateIndex,
+					SuperfastActiveFromRateIndex(gui->rateIndex, gui->mono) : gui->rateIndex,
 				TAG_DONE);
 			SetStatus(gui, "Stop playback before changing output rate.");
 			break;
 		}
 		if (gui->superfastLowrate)
-			gui->rateIndex = RateIndexFromSuperfastActive(code);
+			gui->rateIndex = RateIndexFromSuperfastActive(code, gui->mono);
 		else {
 			gui->rateIndex = code;
 			if (gui->rateIndex < 0 || gui->rateIndex > 4)
