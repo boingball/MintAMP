@@ -13,8 +13,9 @@ The explicit low-pass model is derived from fast-lowrate stride:
 | 1 | 32 | none |
 | 2 | 16 | 16-31 |
 | 4 | 8 | 8-31 |
+| 5 | 6 | 6-31 |
 
-For `44100 Hz -> 22050 Hz` (stride 2), playback retains subbands 0-15 and permanently discards subbands 16-31.  For `44100 Hz -> 11025 Hz` (stride 4), playback retains subbands 0-7 and permanently discards subbands 8-31.  Coefficients, IMDCT output, and overlap state for discarded subbands must be zeroed and must not be consumed by sparse synthesis.
+For `44100 Hz -> 22050 Hz` (stride 2), playback retains subbands 0-15 and permanently discards subbands 16-31.  For `44100 Hz -> 11025 Hz` (stride 4), playback retains subbands 0-7 and permanently discards subbands 8-31.  For `44100 Hz -> 8820/8287 Hz` (stride 5), playback retains subbands 0-5 and permanently discards subbands 6-31.  Coefficients, IMDCT output, and overlap state for discarded subbands must be zeroed and must not be consumed by sparse synthesis.
 
 ## IMDCT safety rule
 
@@ -44,12 +45,32 @@ half-rate FDCT path for every `vindex` and both `oddBlock` states.
 
 ## Supported sparse output rates
 
-`--superfast-lowrate` currently supports only 11,025 Hz and 22,050 Hz.  If no
-rate is specified, the command-line default remains 11,025 Hz for compatibility.
-The GUI must not silently change a selected rate when Superfast is enabled; the
-user-visible status/debug output should report the active stride, active subband
-count, and FDCT choice.  Unsupported rates such as 8,820 Hz, 8,287 Hz, 28,600 Hz,
-or arbitrary values must be rejected instead of falling through to sparse mode.
+`--superfast-lowrate` supports 8,287 Hz, 8,820 Hz, 11,025 Hz, and 22,050 Hz.  If
+no rate is specified, the command-line default remains 11,025 Hz for
+compatibility.  The GUI must not silently change a selected rate when Superfast
+is enabled; the user-visible status/debug output should report the active stride,
+active subband count, and FDCT choice.  Unsupported rates such as 28,600 Hz or
+arbitrary values must be rejected instead of falling through to sparse mode.
+
+## Stride-5 (8,820 / 8,287 Hz) note
+
+8,820 Hz and 8,287 Hz both map to the stride-5 fast-lowrate selector.  Unlike
+stride 2 and stride 4, stride 5's five phases together consume every synthesis
+FIFO row (rows 0-16), so there is no bit-exact "skip whole rows" sparse FDCT for
+it: the full `FDCT32` is still required for exact output.  Superfast stride 5
+therefore takes its win from the IMDCT subband cap, not the FDCT.
+
+The active subband count for stride 5 is 6 (output Nyquist ~4.4 kHz / 689 Hz per
+subband).  Superfast caps the IMDCT to those 6 subbands and zeroes 6-31, down
+from the default fast-lowrate cap of 16 for stride >= 4.  This both reduces IMDCT
+work and removes the high-band aliasing that plain decimation-by-5 produces, so
+8,820/8,287 superfast output can be cleaner as well as faster.  The synthesis
+FDCT runs the full `FDCT32` on the band-limited (subband 6-31 zeroed) input, so
+the result is bit-identical to running the full pipeline with those subbands
+zeroed.  A dedicated stride-5 sparse FDCT that also skips the now-zero first-pass
+folds is possible but would save only the first-pass multiplies (~10% of the
+transform) because all output rows are still needed; it is left as a future
+micro-optimisation.
 
 ## Performance trade-off
 

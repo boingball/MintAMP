@@ -1402,6 +1402,19 @@ int IMDCTSubbandCapSelftest(void)
 		failures++;
 	}
 
+	decInfo.fastLowrateStride = 5;
+	decInfo.fastLowrateActiveSubbands = 6;
+	decInfo.outputMono = 0;
+	helperBc = baseBc;
+	helperApplied = IMDCTApplySubbandCap(&decInfo, &helperBc);
+	if (!helperApplied || helperBc.nBlocksTotal != 6 || helperBc.nBlocksLong != 6 ||
+		helperBc.nBlocksPrev != 6 || helperBc.activeSubbands != 6 || !helperBc.subbandCapActive) {
+		printf("subband cap selftest superfast stride-5 helper failed: applied=%d total=%d long=%d prev=%d activeBands=%d active=%d\n",
+			helperApplied, helperBc.nBlocksTotal, helperBc.nBlocksLong, helperBc.nBlocksPrev,
+			helperBc.activeSubbands, helperBc.subbandCapActive);
+		failures++;
+	}
+
 	memset(&decInfo, 0, sizeof(decInfo));
 	decInfo.fastLowrateStride = 4;
 	decInfo.outputMono = 1;

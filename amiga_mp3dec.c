@@ -645,7 +645,7 @@ static void PrintUsage(const char *prog)
 	printf("  --rate HZ    output/downsample rate: 28600, 22050, 11025, 8820, or 8287 Hz\n");
 	printf("               28600/22050 playback is experimental/high CPU and may underrun\n");
 	printf("  --fast-lowrate lower-quality Amiga conversion; requires --rate\n");
-	printf("  --superfast-lowrate sparse low-rate mode; use --rate 11025 or --rate 22050\n");
+	printf("  --superfast-lowrate sparse low-rate mode; use --rate 8287, 8820, 11025, or 22050\n");
 	printf("                 defaults to 11025 if no --rate is specified\n");
 	printf("  --quality N set quality/speed level (0 fastest, 1 fast, 2 balanced, 3 accurate)\n");
 	printf("               default: 1 for --fast-lowrate --rate 11025, otherwise 3\n");
@@ -1010,8 +1010,9 @@ if (opt->selftestMulshift ||
 		opt->noOutput = 1;
 	}
 
-	if (opt->superfastLowrate && opt->outputRate != 11025 && opt->outputRate != 22050) {
-		fprintf(stderr, "--superfast-lowrate supports only --rate 11025 or --rate 22050\n");
+	if (opt->superfastLowrate && opt->outputRate != 11025 && opt->outputRate != 22050 &&
+		opt->outputRate != 8820 && opt->outputRate != 8287) {
+		fprintf(stderr, "--superfast-lowrate supports only --rate 8287, 8820, 11025, or 22050\n");
 		return -1;
 	}
 	if (opt->fastLowrate && (opt->outputRate != 22050 &&

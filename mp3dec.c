@@ -239,6 +239,8 @@ int MP3FindSyncWord(unsigned char *buf, int nBytes)
 
 static int MP3FastLowrateActiveSubbandsForStride(int stride)
 {
+	if (stride >= 5)
+		return 6;	/* 8820/8287 Hz: output Nyquist ~4.4 kHz -> 6 subbands */
 	if (stride >= 4)
 		return 8;
 	if (stride == 2)
