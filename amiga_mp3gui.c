@@ -358,6 +358,8 @@ typedef struct HelixAmp3Gui {
 	int artCacheBypass;
 	int artValid;
 	int artLoading;
+	int artRestartPending;
+	int artCacheSavePending;
 	unsigned char artGreyBuf[ART_W * ART_H];
 	ArtDecodeState artDecode;
 	struct MsgPort *timerPort;
@@ -1855,7 +1857,12 @@ static void FinishArtDecode(HelixAmp3Gui *gui, int ok)
 		}
 		memcpy(gui->artGreyBuf, st->greyOut, ART_W * ART_H);
 		gui->artValid = 1;
-		SaveArtworkCache(gui);
+		/* The GUI and playback child share the same AmigaDOS/C runtime state.
+		 * Avoid overlapping artwork-cache writes with playback startup. */
+		if (gui->playbackActive)
+			gui->artCacheSavePending = 1;
+		else
+			SaveArtworkCache(gui);
 	}
 	st->active = 0;
 	gui->artLoading = 0;
@@ -2422,6 +2429,14 @@ static void FinalizePlayback(HelixAmp3Gui *gui)
 	 * second-play race on shared process address space. */
 	gGuiPlayer.stopRequested = 0;
 	gPlaybackInterrupted = 0;
+	if (gui->artCacheSavePending) {
+		gui->artCacheSavePending = 0;
+		SaveArtworkCache(gui);
+	}
+	if (gui->artRestartPending) {
+		gui->artRestartPending = 0;
+		StartArtDecode(gui);
+	}
 	gui->lastCleanupStage = GUIPLAY_CLEANUP_NONE;
 	gui->lastDisplayedPhase = GUIPLAY_PHASE_IDLE;
 #if defined(AMIGA_M68K) && defined(MINIAMP3_DEBUG)
@@ -2580,6 +2595,10 @@ static void HandleTimerSignal(HelixAmp3Gui *gui)
 			}
 			break;
 		case GUIPLAY_PHASE_PLAYING: {
+			if (gui->artRestartPending) {
+				gui->artRestartPending = 0;
+				StartArtDecode(gui);
+			}
 #ifdef MINIAMP3_DEBUG
 			long delta = spareMs - gui->lastDisplayedSpareMs;
 			if (delta < 0)
@@ -2614,9 +2633,16 @@ static void HandleTimerSignal(HelixAmp3Gui *gui)
 		if (gui->progressEnabled)
 			DrawProgressIfChanged(gui);
 	}
-	PumpArtDecode(gui);
-	SendTimerRequest(gui, gui->artDecode.active ? ART_TIMER_MICROS :
-		TIMER_TICK_MICROS);
+	{
+		int artCanPump = !gui->playbackActive ||
+			gGuiPlaybackStatus.phase == GUIPLAY_PHASE_PLAYING ||
+			gGuiPlaybackStatus.phase == GUIPLAY_PHASE_UNDERRUN;
+
+		if (artCanPump)
+			PumpArtDecode(gui);
+		SendTimerRequest(gui, gui->artDecode.active && artCanPump ?
+			ART_TIMER_MICROS : TIMER_TICK_MICROS);
+	}
 }
 
 static void HandleDoneSignal(HelixAmp3Gui *gui)
@@ -4219,6 +4245,18 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 		SaveGuiSettings(gui);
 		break;
 	case GID_PLAY:
+		if (gui->playbackActive || gui->playbackDonePending) {
+			SetStatus(gui, "Playback is already starting or active.");
+			break;
+		}
+		/* If artwork is still decoding, pause it before the playback child is
+		 * created.  Rapid Browse->Play can otherwise overlap GUI artwork work
+		 * with the child task's first file reads on shared AmigaDOS/C runtime state. */
+		if (gui->artDecode.active || gui->artLoading) {
+			gui->artDecode.active = 0;
+			gui->artRestartPending = 1;
+			gui->artLoading = 1;
+		}
 		StartPlayback(gui);
 		break;
 	case GID_STOP:
