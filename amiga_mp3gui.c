@@ -161,7 +161,7 @@ extern volatile int gMiniAmp3EmbeddedPlayback;
 #include "picojpeg.h"
 
 #define HELIXAMP3_MAX_PATH 256
-#define HELIXAMP3_ARGC_MAX 22
+#define HELIXAMP3_ARGC_MAX 26
 #define HELIXAMP3_SETTINGS_VERSION 2
 #define HELIXAMP3_QUALITY_MIN 0
 #define HELIXAMP3_QUALITY_MAX 3
@@ -192,13 +192,14 @@ extern volatile int gMiniAmp3EmbeddedPlayback;
 #define ROW_TRACK       (GUI_TOP_Y + 5 * GUI_ROW_H)
 #define ROW_GENRE       (GUI_TOP_Y + 6 * GUI_ROW_H)
 #define ROW_CHECKS      (GUI_TOP_Y + 7 * GUI_ROW_H + 4)
-#define ROW_CYCLES      (GUI_TOP_Y + 8 * GUI_ROW_H + 4)
-#define ROW_BUFFER      (GUI_TOP_Y + 9 * GUI_ROW_H + 4)
-#define ROW_VOLUME      (GUI_TOP_Y + 10 * GUI_ROW_H + 4)
-#define ROW_PROGRESS    (GUI_TOP_Y + 11 * GUI_ROW_H + 8)
-#define ROW_BUTTONS     (GUI_TOP_Y + 12 * GUI_ROW_H + 12)
-#define ROW_STATUS      (GUI_TOP_Y + 13 * GUI_ROW_H + 12)
-#define ROW_FILEINFO    (GUI_TOP_Y + 14 * GUI_ROW_H + 12)
+#define ROW_CHANNELS    (GUI_TOP_Y + 8 * GUI_ROW_H + 4)
+#define ROW_CYCLES      (GUI_TOP_Y + 9 * GUI_ROW_H + 4)
+#define ROW_BUFFER      (GUI_TOP_Y + 10 * GUI_ROW_H + 4)
+#define ROW_VOLUME      (GUI_TOP_Y + 11 * GUI_ROW_H + 4)
+#define ROW_PROGRESS    (GUI_TOP_Y + 12 * GUI_ROW_H + 8)
+#define ROW_BUTTONS     (GUI_TOP_Y + 13 * GUI_ROW_H + 12)
+#define ROW_STATUS      (GUI_TOP_Y + 14 * GUI_ROW_H + 12)
+#define ROW_FILEINFO    (GUI_TOP_Y + 15 * GUI_ROW_H + 12)
 
 #define PROG_X          (GUI_MARGIN_L + 8)
 #define PROG_W          (GUI_WIN_W - PROG_X - 90 - GUI_MARGIN_R)
@@ -240,6 +241,8 @@ enum {
 	GID_FAST_MEM,
 	GID_MONO,
 	GID_FAKE_STEREO,
+	GID_FAKE_STEREO_WIDTH,
+	GID_FAKE_STEREO_DELAY,
 	GID_RATE,
 	GID_BUFFER,
 	GID_VOLUME,
@@ -324,6 +327,10 @@ typedef struct HelixAmp3Gui {
 	struct Gadget  *gadFastLowrate;
 	struct Gadget  *gadRate;
 	struct Gadget  *gadFastMem;
+	struct Gadget  *gadMono;
+	struct Gadget  *gadFakeStereo;
+	struct Gadget  *gadFakeStereoWidth;
+	struct Gadget  *gadFakeStereoDelay;
 	struct Gadget  *gadPlay;
 	struct Gadget  *gadStop;
 	struct VisualInfo *visualInfo;
@@ -355,6 +362,8 @@ typedef struct HelixAmp3Gui {
 	int   fastMem;
 	int   mono;
 	int   fakeStereo;
+	int   fakeStereoWidthIndex;
+	int   fakeStereoDelayIndex;
 	int   rateIndex;
 	int   bufferSeconds;
 	int   volumePercent;
@@ -490,6 +499,11 @@ static int DefaultSuperfastRateIndex(int mono)
 	return mono ? 0 : 1;
 }
 
+static int ChannelUsesMonoCost(const HelixAmp3Gui *gui)
+{
+	return gui->mono || gui->fakeStereo;
+}
+
 static const STRPTR kQualityLabels[] = {
 	(STRPTR)"Faster",
 	(STRPTR)"Fast",
@@ -497,6 +511,28 @@ static const STRPTR kQualityLabels[] = {
 	(STRPTR)"Best",
 	NULL
 };
+
+static const STRPTR kFakeStereoWidthLabels[] = {
+	(STRPTR)"Very wide",
+	(STRPTR)"Wide",
+	(STRPTR)"Normal",
+	(STRPTR)"Subtle",
+	(STRPTR)"Narrow",
+	NULL
+};
+
+static const int kFakeStereoShifts[] = { 1, 2, 3, 4, 5 };
+
+static const STRPTR kFakeStereoDelayLabels[] = {
+	(STRPTR)"48",
+	(STRPTR)"64",
+	(STRPTR)"96",
+	(STRPTR)"128",
+	(STRPTR)"192",
+	NULL
+};
+
+static const int kFakeStereoDelays[] = { 48, 64, 96, 128, 192 };
 
 static struct NewMenu myNewMenus[] = {
 	{ NM_TITLE, (STRPTR)"Project",          0, 0, 0, 0 },
@@ -635,6 +671,8 @@ static void SaveGuiSettings(HelixAmp3Gui *gui)
 	SaveEnvInt("FastMem", gui->fastMem);
 	SaveEnvInt("Mono", gui->mono);
 	SaveEnvInt("FakeStereo", gui->fakeStereo);
+	SaveEnvInt("FakeStereoWidthIndex", gui->fakeStereoWidthIndex);
+	SaveEnvInt("FakeStereoDelayIndex", gui->fakeStereoDelayIndex);
 	SaveEnvInt("RateIndex", gui->rateIndex);
 	SaveEnvInt("BufferSeconds", gui->bufferSeconds);
 	SaveEnvInt("Volume", gui->volumePercent);
@@ -2663,8 +2701,9 @@ static void ShowAbout(HelixAmp3Gui *gui)
 	EasyRequest(gui->win, &es, NULL, TAG_DONE);
 }
 
-static struct Gadget *MakeGadget(HelixAmp3Gui *gui, struct Gadget *prev,
+static struct Gadget *MakeGadgetWithTextAttr(HelixAmp3Gui *gui, struct Gadget *prev,
 	ULONG kind, UWORD id, WORD left, WORD top, WORD width, WORD height,
+	struct TextAttr *textAttr,
 	const char *label, ULONG tag1, ULONG value1, ULONG tag2, ULONG value2,
 	ULONG tag3, ULONG value3, ULONG tag4, ULONG value4)
 {
@@ -2677,10 +2716,8 @@ static struct Gadget *MakeGadget(HelixAmp3Gui *gui, struct Gadget *prev,
 	ng.ng_Height = height;
 	ng.ng_GadgetText = (UBYTE *)label;
 	ng.ng_GadgetID = id;
-	if (kind == TEXT_KIND)
-	ng.ng_TextAttr = &gTopaz8Attr;
-else
-	ng.ng_TextAttr = NULL;
+	ng.ng_TextAttr = textAttr ? textAttr :
+		(kind == TEXT_KIND ? &gTopaz8Attr : NULL);
 	if (kind == BUTTON_KIND)
 		ng.ng_Flags = PLACETEXT_IN;
 	else if (kind == CHECKBOX_KIND)
@@ -2704,6 +2741,30 @@ else
 		tag3, value3,
 		tag4, value4,
 		TAG_DONE);
+}
+
+static struct Gadget *MakeGadget(HelixAmp3Gui *gui, struct Gadget *prev,
+	ULONG kind, UWORD id, WORD left, WORD top, WORD width, WORD height,
+	const char *label, ULONG tag1, ULONG value1, ULONG tag2, ULONG value2,
+	ULONG tag3, ULONG value3, ULONG tag4, ULONG value4)
+{
+	return MakeGadgetWithTextAttr(gui, prev, kind, id, left, top, width, height,
+		NULL, label, tag1, value1, tag2, value2, tag3, value3, tag4, value4);
+}
+
+static void UpdateChannelGadgetState(HelixAmp3Gui *gui)
+{
+	if (!gui->win)
+		return;
+	if (gui->gadMono)
+		GT_SetGadgetAttrs(gui->gadMono, gui->win, NULL,
+			GA_Disabled, gui->fakeStereo, TAG_DONE);
+	if (gui->gadFakeStereoWidth)
+		GT_SetGadgetAttrs(gui->gadFakeStereoWidth, gui->win, NULL,
+			GA_Disabled, !gui->fakeStereo, TAG_DONE);
+	if (gui->gadFakeStereoDelay)
+		GT_SetGadgetAttrs(gui->gadFakeStereoDelay, gui->win, NULL,
+			GA_Disabled, !gui->fakeStereo, TAG_DONE);
 }
 
 static int GuiCreateGadgets(HelixAmp3Gui *gui)
@@ -2839,8 +2900,8 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 	if (!gad)
 		return -1;
 
-	gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_MONO,
-		GUI_MARGIN_L + 390, ROW_CHECKS, 20, 12, "Mono",
+	gui->gadMono = gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_MONO,
+		GUI_MARGIN_L + 14, ROW_CHANNELS, 20, 12, "Mono",
 		GTCB_Checked, gui->mono,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
@@ -2848,9 +2909,9 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 	if (!gad)
 		return -1;
 
-	/* Fake-stereo is a mono-path width effect; it only applies when Mono is on. */
-	gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_FAKE_STEREO,
-		GUI_MARGIN_L + 462, ROW_CHECKS, 20, 12, "Fake-st",
+	gui->gadFakeStereo = gad = MakeGadgetWithTextAttr(gui, gad,
+		CHECKBOX_KIND, GID_FAKE_STEREO,
+		GUI_MARGIN_L + 92, ROW_CHANNELS, 20, 12, &gTopaz8Attr, "Fake-st",
 		GTCB_Checked, gui->fakeStereo,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
@@ -2858,10 +2919,30 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 	if (!gad)
 		return -1;
 
+	gui->gadFakeStereoWidth = gad = MakeGadgetWithTextAttr(gui, gad,
+		CYCLE_KIND, GID_FAKE_STEREO_WIDTH,
+		GUI_MARGIN_L + 232, ROW_CHANNELS - 2, 92, 16, &gTopaz8Attr, "Width:",
+		GTCY_Labels, (ULONG)kFakeStereoWidthLabels,
+		GTCY_Active, gui->fakeStereoWidthIndex,
+		GA_Disabled, !gui->fakeStereo,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gui->gadFakeStereoDelay = gad = MakeGadgetWithTextAttr(gui, gad,
+		CYCLE_KIND, GID_FAKE_STEREO_DELAY,
+		GUI_MARGIN_L + 414, ROW_CHANNELS - 2, 70, 16, &gTopaz8Attr, "Delay:",
+		GTCY_Labels, (ULONG)kFakeStereoDelayLabels,
+		GTCY_Active, gui->fakeStereoDelayIndex,
+		GA_Disabled, !gui->fakeStereo,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
 	gui->gadRate = gad = MakeGadget(gui, gad, CYCLE_KIND, GID_RATE,
 		GUI_MARGIN_L + 48, ROW_CYCLES, 80, 16, "Rate:",
-		GTCY_Labels, (ULONG)(gui->superfastLowrate ? SuperfastRateLabels(gui->mono) : kRateLabels),
-		GTCY_Active, gui->superfastLowrate ? SuperfastActiveFromRateIndex(gui->rateIndex, gui->mono) : gui->rateIndex,
+		GTCY_Labels, (ULONG)(gui->superfastLowrate ? SuperfastRateLabels(ChannelUsesMonoCost(gui)) : kRateLabels),
+		GTCY_Active, gui->superfastLowrate ? SuperfastActiveFromRateIndex(gui->rateIndex, ChannelUsesMonoCost(gui)) : gui->rateIndex,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0);
 	if (!gad)
@@ -2991,11 +3072,13 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	gui->fastMem = LoadEnvInt("FastMem", 1, 0, 1);
 	gui->mono = LoadEnvInt("Mono", 1, 0, 1);
 	gui->fakeStereo = LoadEnvInt("FakeStereo", 0, 0, 1);
+	gui->fakeStereoWidthIndex = LoadEnvInt("FakeStereoWidthIndex", 1, 0, 4);
+	gui->fakeStereoDelayIndex = LoadEnvInt("FakeStereoDelayIndex", 2, 0, 4);
 	gui->rateIndex = LoadEnvInt("RateIndex", 2, 0, 4);
 	if (gui->superfastLowrate) {
 		gui->fastLowrate = 1;
-		if (!RateIndexSupportsSuperfast(gui->rateIndex, gui->mono))
-			gui->rateIndex = DefaultSuperfastRateIndex(gui->mono);
+		if (!RateIndexSupportsSuperfast(gui->rateIndex, ChannelUsesMonoCost(gui)))
+			gui->rateIndex = DefaultSuperfastRateIndex(ChannelUsesMonoCost(gui));
 	}
 	gui->bufferSeconds = LoadEnvInt("BufferSeconds", 10, 1, 30);
 	gui->volumePercent = LoadEnvInt("Volume", 100, 0, 100);
@@ -3109,6 +3192,7 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	}
 	AddGList(gui->win, gui->gadgets, (UWORD)-1, -1, NULL);
 	RefreshGList(gui->gadgets, gui->win, NULL, -1);
+	UpdateChannelGadgetState(gui);
 	if (gui->decodeThenPlay && gui->gadBuffer) {
 		GT_SetGadgetAttrs(gui->gadBuffer, gui->win, NULL,
 			GA_Disabled, TRUE,
@@ -3391,12 +3475,19 @@ static void BuildPlaybackArgs(HelixAmp3Gui *gui, HelixAmp3Args *args)
 	} else if (gui->fastLowrate && strcmp(kRates[gui->rateIndex], "28600")) {
 		AddArg(args, "--fast-lowrate");
 	}
-	if (gui->mono && gui->fakeStereo)
-		AddArg(args, "--fake-stereo");	/* mono decode + pseudo-stereo width */
-	else if (gui->mono)
+	if (gui->fakeStereo) {
+		AddArg(args, "--fake-stereo");
+		AddArg(args, "--fake-stereo-delay");
+		sprintf(num, "%d", kFakeStereoDelays[gui->fakeStereoDelayIndex]);
+		AddArg(args, num);
+		AddArg(args, "--fake-stereo-shift");
+		sprintf(num, "%d", kFakeStereoShifts[gui->fakeStereoWidthIndex]);
+		AddArg(args, num);
+	} else if (gui->mono) {
 		AddArg(args, "--mono");
-	else
+	} else {
 		AddArg(args, "--stereo");
+	}
 	AddArg(args, "--rate");
 	AddArg(args, kRates[gui->rateIndex]);
 	AddArg(args, "--buffer-seconds");
@@ -3942,8 +4033,8 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 		gui->superfastLowrate = !gui->superfastLowrate;
 		if (gui->superfastLowrate) {
 			gui->fastLowrate = 1;
-			if (!RateIndexSupportsSuperfast(gui->rateIndex, gui->mono))
-				gui->rateIndex = DefaultSuperfastRateIndex(gui->mono);
+			if (!RateIndexSupportsSuperfast(gui->rateIndex, ChannelUsesMonoCost(gui)))
+				gui->rateIndex = DefaultSuperfastRateIndex(ChannelUsesMonoCost(gui));
 		}
 		GT_SetGadgetAttrs(gad, gui->win, NULL,
 			GTCB_Checked, gui->superfastLowrate, TAG_DONE);
@@ -3952,9 +4043,9 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 				GTCB_Checked, gui->fastLowrate, TAG_DONE);
 		if (gui->gadRate)
 			GT_SetGadgetAttrs(gui->gadRate, gui->win, NULL,
-				GTCY_Labels, (ULONG)(gui->superfastLowrate ? SuperfastRateLabels(gui->mono) : kRateLabels),
+				GTCY_Labels, (ULONG)(gui->superfastLowrate ? SuperfastRateLabels(ChannelUsesMonoCost(gui)) : kRateLabels),
 				GTCY_Active, gui->superfastLowrate ?
-					SuperfastActiveFromRateIndex(gui->rateIndex, gui->mono) : gui->rateIndex,
+					SuperfastActiveFromRateIndex(gui->rateIndex, ChannelUsesMonoCost(gui)) : gui->rateIndex,
 				TAG_DONE);
 		SetStatus(gui, gui->superfastLowrate ?
 			"Superfast enabled for 8287/8820/11025/22050 Hz (8287 mono-only)." :
@@ -3975,6 +4066,8 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 		SaveGuiSettings(gui);
 		break;
 	case GID_MONO:
+		if (gui->fakeStereo)
+			break;
 		if (gui->playbackActive || gui->playbackDonePending) {
 			GT_SetGadgetAttrs(gad, gui->win, NULL,
 				GTCB_Checked, gui->mono, TAG_DONE);
@@ -3982,14 +4075,14 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 			break;
 		}
 		gui->mono = !gui->mono;
-		if (gui->superfastLowrate && !RateIndexSupportsSuperfast(gui->rateIndex, gui->mono))
-			gui->rateIndex = DefaultSuperfastRateIndex(gui->mono);
+		if (gui->superfastLowrate && !RateIndexSupportsSuperfast(gui->rateIndex, ChannelUsesMonoCost(gui)))
+			gui->rateIndex = DefaultSuperfastRateIndex(ChannelUsesMonoCost(gui));
 		GT_SetGadgetAttrs(gad, gui->win, NULL, GTCB_Checked, gui->mono, TAG_DONE);
 		if (gui->gadRate)
 			GT_SetGadgetAttrs(gui->gadRate, gui->win, NULL,
-				GTCY_Labels, (ULONG)(gui->superfastLowrate ? SuperfastRateLabels(gui->mono) : kRateLabels),
+				GTCY_Labels, (ULONG)(gui->superfastLowrate ? SuperfastRateLabels(ChannelUsesMonoCost(gui)) : kRateLabels),
 				GTCY_Active, gui->superfastLowrate ?
-					SuperfastActiveFromRateIndex(gui->rateIndex, gui->mono) : gui->rateIndex,
+					SuperfastActiveFromRateIndex(gui->rateIndex, ChannelUsesMonoCost(gui)) : gui->rateIndex,
 				TAG_DONE);
 		SetStatus(gui, gui->mono ? "Mono output enabled." : "Stereo output enabled.");
 		SaveGuiSettings(gui);
@@ -4002,23 +4095,49 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 			break;
 		}
 		gui->fakeStereo = !gui->fakeStereo;
+		if (gui->superfastLowrate &&
+			!RateIndexSupportsSuperfast(gui->rateIndex, ChannelUsesMonoCost(gui)))
+			gui->rateIndex = DefaultSuperfastRateIndex(ChannelUsesMonoCost(gui));
 		GT_SetGadgetAttrs(gad, gui->win, NULL, GTCB_Checked, gui->fakeStereo, TAG_DONE);
+		UpdateChannelGadgetState(gui);
+		if (gui->gadRate)
+			GT_SetGadgetAttrs(gui->gadRate, gui->win, NULL,
+				GTCY_Labels, (ULONG)(gui->superfastLowrate ?
+					SuperfastRateLabels(ChannelUsesMonoCost(gui)) : kRateLabels),
+				GTCY_Active, gui->superfastLowrate ?
+					SuperfastActiveFromRateIndex(gui->rateIndex,
+						ChannelUsesMonoCost(gui)) : gui->rateIndex,
+				TAG_DONE);
 		SetStatus(gui, gui->fakeStereo ?
-			"Fake-stereo width enabled (applies in Mono mode)." :
-			"Fake-stereo width disabled.");
+			"Fake-stereo enabled; Mono is temporarily ignored." :
+			"Fake-stereo disabled; Mono selection restored.");
+		SaveGuiSettings(gui);
+		break;
+	case GID_FAKE_STEREO_WIDTH:
+		gui->fakeStereoWidthIndex = code;
+		if (gui->fakeStereoWidthIndex < 0 || gui->fakeStereoWidthIndex > 4)
+			gui->fakeStereoWidthIndex = 1;
+		SetStatus(gui, "Fake-stereo width updated.");
+		SaveGuiSettings(gui);
+		break;
+	case GID_FAKE_STEREO_DELAY:
+		gui->fakeStereoDelayIndex = code;
+		if (gui->fakeStereoDelayIndex < 0 || gui->fakeStereoDelayIndex > 4)
+			gui->fakeStereoDelayIndex = 2;
+		SetStatus(gui, "Fake-stereo delay updated.");
 		SaveGuiSettings(gui);
 		break;
 	case GID_RATE:
 		if (gui->playbackActive || gui->playbackDonePending) {
 			GT_SetGadgetAttrs(gad, gui->win, NULL,
 				GTCY_Active, gui->superfastLowrate ?
-					SuperfastActiveFromRateIndex(gui->rateIndex, gui->mono) : gui->rateIndex,
+					SuperfastActiveFromRateIndex(gui->rateIndex, ChannelUsesMonoCost(gui)) : gui->rateIndex,
 				TAG_DONE);
 			SetStatus(gui, "Stop playback before changing output rate.");
 			break;
 		}
 		if (gui->superfastLowrate)
-			gui->rateIndex = RateIndexFromSuperfastActive(code, gui->mono);
+			gui->rateIndex = RateIndexFromSuperfastActive(code, ChannelUsesMonoCost(gui));
 		else {
 			gui->rateIndex = code;
 			if (gui->rateIndex < 0 || gui->rateIndex > 4)
