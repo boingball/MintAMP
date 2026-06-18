@@ -1,0 +1,27 @@
+name: Apply transport next button
+on:
+  push:
+    branches:
+      - codex/miniamp3-transport-next
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: python3 tools/apply_transport_next_button.py
+      - run: git diff --check
+      - run: |
+          rm -f tools/apply_transport_next_button.py
+          rm -f .github/workflows/apply-transport-next-button.yml
+          rmdir tools 2>/dev/null || true
+          rmdir .github/workflows 2>/dev/null || true
+          rmdir .github 2>/dev/null || true
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add -A
+          git commit -m 'Add MiniAMP3 next-track transport control'
+          git push origin HEAD:codex/miniamp3-transport-next
