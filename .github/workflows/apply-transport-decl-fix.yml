@@ -1,0 +1,27 @@
+name: Apply transport declaration fix
+on:
+  push:
+    branches:
+      - codex/fix-rapid-play-artwork-race-clean
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: python3 tools/apply_transport_decl_fix.py
+      - run: git diff --check
+      - run: |
+          rm -f tools/apply_transport_decl_fix.py
+          rm -f .github/workflows/apply-transport-decl-fix.yml
+          rmdir tools 2>/dev/null || true
+          rmdir .github/workflows 2>/dev/null || true
+          rmdir .github 2>/dev/null || true
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add -A
+          git commit -m 'Declare transport icon drawer before use'
+          git push origin HEAD:codex/fix-rapid-play-artwork-race-clean
