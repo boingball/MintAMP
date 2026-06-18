@@ -35,6 +35,13 @@
 
 volatile int gMiniAmp3EmbeddedPlayback;
 
+#if defined(AMIGA_M68K)
+/* Shared GUI/decoder stop latch. */
+static volatile int gPlaybackInterrupted;
+#else
+static volatile sig_atomic_t gPlaybackInterrupted;
+#endif
+
 static int MiniAmp3ConsoleSuppressed(void)
 {
 	return gMiniAmp3EmbeddedPlayback != 0;
@@ -1534,11 +1541,22 @@ static void InputSourceSeek(InputSource *input, unsigned long pos)
 	}
 }
 
+#define FAST_INPUT_PRELOAD_CHUNK 32768UL
+
+static int FastInputPreloadStopRequested(void)
+{
+#ifdef HAVE_AMIGA_AUDIO_DEVICE
+	if (SetSignal(0, 0) & SIGBREAKF_CTRL_C)
+		gPlaybackInterrupted = 1;
+#endif
+	return gPlaybackInterrupted != 0;
+}
+
 static int InputSourcePreloadFastMemory(InputSource *input)
 {
 	long fileSize;
 	unsigned char *memory;
-	size_t nRead;
+	size_t copied;
 #ifdef HAVE_AMIGA_AUDIO_DEVICE
 	if (input->useAmigaDos) {
 		LONG oldPos;
@@ -1559,40 +1577,53 @@ static int InputSourcePreloadFastMemory(InputSource *input)
 		fileSize = endPos;
 		if (Seek(input->amigaFile, 0, OFFSET_BEGINNING) < 0)
 			return -1;
-		memory = (unsigned char *)AllocFastInputMemory((unsigned long)fileSize);
-		if (!memory)
+	} else
+#endif
+	{
+		if (fseek(input->file, 0, SEEK_END) != 0)
 			return -1;
-		nRead = InputSourceRead(input, memory, (size_t)fileSize);
-		if (nRead != (size_t)fileSize) {
-			FreeFastInputMemory(memory, (unsigned long)fileSize);
-			Seek(input->amigaFile, 0, OFFSET_BEGINNING);
+		fileSize = ftell(input->file);
+		if (fileSize <= 0 || (unsigned long)fileSize > (unsigned long)(size_t)-1) {
+			fseek(input->file, 0, SEEK_SET);
 			return -1;
 		}
-		input->memory = memory;
-		input->memorySize = (unsigned long)fileSize;
-		input->memoryPos = 0;
-		printf("fast-mem input preload: copying %lu bytes to Fast RAM\n", input->memorySize);
-		return 0;
+		if (fseek(input->file, 0, SEEK_SET) != 0)
+			return -1;
 	}
-#endif
-	if (fseek(input->file, 0, SEEK_END) != 0)
-		return -1;
-	fileSize = ftell(input->file);
-	if (fileSize <= 0 || (unsigned long)fileSize > (unsigned long)(size_t)-1) {
-		fseek(input->file, 0, SEEK_SET);
-		return -1;
-	}
-	if (fseek(input->file, 0, SEEK_SET) != 0)
-		return -1;
+
+	if (FastInputPreloadStopRequested())
+		return 1;
 	memory = (unsigned char *)AllocFastInputMemory((unsigned long)fileSize);
 	if (!memory)
 		return -1;
-	nRead = fread(memory, 1, (size_t)fileSize, input->file);
-	if (nRead != (size_t)fileSize) {
-		FreeFastInputMemory(memory, (unsigned long)fileSize);
-		fseek(input->file, 0, SEEK_SET);
-		return -1;
+
+	copied = 0;
+	while (copied < (size_t)fileSize) {
+		size_t chunk;
+		size_t nRead;
+
+		if (FastInputPreloadStopRequested()) {
+			FreeFastInputMemory(memory, (unsigned long)fileSize);
+			InputSourceSeek(input, 0);
+			return 1;
+		}
+		chunk = (size_t)fileSize - copied;
+		if (chunk > (size_t)FAST_INPUT_PRELOAD_CHUNK)
+			chunk = (size_t)FAST_INPUT_PRELOAD_CHUNK;
+		nRead = InputSourceRead(input, memory + copied, chunk);
+		if (nRead != chunk) {
+			FreeFastInputMemory(memory, (unsigned long)fileSize);
+			InputSourceSeek(input, 0);
+			return -1;
+		}
+		copied += nRead;
 	}
+	if (FastInputPreloadStopRequested()) {
+		FreeFastInputMemory(memory, (unsigned long)fileSize);
+		InputSourceSeek(input, 0);
+		return 1;
+	}
+
 	input->memory = memory;
 	input->memorySize = (unsigned long)fileSize;
 	input->memoryPos = 0;
@@ -4610,14 +4641,6 @@ static int DecodeStreamFillPlanarS8(DecodeStream *stream, const DecodeOptions *o
 	return produced;
 }
 
-#ifdef AMIGA_M68K
-/* Ctrl-C signal handling is unavailable in the libnix build for now. */
-static volatile int gPlaybackInterrupted;
-#else
-static volatile sig_atomic_t gPlaybackInterrupted;
-
-#endif
-
 /* Shared status block written by the playback subprocess and read by the GUI
  * timer tick.  Both run in the same AmigaOS process address space so a plain
  * volatile struct is sufficient -- no Exec locking needed for this
@@ -6943,15 +6966,20 @@ int main(int argc, char **argv)
 		AmigaFreeNormalizedArgs(&normalized);
 		return 1;
 	}
-	if (opt.fastMem)
+	if (opt.fastMem) {
+		int preloadResult;
+
 		GuiPublishStartupStage(GUISTART_INPUT_PRELOAD_FASTMEM);
-	if (opt.fastMem && InputSourcePreloadFastMemory(&input) != 0) {
-		fprintf(stderr, "cannot preload input into Fast RAM: %s\n", opt.inName);
-		InputSourceClose(&input);
-		CloseInputFile(&infile, opt.debugCleanup);
-		free(resolvedOutName);
-		AmigaFreeNormalizedArgs(&normalized);
-		return 1;
+		preloadResult = InputSourcePreloadFastMemory(&input);
+		if (preloadResult != 0) {
+			if (preloadResult < 0)
+				fprintf(stderr, "cannot preload input into Fast RAM: %s\n", opt.inName);
+			InputSourceClose(&input);
+			CloseInputFile(&infile, opt.debugCleanup);
+			free(resolvedOutName);
+			AmigaFreeNormalizedArgs(&normalized);
+			return 1;
+		}
 	}
 	if (opt.play && AmigaPlaybackStopRequested(&opt, "after input preload")) {
 		InputSourceClose(&input);
