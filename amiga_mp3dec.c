@@ -311,6 +311,7 @@ typedef struct DecodeOptions {
 	int fakeStereo;
 	int fakeStereoDelay;
 	int fakeStereoShift;
+	int lowPass;
 	int decodeThenPlay;
 	int playLifecycleTest;
 	int audioOpenSilentTest;
@@ -655,6 +656,7 @@ static void PrintUsage(const char *prog)
 		FAKE_STEREO_MAX_DELAY, FAKE_STEREO_DEFAULT_DELAY);
 	printf("  --fake-stereo-shift K  fake-stereo cross-bleed >>K (0-8, default %d; higher=wider, 0=mono)\n",
 		FAKE_STEREO_DEFAULT_SHIFT);
+	printf("  --low-pass   soften Paula output with a light one-pole low-pass filter\n");
 	printf("  --play-fast-path accepted alias; --play already uses reduced-overhead playback\n");
 	printf("  --decode-then-play decode whole MP3 to RAM, then play (debug for --play)\n");
 	printf("  --selftest-play-cleanup open/submit/cleanup audio.device five times\n");
@@ -843,6 +845,8 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			}
 			i++;
 			opt->fakeStereoShift = atoi(argv[i]);
+		} else if (!strcmp(argv[i], "--low-pass")) {
+			opt->lowPass = 1;
 		} else if (!strcmp(argv[i], "--play-fast-path")) {
 			opt->play = 1;
 			opt->outFormat = OUT_S8;
@@ -1806,6 +1810,15 @@ static void PatchU32BE(FILE *fp, long pos, unsigned long v)
 static signed char Sample16ToS8(short s)
 {
 	return (signed char)(s >> 8);
+}
+
+static short ClipToS16(int v)
+{
+	if (v > 32767)
+		return 32767;
+	if (v < -32768)
+		return -32768;
+	return (short)v;
 }
 
 static int MixFrame(const short *in, short *out, int inSamps, int channels, int mono)
@@ -4152,10 +4165,12 @@ static void FakeStereoProcess(FakeStereo *fs, int mono, short *outL, short *outR
 	 */
 	l = mono + (d >> fs->shift);
 	r = d + (mono >> fs->shift);
-	if (l > 32767) l = 32767; else if (l < -32768) l = -32768;
-	if (r > 32767) r = 32767; else if (r < -32768) r = -32768;
-	*outL = (short)l;
-	*outR = (short)r;
+	/* Pseudo-stereo sounds quieter than the real mono path because centre energy
+	 * is spread across channels.  Give it a modest fixed-point makeup gain. */
+	l = (l * 3) / 2;
+	r = (r * 3) / 2;
+	*outL = ClipToS16(l);
+	*outR = ClipToS16(r);
 	fs->hist[fs->pos] = (short)mono;
 	fs->pos = (fs->pos + 1) & FAKE_STEREO_DELAY_MASK;
 }
@@ -4247,6 +4262,9 @@ typedef struct DecodeStream {
 	TimingStats *timing;
 	RateState rateState;
 	FakeStereo fakeStereo;
+	int lowPassReady;
+	int lowPassL;
+	int lowPassR;
 } DecodeStream;
 
 static void DecodeStreamInit(DecodeStream *stream, InputSource *input,
@@ -4258,6 +4276,21 @@ static void DecodeStreamInit(DecodeStream *stream, InputSource *input,
 	stream->readPtr = stream->readBuf;
 	stream->stats = stats;
 	stream->timing = timing;
+}
+
+
+static void DecodeStreamLowPassPair(DecodeStream *stream, short *left, short *right)
+{
+	if (!stream->lowPassReady) {
+		stream->lowPassL = *left;
+		stream->lowPassR = *right;
+		stream->lowPassReady = 1;
+	} else {
+		stream->lowPassL += (((int)*left) - stream->lowPassL) >> 2;
+		stream->lowPassR += (((int)*right) - stream->lowPassR) >> 2;
+	}
+	*left = ClipToS16(stream->lowPassL);
+	*right = ClipToS16(stream->lowPassR);
 }
 
 static int DecodeStreamCopySpill(DecodeStream *stream, signed char *dest,
@@ -4606,18 +4639,20 @@ static int DecodeStreamFillPlanarS8(DecodeStream *stream, const DecodeOptions *o
 		if (direct > maxFrames - produced)
 			direct = maxFrames - produced;
 		for (i = 0; i < direct; i++) {
+			short wl, wr;
 			if (channels == 2) {
-				left[produced + i] = Sample16ToS8(pcm[2 * i]);
-				right[produced + i] = Sample16ToS8(pcm[2 * i + 1]);
+				wl = pcm[2 * i];
+				wr = pcm[2 * i + 1];
 			} else if (stream->fakeStereo.enabled) {
-				short wl, wr;
 				FakeStereoProcess(&stream->fakeStereo, pcm[i], &wl, &wr);
-				left[produced + i] = Sample16ToS8(wl);
-				right[produced + i] = Sample16ToS8(wr);
 			} else {
-				left[produced + i] = Sample16ToS8(pcm[i]);
-				right[produced + i] = left[produced + i];
+				wl = pcm[i];
+				wr = pcm[i];
 			}
+			if (opt->lowPass)
+				DecodeStreamLowPassPair(stream, &wl, &wr);
+			left[produced + i] = Sample16ToS8(wl);
+			right[produced + i] = Sample16ToS8(wr);
 		}
 		stream->planarSpillPos = 0;
 		stream->planarSpillCount = frames - direct;
