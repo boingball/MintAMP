@@ -5063,8 +5063,8 @@ static void AmigaAudioClose(AmigaAudioPlayer *player,
 	gGuiPlaybackStatus.cleanupStage = GUIPLAY_CLEANUP_ABORT_REAP;
 	/* First request cancellation for the entire ring, then reap it in a second
 	 * pass.  Waiting one slot at a time lets audio.device advance the next queued
-	 * write between AbortIO calls, which is exactly the Stop hang seen with the
-	 * old three-request mono ring on real hardware. */
+	 * write between AbortIO calls and can prolong or stall Stop while the queue is
+	 * being unwound. */
 	for (i = 0; i < AMIGA_AUDIO_PLAYBACK_SLOTS; i++) {
 		for (ch = 0; ch < 2; ch++) {
 			if (player->req[i][ch] && player->sent[i][ch]) {
