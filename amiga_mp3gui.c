@@ -1867,6 +1867,8 @@ static void DrawFilterButton(HelixAmp3Gui *gui)
 
 static void DrawArtPanel(HelixAmp3Gui *gui);
 static void DrawTransportIcons(HelixAmp3Gui *gui);
+static void DrawFilterButton(HelixAmp3Gui *gui);
+static void ApplyHardwareAudioFilter(HelixAmp3Gui *gui);
 static void HandleDoneSignal(HelixAmp3Gui *gui);
 static void SaveArtworkCache(HelixAmp3Gui *gui);
 
@@ -3359,6 +3361,7 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	AddGList(gui->win, gui->gadgets, (UWORD)-1, -1, NULL);
 	RefreshGList(gui->gadgets, gui->win, NULL, -1);
 	UpdateChannelGadgetState(gui);
+	ApplyHardwareAudioFilter(gui);
 	if (gui->decodeThenPlay && gui->gadBuffer) {
 		GT_SetGadgetAttrs(gui->gadBuffer, gui->win, NULL,
 			GA_Disabled, TRUE,
