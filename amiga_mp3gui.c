@@ -140,6 +140,7 @@ extern volatile int gMiniAmp3EmbeddedPlayback;
 #include <intuition/intuition.h>
 #include <intuition/intuitionbase.h>
 #include <intuition/screens.h>
+#include <intuition/gadgetclass.h>
 #include <libraries/asl.h>
 #include <libraries/gadtools.h>
 #include <graphics/gfxbase.h>
@@ -169,11 +170,11 @@ extern volatile int gMiniAmp3EmbeddedPlayback;
 #define GUI_ENV_PREFIX  "ENVARC:MiniAMP3"
 
 #define GUI_WIN_W       560    /* inner width; wide enough for all controls */
-#define GUI_WIN_H       310    /* compact inner height */
+#define GUI_WIN_H       322    /* compact inner height with safe title-bar clearance */
 
 #define GUI_MARGIN_L     8     /* left margin */
 #define GUI_MARGIN_R     8     /* right margin */
-#define GUI_TOP_Y        8     /* compact top margin */
+#define GUI_TOP_Y       20     /* leave breathing room below the title bar */
 #define GUI_ROW_H       18     /* row pitch - enough for Topaz 8 + padding */
 
 #define ART_W           64
@@ -191,7 +192,11 @@ extern volatile int gMiniAmp3EmbeddedPlayback;
 #define FILE_W          (BROWSE_X - META_X - 4)
 #define SLIDER_X        (GUI_MARGIN_L + 60)
 #define BUFFER_SLIDER_W 300
-#define VOLUME_SLIDER_W (GUI_WIN_W - SLIDER_X - GUI_MARGIN_R)
+#define VOLUME_SLIDER_W BUFFER_SLIDER_W
+#define TRANSPORT_W     96
+#define TRANSPORT_H     22
+#define PLAY_X          (GUI_MARGIN_L + 126)
+#define STOP_X          (GUI_MARGIN_L + 330)
 #define FILEINFO_X      (GUI_MARGIN_L + 84)
 #define FILEINFO_W      (GUI_WIN_W - FILEINFO_X - GUI_MARGIN_R)
 
@@ -324,6 +329,7 @@ typedef struct HelixAmp3Gui {
 	struct Gadget  *gadgets;
 	struct Gadget  *gadContext;
 	struct Gadget  *gadFile;
+	struct Gadget  *gadBrowse;
 	struct Gadget  *gadTitle;
 	struct Gadget  *gadArtist;
 	struct Gadget  *gadAlbum;
@@ -2404,6 +2410,9 @@ static void FinalizePlayback(HelixAmp3Gui *gui)
 	gui->playbackDonePending = 0;
 	gui->playbackStoppedByUser = 0;
 	gui->playbackActive = 0;
+	if (gui->win && gui->gadBrowse)
+		GT_SetGadgetAttrs(gui->gadBrowse, gui->win, NULL,
+			GA_Disabled, FALSE, TAG_DONE);
 	gGuiPlayer.process = NULL;
 	gDonePort = NULL;
 	if (gui->totalSecs > 0 && !stoppedByUser)
@@ -2734,6 +2743,35 @@ static struct Gadget *MakeGadget(HelixAmp3Gui *gui, struct Gadget *prev,
 		NULL, label, tag1, value1, tag2, value2, tag3, value3, tag4, value4);
 }
 
+static struct Gadget *MakeSliderGadget(HelixAmp3Gui *gui, struct Gadget *prev,
+	UWORD id, WORD left, WORD top, WORD width, const char *label,
+	LONG minValue, LONG maxValue, LONG level, const char *format,
+	LONG maxLevelLen, LONG visible)
+{
+	struct NewGadget ng;
+
+	memset(&ng, 0, sizeof(ng));
+	ng.ng_LeftEdge = left;
+	ng.ng_TopEdge = top;
+	ng.ng_Width = width;
+	ng.ng_Height = 16;
+	ng.ng_GadgetText = (UBYTE *)label;
+	ng.ng_GadgetID = id;
+	ng.ng_Flags = PLACETEXT_LEFT;
+	ng.ng_VisualInfo = gui->visualInfo;
+	return CreateGadget(SLIDER_KIND, prev, &ng,
+		GA_Immediate, TRUE,
+		GA_RelVerify, TRUE,
+		GTSL_Min, minValue,
+		GTSL_Max, maxValue,
+		GTSL_Level, level,
+		GTSL_LevelFormat, (ULONG)format,
+		GTSL_LevelPlace, PLACETEXT_IN,
+		GTSL_MaxLevelLen, maxLevelLen,
+		PGA_Visible, visible,
+		TAG_DONE);
+}
+
 static void UpdateChannelGadgetState(HelixAmp3Gui *gui)
 {
 	if (!gui->win)
@@ -2767,7 +2805,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 	if (!gad)
 		return -1;
 
-	gad = MakeGadget(gui, gad, BUTTON_KIND, GID_BROWSE,
+	gui->gadBrowse = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_BROWSE,
 		BROWSE_X, ROW_FILE - 1, BROWSE_W, 16, "Browse",
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
@@ -2939,28 +2977,20 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 	if (!gad)
 		return -1;
 
-	gui->gadBuffer = gad = MakeGadget(gui, gad, SLIDER_KIND, GID_BUFFER,
-		SLIDER_X, ROW_BUFFER,
-		BUFFER_SLIDER_W, 16, "Buffer:",
-		GTSL_Min, 1,
-		GTSL_Max, 10,
-		GTSL_Level, gui->bufferSeconds,
-		GTSL_LevelFormat, (ULONG)"%ld sec");
+	gui->gadBuffer = gad = MakeSliderGadget(gui, gad, GID_BUFFER,
+		SLIDER_X, ROW_BUFFER, BUFFER_SLIDER_W, "Buffer:",
+		1, 10, gui->bufferSeconds, "%ld sec", 6, 2);
 	if (!gad)
 		return -1;
 
-	gui->gadVolume = gad = MakeGadget(gui, gad, SLIDER_KIND, GID_VOLUME,
-		SLIDER_X, ROW_VOLUME,
-		VOLUME_SLIDER_W, 16, "Volume",
-		GTSL_Min, 0,
-		GTSL_Max, 100,
-		GTSL_Level, gui->volumePercent,
-		GTSL_LevelFormat, (ULONG)"%ld%%");
+	gui->gadVolume = gad = MakeSliderGadget(gui, gad, GID_VOLUME,
+		SLIDER_X, ROW_VOLUME, VOLUME_SLIDER_W, "Volume:",
+		0, 100, gui->volumePercent, "%ld%%", 4, 12);
 	if (!gad)
 		return -1;
 
 	gui->gadPlay = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_PLAY,
-		GUI_MARGIN_L + 120, ROW_BUTTONS, 80, 18, "Play",
+		PLAY_X, ROW_BUTTONS, TRANSPORT_W, TRANSPORT_H, "> PLAY",
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
@@ -2969,7 +2999,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadStop = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_STOP,
-		GUI_MARGIN_L + 300, ROW_BUTTONS, 80, 18, "Stop",
+		STOP_X, ROW_BUTTONS, TRANSPORT_W, TRANSPORT_H, "[] STOP",
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
@@ -3390,6 +3420,13 @@ static void ChooseMp3(HelixAmp3Gui *gui)
 	struct FileRequester *req;
 	char path[HELIXAMP3_MAX_PATH];
 
+	/* Replacing tags/artwork while the playback child and artwork timer still
+	 * reference the current selection can corrupt Intuition/ASL state and raise
+	 * a recoverable alert.  File changes are intentionally a stopped-state action. */
+	if (gui->playbackActive || gui->playbackDonePending) {
+		SetStatus(gui, "Stop playback before choosing another file.");
+		return;
+	}
 	if (!gui->lastDrawer[0] && gui->inputName[0])
 		CopyDrawerFromPath(gui->lastDrawer, sizeof(gui->lastDrawer),
 			gui->inputName);
@@ -3824,6 +3861,9 @@ static void StartPlayback(HelixAmp3Gui *gui)
 	gui->playbackDonePending = 0;
 	gui->playbackStoppedByUser = 0;
 	gui->playbackActive = 1;
+	if (gui->gadBrowse)
+		GT_SetGadgetAttrs(gui->gadBrowse, gui->win, NULL,
+			GA_Disabled, TRUE, TAG_DONE);
 	SetStatus(gui, gui->decodeThenPlay ?
 		"Buffering..." :
 		"Starting playback...");
