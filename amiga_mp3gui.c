@@ -169,11 +169,11 @@ extern volatile int gMiniAmp3EmbeddedPlayback;
 #define GUI_ENV_PREFIX  "ENVARC:MiniAMP3"
 
 #define GUI_WIN_W       560    /* inner width; wide enough for all controls */
-#define GUI_WIN_H       338    /* inner height */
+#define GUI_WIN_H       310    /* compact inner height */
 
 #define GUI_MARGIN_L     8     /* left margin */
 #define GUI_MARGIN_R     8     /* right margin */
-#define GUI_TOP_Y       36     /* y of first gadget row */
+#define GUI_TOP_Y        8     /* compact top margin */
 #define GUI_ROW_H       18     /* row pitch - enough for Topaz 8 + padding */
 
 #define ART_W           64
@@ -183,6 +183,17 @@ extern volatile int gMiniAmp3EmbeddedPlayback;
 #define ART_Y           GUI_TOP_Y
 
 #define TEXT_COL_W      (ART_X - GUI_MARGIN_L - 8)
+#define META_X          (GUI_MARGIN_L + 60)
+#define META_RIGHT      (ART_X - 8)
+#define META_W          (META_RIGHT - META_X)
+#define BROWSE_W        56
+#define BROWSE_X        (ART_X - BROWSE_W)
+#define FILE_W          (BROWSE_X - META_X - 4)
+#define SLIDER_X        (GUI_MARGIN_L + 60)
+#define BUFFER_SLIDER_W 300
+#define VOLUME_SLIDER_W (GUI_WIN_W - SLIDER_X - GUI_MARGIN_R)
+#define FILEINFO_X      (GUI_MARGIN_L + 84)
+#define FILEINFO_W      (GUI_WIN_W - FILEINFO_X - GUI_MARGIN_R)
 
 #define ROW_FILE        (GUI_TOP_Y)
 #define ROW_TITLE       (GUI_TOP_Y + 1 * GUI_ROW_H)
@@ -325,6 +336,7 @@ typedef struct HelixAmp3Gui {
 	struct Gadget  *gadBuffer;
 	struct Gadget  *gadVolume;
 	struct Gadget  *gadFastLowrate;
+	struct Gadget  *gadSuperfastLowrate;
 	struct Gadget  *gadRate;
 	struct Gadget  *gadFastMem;
 	struct Gadget  *gadMono;
@@ -458,36 +470,6 @@ static const STRPTR kRateLabels[] = {
 	(STRPTR)"28600",
 	NULL
 };
-
-static const STRPTR kSuperfastMonoRateLabels[] = {
-	(STRPTR)"8287",
-	(STRPTR)"8820",
-	(STRPTR)"11025",
-	(STRPTR)"22050",
-	NULL
-};
-
-static const STRPTR kSuperfastStereoRateLabels[] = {
-	(STRPTR)"8820",
-	(STRPTR)"11025",
-	(STRPTR)"22050",
-	NULL
-};
-
-static const STRPTR *SuperfastRateLabels(int mono)
-{
-	return mono ? kSuperfastMonoRateLabels : kSuperfastStereoRateLabels;
-}
-
-static int SuperfastActiveFromRateIndex(int rateIndex, int mono)
-{
-	return mono ? rateIndex : rateIndex - 1;
-}
-
-static int RateIndexFromSuperfastActive(int active, int mono)
-{
-	return mono ? active : active + 1;
-}
 
 static int RateIndexSupportsSuperfast(int rateIndex, int mono)
 {
@@ -2777,7 +2759,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 	gad = gui->gadContext;
 
 	gui->gadFile = gad = MakeGadget(gui, gad, TEXT_KIND, GID_FILE,
-		GUI_MARGIN_L + 48, ROW_FILE, TEXT_COL_W - 100, 16, "File:",
+		META_X, ROW_FILE, FILE_W, 16, "File:",
 		GTTX_Text, (ULONG)gui->fileText,
 		GTTX_Border, TRUE,
 		TAG_IGNORE, 0,
@@ -2786,7 +2768,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gad = MakeGadget(gui, gad, BUTTON_KIND, GID_BROWSE,
-		ART_X - 56, ROW_FILE - 1, 56, 16, "Browse",
+		BROWSE_X, ROW_FILE - 1, BROWSE_W, 16, "Browse",
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
@@ -2795,7 +2777,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadTitle = gad = MakeGadget(gui, gad, TEXT_KIND, GID_TITLE,
-		GUI_MARGIN_L + 54, ROW_TITLE, TEXT_COL_W - 54, 16, "Title:",
+		META_X, ROW_TITLE, META_W, 16, "Title:",
 		GTTX_Text, (ULONG)"-",
 		GTTX_Border, TRUE,
 		TAG_IGNORE, 0,
@@ -2804,7 +2786,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadArtist = gad = MakeGadget(gui, gad, TEXT_KIND, GID_ARTIST,
-		GUI_MARGIN_L + 60, ROW_ARTIST, TEXT_COL_W - 54, 16, "Artist:",
+		META_X, ROW_ARTIST, META_W, 16, "Artist:",
 		GTTX_Text, (ULONG)"-",
 		GTTX_Border, TRUE,
 		TAG_IGNORE, 0,
@@ -2813,7 +2795,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadAlbum = gad = MakeGadget(gui, gad, TEXT_KIND, GID_ALBUM,
-		GUI_MARGIN_L + 54, ROW_ALBUM, TEXT_COL_W - 54, 16, "Album:",
+		META_X, ROW_ALBUM, META_W, 16, "Album:",
 		GTTX_Text, (ULONG)"-",
 		GTTX_Border, TRUE,
 		TAG_IGNORE, 0,
@@ -2856,7 +2838,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0);
 	if (!gad) return -1;
 	gui->gadTrack = gad = MakeGadget(gui, gad, TEXT_KIND, GID_TRACK,
-		GUI_MARGIN_L + 54, ROW_TRACK, TEXT_COL_W - 54, 16, "Track:",
+		META_X, ROW_TRACK, META_W, 16, "Track:",
 		GTTX_Text, (ULONG)"-",
 		GTTX_Border, TRUE,
 		TAG_IGNORE, 0,
@@ -2865,7 +2847,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadGenre = gad = MakeGadget(gui, gad, TEXT_KIND, GID_GENRE,
-		GUI_MARGIN_L + 54, ROW_GENRE, TEXT_COL_W - 54, 16, "Genre:",
+		META_X, ROW_GENRE, META_W, 16, "Genre:",
 		GTTX_Text, (ULONG)"-",
 		GTTX_Border, TRUE,
 		TAG_IGNORE, 0,
@@ -2882,7 +2864,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 	if (!gad)
 		return -1;
 
-	gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_SUPERFAST_LOWRATE,
+	gui->gadSuperfastLowrate = gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_SUPERFAST_LOWRATE,
 		GUI_MARGIN_L + 116, ROW_CHECKS, 20, 12, "Superfast",
 		GTCB_Checked, gui->superfastLowrate,
 		TAG_IGNORE, 0,
@@ -2941,8 +2923,8 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 
 	gui->gadRate = gad = MakeGadget(gui, gad, CYCLE_KIND, GID_RATE,
 		GUI_MARGIN_L + 48, ROW_CYCLES, 80, 16, "Rate:",
-		GTCY_Labels, (ULONG)(gui->superfastLowrate ? SuperfastRateLabels(ChannelUsesMonoCost(gui)) : kRateLabels),
-		GTCY_Active, gui->superfastLowrate ? SuperfastActiveFromRateIndex(gui->rateIndex, ChannelUsesMonoCost(gui)) : gui->rateIndex,
+		GTCY_Labels, (ULONG)kRateLabels,
+		GTCY_Active, gui->rateIndex,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0);
 	if (!gad)
@@ -2958,18 +2940,18 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadBuffer = gad = MakeGadget(gui, gad, SLIDER_KIND, GID_BUFFER,
-		GUI_MARGIN_L + 62, ROW_BUFFER,
-		GUI_WIN_W - GUI_MARGIN_L - GUI_MARGIN_R - 80, 16, "Buffer:",
+		SLIDER_X, ROW_BUFFER,
+		BUFFER_SLIDER_W, 16, "Buffer:",
 		GTSL_Min, 1,
-		GTSL_Max, 30,
+		GTSL_Max, 10,
 		GTSL_Level, gui->bufferSeconds,
 		GTSL_LevelFormat, (ULONG)"%ld sec");
 	if (!gad)
 		return -1;
 
 	gui->gadVolume = gad = MakeGadget(gui, gad, SLIDER_KIND, GID_VOLUME,
-		GUI_MARGIN_L + 62, ROW_VOLUME,
-		GUI_WIN_W - GUI_MARGIN_L - GUI_MARGIN_R - 80, 16, "Volume",
+		SLIDER_X, ROW_VOLUME,
+		VOLUME_SLIDER_W, 16, "Volume",
 		GTSL_Min, 0,
 		GTSL_Max, 100,
 		GTSL_Level, gui->volumePercent,
@@ -2996,7 +2978,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadStatus = gad = MakeGadget(gui, gad, TEXT_KIND, GID_STATUS,
-		GUI_MARGIN_L + 60, ROW_STATUS, GUI_WIN_W - GUI_MARGIN_L - GUI_MARGIN_R - 80, 16, "Status:",
+		META_X, ROW_STATUS, GUI_WIN_W - META_X - GUI_MARGIN_R, 16, "Status:",
 		GTTX_Text, (ULONG)gui->statusText,
 		GTTX_Border, TRUE,
 		TAG_IGNORE, 0,
@@ -3005,7 +2987,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadFileInfo = gad = MakeGadget(gui, gad, TEXT_KIND, GID_FILEINFO,
-		GUI_MARGIN_L + 68, ROW_FILEINFO, GUI_WIN_W - GUI_MARGIN_L - GUI_MARGIN_R - 88, 16, "File info:",
+		FILEINFO_X, ROW_FILEINFO, FILEINFO_W, 16, "File info:",
 		GTTX_Text, (ULONG)gui->fileInfoText,
 		GTTX_Border, TRUE,
 		TAG_IGNORE, 0,
@@ -3080,7 +3062,7 @@ static int GuiOpen(HelixAmp3Gui *gui)
 		if (!RateIndexSupportsSuperfast(gui->rateIndex, ChannelUsesMonoCost(gui)))
 			gui->rateIndex = DefaultSuperfastRateIndex(ChannelUsesMonoCost(gui));
 	}
-	gui->bufferSeconds = LoadEnvInt("BufferSeconds", 10, 1, 30);
+	gui->bufferSeconds = LoadEnvInt("BufferSeconds", 10, 1, 10);
 	gui->volumePercent = LoadEnvInt("Volume", 100, 0, 100);
 	gMiniAmp3RequestedVolume = (unsigned short)gui->volumePercent;
 	gMiniAmp3VolumeSequence++;
@@ -3985,8 +3967,8 @@ static void SetGuiBuffer(HelixAmp3Gui *gui, int seconds, int persist)
 	}
 	if (seconds < 1)
 		seconds = 1;
-	if (seconds > 30)
-		seconds = 30;
+	if (seconds > 10)
+		seconds = 10;
 	gui->bufferSeconds = seconds;
 	GT_SetGadgetAttrs(gui->gadBuffer, gui->win, NULL,
 		GTSL_Level, gui->bufferSeconds,
@@ -4043,9 +4025,8 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 				GTCB_Checked, gui->fastLowrate, TAG_DONE);
 		if (gui->gadRate)
 			GT_SetGadgetAttrs(gui->gadRate, gui->win, NULL,
-				GTCY_Labels, (ULONG)(gui->superfastLowrate ? SuperfastRateLabels(ChannelUsesMonoCost(gui)) : kRateLabels),
-				GTCY_Active, gui->superfastLowrate ?
-					SuperfastActiveFromRateIndex(gui->rateIndex, ChannelUsesMonoCost(gui)) : gui->rateIndex,
+				GTCY_Labels, (ULONG)kRateLabels,
+				GTCY_Active, gui->rateIndex,
 				TAG_DONE);
 		SetStatus(gui, gui->superfastLowrate ?
 			"Superfast enabled for 8287/8820/11025/22050 Hz (8287 mono-only)." :
@@ -4080,9 +4061,8 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 		GT_SetGadgetAttrs(gad, gui->win, NULL, GTCB_Checked, gui->mono, TAG_DONE);
 		if (gui->gadRate)
 			GT_SetGadgetAttrs(gui->gadRate, gui->win, NULL,
-				GTCY_Labels, (ULONG)(gui->superfastLowrate ? SuperfastRateLabels(ChannelUsesMonoCost(gui)) : kRateLabels),
-				GTCY_Active, gui->superfastLowrate ?
-					SuperfastActiveFromRateIndex(gui->rateIndex, ChannelUsesMonoCost(gui)) : gui->rateIndex,
+				GTCY_Labels, (ULONG)kRateLabels,
+				GTCY_Active, gui->rateIndex,
 				TAG_DONE);
 		SetStatus(gui, gui->mono ? "Mono output enabled." : "Stereo output enabled.");
 		SaveGuiSettings(gui);
@@ -4102,11 +4082,8 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 		UpdateChannelGadgetState(gui);
 		if (gui->gadRate)
 			GT_SetGadgetAttrs(gui->gadRate, gui->win, NULL,
-				GTCY_Labels, (ULONG)(gui->superfastLowrate ?
-					SuperfastRateLabels(ChannelUsesMonoCost(gui)) : kRateLabels),
-				GTCY_Active, gui->superfastLowrate ?
-					SuperfastActiveFromRateIndex(gui->rateIndex,
-						ChannelUsesMonoCost(gui)) : gui->rateIndex,
+				GTCY_Labels, (ULONG)kRateLabels,
+				GTCY_Active, gui->rateIndex,
 				TAG_DONE);
 		SetStatus(gui, gui->fakeStereo ?
 			"Fake-stereo enabled; Mono is temporarily ignored." :
@@ -4130,20 +4107,24 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 	case GID_RATE:
 		if (gui->playbackActive || gui->playbackDonePending) {
 			GT_SetGadgetAttrs(gad, gui->win, NULL,
-				GTCY_Active, gui->superfastLowrate ?
-					SuperfastActiveFromRateIndex(gui->rateIndex, ChannelUsesMonoCost(gui)) : gui->rateIndex,
+				GTCY_Active, gui->rateIndex,
 				TAG_DONE);
 			SetStatus(gui, "Stop playback before changing output rate.");
 			break;
 		}
-		if (gui->superfastLowrate)
-			gui->rateIndex = RateIndexFromSuperfastActive(code, ChannelUsesMonoCost(gui));
-		else {
-			gui->rateIndex = code;
-			if (gui->rateIndex < 0 || gui->rateIndex > 4)
-				gui->rateIndex = 2;
+		gui->rateIndex = code;
+		if (gui->rateIndex < 0 || gui->rateIndex > 4)
+			gui->rateIndex = 2;
+		if (gui->superfastLowrate &&
+			!RateIndexSupportsSuperfast(gui->rateIndex, ChannelUsesMonoCost(gui))) {
+			gui->superfastLowrate = 0;
+			if (gui->gadSuperfastLowrate)
+				GT_SetGadgetAttrs(gui->gadSuperfastLowrate, gui->win, NULL,
+					GTCB_Checked, FALSE, TAG_DONE);
+			SetStatus(gui, "Selected rate uses standard playback; Superfast disabled.");
+		} else {
+			SetStatus(gui, "Output sample rate updated.");
 		}
-		SetStatus(gui, "Output sample rate updated.");
 		SaveGuiSettings(gui);
 		break;
 	case GID_BUFFER:
