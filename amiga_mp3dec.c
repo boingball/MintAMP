@@ -4291,7 +4291,7 @@ static int DecodeStreamFillS8(DecodeStream *stream, const DecodeOptions *opt,
 
 	produced = 0;
 	DecodeStreamCopySpill(stream, dest, maxBytes, &produced);
-	while (produced < maxBytes && !stream->outOfData) {
+	while (produced < maxBytes && !stream->outOfData && !gPlaybackInterrupted) {
 		int nRead;
 		int offset;
 		int err;
@@ -4331,6 +4331,8 @@ static int DecodeStreamFillS8(DecodeStream *stream, const DecodeOptions *opt,
 			err = MP3Decode(stream->decoder, &stream->readPtr,
 				&stream->bytesLeft, stream->decodeBuf, 0);
 		}
+		if (gPlaybackInterrupted)
+			break;
 		if (err) {
 			if (err == ERR_MP3_INDATA_UNDERFLOW &&
 				stream->stats->decodedFrames == 0 && frameBytes > 1) {
@@ -4488,7 +4490,7 @@ static int DecodeStreamFillPlanarS8(DecodeStream *stream, const DecodeOptions *o
 		FakeStereoInit(&stream->fakeStereo, opt->fakeStereo,
 			opt->fakeStereoDelay, opt->fakeStereoShift);
 	DecodeStreamCopyPlanarSpill(stream, left, right, maxFrames, &produced);
-	while (produced < maxFrames && !stream->outOfData) {
+	while (produced < maxFrames && !stream->outOfData && !gPlaybackInterrupted) {
 		const short *pcm;
 		int frames;
 		int channels;
@@ -4534,6 +4536,8 @@ static int DecodeStreamFillPlanarS8(DecodeStream *stream, const DecodeOptions *o
 			err = MP3Decode(stream->decoder, &stream->readPtr,
 				&stream->bytesLeft, stream->decodeBuf, 0);
 		}
+		if (gPlaybackInterrupted)
+			break;
 		if (err) {
 			if (err == ERR_MP3_INDATA_UNDERFLOW &&
 				stream->stats->decodedFrames == 0 && frameBytes > 1) {
@@ -4904,10 +4908,14 @@ static unsigned int AmigaPalAudioPeriod(int outputRate)
 		(unsigned long)outputRate);
 }
 
-#define AMIGA_MONO_AUDIO_SLOTS 3
+/* Keep no more than two live audio.device writes per channel.  The earlier
+ * three-request mono ring can leave Stop blocked while audio.device unwinds the
+ * queued writes on real hardware.  Arrays remain sized for the stereo Fast-RAM
+ * decode-ahead slot C, but only A/B are submitted to Paula. */
+#define AMIGA_MONO_AUDIO_SLOTS 2
 #define AMIGA_STEREO_AUDIO_SLOTS 2
 #define AMIGA_STEREO_DECODE_SLOTS 3
-#define AMIGA_AUDIO_PLAYBACK_SLOTS AMIGA_MONO_AUDIO_SLOTS
+#define AMIGA_AUDIO_PLAYBACK_SLOTS AMIGA_STEREO_DECODE_SLOTS
 
 static int AmigaAudioLiveSlots(int stereo)
 {
@@ -5053,8 +5061,10 @@ static void AmigaAudioClose(AmigaAudioPlayer *player,
 		(unsigned long)player->outputStride, 0);
 	AmigaAudioCleanupTrace(player, "volume control request: none allocated (next-buffer ioa_Volume updates)\n");
 	gGuiPlaybackStatus.cleanupStage = GUIPLAY_CLEANUP_ABORT_REAP;
-	/* No request, device, port, or DMA buffer is destroyed until every write
-	 * has either completed or has been aborted and reaped with WaitIO. */
+	/* First request cancellation for the entire ring, then reap it in a second
+	 * pass.  Waiting one slot at a time lets audio.device advance the next queued
+	 * write between AbortIO calls and can prolong or stall Stop while the queue is
+	 * being unwound. */
 	for (i = 0; i < AMIGA_AUDIO_PLAYBACK_SLOTS; i++) {
 		for (ch = 0; ch < 2; ch++) {
 			if (player->req[i][ch] && player->sent[i][ch]) {
@@ -5073,6 +5083,12 @@ static void AmigaAudioClose(AmigaAudioPlayer *player,
 				}
 				AmigaAudioCleanupTrace4(player, "request index=%ld channel=%ld AbortIO issued=%ld\n",
 					(unsigned long)i, (unsigned long)ch, (unsigned long)aborted, 0);
+			}
+		}
+	}
+	for (i = 0; i < AMIGA_AUDIO_PLAYBACK_SLOTS; i++) {
+		for (ch = 0; ch < 2; ch++) {
+			if (player->req[i][ch] && player->sent[i][ch]) {
 				WaitIO((struct IORequest *)player->req[i][ch]);
 				AmigaAudioCleanupTrace4(player, "request index=%ld channel=%ld WaitIO completed=1\n",
 					(unsigned long)i, (unsigned long)ch, 0, 0);
@@ -5478,28 +5494,13 @@ static int AmigaAudioWaitOne(AmigaAudioPlayer *player, int index, int ch)
 		ULONG got = Wait(sigs);
 		if (got & SIGBREAKF_CTRL_C) {
 			gPlaybackInterrupted = 1;
-			AbortIO(req);
+			player->stopping = 1;
+			if (!CheckIO(req))
+				AbortIO(req);
 			break;
 		}
 	}
 #endif
-	err = WaitIO(req);
-	if (!err)
-		err = player->req[index][ch]->ioa_Request.io_Error;
-	player->sent[index][ch] = 0;
-	return err;
-}
-
-static int AmigaAudioAbortSent(AmigaAudioPlayer *player, int index, int ch)
-{
-	struct IORequest *req;
-	int err;
-
-	req = (struct IORequest *)player->req[index][ch];
-	if (!req || !player->sent[index][ch])
-		return 0;
-	if (!CheckIO(req))
-		AbortIO(req);
 	err = WaitIO(req);
 	if (!err)
 		err = player->req[index][ch]->ioa_Request.io_Error;
@@ -5513,12 +5514,29 @@ static int AmigaAudioAbortOutstanding(AmigaAudioPlayer *player)
 	int ch;
 	int err;
 
+	if (!player)
+		return 0;
+	player->stopping = 1;
+	/* Cancel every queued request before waiting for any one request. */
+	for (i = 0; i < AMIGA_AUDIO_PLAYBACK_SLOTS; i++) {
+		for (ch = 0; ch < 2; ch++) {
+			struct IORequest *req = (struct IORequest *)player->req[i][ch];
+			if (req && player->sent[i][ch] && !CheckIO(req))
+				AbortIO(req);
+		}
+	}
 	err = 0;
 	for (i = 0; i < AMIGA_AUDIO_PLAYBACK_SLOTS; i++) {
 		for (ch = 0; ch < 2; ch++) {
-			int err2 = AmigaAudioAbortSent(player, i, ch);
-			if (!err)
-				err = err2;
+			struct IORequest *req = (struct IORequest *)player->req[i][ch];
+			if (req && player->sent[i][ch]) {
+				int err2 = WaitIO(req);
+				if (!err2)
+					err2 = player->req[i][ch]->ioa_Request.io_Error;
+				player->sent[i][ch] = 0;
+				if (!err)
+					err = err2;
+			}
 		}
 	}
 	return err;
