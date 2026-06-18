@@ -1,0 +1,31 @@
+name: Apply missing hardware filter implementation
+on:
+  push:
+    branches:
+      - codex/fix-rapid-play-artwork-race-clean
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: python3 tools/apply_hardware_filter_missing_bits.py
+      - run: |
+          git diff --check
+          grep -q 'static void ApplyHardwareAudioFilter' amiga_mp3gui.c
+          grep -q 'static void DrawFilterButton' amiga_mp3gui.c
+          grep -q 'case GID_HARDWARE_FILTER:' amiga_mp3gui.c
+      - run: |
+          rm -f tools/apply_hardware_filter_missing_bits.py
+          rm -f .github/workflows/apply-hardware-filter-missing-bits.yml
+          rmdir tools 2>/dev/null || true
+          rmdir .github/workflows 2>/dev/null || true
+          rmdir .github 2>/dev/null || true
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add -A
+          git commit -m 'Wire MiniAMP3 filter button to Amiga hardware'
+          git push origin HEAD:codex/fix-rapid-play-artwork-race-clean
