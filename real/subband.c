@@ -380,7 +380,7 @@ int FusedSynthSelftest(void)
 	int produced;
 	int chIndepMismatches;
 	int minFused, maxFused, minLegacy, maxLegacy;
-	double rmsFused[2], rmsFast[2], d;
+	double rmsFused[2], rmsFast[2], rmsRef[2], d;
 	int tmp0[32], tmp1[32];
 	int *xin[2];
 
@@ -430,7 +430,7 @@ int FusedSynthSelftest(void)
 
 	memset(legacyVbuf, 0, sizeof(legacyVbuf)); memset(&sbi, 0, sizeof(sbi));
 	phaseFused = phaseFast = legacyVindex = fusedCount = fastCount = refCount = 0;
-	rmsFused[0] = rmsFused[1] = rmsFast[0] = rmsFast[1] = 0.0;
+	rmsFused[0] = rmsFused[1] = rmsFast[0] = rmsFast[1] = rmsRef[0] = rmsRef[1] = 0.0;
 	for (b = 0; b < 8; b++) {
 		int oddBlock = b & 1;
 		int produced;
@@ -442,12 +442,16 @@ int FusedSynthSelftest(void)
 		if (oddBlock) legacyVindex = (legacyVindex - 1) & 7;
 	}
 	memset(legacyVbuf, 0, sizeof(legacyVbuf)); legacyVindex = 0;
+	MP3SetExperimentalFDCT32Quarter(1);
+	MP3SetExperimentalReducedTaps(1);
 	for (b = 0; b < 8; b++) {
 		int oddBlock = b & 1;
 		produced = FusedSelftestLegacyBlock(fastPcm + fastCount, input[0][b], input[1][b], legacyVbuf, &legacyVindex, 2, 4, &phaseFast, oddBlock);
 		fastCount += produced;
 		if (oddBlock) legacyVindex = (legacyVindex - 1) & 7;
 	}
+	MP3SetExperimentalReducedTaps(0);
+	MP3SetExperimentalFDCT32Quarter(0);
 	memset(&sbi, 0, sizeof(sbi));
 	for (b = 0; b < 8; b++) {
 		int oddBlock = b & 1;
@@ -457,17 +461,21 @@ int FusedSynthSelftest(void)
 	}
 	for (i = 0; i < fusedCount / 2; i++) {
 		int ref = (i * 4) * 2;
+		d = (double)refPcm[ref]; rmsRef[0] += d*d;
+		d = (double)refPcm[ref+1]; rmsRef[1] += d*d;
 		d = (double)fusedPcm[i*2] - (double)refPcm[ref]; rmsFused[0] += d*d;
 		d = (double)fusedPcm[i*2+1] - (double)refPcm[ref+1]; rmsFused[1] += d*d;
 		d = (double)fastPcm[i*2] - (double)refPcm[ref]; rmsFast[0] += d*d;
 		d = (double)fastPcm[i*2+1] - (double)refPcm[ref+1]; rmsFast[1] += d*d;
 	}
+	rmsRef[0] = FusedSelftestSqrt(rmsRef[0] / (double)(fusedCount/2));
+	rmsRef[1] = FusedSelftestSqrt(rmsRef[1] / (double)(fusedCount/2));
 	rmsFused[0] = FusedSelftestSqrt(rmsFused[0] / (double)(fusedCount/2));
 	rmsFused[1] = FusedSelftestSqrt(rmsFused[1] / (double)(fusedCount/2));
 	rmsFast[0] = FusedSelftestSqrt(rmsFast[0] / (double)(fastCount/2));
 	rmsFast[1] = FusedSelftestSqrt(rmsFast[1] / (double)(fastCount/2));
-	printf("Stride4 RMS fused_ch0=%.2f fused_ch1=%.2f fast_ch0=%.2f fast_ch1=%.2f ratio_ch0=%.6f ratio_ch1=%.6f\n",
-		rmsFused[0], rmsFused[1], rmsFast[0], rmsFast[1],
+	printf("Stride4 RMS ref_signal_ch0=%.2f ref_signal_ch1=%.2f fast_vs_ref_ch0=%.2f fast_vs_ref_ch1=%.2f fused_vs_ref_ch0=%.2f fused_vs_ref_ch1=%.2f ratio_ch0=%.6f ratio_ch1=%.6f\n",
+		rmsRef[0], rmsRef[1], rmsFast[0], rmsFast[1], rmsFused[0], rmsFused[1],
 		rmsFast[0] != 0.0 ? rmsFused[0]/rmsFast[0] : 0.0,
 		rmsFast[1] != 0.0 ? rmsFused[1]/rmsFast[1] : 0.0);
 	memset(&sbi, 0, sizeof(sbi));
