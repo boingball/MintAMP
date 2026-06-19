@@ -147,7 +147,8 @@ int STATNAME(PolyphaseStereoFastLowrateStride2_C_REFERENCE)(short *pcm, int *vbu
 int STATNAME(PolyphaseStereoFastLowrateStride2_TEST_ACTIVE)(short *pcm, int *vbuf, const int *coefBase);
 int STATNAME(StereoFastPolyphaseStride2_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
 int STATNAME(StereoFastPolyphaseStride4_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
-void MP3GetStereoStride4PolyphaseCounters(unsigned long *asmCalls, unsigned long *cCalls);
+void MP3GetStereoStride4PolyphaseCounters(unsigned long *asmCalls, unsigned long *cCalls,
+	unsigned long *reducedCalls);
 void MP3ResetStereoStride4PolyphaseCounters(void);
 int STATNAME(PolyphaseStereoFastLowrateStride4_C_REFERENCE)(short *pcm, int *vbuf, const int *coefBase, int phase);
 int STATNAME(PolyphaseStereoFastLowrateStride4_TEST_ACTIVE)(short *pcm, int *vbuf, const int *coefBase, int phase);
@@ -7681,12 +7682,12 @@ int main(int argc, char **argv)
 						s2Asm, s2C);
 				}
 				{
-					unsigned long s4Asm = 0, s4C = 0;
-					MP3GetStereoStride4PolyphaseCounters(&s4Asm, &s4C);
+					unsigned long s4Asm = 0, s4C = 0, s4Reduced = 0;
+					MP3GetStereoStride4PolyphaseCounters(&s4Asm, &s4C, &s4Reduced);
 					printf("stereo stride-4 polyphase: %s\n",
-						s4Asm ? "asm" : "C");
-					printf("stereo stride-4 polyphase calls: asm=%lu C=%lu\n",
-						s4Asm, s4C);
+						s4Reduced ? "reduced" : (s4Asm ? "asm" : "C"));
+					printf("stereo stride-4 polyphase calls: asm=%lu C=%lu reduced=%lu\n",
+						s4Asm, s4C, s4Reduced);
 				}
 				printf("core IMDCT subbands: executed=%lu skipped=%lu\n",
 					coreProfile.imdctSubbandsExecuted, coreProfile.imdctSubbandsSkipped);

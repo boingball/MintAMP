@@ -366,7 +366,8 @@ void MP3SetForceStereoStride2PolyphaseC(int enabled);
 int MP3ForceStereoStride2PolyphaseC(void);
 void MP3GetStereoStride2PolyphaseCounters(unsigned long *asmCalls, unsigned long *cCalls);
 void MP3ResetStereoStride2PolyphaseCounters(void);
-void MP3GetStereoStride4PolyphaseCounters(unsigned long *asmCalls, unsigned long *cCalls);
+void MP3GetStereoStride4PolyphaseCounters(unsigned long *asmCalls, unsigned long *cCalls,
+	unsigned long *reducedCalls);
 void MP3ResetStereoStride4PolyphaseCounters(void);
 int PolyphaseStereoFastLowrateStride4_C_REFERENCE(short *pcm, int *vbuf, const int *coefBase, int phase);
 int PolyphaseStereoFastLowrateStride4_TEST_ACTIVE(short *pcm, int *vbuf, const int *coefBase, int phase);
