@@ -294,6 +294,8 @@ static double FusedSelftestSqrt(double x)
 }
 
 #if defined(AMIGA_FUSED_SYNTHESIS) && defined(AMIGA_FAST_POLYPHASE)
+static void FusedFastDCT4(const int *samples, int *sy0, int *sy1);
+static int FusedWindowBand4(short *pcm, int *vbase, int nChans, int phase);
 static void FusedSelftestFillInput(int x[2][8][32])
 {
 	unsigned long seed[2];
@@ -429,6 +431,71 @@ int FusedSynthSelftest(void)
 	printf("Scaling checkpoint stride4 fused_min=%d fused_max=%d legacy_min=%d legacy_max=%d max_ratio=%.6f\n",
 		minFused, maxFused, minLegacy, maxLegacy,
 		maxLegacy != 0 ? ((double)maxFused / (double)maxLegacy) : 0.0);
+
+	/* Isolation A: compare the fused butterfly scatter against trusted full FDCT32
+	 * rows before any dewindowing.  Rows are the stride-4 active rows the fused
+	 * freq_div==4 path claims to produce.
+	 */
+	{
+		static const int activeRows[8] = { 0, 4, 8, 12, 16, 20, 24, 28 };
+		int refIso[2 * VBUF_LENGTH];
+		int fusedIso[2 * VBUF_LENGTH];
+		int tmpIso[32];
+		int badRows = 0;
+		int tolerance = 4;
+		memset(refIso, 0, sizeof(refIso));
+		memset(fusedIso, 0, sizeof(fusedIso));
+		memcpy(tmpIso, input[0][0], sizeof(tmpIso));
+		FDCT32_C_REFERENCE(tmpIso, refIso, 0, 0, 0);
+		FusedFastDCT4(input[0][0], fusedIso, fusedIso + VBUF_LENGTH);
+		printf("Butterfly isolation active rows tolerance=%d\n", tolerance);
+		for (i = 0; i < 8; i++) {
+			int row = activeRows[i];
+			int idx = row * 64;
+			int fv = fusedIso[idx];
+			int rv = refIso[idx];
+			int diff = fv - rv;
+			if (diff > tolerance || diff < -tolerance)
+				badRows++;
+			printf("Butterfly row=%d half=0 fused=%d reference=%d diff=%d\n", row, fv, rv, diff);
+		}
+		for (i = 0; i < 8; i++) {
+			int row = activeRows[i];
+			int idx = VBUF_LENGTH + row * 64;
+			int fv = fusedIso[idx];
+			int rv = refIso[idx];
+			int diff = fv - rv;
+			if (diff > tolerance || diff < -tolerance)
+				badRows++;
+			printf("Butterfly row=%d half=1 fused=%d reference=%d diff=%d\n", row, fv, rv, diff);
+		}
+		printf("Butterfly isolation rows_exceeding_tolerance=%d\n", badRows);
+	}
+
+	/* Isolation B: feed the fused 4-tap dewindow with trusted legacy FDCT FIFO. */
+	{
+		short fusedWin[16];
+		short fastWin[16];
+		int refIso[2 * VBUF_LENGTH];
+		int tmpL[32], tmpR[32];
+		int phF = 0, phW = 0;
+		int mismatch = 0, first = -1, firstF = 0, firstR = 0;
+		memset(refIso, 0, sizeof(refIso));
+		memcpy(tmpL, input[0][0], sizeof(tmpL));
+		memcpy(tmpR, input[1][0], sizeof(tmpR));
+		FDCT32_C_REFERENCE(tmpL, refIso + 0*32, 0, 0, 0);
+		FDCT32_C_REFERENCE(tmpR, refIso + 1*32, 0, 0, 0);
+		FusedWindowBand4(fusedWin, refIso, 2, phF);
+		PolyphaseStereoFastLowrate(fastWin, refIso, polyCoef, 4, &phW);
+		for (i = 0; i < 16; i++) {
+			if (fusedWin[i] != fastWin[i]) {
+				if (first < 0) { first = i; firstF = fusedWin[i]; firstR = fastWin[i]; }
+				mismatch++;
+			}
+		}
+		printf("Window isolation legacy_fifo samples=16 mismatches=%d first_mismatch_index=%d fused=%d fast=%d\n",
+			mismatch, first, firstF, firstR);
+	}
 
 	memset(legacyVbuf, 0, sizeof(legacyVbuf)); memset(&sbi, 0, sizeof(sbi));
 	phaseFused = phaseFast = legacyVindex = fusedCount = fastCount = refCount = 0;
