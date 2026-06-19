@@ -7023,6 +7023,11 @@ int main(int argc, char **argv)
 		AmigaFreeNormalizedArgs(&normalized);
 		return selftestErr;
 	}
+	if (opt.selftestFusedSynth) {
+		int selftestErr = SelftestFusedSynth();
+		AmigaFreeNormalizedArgs(&normalized);
+		return selftestErr;
+	}
 	if (opt.selftestHuffman) {
 		int selftestErr = SelftestHuffman(&opt);
 		AmigaFreeNormalizedArgs(&normalized);
