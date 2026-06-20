@@ -108,7 +108,7 @@ static __inline void IntensityScaleRun1_AmigaM68K(int *xL, int *xR, int fl, int 
 		"move.l %%d4,%2\n\t"
 		"move.l %%d5,%3"
 		: "+a" (xL), "+a" (xR), "+m" (outL), "+m" (outR)
-		: "m" (fr), "m" (fl), "d" (count)
+		: "m" (fr), "m" (fl), "m" (count)
 		: "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7", "cc", "memory");
 	*mOutL = outL;
 	*mOutR = outR;
@@ -154,7 +154,7 @@ static __inline void IntensityScaleRun3_AmigaM68K(int *xL, int *xR, int fl, int 
 		"move.l %%d4,%2\n\t"
 		"move.l %%d5,%3"
 		: "+a" (xL), "+a" (xR), "+m" (outL), "+m" (outR)
-		: "m" (fr), "m" (fl), "d" (count)
+		: "m" (fr), "m" (fl), "m" (count)
 		: "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7", "cc", "memory");
 	*mOutL = outL;
 	*mOutR = outR;
