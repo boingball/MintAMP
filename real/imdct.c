@@ -169,12 +169,12 @@ static void AntiAlias_AmigaM68KAsm(int *x, int nBfly)
 		"move.l %%d5,-4(%[xhi])\n\t"
 		"addq.l #8,%[c]\n\t"
 		"dbra %%d6,2b\n\t"
-		"dbra %[outer],1b"
-	 /* Restore xlo to the boundary: the inner pre-decrement loop walked it
-     * 8 * 4 = 32 bytes backwards.  Without this, the next outer iteration's
-     * lea 72(%[xlo]) would advance from boundary-32, placing the next
-     * boundary 32 bytes too early and corrupting every subsequent block. */
-    "lea 32(%[xlo]),%[xlo]\n\t"
+		/* Restore xlo to the boundary: the inner pre-decrement loop walked it
+		 * 8 * 4 = 32 bytes backwards. Without this, the next outer iteration's
+		 * lea 72(%[xlo]) would advance from boundary-32, placing the next
+		 * boundary 32 bytes too early and corrupting every subsequent block. */
+		"lea 32(%[xlo]),%[xlo]\n\t"
+		"dbra %[outer],1b\n\t"
 		: [outer] "+d" (outer), [xlo] "+a" (xLo), [xhi] "=&a" (xHi), [c] "=&a" (c)
 		: [cbase] "a" (cBase)
 		: "d0", "d1", "d2", "d3", "d4", "d5", "d6", "cc", "memory");
