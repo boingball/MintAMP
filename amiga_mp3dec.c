@@ -309,6 +309,7 @@ typedef struct DecodeOptions {
 	int selftestReducedTaps;
 	int selftestFdct32Quarter;
 	int selftestFdct32Mulsw;
+	int selftestMulswTiming;
 	int selftestFdct32QuarterStereo;
 	int selftestHuffman;
 	int selftestDequant;
@@ -730,6 +731,7 @@ static void PrintUsage(const char *prog)
 	printf("  --selftest-reduced-taps compare full and reduced stride-4 dewindow paths\n");
 	printf("  --selftest-fdct32-quarter inspect lossy stride-4 quarter-rate FDCT32 scatter\n");
 	printf("  --selftest-fdct32-mulsw compare lossy 16x16 FDCT32 against full FDCT32\n");
+	printf("  --selftest-mulsw-timing measure m68k muls.l vs muls.w instruction timing\n");
 	printf("  --selftest-fdct32-quarter-stereo verify independent stereo stride-4 quarter FDCT32 dispatch\n");
 	printf("  --selftest-huffman compare C and active Huffman pair decode paths\n");
 	printf("  --selftest-dequant compare C and optional m68k asm dequant block paths\n");
@@ -965,6 +967,8 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->selftestFdct32Quarter = 1;
 		} else if (!strcmp(argv[i], "--selftest-fdct32-mulsw")) {
 			opt->selftestFdct32Mulsw = 1;
+		} else if (!strcmp(argv[i], "--selftest-mulsw-timing")) {
+			opt->selftestMulswTiming = 1;
 		} else if (!strcmp(argv[i], "--selftest-fdct32-quarter-stereo")) {
 			opt->selftestFdct32QuarterStereo = 1;
 		} else if (!strcmp(argv[i], "--selftest-huffman")) {
@@ -1064,6 +1068,7 @@ if (opt->selftestMulshift ||
     opt->selftestReducedTaps ||
     opt->selftestFdct32Quarter ||
     opt->selftestFdct32Mulsw ||
+    opt->selftestMulswTiming ||
     opt->selftestFdct32QuarterStereo ||
     opt->selftestHuffman ||
     opt->selftestDequant ||
@@ -4627,6 +4632,125 @@ static int SelftestMulshift(void)
 	return failures ? 1 : 0;
 }
 
+static volatile int gMulswTimingSink;
+
+#if defined(AMIGA_M68K) && (defined(__mc68020__) || defined(__mc68030__) || defined(__mc68040__) || defined(__mc68060__))
+#define HAVE_M68K_MULS_TIMING_ASM 1
+#else
+#define HAVE_M68K_MULS_TIMING_ASM 0
+#endif
+
+#define MULSW_TIMING_INPUTS 1024UL
+#define MULSW_TIMING_ITERATIONS 10000000UL
+
+static void FillMulswTimingInputs(int *inputs, unsigned long count)
+{
+	unsigned long seed;
+	unsigned long i;
+
+	seed = 0x6d756c73UL;
+	for (i = 0; i < count; i++)
+		inputs[i] = (int)NextRand32(&seed);
+}
+
+#if HAVE_M68K_MULS_TIMING_ASM
+static int RunMulsLongTimingLoop(const int *inputs, unsigned long iterations)
+{
+	unsigned long i;
+	int acc;
+
+	acc = 0x13572468L;
+	for (i = 0; i < iterations; i++) {
+		int a;
+		int b;
+		int hi;
+		int lo;
+
+		a = inputs[i & (MULSW_TIMING_INPUTS - 1UL)];
+		b = inputs[(i + 1UL) & (MULSW_TIMING_INPUTS - 1UL)];
+		lo = a ^ acc;
+		__asm__ volatile (
+			"muls.l %3,%0:%1"
+			: "=d"(hi), "+d"(lo)
+			: "1"(lo), "d"(b)
+			: "cc");
+		acc += lo ^ hi;
+	}
+	return acc;
+}
+
+static int RunMulsWordTimingLoop(const int *inputs, unsigned long iterations)
+{
+	unsigned long i;
+	int acc;
+
+	acc = 0x13572468L;
+	for (i = 0; i < iterations; i++) {
+		int a;
+		int b;
+
+		a = inputs[i & (MULSW_TIMING_INPUTS - 1UL)] ^ acc;
+		b = inputs[(i + 1UL) & (MULSW_TIMING_INPUTS - 1UL)];
+		__asm__ volatile (
+			"muls.w %1,%0"
+			: "+d"(a)
+			: "d"(b)
+			: "cc");
+		acc += a;
+	}
+	return acc;
+}
+#endif
+
+static int SelftestMulswTiming(void)
+{
+#if HAVE_M68K_MULS_TIMING_ASM
+	int *inputs;
+	clock_t start;
+	clock_t elapsedLong;
+	clock_t elapsedWord;
+	double secondsLong;
+	double secondsWord;
+	double nsLong;
+	double nsWord;
+	double ratio;
+
+	inputs = (int *)malloc(sizeof(inputs[0]) * (size_t)MULSW_TIMING_INPUTS);
+	if (!inputs) {
+		fprintf(stderr, "muls timing selftest failed: out of memory\n");
+		return 1;
+	}
+	FillMulswTimingInputs(inputs, MULSW_TIMING_INPUTS);
+
+	start = clock();
+	gMulswTimingSink = RunMulsLongTimingLoop(inputs, MULSW_TIMING_ITERATIONS);
+	elapsedLong = clock() - start;
+
+	start = clock();
+	gMulswTimingSink ^= RunMulsWordTimingLoop(inputs, MULSW_TIMING_ITERATIONS);
+	elapsedWord = clock() - start;
+
+	free(inputs);
+
+	secondsLong = ClocksToSeconds(elapsedLong);
+	secondsWord = ClocksToSeconds(elapsedWord);
+	nsLong = secondsLong * 1000000000.0 / (double)MULSW_TIMING_ITERATIONS;
+	nsWord = secondsWord * 1000000000.0 / (double)MULSW_TIMING_ITERATIONS;
+	ratio = secondsWord > 0.0 ? secondsLong / secondsWord : 0.0;
+
+	printf("muls.l iterations: %lu   elapsed: %.6f s   ns/op: %.2f\n",
+		MULSW_TIMING_ITERATIONS, secondsLong, nsLong);
+	printf("muls.w iterations: %lu   elapsed: %.6f s   ns/op: %.2f\n",
+		MULSW_TIMING_ITERATIONS, secondsWord, nsWord);
+	printf("muls.w / muls.l speed ratio: %.3fx faster\n", ratio);
+	printf("muls timing accumulator: %ld\n", (long)gMulswTimingSink);
+	return 0;
+#else
+	printf("muls timing selftest not available: requires AMIGA_M68K and 68020+ inline asm\n");
+	return 1;
+#endif
+}
+
 
 /*
  * Fake-stereo (pseudo-stereo) widener.  Runs on the mono decode path so the
@@ -7324,6 +7448,11 @@ int main(int argc, char **argv)
 	}
 	if (opt.selftestFdct32Mulsw) {
 		int selftestErr = SelftestFdct32Mulsw();
+		AmigaFreeNormalizedArgs(&normalized);
+		return selftestErr;
+	}
+	if (opt.selftestMulswTiming) {
+		int selftestErr = SelftestMulswTiming();
 		AmigaFreeNormalizedArgs(&normalized);
 		return selftestErr;
 	}

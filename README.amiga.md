@@ -374,6 +374,11 @@ amiga_mp3dec --quality 0 --play --fast-mem --fast-lowrate --rate 11025 --mono so
 - `--selftest-mulshift` compares the portable C `MULSHIFT32` reference with the
   optional 68020+ assembly helper over edge cases and 100,000 pseudo-random
   input pairs.
+- `--selftest-mulsw-timing` is a 68020+ `AMIGA_M68K` microbenchmark for the
+  stereo-optimization gate: it times equal-count inline-assembly `muls.l` and
+  `muls.w` loops over the same pseudo-random input ring, then prints elapsed
+  seconds, ns/op, and the `muls.w / muls.l` speed ratio.  Use the target
+  68030 result only as measurement input; it does not change the decode path.
 - `--selftest-clz` compares the portable C `CLZ` reference with the active
   helper over zero, one, every power of two, `0x7fffffff`, `0xffffffff`, and
   10,000 pseudo-random inputs.  In `AMIGA_M68K_ASM` 68020+ builds this proves
