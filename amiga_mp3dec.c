@@ -309,6 +309,7 @@ typedef struct DecodeOptions {
 	int selftestFdct32QuarterStereo;
 	int selftestHuffman;
 	int selftestDequant;
+	int selftestIntensity;
 	int selftestBitstream;
 	int selftestMonoFastLowrateStereo;
 	int selftestQuality;
@@ -727,6 +728,7 @@ static void PrintUsage(const char *prog)
 	printf("  --selftest-fdct32-quarter-stereo verify independent stereo stride-4 quarter FDCT32 dispatch\n");
 	printf("  --selftest-huffman compare C and active Huffman pair decode paths\n");
 	printf("  --selftest-dequant compare C and optional m68k asm dequant block paths\n");
+	printf("  --selftest-intensity compare C and optional m68k asm intensity scale paths\n");
 	printf("  --selftest-bitstream compare C and optional m68k move.l bitstream refill paths\n");
 	printf("  --selftest-mono-fastlowrate-stereo verify stereo-to-mono low-rate accounting\n");
 	printf("  --selftest-quality verify --quality flag mapping and auto-default selection\n");
@@ -963,6 +965,8 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->selftestHuffman = 1;
 		} else if (!strcmp(argv[i], "--selftest-dequant")) {
 			opt->selftestDequant = 1;
+		} else if (!strcmp(argv[i], "--selftest-intensity")) {
+			opt->selftestIntensity = 1;
 		} else if (!strcmp(argv[i], "--selftest-bitstream")) {
 			opt->selftestBitstream = 1;
 		} else if (!strcmp(argv[i], "--selftest-mono-fastlowrate-stereo")) {
@@ -4345,6 +4349,128 @@ static int SelftestHuffman(const DecodeOptions *opt)
 	return failures ? 1 : 0;
 }
 
+
+static int TestIntensityCase(unsigned long index, unsigned long seed, int pattern,
+	int stride, int count, int fl, int fr, int seedL, int seedR)
+{
+	static int cx0[MAX_NSAMP];
+	static int cx1[MAX_NSAMP];
+	static int ax0[MAX_NSAMP];
+	static int ax1[MAX_NSAMP];
+	int i;
+	int cmOutL, cmOutR, amOutL, amOutR;
+	int span;
+
+	span = (count > 0) ? ((count - 1) * stride + 1) : 1;
+	if (span > MAX_NSAMP)
+		span = MAX_NSAMP;
+	for (i = 0; i < MAX_NSAMP; i++) {
+		seed = seed * 1664525UL + 1013904223UL;
+		if (pattern == 0)
+			cx0[i] = 0;
+		else if (pattern == 1)
+			cx0[i] = (i == (span >> 1)) ? 0x02000000 : 0;
+		else if (pattern == 2)
+			cx0[i] = (i & 1) ? 0x03ffffff : (int)0xfc000000UL;
+		else
+			cx0[i] = ((int)seed) >> 6;
+		cx1[i] = (int)(0x5a5a0000UL ^ (unsigned long)i);
+		ax0[i] = cx0[i];
+		ax1[i] = cx1[i];
+	}
+	cmOutL = amOutL = seedL;
+	cmOutR = amOutR = seedR;
+	if (count > 1) {
+		int firstCount = count >> 1;
+		int secondCount = count - firstCount;
+		int offset = firstCount * stride;
+		IntensityScaleRun_C_REFERENCE(cx0, cx1, fl, fr, firstCount, stride, &cmOutL, &cmOutR);
+		IntensityScaleRun_C_REFERENCE(cx0 + offset, cx1 + offset, fl, fr, secondCount, stride, &cmOutL, &cmOutR);
+		if (stride == 1) {
+			IntensityScaleRun1_TEST_ACTIVE(ax0, ax1, fl, fr, firstCount, &amOutL, &amOutR);
+			IntensityScaleRun1_TEST_ACTIVE(ax0 + offset, ax1 + offset, fl, fr, secondCount, &amOutL, &amOutR);
+		} else {
+			IntensityScaleRun3_TEST_ACTIVE(ax0, ax1, fl, fr, firstCount, &amOutL, &amOutR);
+			IntensityScaleRun3_TEST_ACTIVE(ax0 + offset, ax1 + offset, fl, fr, secondCount, &amOutL, &amOutR);
+		}
+	} else {
+		IntensityScaleRun_C_REFERENCE(cx0, cx1, fl, fr, count, stride, &cmOutL, &cmOutR);
+		if (stride == 1)
+			IntensityScaleRun1_TEST_ACTIVE(ax0, ax1, fl, fr, count, &amOutL, &amOutR);
+		else
+			IntensityScaleRun3_TEST_ACTIVE(ax0, ax1, fl, fr, count, &amOutL, &amOutR);
+	}
+	if (cmOutL != amOutL || cmOutR != amOutR) {
+		printf("Intensity selftest mask mismatch %lu: stride=%d count=%d fl=%ld fr=%ld C(%ld,%ld) active(%ld,%ld)\n",
+			index, stride, count, (long)fl, (long)fr, (long)cmOutL, (long)cmOutR, (long)amOutL, (long)amOutR);
+		return -1;
+	}
+	for (i = 0; i < MAX_NSAMP; i++) {
+		if (cx0[i] != ax0[i] || cx1[i] != ax1[i]) {
+			printf("Intensity selftest sample mismatch %lu[%d]: stride=%d count=%d fl=%ld fr=%ld C(%ld,%ld) active(%ld,%ld)\n",
+				index, i, stride, count, (long)fl, (long)fr, (long)cx0[i], (long)cx1[i], (long)ax0[i], (long)ax1[i]);
+			return -1;
+		}
+	}
+	return 0;
+}
+
+static int SelftestIntensity(void)
+{
+	unsigned long cases;
+	unsigned long failures;
+	unsigned long seed;
+	int strideIdx;
+
+	cases = 0;
+	failures = 0;
+	seed = 0x51a1e5c7UL;
+	for (strideIdx = 0; strideIdx < 2; strideIdx++) {
+		int stride = strideIdx ? 3 : 1;
+		int maxCount = strideIdx ? (MAX_NSAMP / 3) : MAX_NSAMP;
+		int pattern;
+		for (pattern = 0; pattern < 4; pattern++) {
+			int countCase;
+			for (countCase = 0; countCase < 96; countCase++) {
+				int count;
+				int fl;
+				int fr;
+				int seedL;
+				int seedR;
+				seed = NextRand32(&seed);
+				count = (countCase < 8) ? countCase : (int)(seed % (unsigned long)(maxCount + 1));
+				seed = NextRand32(&seed);
+				fl = ((int)seed) >> 1;
+				seed = NextRand32(&seed);
+				fr = ((int)seed) >> 1;
+				seed = NextRand32(&seed);
+				seedL = (int)(seed | 0x01010101UL);
+				seed = NextRand32(&seed);
+				seedR = (int)(seed | 0x02020202UL);
+				if (TestIntensityCase(cases, seed, pattern, stride, count, fl, fr, seedL, seedR) != 0) {
+					failures++;
+					if (failures >= 16) {
+						printf("Intensity selftest stopped after 16 failures\n");
+						break;
+					}
+				}
+				cases++;
+			}
+		}
+	}
+	printf("Intensity asm requested: %s\n",
+#ifdef AMIGA_M68K_ASM_INTENSITY
+		"yes"
+#else
+		"no"
+#endif
+	);
+	printf("Intensity asm active: %s\n", IntensityScaleRun_HAS_AMIGA_M68K_ASM_RUNTIME() ? "yes" : "no");
+	printf("Intensity selftest cases: %lu\n", cases);
+	printf("Intensity selftest failures: %lu\n", failures);
+	return failures ? 1 : 0;
+}
+
 static int SelftestDequant(void)
 {
 	enum { DEQUANT_X_MAX = 8206 };
@@ -7328,6 +7454,11 @@ int main(int argc, char **argv)
 	}
 	if (opt.selftestDequant) {
 		int selftestErr = SelftestDequant();
+		AmigaFreeNormalizedArgs(&normalized);
+		return selftestErr;
+	}
+	if (opt.selftestIntensity) {
+		int selftestErr = SelftestIntensity();
 		AmigaFreeNormalizedArgs(&normalized);
 		return selftestErr;
 	}

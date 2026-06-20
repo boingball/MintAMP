@@ -44,6 +44,148 @@
 #include "coder.h"
 #include "assembly.h"
 
+#if defined(AMIGA_M68K) && defined(AMIGA_M68K_ASM_INTENSITY) && defined(__GNUC__) && \
+	(defined(__mc68020__) || defined(__mc68030__) || defined(__mc68040__) || \
+	 defined(__mc68060__) || defined(mc68020))
+#define INTENSITYSCALE_HAS_AMIGA_M68K_ASM 1
+#else
+#define INTENSITYSCALE_HAS_AMIGA_M68K_ASM 0
+#endif
+
+void IntensityScaleRun_C_REFERENCE(int *xL, int *xR, int fl, int fr,
+	int count, int stride, int *mOutL, int *mOutR)
+{
+	int i, xl, xr, outL, outR;
+
+	outL = *mOutL;
+	outR = *mOutR;
+	for (i = 0; i < count; i++) {
+		xr = MULSHIFT32(fr, *xL) << 2;	xR[0] = xr;	outR |= FASTABS(xr);
+		xl = MULSHIFT32(fl, *xL) << 2;	xL[0] = xl;	outL |= FASTABS(xl);
+		xL += stride;
+		xR += stride;
+	}
+	*mOutL = outL;
+	*mOutR = outR;
+}
+
+#if INTENSITYSCALE_HAS_AMIGA_M68K_ASM
+static __inline void IntensityScaleRun1_AmigaM68K(int *xL, int *xR, int fl, int fr,
+	int count, int *mOutL, int *mOutR)
+{
+	int outL, outR;
+
+	if (count <= 0)
+		return;
+	outL = *mOutL;
+	outR = *mOutR;
+	__asm__ volatile (
+		"move.l %6,%%d7\n\t"
+		"subq.l #1,%%d7\n\t"
+		"moveq #31,%%d6\n\t"
+		"move.l %2,%%d4\n\t"
+		"move.l %3,%%d5\n"
+		"1:\n\t"
+		"move.l (%0),%%d0\n\t"
+		"move.l %%d0,%%d1\n\t"
+		"muls.l %4,%%d2:%%d0\n\t"
+		"asl.l #2,%%d2\n\t"
+		"move.l %%d2,(%1)+\n\t"
+		"move.l %%d2,%%d3\n\t"
+		"asr.l %%d6,%%d3\n\t"
+		"eor.l %%d3,%%d2\n\t"
+		"sub.l %%d3,%%d2\n\t"
+		"or.l %%d2,%%d5\n\t"
+		"muls.l %5,%%d2:%%d1\n\t"
+		"asl.l #2,%%d2\n\t"
+		"move.l %%d2,(%0)+\n\t"
+		"move.l %%d2,%%d3\n\t"
+		"asr.l %%d6,%%d3\n\t"
+		"eor.l %%d3,%%d2\n\t"
+		"sub.l %%d3,%%d2\n\t"
+		"or.l %%d2,%%d4\n\t"
+		"dbf %%d7,1b\n\t"
+		"move.l %%d4,%2\n\t"
+		"move.l %%d5,%3"
+		: "+a" (xL), "+a" (xR), "+m" (outL), "+m" (outR)
+		: "m" (fr), "m" (fl), "d" (count)
+		: "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7", "cc", "memory");
+	*mOutL = outL;
+	*mOutR = outR;
+}
+
+static __inline void IntensityScaleRun3_AmigaM68K(int *xL, int *xR, int fl, int fr,
+	int count, int *mOutL, int *mOutR)
+{
+	int outL, outR;
+
+	if (count <= 0)
+		return;
+	outL = *mOutL;
+	outR = *mOutR;
+	__asm__ volatile (
+		"move.l %6,%%d7\n\t"
+		"subq.l #1,%%d7\n\t"
+		"moveq #31,%%d6\n\t"
+		"move.l %2,%%d4\n\t"
+		"move.l %3,%%d5\n"
+		"1:\n\t"
+		"move.l (%0),%%d0\n\t"
+		"move.l %%d0,%%d1\n\t"
+		"muls.l %4,%%d2:%%d0\n\t"
+		"asl.l #2,%%d2\n\t"
+		"move.l %%d2,(%1)\n\t"
+		"addq.l #12,%1\n\t"
+		"move.l %%d2,%%d3\n\t"
+		"asr.l %%d6,%%d3\n\t"
+		"eor.l %%d3,%%d2\n\t"
+		"sub.l %%d3,%%d2\n\t"
+		"or.l %%d2,%%d5\n\t"
+		"muls.l %5,%%d2:%%d1\n\t"
+		"asl.l #2,%%d2\n\t"
+		"move.l %%d2,(%0)\n\t"
+		"addq.l #12,%0\n\t"
+		"move.l %%d2,%%d3\n\t"
+		"asr.l %%d6,%%d3\n\t"
+		"eor.l %%d3,%%d2\n\t"
+		"sub.l %%d3,%%d2\n\t"
+		"or.l %%d2,%%d4\n\t"
+		"dbf %%d7,1b\n\t"
+		"move.l %%d4,%2\n\t"
+		"move.l %%d5,%3"
+		: "+a" (xL), "+a" (xR), "+m" (outL), "+m" (outR)
+		: "m" (fr), "m" (fl), "d" (count)
+		: "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7", "cc", "memory");
+	*mOutL = outL;
+	*mOutR = outR;
+}
+#endif
+
+void IntensityScaleRun1_TEST_ACTIVE(int *xL, int *xR, int fl, int fr,
+	int count, int *mOutL, int *mOutR)
+{
+#if INTENSITYSCALE_HAS_AMIGA_M68K_ASM
+	IntensityScaleRun1_AmigaM68K(xL, xR, fl, fr, count, mOutL, mOutR);
+#else
+	IntensityScaleRun_C_REFERENCE(xL, xR, fl, fr, count, 1, mOutL, mOutR);
+#endif
+}
+
+void IntensityScaleRun3_TEST_ACTIVE(int *xL, int *xR, int fl, int fr,
+	int count, int *mOutL, int *mOutR)
+{
+#if INTENSITYSCALE_HAS_AMIGA_M68K_ASM
+	IntensityScaleRun3_AmigaM68K(xL, xR, fl, fr, count, mOutL, mOutR);
+#else
+	IntensityScaleRun_C_REFERENCE(xL, xR, fl, fr, count, 3, mOutL, mOutR);
+#endif
+}
+
+int IntensityScaleRun_HAS_AMIGA_M68K_ASM_RUNTIME(void)
+{
+	return INTENSITYSCALE_HAS_AMIGA_M68K_ASM;
+}
+
 /**************************************************************************************
  * Function:    MidSideProc
  *
@@ -199,12 +341,10 @@ void IntensityProcMPEG1(int x[MAX_NCHAN][MAX_NSAMP], int nSamps, FrameHeader *fh
 			fr = isfTab[6] - isfTab[isf];
 		}
 
-		n = fh->sfBand->l[cb + 1] - fh->sfBand->l[cb];
-		for (j = 0; j < n && sampsLeft > 0; j++, i++) {
-			xr = MULSHIFT32(fr, x[0][i]) << 2;	x[1][i] = xr; mOutR |= FASTABS(xr);
-			xl = MULSHIFT32(fl, x[0][i]) << 2;	x[0][i] = xl; mOutL |= FASTABS(xl);
-			sampsLeft--;
-		}
+		n = MIN(fh->sfBand->l[cb + 1] - fh->sfBand->l[cb], sampsLeft);
+		IntensityScaleRun1_TEST_ACTIVE(&x[0][i], &x[1][i], fl, fr, n, &mOutL, &mOutR);
+		i += n;
+		sampsLeft -= n;
 	}
 
 	/* short blocks */
@@ -265,7 +405,7 @@ void IntensityProcMPEG2(int x[MAX_NCHAN][MAX_NSAMP], int nSamps, FrameHeader *fh
 						CriticalBandInfo *cbi, ScaleFactorJS *sfjs, int midSideFlag, int mixFlag, int mOut[2])
 {
 	int i, j, k, n, r, cb, w;
-	int fl, fr, mOutL, mOutR, xl, xr;
+	int fl, fr, mOutL, mOutR;
 	int sampsLeft;
 	int isf, sfIdx, tmp, il[23];
 	int *isfTab;
@@ -300,11 +440,8 @@ void IntensityProcMPEG2(int x[MAX_NCHAN][MAX_NSAMP], int nSamps, FrameHeader *fh
 				fr = isfTab[(sfIdx & 0x01 ? 0 : isf)];
 			}
 			n = MIN(fh->sfBand->l[cb + 1] - fh->sfBand->l[cb], sampsLeft);
-
-			for(j = 0; j < n; j++, i++) {
-				xr = MULSHIFT32(fr, x[0][i]) << 2;	x[1][i] = xr;	mOutR |= FASTABS(xr);
-				xl = MULSHIFT32(fl, x[0][i]) << 2;	x[0][i] = xl;	mOutL |= FASTABS(xl);
-			}
+			IntensityScaleRun1_TEST_ACTIVE(&x[0][i], &x[1][i], fl, fr, n, &mOutL, &mOutR);
+			i += n;
 
 			/* early exit once we've used all the non-zero samples */
 			sampsLeft -= n;
@@ -333,10 +470,8 @@ void IntensityProcMPEG2(int x[MAX_NCHAN][MAX_NSAMP], int nSamps, FrameHeader *fh
 				}
 				n = fh->sfBand->s[cb + 1] - fh->sfBand->s[cb];
 
-				for(j = 0; j < n; j++, i+=3) {
-					xr = MULSHIFT32(fr, x[0][i]) << 2;	x[1][i] = xr;	mOutR |= FASTABS(xr);
-					xl = MULSHIFT32(fl, x[0][i]) << 2;	x[0][i] = xl;	mOutL |= FASTABS(xl);
-				}
+				IntensityScaleRun3_TEST_ACTIVE(&x[0][i], &x[1][i], fl, fr, n, &mOutL, &mOutR);
+				i += 3 * n;
 			}
 		}
 	}
