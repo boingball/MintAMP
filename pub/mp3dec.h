@@ -188,6 +188,8 @@ void MP3SetExperimentalReducedTaps(int enabled);
 int MP3ExperimentalReducedTapsEnabled(void);
 void MP3SetExperimentalFDCT32Quarter(int enabled);
 int MP3ExperimentalFDCT32QuarterEnabled(void);
+void MP3SetExperimentalFDCT32Mulsw(int enabled);
+int MP3ExperimentalFDCT32MulswEnabled(void);
 void MP3SetExperimentalHuffman(int enabled);
 int MP3ExperimentalHuffmanEnabled(void);
 void MP3SetOutputMono(HMP3Decoder hMP3Decoder, int enabled);
