@@ -1063,6 +1063,7 @@ if (opt->selftestMulshift ||
     opt->selftestFdct32 ||
     opt->selftestFdct32Half ||
     opt->selftestImdct ||
+    opt->selftestImdctMulsw ||
     opt->selftestImdctThin ||
     opt->selftestSubbandCap ||
     opt->selftestAntialias ||
