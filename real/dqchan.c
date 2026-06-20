@@ -288,23 +288,21 @@ static int DequantBlock_AmigaM68KAsm(int *inbuf, int *outbuf, int num, int scale
 	register const int *tab4Reg __asm__("a2");
 	register int scalefReg __asm__("d5");
 	register int scaleiReg __asm__("d6");
-	register int tab4ShiftReg __asm__("d7");
 
 	tab16 = pow43_14[scale & 0x3];
 	scalef = pow14[scale & 0x3];
 	scalei = MIN(scale >> 2, 31);
 
-	/* Keep the small-coefficient table unshifted for the register-indirect asm path. */
+	/* Cache first 4 values pre-shifted, matching the C reference hot path. */
 	shift = MIN(scalei + 3, 31);
 	shift = MAX(shift, 0);
 	tab4[0] = 0;
-	tab4[1] = tab16[1];
-	tab4[2] = tab16[2];
-	tab4[3] = tab16[3];
+	tab4[1] = tab16[1] >> shift;
+	tab4[2] = tab16[2] >> shift;
+	tab4[3] = tab16[3] >> shift;
 	tab4Reg = tab4;
 	scalefReg = scalef;
 	scaleiReg = scalei;
-	tab4ShiftReg = shift;
 
 	do {
 
@@ -321,13 +319,12 @@ static int DequantBlock_AmigaM68KAsm(int *inbuf, int *outbuf, int num, int scale
 		}
 
 		if (x < 4) {
-			/* 68020+ indexed load, one variable arithmetic shift, and mask update. */
+			/* 68020+ indexed load from the pre-shifted small-coefficient table. */
 			__asm__ volatile (
 				"move.l (%[tab],%[idx].l*4),%[out]\n\t"
-				"asr.l %[sh],%[out]\n\t"
 				"or.l %[out],%[mask]"
 				: [out] "=&d" (y), [mask] "+d" (mask)
-				: [tab] "a" (tab4Reg), [idx] "d" (x), [sh] "d" (tab4ShiftReg)
+				: [tab] "a" (tab4Reg), [idx] "d" (x)
 				: "cc");
 			DequantBlock_AmigaM68K_WriteOutput(&outbuf,
 				DequantBlock_AmigaM68K_ApplySign(y, sx));
