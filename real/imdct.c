@@ -125,18 +125,28 @@ void AntiAlias_C_REFERENCE(int *x, int nBfly)
 }
 
 #if ANTIALIAS_HAS_AMIGA_M68K_ASM
-static __inline void AntiAlias_AmigaM68KBoundary(int *x)
+static void AntiAlias_AmigaM68KAsm(int *x, int nBfly)
 {
+	const int *cBase;
 	const int *c;
 	int *xLo;
 	int *xHi;
+	int outer;
 
-	c = csa[0];
+	if (nBfly <= 0)
+		return;
+
+	cBase = csa[0];
 	xLo = x;
-	xHi = x;
+	outer = nBfly - 1;
 	__asm__ volatile (
-		"moveq #7,%%d7\n"
 		"1:\n\t"
+		/* Advance to the next 18-sample block boundary. */
+		"lea 72(%[xlo]),%[xlo]\n\t"
+		"movea.l %[xlo],%[xhi]\n\t"
+		"movea.l %[cbase],%[c]\n\t"
+		"moveq #7,%%d6\n"
+		"2:\n\t"
 		/* Read a0 = x[-(i+1)] and b0 = x[i]. */
 		"move.l -(%[xlo]),%%d0\n\t"
 		"move.l (%[xhi])+,%%d1\n\t"
@@ -151,27 +161,18 @@ static __inline void AntiAlias_AmigaM68KBoundary(int *x)
 		"move.l %%d1,%%d2\n\t"
 		"muls.l (%[c]),%%d5:%%d2\n\t"
 		"move.l %%d0,%%d4\n\t"
-		"muls.l 4(%[c]),%%d6:%%d4\n\t"
-		"add.l %%d6,%%d5\n\t"
+		"muls.l 4(%[c]),%%d2:%%d4\n\t"
+		"add.l %%d2,%%d5\n\t"
 		"add.l %%d5,%%d5\n\t"
 		/* Store to the locations just read by pre-decrement/post-increment. */
 		"move.l %%d3,(%[xlo])\n\t"
 		"move.l %%d5,-4(%[xhi])\n\t"
 		"addq.l #8,%[c]\n\t"
-		"dbra %%d7,1b"
-		: [c] "+a" (c), [xlo] "+a" (xLo), [xhi] "+a" (xHi)
-		:
-		: "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7", "cc", "memory");
-}
-
-static void AntiAlias_AmigaM68KAsm(int *x, int nBfly)
-{
-	int k;
-
-	for (k = nBfly; k > 0; k--) {
-		x += 18;
-		AntiAlias_AmigaM68KBoundary(x);
-	}
+		"dbra %%d6,2b\n\t"
+		"dbra %[outer],1b"
+		: [outer] "+d" (outer), [xlo] "+a" (xLo), [xhi] "=&a" (xHi), [c] "=&a" (c)
+		: [cbase] "a" (cBase)
+		: "d0", "d1", "d2", "d3", "d4", "d5", "d6", "cc", "memory");
 }
 #endif
 
