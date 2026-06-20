@@ -669,7 +669,7 @@ static void PrintUsage(const char *prog)
 	printf("  --bench      print elapsed decode/write time and realtime ratio\n");
 	printf("  --info       print MP3/ID3 metadata; alone, inspect without decoding\n");
 	printf("  --play       AmigaOS experimental audio.device Paula playback (mono s8)\n");
-	printf("  --stereo     opt-in experimental --play stereo output (s8 per channel)\n");
+	printf("  --stereo     opt-in stereo output for --play or --decode-only benchmarking\n");
 	printf("               stereo rates: 8820, 11025, 22050, or PAL-top 28600 Hz\n");
 	printf("               mono rates: 8287 default, 8820, 11025, 22050, or PAL-top 28600 Hz\n");
 	printf("  --fake-stereo  --play pseudo-stereo width from the mono decode (mono CPU cost)\n");
@@ -1062,8 +1062,8 @@ if (opt->selftestMulshift ||
     opt->selftestFakeStereo)
 		return 0;
 
-	if (opt->stereo && !opt->play) {
-		fprintf(stderr, "--stereo is only supported with --play\n");
+	if (opt->stereo && !opt->play && !opt->decodeOnly) {
+		fprintf(stderr, "--stereo is only supported with --play or --decode-only\n");
 		return -1;
 	}
 	if (opt->fakeStereo && !opt->play) {
@@ -1098,8 +1098,8 @@ if (opt->selftestMulshift ||
 		fprintf(stderr, "--play supports --rate 8287, 8820, 11025, 22050, or 28600 only\n");
 		return -1;
 	}
-	if (opt->stereo && opt->outputRate == 8287) {
-		fprintf(stderr, "--stereo supports --rate 8820, 11025, 22050, or PAL-top 28600 only\n");
+	if (opt->play && opt->stereo && opt->outputRate == 8287) {
+		fprintf(stderr, "--stereo playback supports --rate 8820, 11025, 22050, or PAL-top 28600 only\n");
 		return -1;
 	}
 	if (opt->play) {
@@ -7525,7 +7525,7 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	if (opt.stereo)
+	if (opt.play && opt.stereo)
 		fprintf(stderr, "Stereo playback needs significantly more CPU and may underrun on 030.\n");
 	GuiPublishStartupStage(GUISTART_DECODER_CONFIG);
 	if (opt.play && AmigaPlaybackStopRequested(&opt, "before decoder config")) {
