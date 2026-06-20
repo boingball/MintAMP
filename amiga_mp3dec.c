@@ -121,6 +121,7 @@ static const char amigaStackCookie[] __attribute__((used)) = "$STACK:250000";
 
 void STATNAME(FDCT32)(int *x, int *d, int offset, int oddBlock, int gb);
 void STATNAME(FDCT32_C_REFERENCE)(int *x, int *d, int offset, int oddBlock, int gb);
+void STATNAME(FDCT32_MULSW_C_REFERENCE)(int *x, int *d, int offset, int oddBlock, int gb);
 void STATNAME(FDCT32Half)(int *x, int *d, int offset, int oddBlock, int gb);
 void STATNAME(FDCT32Half_TEST_ACTIVE)(int *x, int *d, int offset, int oddBlock, int gb);
 int STATNAME(FDCT32Half_AMIGA_M68K_ASM_RUNTIME)(void);
@@ -202,6 +203,7 @@ int STATNAME(BitstreamRefillSelftest)(void);
 extern const int STATNAME(polyCoef)[264];
 #define AMIGA_FDCT32 STATNAME(FDCT32)
 #define AMIGA_FDCT32_C_REFERENCE STATNAME(FDCT32_C_REFERENCE)
+#define AMIGA_FDCT32_MULSW_C_REFERENCE STATNAME(FDCT32_MULSW_C_REFERENCE)
 #define AMIGA_FDCT32_HALF STATNAME(FDCT32Half)
 #define AMIGA_FDCT32_HALF_TEST_ACTIVE STATNAME(FDCT32Half_TEST_ACTIVE)
 #define AMIGA_FDCT32_HALF_HAS_ASM STATNAME(FDCT32Half_AMIGA_M68K_ASM_RUNTIME)
@@ -306,6 +308,7 @@ typedef struct DecodeOptions {
 	int selftestFastLowrate;
 	int selftestReducedTaps;
 	int selftestFdct32Quarter;
+	int selftestFdct32Mulsw;
 	int selftestFdct32QuarterStereo;
 	int selftestHuffman;
 	int selftestDequant;
@@ -324,6 +327,7 @@ typedef struct DecodeOptions {
 	int expImdctThin;
 	int expReducedTaps;
 	int expFdct32Quarter;
+	int expFdct32Mulsw;
 	int help;
 	int debugArgv;
 	int debugFastLowrate;
@@ -702,6 +706,7 @@ static void PrintUsage(const char *prog)
 	printf("  --exp-imdct-thin request experimental fast-lowrate IMDCT output thinning\n");
 	printf("  --exp-reduced-taps use experimental reduced-tap fast-lowrate dewindow\n");
 	printf("  --exp-fdct32-quarter use experimental stride-4 quarter-rate FDCT32 approximation\n");
+	printf("  --exp-fdct32-mulsw use experimental 16x16 muls.w FDCT32 approximation\n");
 	printf("  --selftest-mulshift compare C and optional asm MULSHIFT32 helpers\n");
 	printf("  --selftest-clz compare C and optional m68k bfffo CLZ helpers\n");
 	printf("  --selftest-fdct32 compare C reference and optional m68k asm FDCT32 path\n");
@@ -724,6 +729,7 @@ static void PrintUsage(const char *prog)
 	printf("  --selftest-fastlowrate compare synthetic stride decimation paths\n");
 	printf("  --selftest-reduced-taps compare full and reduced stride-4 dewindow paths\n");
 	printf("  --selftest-fdct32-quarter inspect lossy stride-4 quarter-rate FDCT32 scatter\n");
+	printf("  --selftest-fdct32-mulsw compare lossy 16x16 FDCT32 against full FDCT32\n");
 	printf("  --selftest-fdct32-quarter-stereo verify independent stereo stride-4 quarter FDCT32 dispatch\n");
 	printf("  --selftest-huffman compare C and active Huffman pair decode paths\n");
 	printf("  --selftest-dequant compare C and optional m68k asm dequant block paths\n");
@@ -957,6 +963,8 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->selftestReducedTaps = 1;
 		} else if (!strcmp(argv[i], "--selftest-fdct32-quarter")) {
 			opt->selftestFdct32Quarter = 1;
+		} else if (!strcmp(argv[i], "--selftest-fdct32-mulsw")) {
+			opt->selftestFdct32Mulsw = 1;
 		} else if (!strcmp(argv[i], "--selftest-fdct32-quarter-stereo")) {
 			opt->selftestFdct32QuarterStereo = 1;
 		} else if (!strcmp(argv[i], "--selftest-huffman")) {
@@ -990,6 +998,8 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->expReducedTaps = 1;
 		} else if (!strcmp(argv[i], "--exp-fdct32-quarter")) {
 			opt->expFdct32Quarter = 1;
+		} else if (!strcmp(argv[i], "--exp-fdct32-mulsw")) {
+			opt->expFdct32Mulsw = 1;
 		} else if (!strcmp(argv[i], "--quality")) {
 			if (++i >= argc)
 				return -1;
@@ -1053,6 +1063,7 @@ if (opt->selftestMulshift ||
     opt->selftestFastLowrate ||
     opt->selftestReducedTaps ||
     opt->selftestFdct32Quarter ||
+    opt->selftestFdct32Mulsw ||
     opt->selftestFdct32QuarterStereo ||
     opt->selftestHuffman ||
     opt->selftestDequant ||
@@ -2620,6 +2631,84 @@ static int SelftestFdct32(void)
 	return failures ? 1 : 0;
 }
 
+
+
+static double SqrtApprox(double x);
+
+static int SelftestFdct32Mulsw(void)
+{
+#if !defined(AMIGA_FDCT32_MULSW)
+	printf("FDCT32Mulsw compile flag: no\n");
+	printf("FDCT32Mulsw selftest not run: AMIGA_FDCT32_MULSW is not compiled in this build\n");
+	printf("FDCT32Mulsw selftest PASS (unavailable in this build)\n");
+	return 0;
+#else
+	static int refBuf[32], mulBuf[32], refDest[4096], mulDest[4096];
+	unsigned long i, seed, failures, writes, samples;
+	double squares, refSquares;
+	int j;
+	int refMin, refMax, mulMin, mulMax;
+
+	failures = 0;
+	writes = 0;
+	samples = 0;
+	squares = 0.0;
+	refSquares = 0.0;
+	refMin = refMax = mulMin = mulMax = 0;
+	seed = 0x6d756c73UL;
+	for (i = 0; i < 4096UL; i++) {
+		int offset, oddBlock, gb;
+		seed = seed * 1664525UL + 1013904223UL;
+		offset = (int)(seed & 7);
+		oddBlock = (int)((seed >> 3) & 1);
+		gb = (int)((seed >> 4) % 8);
+		for (j = 0; j < 32; j++) {
+			seed = seed * 1664525UL + 1013904223UL;
+			refBuf[j] = ((int)seed) >> 8;
+			mulBuf[j] = refBuf[j];
+		}
+		for (j = 0; j < 4096; j++) {
+			refDest[j] = (int)(0x55aa0000UL ^ (unsigned long)j);
+			mulDest[j] = refDest[j];
+		}
+		AMIGA_FDCT32_C_REFERENCE(refBuf, refDest, offset, oddBlock, gb);
+		AMIGA_FDCT32_MULSW_C_REFERENCE(mulBuf, mulDest, offset, oddBlock, gb);
+		for (j = 0; j < 4096; j++) {
+			int sentinel = (int)(0x55aa0000UL ^ (unsigned long)j);
+			if ((refDest[j] == sentinel) != (mulDest[j] == sentinel))
+				failures++;
+			if (refDest[j] != sentinel) {
+				double d = (double)refDest[j] - (double)mulDest[j];
+				squares += d * d;
+				refSquares += (double)refDest[j] * (double)refDest[j];
+				if (writes == 0 || refDest[j] < refMin) refMin = refDest[j];
+				if (writes == 0 || refDest[j] > refMax) refMax = refDest[j];
+				if (writes == 0 || mulDest[j] < mulMin) mulMin = mulDest[j];
+				if (writes == 0 || mulDest[j] > mulMax) mulMax = mulDest[j];
+				samples++;
+				writes++;
+			}
+		}
+	}
+	printf("FDCT32Mulsw compile flag: yes\n");
+	printf("FDCT32Mulsw selftest cases: %lu\n", i);
+	printf("FDCT32Mulsw output-structure mismatches: %lu\n", failures);
+	printf("FDCT32Mulsw written outputs compared: %lu\n", writes);
+	printf("FDCT32Mulsw FDCT32 output range: min=%ld max=%ld\n",
+		(long)refMin, (long)refMax);
+	printf("FDCT32Mulsw muls.w output range: min=%ld max=%ld\n",
+		(long)mulMin, (long)mulMax);
+	printf("FDCT32Mulsw magnitude ratio muls.w/full: %.6f\n",
+		(double)((mulMax > -mulMin) ? mulMax : -mulMin) /
+		(double)(((refMax > -refMin) ? refMax : -refMin) ? ((refMax > -refMin) ? refMax : -refMin) : 1));
+	printf("FDCT32Mulsw signal RMS: %.2f counts\n",
+		SqrtApprox(refSquares / (samples ? (double)samples : 1.0)));
+	printf("FDCT32Mulsw RMS difference vs FDCT32: %.2f counts\n",
+		SqrtApprox(squares / (samples ? (double)samples : 1.0)));
+	printf("FDCT32Mulsw selftest %s (lossy approximation)\n", failures ? "FAIL" : "PASS");
+	return failures ? 1 : 0;
+#endif
+}
 
 static int SelftestFdct32Half(void)
 {
@@ -7233,6 +7322,11 @@ int main(int argc, char **argv)
 		AmigaFreeNormalizedArgs(&normalized);
 		return selftestErr;
 	}
+	if (opt.selftestFdct32Mulsw) {
+		int selftestErr = SelftestFdct32Mulsw();
+		AmigaFreeNormalizedArgs(&normalized);
+		return selftestErr;
+	}
 	if (opt.selftestFdct32Half) {
 		int selftestErr;
 		gSelftestVerbose = opt.selftestVerbose || opt.selftestFdct32HalfDebug;
@@ -7560,6 +7654,14 @@ int main(int argc, char **argv)
 	MP3SetExperimentalReducedTaps(opt.expReducedTaps);
 	MP3SetExperimentalFDCT32Quarter(opt.expFdct32Quarter ||
 		(opt.superfastLowrate && opt.outputRate == 11025));
+	MP3SetExperimentalFDCT32Mulsw(opt.expFdct32Mulsw);
+	if (opt.expFdct32Mulsw) {
+#if defined(AMIGA_FDCT32_MULSW)
+		fprintf(stderr, "warning: --exp-fdct32-mulsw enables lossy 16x16 muls.w FDCT32 synthesis\n");
+#else
+		fprintf(stderr, "warning: --exp-fdct32-mulsw requested, but this build lacks AMIGA_FDCT32_MULSW\n");
+#endif
+	}
 	if (opt.fastLowrate) {
 		int stride = FastLowrateStrideForOutputRate(opt.outputRate);
 		if (opt.expReducedTaps && stride != 2 && stride != 4)
@@ -7677,7 +7779,8 @@ int main(int argc, char **argv)
 				MP3GetFastLowrateActiveSubbands(decoder), 32,
 				(MP3GetFastLowrateStride(decoder) == 4 &&
 				 MP3ExperimentalFDCT32QuarterEnabled()) ?
-					"FDCT32Quarter" : "FDCT32 full-rate");
+					"FDCT32Quarter" : (MP3ExperimentalFDCT32MulswEnabled() ?
+					"FDCT32Mulsw" : "FDCT32 full-rate"));
 		else
 			printf("fast-lowrate stride: %d (fast-lowrate: IMDCT/DCT32 full-rate)\n",
 				MP3GetFastLowrateStride(decoder));
@@ -7967,7 +8070,8 @@ int main(int argc, char **argv)
 				MP3GetFastLowrateActiveSubbands(decoder), 32,
 				(MP3GetFastLowrateStride(decoder) == 4 &&
 				 MP3ExperimentalFDCT32QuarterEnabled()) ?
-					"FDCT32Quarter" : "FDCT32 full-rate");
+					"FDCT32Quarter" : (MP3ExperimentalFDCT32MulswEnabled() ?
+					"FDCT32Mulsw" : "FDCT32 full-rate"));
 		else
 			printf("fast-lowrate stride: %d (fast-lowrate: IMDCT/DCT32 full-rate)\n",
 				MP3GetFastLowrateStride(decoder));
@@ -8049,8 +8153,9 @@ int main(int argc, char **argv)
 						FastLowrateStrideForOutputRate(opt.outputRate) == 2 ? 16 :
 						(FastLowrateStrideForOutputRate(opt.outputRate) == 4 ? 8 : 32),
 						FastLowrateStrideForOutputRate(opt.outputRate) == 4 && opt.superfastLowrate ?
-						"FDCT32Quarter" : (FastLowrateStrideForOutputRate(opt.outputRate) == 2 ?
-						"FDCT32Half" : "FDCT32"));
+						"FDCT32Quarter" : (MP3ExperimentalFDCT32MulswEnabled() ?
+						"FDCT32Mulsw" : (FastLowrateStrideForOutputRate(opt.outputRate) == 2 ?
+						"FDCT32Half" : "FDCT32")));
 			}
 		}
 		printf("timing frame decode: %.3f s\n", ClocksToSeconds(timing.frameDecode));

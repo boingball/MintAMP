@@ -103,6 +103,58 @@ static const int dcttab[48] = {
 	-COS2_1, -COS2_2, COS3_1, 	/* 31, 31, 30 */
 };
 
+#if defined(AMIGA_FDCT32_MULSW)
+/* Experimental FDCT32 16x16 proof-of-concept coefficients.  The original
+ * dcttab entries deliberately use mixed Q31..Q27 scales.  This table preserves
+ * that per-coefficient scale by keeping the signed high 16 bits of each 32-bit
+ * coefficient (coef16 = coef32 >> 16), instead of rescaling all coefficients to
+ * one uniform Q format.
+ *
+ * The multiply helper reduces the data operand the same way (data16 = x >> 16)
+ * and performs a true 16x16 multiply:
+ *
+ *     data16 * coef16 ~= (x >> 16) * (coef32 >> 16)
+ *                     ~= (x * coef32) >> 32
+ *
+ * That lands in the same scale as the existing MULSHIFT32/high-word result, so
+ * the caller's existing per-coefficient left shifts continue to compensate the
+ * mixed Q31..Q27 coefficients.  The only intended loss is the discarded low 16
+ * bits of both operands.
+ */
+static const short dcttab16[48] = {
+	16403, 20869, 16463,
+	16563, 27915, 17121,
+	16890, 16857, 18577,
+	17401, 24316, 21195,
+	18124, 19160, 25826,
+	19101, 31869, 17378,
+	20398, 27503, 28220,
+	22112, 24396, 20894,
+	16704, 20995, 17733,
+	19704, 29490, 21406,
+	-16705, -20996, 17733,
+	-19705, -29491, 21406,
+	16704, 20995, 17733,
+	19704, 29490, 21406,
+	-16705, -20996, 17733,
+	-19705, -29491, 21406
+};
+static const short dct4_16 = 23170;
+
+static __inline int FDCT32_MULSW_SHIFT32(int coef, int x)
+{
+	short sx = (short)(x >> 16);
+	short cy = (short)coef;
+	int acc;
+#if defined(AMIGA_M68K) && defined(__GNUC__) && (defined(__mc68020__) || defined(__mc68030__) || defined(__mc68040__) || defined(__mc68060__) || defined(mc68020))
+	acc = sx;
+	__asm__ volatile ("muls.w %1,%0" : "+d" (acc) : "dmi" (cy));
+#else
+	acc = (int)sx * (int)cy;
+#endif
+	return acc;
+}
+#endif
 
 #if defined(AMIGA_M68K) && defined(AMIGA_M68K_ASM_FDCT32) && defined(__GNUC__) && \
 	(defined(__mc68020__) || defined(__mc68030__) || defined(__mc68040__) || \
@@ -561,6 +613,160 @@ void FDCT32_C_REFERENCE(int *buf, int *dest, int offset, int oddBlock, int gb)
 	}
 }
 
+#if defined(AMIGA_FDCT32_MULSW)
+#define D32FP_MULSW(i, s0, s1, s2) { \
+    a0 = buf[i];			a3 = buf[31-i]; \
+	a1 = buf[15-i];			a2 = buf[16+i]; \
+    b0 = a0 + a3;			b3 = FDCT32_MULSW_SHIFT32(*cptr++, a0 - a3) << (s0);	\
+	b1 = a1 + a2;			b2 = FDCT32_MULSW_SHIFT32(*cptr++, a1 - a2) << (s1);	\
+	buf[i] = b0 + b1;		buf[15-i] = FDCT32_MULSW_SHIFT32(*cptr,   b0 - b1) << (s2); \
+	buf[16+i] = b2 + b3;    buf[31-i] = FDCT32_MULSW_SHIFT32(*cptr++, b3 - b2) << (s2); \
+}
+void FDCT32_MULSW_C_REFERENCE(int *buf, int *dest, int offset, int oddBlock, int gb)
+{
+    int i, s, tmp, es, oddBase, evenBase, delayOff, clipBits;
+    const short *cptr = dcttab16;
+    int a0, a1, a2, a3, a4, a5, a6, a7;
+    int b0, b1, b2, b3, b4, b5, b6, b7;
+	int *d;
+
+	/* scaling - ensure at least 6 guard bits for DCT
+	 * (in practice this is already true 99% of time, so this code is
+	 *  almost never triggered)
+	 */
+	es = 0;
+	if (gb < 6) {
+		es = 6 - gb;
+		for (i = 0; i < 32; i++)
+			buf[i] >>= es;
+	}
+
+	/* first pass */
+	D32FP_MULSW(0, 1, 5, 1);
+	D32FP_MULSW(1, 1, 3, 1);
+	D32FP_MULSW(2, 1, 3, 1);
+	D32FP_MULSW(3, 1, 2, 1);
+	D32FP_MULSW(4, 1, 2, 1);
+	D32FP_MULSW(5, 1, 1, 2);
+	D32FP_MULSW(6, 1, 1, 2);
+	D32FP_MULSW(7, 1, 1, 4);
+
+	/* second pass */
+	for (i = 4; i > 0; i--) {
+		a0 = buf[0]; 	    a7 = buf[7];		a3 = buf[3];	    a4 = buf[4];
+		b0 = a0 + a7;	    b7 = FDCT32_MULSW_SHIFT32(*cptr++, a0 - a7) << 1;
+		b3 = a3 + a4;	    b4 = FDCT32_MULSW_SHIFT32(*cptr++, a3 - a4) << 3;
+		a0 = b0 + b3;	    a3 = FDCT32_MULSW_SHIFT32(*cptr,   b0 - b3) << 1;
+		a4 = b4 + b7;		a7 = FDCT32_MULSW_SHIFT32(*cptr++, b7 - b4) << 1;
+
+		a1 = buf[1];	    a6 = buf[6];	    a2 = buf[2];	    a5 = buf[5];
+		b1 = a1 + a6;	    b6 = FDCT32_MULSW_SHIFT32(*cptr++, a1 - a6) << 1;
+		b2 = a2 + a5;	    b5 = FDCT32_MULSW_SHIFT32(*cptr++, a2 - a5) << 1;
+		a1 = b1 + b2;		a2 = FDCT32_MULSW_SHIFT32(*cptr,   b1 - b2) << 2;
+		a5 = b5 + b6;	    a6 = FDCT32_MULSW_SHIFT32(*cptr++, b6 - b5) << 2;
+
+		b0 = a0 + a1;	    b1 = FDCT32_MULSW_SHIFT32(dct4_16, a0 - a1) << 1;
+		b2 = a2 + a3;	    b3 = FDCT32_MULSW_SHIFT32(dct4_16, a3 - a2) << 1;
+		buf[0] = b0;	    buf[1] = b1;
+		buf[2] = b2 + b3;	buf[3] = b3;
+
+		b4 = a4 + a5;	    b5 = FDCT32_MULSW_SHIFT32(dct4_16, a4 - a5) << 1;
+		b6 = a6 + a7;	    b7 = FDCT32_MULSW_SHIFT32(dct4_16, a7 - a6) << 1;
+		b6 += b7;
+		buf[4] = b4 + b6;	buf[5] = b5 + b7;
+		buf[6] = b5 + b6;	buf[7] = b7;
+
+		buf += 8;
+	}
+	buf -= 32;	/* reset */
+
+	oddBase = oddBlock ? VBUF_LENGTH : 0;
+	evenBase = oddBlock ? 0 : VBUF_LENGTH;
+	delayOff = (offset - oddBlock) & 7;
+
+	/* sample 0 - always delayed one block */
+	d = dest + 64*16 + delayOff + evenBase;
+	s = buf[ 0];				d[0] = d[8] = s;
+
+	/* samples 16 to 31 */
+	d = dest + offset + oddBase;
+
+	s = buf[ 1];				d[0] = d[8] = s;	d += 64;
+
+	tmp = buf[25] + buf[29];
+	s = buf[17] + tmp;			d[0] = d[8] = s;	d += 64;
+	s = buf[ 9] + buf[13];		d[0] = d[8] = s;	d += 64;
+	s = buf[21] + tmp;			d[0] = d[8] = s;	d += 64;
+
+	tmp = buf[29] + buf[27];
+	s = buf[ 5];				d[0] = d[8] = s;	d += 64;
+	s = buf[21] + tmp;			d[0] = d[8] = s;	d += 64;
+	s = buf[13] + buf[11];		d[0] = d[8] = s;	d += 64;
+	s = buf[19] + tmp;			d[0] = d[8] = s;	d += 64;
+
+	tmp = buf[27] + buf[31];
+	s = buf[ 3];				d[0] = d[8] = s;	d += 64;
+	s = buf[19] + tmp;			d[0] = d[8] = s;	d += 64;
+	s = buf[11] + buf[15];		d[0] = d[8] = s;	d += 64;
+	s = buf[23] + tmp;			d[0] = d[8] = s;	d += 64;
+
+	tmp = buf[31];
+	s = buf[ 7];				d[0] = d[8] = s;	d += 64;
+	s = buf[23] + tmp;			d[0] = d[8] = s;	d += 64;
+	s = buf[15];				d[0] = d[8] = s;	d += 64;
+	s = tmp;					d[0] = d[8] = s;
+
+	/* samples 16 to 1 (sample 16 used again) */
+	d = dest + 16 + delayOff + evenBase;
+
+	s = buf[ 1];				d[0] = d[8] = s;	d += 64;
+
+	tmp = buf[30] + buf[25];
+	s = buf[17] + tmp;			d[0] = d[8] = s;	d += 64;
+	s = buf[14] + buf[ 9];		d[0] = d[8] = s;	d += 64;
+	s = buf[22] + tmp;			d[0] = d[8] = s;	d += 64;
+	s = buf[ 6];				d[0] = d[8] = s;	d += 64;
+
+	tmp = buf[26] + buf[30];
+	s = buf[22] + tmp;			d[0] = d[8] = s;	d += 64;
+	s = buf[10] + buf[14];		d[0] = d[8] = s;	d += 64;
+	s = buf[18] + tmp;			d[0] = d[8] = s;	d += 64;
+	s = buf[ 2];				d[0] = d[8] = s;	d += 64;
+
+	tmp = buf[28] + buf[26];
+	s = buf[18] + tmp;			d[0] = d[8] = s;	d += 64;
+	s = buf[12] + buf[10];		d[0] = d[8] = s;	d += 64;
+	s = buf[20] + tmp;			d[0] = d[8] = s;	d += 64;
+	s = buf[ 4];				d[0] = d[8] = s;	d += 64;
+
+	tmp = buf[24] + buf[28];
+	s = buf[20] + tmp;			d[0] = d[8] = s;	d += 64;
+	s = buf[ 8] + buf[12];		d[0] = d[8] = s;	d += 64;
+	s = buf[16] + tmp;			d[0] = d[8] = s;
+
+	/* this is so rarely invoked that it's not worth making two versions of the output
+	 *   shuffle code (one for no shift, one for clip + variable shift) like in IMDCT
+	 * here we just load, clip, shift, and store on the rare instances that es != 0
+	 */
+	if (es) {
+		clipBits = 31 - es;
+		d = dest + 64*16 + delayOff + evenBase;
+		s = d[0];	CLIP_2N(s, clipBits);	d[0] = d[8] = (s << es);
+
+		d = dest + offset + oddBase;
+		for (i = 16; i <= 31; i++) {
+			s = d[0];	CLIP_2N(s, clipBits);	d[0] = d[8] = (s << es);	d += 64;
+		}
+
+		d = dest + 16 + delayOff + evenBase;
+		for (i = 15; i >= 0; i--) {
+			s = d[0];	CLIP_2N(s, clipBits);	d[0] = d[8] = (s << es);	d += 64;
+		}
+	}
+}
+#undef D32FP_MULSW
+#endif
+
 /**************************************************************************************
  * Function:    FDCT32Half
  *
@@ -985,6 +1191,12 @@ int FDCT32_HAS_AMIGA_M68K_ASM_RUNTIME(void)
 
 void FDCT32(int *buf, int *dest, int offset, int oddBlock, int gb)
 {
+#if defined(AMIGA_FDCT32_MULSW)
+	if (MP3ExperimentalFDCT32MulswEnabled()) {
+		FDCT32_MULSW_C_REFERENCE(buf, dest, offset, oddBlock, gb);
+		return;
+	}
+#endif
 #if FDCT32_HAS_AMIGA_M68K_ASM
 	FDCT32_AMIGA_M68K_ASM(buf, dest, offset, oddBlock, gb);
 #else
