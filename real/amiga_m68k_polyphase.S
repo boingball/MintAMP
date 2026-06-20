@@ -13,6 +13,7 @@
 	.globl	AmigaM68KPolyphaseMonoFastStride2Reduced
 	.globl	MonoFastPolyphaseStride4_Amiga_m68k
 	.globl	StereoFastPolyphaseStride2Phase0_Amiga_m68k
+	.globl	StereoFastPolyphaseStride2Phase0Reduced_Amiga_m68k
 	.globl	StereoFastPolyphaseStride4Half_Amiga_m68k
 	.globl	StereoFastPolyphaseStride4Phase0_Amiga_m68k
 	.globl	StereoFastPolyphaseStride4Phase1_Amiga_m68k
@@ -495,6 +496,67 @@ MonoFastPolyphaseStride4_Amiga_m68k:
 .endm
 
 
+.macro STEREO_SAMPLE0_R4 poff
+	clr.l	%d3
+	clr.l	%d5
+	STEREO_PROD_ADD 8,16,%d3,%d5
+	STEREO_PROD_SUB 84,20,%d3,%d5
+	STEREO_PROD_ADD 12,24,%d3,%d5
+	STEREO_PROD_SUB 80,28,%d3,%d5
+	STEREO_PROD_ADD 16,32,%d3,%d5
+	STEREO_PROD_SUB 76,36,%d3,%d5
+	STEREO_PROD_ADD 20,40,%d3,%d5
+	STEREO_PROD_SUB 72,44,%d3,%d5
+	CLIP_STORE %d3,\poff
+	CLIP_STORE %d5,\poff+2
+.endm
+
+.macro STEREO_SAMPLE16_R4 poff
+	clr.l	%d3
+	clr.l	%d5
+	STEREO_PROD_ADD 4104,1032,%d3,%d5
+	STEREO_PROD_ADD 4108,1036,%d3,%d5
+	STEREO_PROD_ADD 4112,1040,%d3,%d5
+	STEREO_PROD_ADD 4116,1044,%d3,%d5
+	CLIP_STORE %d3,\poff
+	CLIP_STORE %d5,\poff+2
+.endm
+
+.macro STEREO_PAIR_LO_R4 pair, poff
+	.set VB, (\pair * 256)
+	.set CF, (\pair * 64)
+	clr.l	%d3
+	clr.l	%d5
+	STEREO_PROD_ADD VB+8,CF+16,%d3,%d5
+	STEREO_PROD_SUB VB+84,CF+20,%d3,%d5
+	STEREO_PROD_ADD VB+12,CF+24,%d3,%d5
+	STEREO_PROD_SUB VB+80,CF+28,%d3,%d5
+	STEREO_PROD_ADD VB+16,CF+32,%d3,%d5
+	STEREO_PROD_SUB VB+76,CF+36,%d3,%d5
+	STEREO_PROD_ADD VB+20,CF+40,%d3,%d5
+	STEREO_PROD_SUB VB+72,CF+44,%d3,%d5
+	CLIP_STORE %d3,\poff
+	CLIP_STORE %d5,\poff+2
+.endm
+
+.macro STEREO_PAIR_HI_R4 pair, poff
+	.set VB, (\pair * 256)
+	.set CF, (\pair * 64)
+	clr.l	%d3
+	clr.l	%d5
+	STEREO_PROD_ADD VB+8,CF+20,%d3,%d5
+	STEREO_PROD_ADD VB+84,CF+16,%d3,%d5
+	STEREO_PROD_ADD VB+12,CF+28,%d3,%d5
+	STEREO_PROD_ADD VB+80,CF+24,%d3,%d5
+	STEREO_PROD_ADD VB+16,CF+36,%d3,%d5
+	STEREO_PROD_ADD VB+76,CF+32,%d3,%d5
+	STEREO_PROD_ADD VB+20,CF+44,%d3,%d5
+	STEREO_PROD_ADD VB+72,CF+40,%d3,%d5
+	CLIP_STORE %d3,\poff
+	CLIP_STORE %d5,\poff+2
+.endm
+
+
 /* void StereoFastPolyphaseStride2Phase0_Amiga_m68k(short *pcm, int *vbuf, const int *coefBase)
  * Caller contract: stride-2 low-rate synthesis never advances away from phase 0
  * because 32 %% 2 == 0.  This single phase emits logical sample rows
@@ -523,6 +585,37 @@ StereoFastPolyphaseStride2Phase0_Amiga_m68k:
 	STEREO_PAIR_HI 6,52
 	STEREO_PAIR_HI 4,56
 	STEREO_PAIR_HI 2,60
+
+	movem.l	(%sp)+,%d2-%d7/%a2-%a6
+	rts
+
+
+/* void StereoFastPolyphaseStride2Phase0Reduced_Amiga_m68k(short *pcm, int *vbuf, const int *coefBase)
+ * Emits the same 16 interleaved stride-2 stereo pairs as the full stride-2
+ * kernel, but keeps only the middle four paired taps used by the reduced C path.
+ */
+StereoFastPolyphaseStride2Phase0Reduced_Amiga_m68k:
+	movem.l	%d2-%d7/%a2-%a6,-(%sp)
+	move.l	48(%sp),%a0		| pcm
+	move.l	52(%sp),%a1		| vbuf
+	move.l	56(%sp),%a2		| coefBase
+
+	STEREO_SAMPLE0_R4 0
+	STEREO_PAIR_LO_R4 2,4
+	STEREO_PAIR_LO_R4 4,8
+	STEREO_PAIR_LO_R4 6,12
+	STEREO_PAIR_LO_R4 8,16
+	STEREO_PAIR_LO_R4 10,20
+	STEREO_PAIR_LO_R4 12,24
+	STEREO_PAIR_LO_R4 14,28
+	STEREO_SAMPLE16_R4 32
+	STEREO_PAIR_HI_R4 14,36
+	STEREO_PAIR_HI_R4 12,40
+	STEREO_PAIR_HI_R4 10,44
+	STEREO_PAIR_HI_R4 8,48
+	STEREO_PAIR_HI_R4 6,52
+	STEREO_PAIR_HI_R4 4,56
+	STEREO_PAIR_HI_R4 2,60
 
 	movem.l	(%sp)+,%d2-%d7/%a2-%a6
 	rts

@@ -114,7 +114,9 @@
 #define PolyphaseMonoFastLowrateStride4_HAS_AMIGA_M68K_ASM_RUNTIME STATNAME(PolyphaseMonoFastLowrateStride4_HAS_AMIGA_M68K_ASM_RUNTIME)
 #define PolyphaseStereoFastLowrateStride2_C_REFERENCE STATNAME(PolyphaseStereoFastLowrateStride2_C_REFERENCE)
 #define PolyphaseStereoFastLowrateStride2_TEST_ACTIVE STATNAME(PolyphaseStereoFastLowrateStride2_TEST_ACTIVE)
+#define PolyphaseStereoFastLowrateStride2Reduced_C_REFERENCE STATNAME(PolyphaseStereoFastLowrateStride2Reduced_C_REFERENCE)
 #define PolyphaseStereoFastLowrateStride2Reduced_TEST_ACTIVE STATNAME(PolyphaseStereoFastLowrateStride2Reduced_TEST_ACTIVE)
+#define PolyphaseStereoFastLowrateStride2Reduced_HAS_AMIGA_M68K_ASM_RUNTIME STATNAME(PolyphaseStereoFastLowrateStride2Reduced_HAS_AMIGA_M68K_ASM_RUNTIME)
 #define PolyphaseMonoFastLowrateStride2Reduced_C_REFERENCE STATNAME(PolyphaseMonoFastLowrateStride2Reduced_C_REFERENCE)
 #define PolyphaseMonoFastLowrateStride2Reduced_TEST_ACTIVE STATNAME(PolyphaseMonoFastLowrateStride2Reduced_TEST_ACTIVE)
 #define PolyphaseMonoFastLowrateStride2Reduced_HAS_AMIGA_M68K_ASM_RUNTIME STATNAME(PolyphaseMonoFastLowrateStride2Reduced_HAS_AMIGA_M68K_ASM_RUNTIME)
@@ -131,6 +133,7 @@
 #define AmigaM68KPolyphaseMonoFastStride2_IsActive STATNAME(AmigaM68KPolyphaseMonoFastStride2_IsActive)
 #define AmigaM68KPolyphaseMonoFastStride2Reduced_IsActive STATNAME(AmigaM68KPolyphaseMonoFastStride2Reduced_IsActive)
 #define MonoFastPolyphaseStride4_Amiga_m68k_IsActive STATNAME(MonoFastPolyphaseStride4_Amiga_m68k_IsActive)
+#define StereoFastPolyphaseStride2Phase0Reduced_Amiga_m68k_IsActive STATNAME(StereoFastPolyphaseStride2Phase0Reduced_Amiga_m68k_IsActive)
 #define FDCT32				STATNAME(FDCT32)
 #define FDCT32Half			STATNAME(FDCT32Half)
 #define FDCT32Quarter			STATNAME(FDCT32Quarter)
@@ -365,7 +368,9 @@ int PolyphaseMonoFastLowrateStride4_TEST_ACTIVE(short *pcm, int *vbuf, const int
 int PolyphaseMonoFastLowrateStride4_HAS_AMIGA_M68K_ASM_RUNTIME(void);
 int PolyphaseStereoFastLowrateStride2_C_REFERENCE(short *pcm, int *vbuf, const int *coefBase);
 int PolyphaseStereoFastLowrateStride2_TEST_ACTIVE(short *pcm, int *vbuf, const int *coefBase);
+int PolyphaseStereoFastLowrateStride2Reduced_C_REFERENCE(short *pcm, int *vbuf, const int *coefBase);
 int PolyphaseStereoFastLowrateStride2Reduced_TEST_ACTIVE(short *pcm, int *vbuf, const int *coefBase);
+int PolyphaseStereoFastLowrateStride2Reduced_HAS_AMIGA_M68K_ASM_RUNTIME(void);
 int PolyphaseMonoFastLowrateStride2Reduced_C_REFERENCE(short *pcm, int *vbuf, const int *coefBase);
 int PolyphaseMonoFastLowrateStride2Reduced_TEST_ACTIVE(short *pcm, int *vbuf, const int *coefBase);
 int PolyphaseMonoFastLowrateStride2Reduced_HAS_AMIGA_M68K_ASM_RUNTIME(void);
@@ -393,6 +398,7 @@ int AmigaM68KPolyphaseMonoFast_IsActive(void);
 int AmigaM68KPolyphaseMonoFastStride2_IsActive(void);
 int AmigaM68KPolyphaseMonoFastStride2Reduced_IsActive(void);
 int MonoFastPolyphaseStride4_Amiga_m68k_IsActive(void);
+int StereoFastPolyphaseStride2Phase0Reduced_Amiga_m68k_IsActive(void);
 
 /* hufftabs.c */
 extern const HuffTabLookup huffTabLookup[HUFF_PAIRTABS];
