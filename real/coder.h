@@ -101,6 +101,10 @@
 #define	MidSideProc			STATNAME(MidSideProc)
 #define	IntensityProcMPEG1	STATNAME(IntensityProcMPEG1)
 #define	IntensityProcMPEG2	STATNAME(IntensityProcMPEG2)
+#define IntensityScaleRun_C_REFERENCE STATNAME(IntensityScaleRun_C_REFERENCE)
+#define IntensityScaleRun1_TEST_ACTIVE STATNAME(IntensityScaleRun1_TEST_ACTIVE)
+#define IntensityScaleRun3_TEST_ACTIVE STATNAME(IntensityScaleRun3_TEST_ACTIVE)
+#define IntensityScaleRun_HAS_AMIGA_M68K_ASM_RUNTIME STATNAME(IntensityScaleRun_HAS_AMIGA_M68K_ASM_RUNTIME)
 #define PolyphaseMono		STATNAME(PolyphaseMono)
 #define PolyphaseStereo		STATNAME(PolyphaseStereo)
 #define PolyphaseMonoFast_C_REFERENCE STATNAME(PolyphaseMonoFast_C_REFERENCE)
@@ -330,6 +334,13 @@ void IntensityProcMPEG1(int x[MAX_NCHAN][MAX_NSAMP], int nSamps, FrameHeader *fh
 						CriticalBandInfo *cbi, int midSideFlag, int mixFlag, int mOut[2]);
 void IntensityProcMPEG2(int x[MAX_NCHAN][MAX_NSAMP], int nSamps, FrameHeader *fh, ScaleFactorInfoSub *sfis, 
 						CriticalBandInfo *cbi, ScaleFactorJS *sfjs, int midSideFlag, int mixFlag, int mOut[2]);
+void IntensityScaleRun_C_REFERENCE(int *xL, int *xR, int fl, int fr,
+	int count, int stride, int *mOutL, int *mOutR);
+void IntensityScaleRun1_TEST_ACTIVE(int *xL, int *xR, int fl, int fr,
+	int count, int *mOutL, int *mOutR);
+void IntensityScaleRun3_TEST_ACTIVE(int *xL, int *xR, int fl, int fr,
+	int count, int *mOutL, int *mOutR);
+int IntensityScaleRun_HAS_AMIGA_M68K_ASM_RUNTIME(void);
 
 /* dct32.c */
 // about 1 ms faster in RAM, but very large

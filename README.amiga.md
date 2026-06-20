@@ -39,7 +39,7 @@ m68k-amigaos-gcc -m68030 -std=gnu89 -O3 -fomit-frame-pointer \
   -DAMIGA_M68K -DAMIGA_M68K_ASM -DAMIGA_M68K_ASM_FDCT32 \
   -DAMIGA_FAST_POLYPHASE -DAMIGA_M68K_ASM_POLYPHASE \
   -DAMIGA_M68K_ASM_IMDCT -DAMIGA_M68K_ASM_MIDSIDE \
-  -DAMIGA_M68K_ASM_HUFFMAN \
+  -DAMIGA_M68K_ASM_INTENSITY -DAMIGA_M68K_ASM_HUFFMAN \
   -o amiga_mp3dec.fastexp amiga_mp3dec.c mp3dec.c mp3tabs.c real/*.c \
   real/amiga_m68k_polyphase.S
 python3 tools/amiga_fast_preferred_hunks.py amiga_mp3dec.fastexp
