@@ -1102,11 +1102,75 @@ static int PolyphaseMonoFastLowrateCompact(short *pcm, int *vbuf,
 	return count;
 }
 
+static int PolyphaseMonoFastLowrateStride2(short *pcm, int *vbuf,
+	const int *coefBase)
+{
+	pcm[0] = PolyphaseMonoFastSample0(vbuf, coefBase);
+	pcm[1] = PolyphaseMonoFastSampleLo(2, vbuf, coefBase);
+	pcm[2] = PolyphaseMonoFastSampleLo(4, vbuf, coefBase);
+	pcm[3] = PolyphaseMonoFastSampleLo(6, vbuf, coefBase);
+	pcm[4] = PolyphaseMonoFastSampleLo(8, vbuf, coefBase);
+	pcm[5] = PolyphaseMonoFastSampleLo(10, vbuf, coefBase);
+	pcm[6] = PolyphaseMonoFastSampleLo(12, vbuf, coefBase);
+	pcm[7] = PolyphaseMonoFastSampleLo(14, vbuf, coefBase);
+	pcm[8] = PolyphaseMonoFastSample16(vbuf, coefBase);
+	pcm[9] = PolyphaseMonoFastSampleHi(14, vbuf, coefBase);
+	pcm[10] = PolyphaseMonoFastSampleHi(12, vbuf, coefBase);
+	pcm[11] = PolyphaseMonoFastSampleHi(10, vbuf, coefBase);
+	pcm[12] = PolyphaseMonoFastSampleHi(8, vbuf, coefBase);
+	pcm[13] = PolyphaseMonoFastSampleHi(6, vbuf, coefBase);
+	pcm[14] = PolyphaseMonoFastSampleHi(4, vbuf, coefBase);
+	pcm[15] = PolyphaseMonoFastSampleHi(2, vbuf, coefBase);
+	return 16;
+}
+
 static int PolyphaseMonoFastLowrateStride4(short *pcm, int *vbuf,
 	const int *coefBase, int phase)
 {
-	return PolyphaseMonoFastLowrateCompact(pcm, vbuf, coefBase,
-		fastLowrateStride4Samples[phase], 8);
+	switch (phase) {
+	case 0:
+		pcm[0] = PolyphaseMonoFastSample0(vbuf, coefBase);
+		pcm[1] = PolyphaseMonoFastSampleLo(4, vbuf, coefBase);
+		pcm[2] = PolyphaseMonoFastSampleLo(8, vbuf, coefBase);
+		pcm[3] = PolyphaseMonoFastSampleLo(12, vbuf, coefBase);
+		pcm[4] = PolyphaseMonoFastSample16(vbuf, coefBase);
+		pcm[5] = PolyphaseMonoFastSampleHi(12, vbuf, coefBase);
+		pcm[6] = PolyphaseMonoFastSampleHi(8, vbuf, coefBase);
+		pcm[7] = PolyphaseMonoFastSampleHi(4, vbuf, coefBase);
+		return 8;
+	case 1:
+		pcm[0] = PolyphaseMonoFastSampleLo(3, vbuf, coefBase);
+		pcm[1] = PolyphaseMonoFastSampleLo(7, vbuf, coefBase);
+		pcm[2] = PolyphaseMonoFastSampleLo(11, vbuf, coefBase);
+		pcm[3] = PolyphaseMonoFastSampleLo(15, vbuf, coefBase);
+		pcm[4] = PolyphaseMonoFastSampleHi(13, vbuf, coefBase);
+		pcm[5] = PolyphaseMonoFastSampleHi(9, vbuf, coefBase);
+		pcm[6] = PolyphaseMonoFastSampleHi(5, vbuf, coefBase);
+		pcm[7] = PolyphaseMonoFastSampleHi(1, vbuf, coefBase);
+		return 8;
+	case 2:
+		pcm[0] = PolyphaseMonoFastSampleLo(2, vbuf, coefBase);
+		pcm[1] = PolyphaseMonoFastSampleLo(6, vbuf, coefBase);
+		pcm[2] = PolyphaseMonoFastSampleLo(10, vbuf, coefBase);
+		pcm[3] = PolyphaseMonoFastSampleLo(14, vbuf, coefBase);
+		pcm[4] = PolyphaseMonoFastSampleHi(14, vbuf, coefBase);
+		pcm[5] = PolyphaseMonoFastSampleHi(10, vbuf, coefBase);
+		pcm[6] = PolyphaseMonoFastSampleHi(6, vbuf, coefBase);
+		pcm[7] = PolyphaseMonoFastSampleHi(2, vbuf, coefBase);
+		return 8;
+	case 3:
+		pcm[0] = PolyphaseMonoFastSampleLo(1, vbuf, coefBase);
+		pcm[1] = PolyphaseMonoFastSampleLo(5, vbuf, coefBase);
+		pcm[2] = PolyphaseMonoFastSampleLo(9, vbuf, coefBase);
+		pcm[3] = PolyphaseMonoFastSampleLo(13, vbuf, coefBase);
+		pcm[4] = PolyphaseMonoFastSampleHi(15, vbuf, coefBase);
+		pcm[5] = PolyphaseMonoFastSampleHi(11, vbuf, coefBase);
+		pcm[6] = PolyphaseMonoFastSampleHi(7, vbuf, coefBase);
+		pcm[7] = PolyphaseMonoFastSampleHi(3, vbuf, coefBase);
+		return 8;
+	default:
+		return 0;
+	}
 }
 
 #if defined(AMIGA_FAST_REDUCED_TAPS)
@@ -1850,8 +1914,7 @@ int PolyphaseMonoFastLowrate(short *pcm, int *vbuf, const int *coefBase, int str
 		}
 #endif
 		gMonoStride2CCalls++;
-		return PolyphaseMonoFastLowrateList(pcm, vbuf, coefBase,
-			fastLowrateStride2Samples, 16);
+		return PolyphaseMonoFastLowrateStride2(pcm, vbuf, coefBase);
 	}
 	if (stride == 4) {
 		*phase = PolyphaseAdvanceLowratePhase(localPhase, stride);
