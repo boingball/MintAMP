@@ -46,6 +46,57 @@
 
 typedef int ARRAY3[3];	/* for short-block reordering */
 
+#if defined(AMIGA_M68K_ASM) && defined(__GNUC__) && \
+	(defined(__mc68000__) || defined(__mc68020__) || defined(__mc68030__) || \
+	 defined(__mc68040__) || defined(__mc68060__) || defined(mc68000) || \
+	 defined(mc68020))
+#define REORDER_SHORT_BLOCK_HAS_AMIGA_M68K_ASM 1
+#else
+#define REORDER_SHORT_BLOCK_HAS_AMIGA_M68K_ASM 0
+#endif
+
+static __inline void ReorderShortBlock(ARRAY3 *buf, int *workBuf, int nSamps)
+{
+#if REORDER_SHORT_BLOCK_HAS_AMIGA_M68K_ASM
+	int *src0;
+	int *src1;
+	int *src2;
+	int *dst;
+	unsigned int count;
+
+	if (nSamps <= 0)
+		return;
+
+	src0 = workBuf;
+	src1 = workBuf + nSamps;
+	src2 = workBuf + 2*nSamps;
+	dst = (int *)buf;
+	count = (unsigned int)(nSamps - 1);
+
+	__asm__ volatile (
+		"1:\n\t"
+		"move.l (%[src0])+,(%[dst])+\n\t"
+		"move.l (%[src1])+,(%[dst])+\n\t"
+		"move.l (%[src2])+,(%[dst])+\n\t"
+		"dbf %[count],1b"
+		: [src0] "+a" (src0),
+		  [src1] "+a" (src1),
+		  [src2] "+a" (src2),
+		  [dst] "+a" (dst),
+		  [count] "+d" (count)
+		:
+		: "memory", "cc");
+#else
+	int j;
+
+	for (j = 0; j < nSamps; j++) {
+		buf[j][0] = workBuf[0*nSamps + j];
+		buf[j][1] = workBuf[1*nSamps + j];
+		buf[j][2] = workBuf[2*nSamps + j];
+	}
+#endif
+}
+
 /* optional pre-emphasis for high-frequency scale factor bands */
 static const char preTab[22] = { 0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,2,2,3,3,3,2,0 };
 
@@ -460,7 +511,7 @@ static int DequantBlock(int *inbuf, int *outbuf, int num, int scale)
 int DequantChannel(int *sampleBuf, int *workBuf, int *nonZeroBound, FrameHeader *fh, SideInfoSub *sis, 
 					ScaleFactorInfoSub *sfis, CriticalBandInfo *cbi)
 {
-	int i, j, w, cb;
+	int i, w, cb;
 	int cbStartL, cbEndL, cbStartS, cbEndS;
 	int nSamps, nonZero, sfactMultiplier, gbMask;
 	int globalGain, gainI;
@@ -553,11 +604,7 @@ int DequantChannel(int *sampleBuf, int *workBuf, int *nonZeroBound, FrameHeader 
 		/* reorder blocks */
 		buf = (ARRAY3 *)(sampleBuf + i);
 		i += 3*nSamps;
-		for (j = 0; j < nSamps; j++) {
-			buf[j][0] = workBuf[0*nSamps + j];
-			buf[j][1] = workBuf[1*nSamps + j];
-			buf[j][2] = workBuf[2*nSamps + j];
-		}
+		ReorderShortBlock(buf, workBuf, nSamps);
 
 		ASSERT(3*nSamps <= MAX_REORDER_SAMPS);
 
@@ -588,4 +635,3 @@ int DequantChannel(int *sampleBuf, int *workBuf, int *nonZeroBound, FrameHeader 
 
 	return CLZ(gbMask) - 1;
 }
-
