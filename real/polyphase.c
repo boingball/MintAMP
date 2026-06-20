@@ -1594,6 +1594,10 @@ int PolyphaseMonoFastLowrateStride2_C_REFERENCE(short *pcm, int *vbuf, const int
 
 int PolyphaseMonoFastLowrateStride2_TEST_ACTIVE(short *pcm, int *vbuf, const int *coefBase)
 {
+#if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_FAST_REDUCED_TAPS)
+	if (MP3ExperimentalReducedTapsEnabled())
+		return PolyphaseMonoFastLowrateStride2Reduced(pcm, vbuf, coefBase);
+#endif
 #if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_M68K_ASM_POLYPHASE)
 	if (AmigaM68KPolyphaseMonoFastStride2_IsActive()) {
 		AmigaM68KPolyphaseMonoFastStride2(pcm, vbuf, PolyAsmCoef(coefBase));

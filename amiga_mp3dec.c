@@ -3806,6 +3806,7 @@ static int SelftestReducedTaps(void)
 	unsigned long stereoCountMismatches;
 	unsigned long stride2StereoCountMismatches;
 	unsigned long stride2MonoCountMismatches;
+	unsigned long stride2MonoOverrunMismatches;
 	unsigned long stride2StereoIndependenceMismatches;
 	double monoSquares;
 	double stereoSquares;
@@ -3822,6 +3823,7 @@ static int SelftestReducedTaps(void)
 	stereoCountMismatches = 0;
 	stride2StereoCountMismatches = 0;
 	stride2MonoCountMismatches = 0;
+	stride2MonoOverrunMismatches = 0;
 	stride2StereoIndependenceMismatches = 0;
 	monoSquares = 0.0;
 	stereoSquares = 0.0;
@@ -3888,6 +3890,11 @@ static int SelftestReducedTaps(void)
 			stride2StereoCountMismatches++;
 		if (fullStride2MonoCount != 16 || reducedStride2MonoCount != 16)
 			stride2MonoCountMismatches++;
+		if (reducedStride2MonoCount == 16) {
+			for (j = 16; j < AMIGA_POLYPHASE_NBANDS; j++)
+				if (reducedStride2Mono[j] != (short)(0x7a00 + j))
+					stride2MonoOverrunMismatches++;
+		}
 		if (reducedMonoCount == 8) {
 			for (j = 0; j < 8; j++) {
 				double d = (double)((int)fullMono[j] - (int)reducedMono[j]);
@@ -3961,6 +3968,8 @@ static int SelftestReducedTaps(void)
 		stride2StereoCountMismatches);
 	printf("Reduced taps stride2 mono output samples per call: 16 (mismatches: %lu)\n",
 		stride2MonoCountMismatches);
+	printf("Reduced taps stride2 mono overrun/aliasing mismatches: %lu\n",
+		stride2MonoOverrunMismatches);
 	printf("Reduced taps stride2 stereo channel-independence mismatches: %lu\n",
 		stride2StereoIndependenceMismatches);
 	printf("Reduced taps mono RMS difference: %.2f counts (target < 500)\n",
@@ -3976,6 +3985,7 @@ static int SelftestReducedTaps(void)
 		SqrtApprox(stride2StereoSquares[1] / (stride2StereoSamples[1] > 0.0 ?
 			stride2StereoSamples[1] : 1.0)));
 	if (stride2StereoCountMismatches || stride2MonoCountMismatches ||
+		stride2MonoOverrunMismatches ||
 		stride2StereoIndependenceMismatches) {
 		printf("Reduced taps selftest FAIL\n");
 		return 1;
