@@ -47,6 +47,28 @@
 #include <stdio.h>
 #include <string.h>
 
+#if defined(AMIGA_IMDCT_MULSW)
+static int gExperimentalIMDCTMulswEnabled;
+#endif
+
+void MP3SetExperimentalIMDCTMulsw(int enabled)
+{
+#if defined(AMIGA_IMDCT_MULSW)
+	gExperimentalIMDCTMulswEnabled = enabled ? 1 : 0;
+#else
+	(void)enabled;
+#endif
+}
+
+int MP3ExperimentalIMDCTMulswEnabled(void)
+{
+#if defined(AMIGA_IMDCT_MULSW)
+	return gExperimentalIMDCTMulswEnabled;
+#else
+	return 0;
+#endif
+}
+
 /**************************************************************************************
  * Function:    AntiAlias
  *
@@ -484,6 +506,44 @@ int fastWin36[18] = {
 	0x4a868feb, 0xef7a6275, 0x47311c28, 0xf6a09e67, 0x42aace8b, 0xfd16d8dd,
 };
 
+#if defined(AMIGA_IMDCT_MULSW)
+/*
+ * Experimental 16x16 IMDCT coefficients.  These are the signed high 16 bits
+ * of the existing Q31/Q30 32-bit constants.  Multiplying coef_hi16 by
+ * data_hi16 therefore approximates (coef32 * data32) >> 32, matching the
+ * MULSHIFT32 result domain before the existing post-multiply shifts.
+ * Window type != 0 and short/mixed blocks deliberately fall back to the 32-bit
+ * path for this proof of concept.
+ */
+static const short c9_16[5] = { 28378, 25102, 5690, 21063, 32270 };
+static const short c18_16[9] = { 32643, 31651, 29698, 26842, 23170, 18795, 13848, 8481, 2856 };
+static const short fastWin36_16[18] = {
+	17066, -15638, 18225, -13984, 19078, -12154, 19601, -10203, 19777,
+	-8192, 19601, -6180, 19078, -4229, 18225, -2399, 17066, -745
+};
+
+static __inline int IMDCT_MULSW_HIGH16(int x)
+{
+	return x >> 16;
+}
+
+static __inline int IMDCT_MULSW_SHIFT32(short coef, int data)
+{
+	int r;
+#if defined(AMIGA_M68K) && defined(__GNUC__)
+	r = (int)((short)IMDCT_MULSW_HIGH16(data));
+	__asm__ volatile (
+		"muls.w %1,%0"
+		: "+d" (r)
+		: "dm" (coef)
+		: "cc");
+#else
+	r = (int)coef * (int)((short)IMDCT_MULSW_HIGH16(data));
+#endif
+	return r;
+}
+#endif
+
 
 #if defined(AMIGA_M68K) && defined(AMIGA_M68K_ASM_IMDCT) && defined(__GNUC__) && \
 	(defined(__mc68020__) || defined(__mc68030__) || defined(__mc68040__) || \
@@ -644,6 +704,73 @@ int IMDCT36_C_REFERENCE(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, 
 	return mOut;
 }
 
+#if defined(AMIGA_IMDCT_MULSW)
+static __inline void idct9_mulsw(int *x)
+{
+	int a1, a2, a3, a4, a5, a6, a7, a8, a9;
+	int a10, a11, a12, a13, a14, a15, a16, a17, a18;
+	int a19, a20, a21, a22, a23, a24, a25, a26, a27;
+	int m1, m3, m5, m6, m7, m8, m9, m10, m11, m12;
+	int x0, x1, x2, x3, x4, x5, x6, x7, x8;
+
+	x0 = x[0]; x1 = x[1]; x2 = x[2]; x3 = x[3]; x4 = x[4];
+	x5 = x[5]; x6 = x[6]; x7 = x[7]; x8 = x[8];
+	a1 = x0 - x6; a2 = x1 - x5; a3 = x1 + x5; a4 = x2 - x4;
+	a5 = x2 + x4; a6 = x2 + x8; a7 = x1 + x7;
+	a8 = a6 - a5; a9 = a3 - a7; a10 = a2 - x7; a11 = a4 - x8;
+	m1 = IMDCT_MULSW_SHIFT32(c9_16[0], x3);
+	m3 = IMDCT_MULSW_SHIFT32(c9_16[0], a10);
+	m5 = IMDCT_MULSW_SHIFT32(c9_16[1], a5);
+	m6 = IMDCT_MULSW_SHIFT32(c9_16[2], a6);
+	m7 = IMDCT_MULSW_SHIFT32(c9_16[1], a8);
+	m8 = IMDCT_MULSW_SHIFT32(c9_16[2], a5);
+	m9 = IMDCT_MULSW_SHIFT32(c9_16[3], a9);
+	m10 = IMDCT_MULSW_SHIFT32(c9_16[4], a7);
+	m11 = IMDCT_MULSW_SHIFT32(c9_16[3], a3);
+	m12 = IMDCT_MULSW_SHIFT32(c9_16[4], a9);
+	a12 = x[0] + (x[6] >> 1); a13 = a12 + (m1 << 1); a14 = a12 - (m1 << 1);
+	a15 = a1 + (a11 >> 1); a16 = (m5 << 1) + (m6 << 1); a17 = (m7 << 1) - (m8 << 1);
+	a18 = a16 + a17; a19 = (m9 << 1) + (m10 << 1); a20 = (m11 << 1) - (m12 << 1);
+	a21 = a20 - a19; a22 = a13 + a16; a23 = a14 + a16; a24 = a14 + a17;
+	a25 = a13 + a17; a26 = a14 - a18; a27 = a13 - a18;
+	x[0] = a22 + a19; x[1] = a15 + (m3 << 1); x[2] = a24 + a20;
+	x[3] = a26 - a21; x[4] = a1 - a11; x[5] = a27 + a21;
+	x[6] = a25 - a20; x[7] = a15 - (m3 << 1); x[8] = a23 - a19;
+}
+
+int IMDCT36_MULSW_C_REFERENCE(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb)
+{
+	int i, es, xBuf[18];
+	int acc1, acc2, s, d, t, mOut, xo, xe, *xp, *ypLo, *ypHi, yLo, yHi;
+	const short *cp, *wp;
+
+	if (btCurr != 0 || btPrev != 0)
+		return IMDCT36_C_REFERENCE(xCurr, xPrev, y, btCurr, btPrev, blockIdx, gb);
+	acc1 = acc2 = 0; xCurr += 17;
+	if (gb < 7) {
+		es = 7 - gb;
+		for (i = 8; i >= 0; i--) { acc1 = ((*xCurr--) >> es) - acc1; acc2 = acc1 - acc2; acc1 = ((*xCurr--) >> es) - acc1; xBuf[i+9] = acc2; xBuf[i] = acc1; xPrev[i] >>= es; }
+	} else {
+		es = 0;
+		for (i = 8; i >= 0; i--) { acc1 = (*xCurr--) - acc1; acc2 = acc1 - acc2; acc1 = (*xCurr--) - acc1; xBuf[i+9] = acc2; xBuf[i] = acc1; }
+	}
+	xBuf[9] >>= 1; xBuf[0] >>= 1;
+	idct9_mulsw(xBuf); idct9_mulsw(xBuf + 9);
+	xp = xBuf + 8; cp = c18_16 + 8; wp = fastWin36_16; ypLo = y; ypHi = y + 17*NBANDS; mOut = 0;
+	for (i = 9; i > 0; i--) {
+		xo = *(xp + 9); xe = *xp--; xo = IMDCT_MULSW_SHIFT32(*cp--, xo); xe >>= 2;
+		s = -(*xPrev); d = -(xe - xo); (*xPrev++) = xe + xo; t = s - d;
+		yLo = d + (IMDCT_MULSW_SHIFT32(*wp++, t) << 2);
+		yHi = s + (IMDCT_MULSW_SHIFT32(*wp++, t) << 2);
+		*ypLo = yLo; ypLo += NBANDS; *ypHi = yHi; ypHi -= NBANDS;
+		mOut |= FASTABS(yLo); mOut |= FASTABS(yHi);
+	}
+	xPrev -= 9;
+	if (es) mOut |= FreqInvertRescale(y, xPrev, blockIdx, es);
+	else if (blockIdx & 0x01) FreqInvertOdd(y);
+	return mOut;
+}
+#endif
 
 #if IMDCT36_HAS_AMIGA_M68K_ASM
 static __inline void idct9_amiga_m68k_asm(int *x)
@@ -877,6 +1004,10 @@ int IMDCT36_TEST_ACTIVE(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, 
 
 static int IMDCT36(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb)
 {
+#if defined(AMIGA_IMDCT_MULSW)
+	if (MP3ExperimentalIMDCTMulswEnabled() && btCurr == 0 && btPrev == 0)
+		return IMDCT36_MULSW_C_REFERENCE(xCurr, xPrev, y, btCurr, btPrev, blockIdx, gb);
+#endif
 	return IMDCT36_TEST_ACTIVE(xCurr, xPrev, y, btCurr, btPrev, blockIdx, gb);
 }
 

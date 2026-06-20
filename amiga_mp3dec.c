@@ -132,6 +132,7 @@ void STATNAME(AntiAlias_TEST_ACTIVE)(int *x, int nBfly);
 int STATNAME(AntiAlias_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
 int STATNAME(IMDCT36_C_REFERENCE)(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb);
 int STATNAME(IMDCT36_TEST_ACTIVE)(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb);
+int STATNAME(IMDCT36_MULSW_C_REFERENCE)(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb);
 int STATNAME(IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
 int STATNAME(IMDCTThinOutputSelftest)(void);
 int STATNAME(IMDCTSubbandCapSelftest)(void);
@@ -214,6 +215,7 @@ extern const int STATNAME(polyCoef)[264];
 #define AMIGA_ANTIALIAS_HAS_ASM STATNAME(AntiAlias_HAS_AMIGA_M68K_ASM_RUNTIME)
 #define AMIGA_IMDCT36_C_REFERENCE STATNAME(IMDCT36_C_REFERENCE)
 #define AMIGA_IMDCT36_TEST_ACTIVE STATNAME(IMDCT36_TEST_ACTIVE)
+#define AMIGA_IMDCT36_MULSW_C_REFERENCE STATNAME(IMDCT36_MULSW_C_REFERENCE)
 #define AMIGA_IMDCT36_HAS_ASM STATNAME(IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME)
 #define AMIGA_IMDCT_THIN_SELFTEST STATNAME(IMDCTThinOutputSelftest)
 #define AMIGA_IMDCT_SUBBAND_CAP_SELFTEST STATNAME(IMDCTSubbandCapSelftest)
@@ -294,6 +296,7 @@ typedef struct DecodeOptions {
 	int selftestVerbose;
 	int selftestImdct;
 	int selftestImdctThin;
+	int selftestImdctMulsw;
 	int selftestSubbandCap;
 	int selftestAntialias;
 	int selftestPolyphase;
@@ -326,6 +329,7 @@ typedef struct DecodeOptions {
 	int expPoly;
 	int expHuff;
 	int expImdctThin;
+	int expImdctMulsw;
 	int expReducedTaps;
 	int expFdct32Quarter;
 	int expFdct32Mulsw;
@@ -705,6 +709,7 @@ static void PrintUsage(const char *prog)
 	printf("  --exp-poly  use experimental 68030 asm mono polyphase when compiled in\n");
 	printf("  --exp-huff  use experimental 68030 inline-asm Huffman pair refill when compiled in\n");
 	printf("  --exp-imdct-thin request experimental fast-lowrate IMDCT output thinning\n");
+	printf("  --exp-imdct-mulsw request experimental lossy 16x16 muls.w long IMDCT36 path\n");
 	printf("  --exp-reduced-taps use experimental reduced-tap fast-lowrate dewindow\n");
 	printf("  --exp-fdct32-quarter use experimental stride-4 quarter-rate FDCT32 approximation\n");
 	printf("  --exp-fdct32-mulsw use experimental 16x16 muls.w FDCT32 approximation\n");
@@ -716,6 +721,7 @@ static void PrintUsage(const char *prog)
 	printf("  --selftest-verbose print every selftest mismatch instead of the first only\n");
 	printf("  --selftest-imdct compare C reference and optional m68k asm long IMDCT path\n");
 	printf("  --selftest-imdct-thin verify exact selected IMDCT bands and deterministic sparse output\n");
+	printf("  --selftest-imdct-mulsw compare lossy 16x16 IMDCT36 with the 32-bit reference\n");
 	printf("  --selftest-subband-cap verify low-rate mono IMDCT subband cap behavior\n");
 	printf("  --selftest-antialias compare C reference and optional m68k asm antialias path\n");
 	printf("  --selftest-polyphase compare C fast mono polyphase and optional m68k asm path\n");
@@ -937,6 +943,8 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->selftestImdct = 1;
 		} else if (!strcmp(argv[i], "--selftest-imdct-thin")) {
 			opt->selftestImdctThin = 1;
+		} else if (!strcmp(argv[i], "--selftest-imdct-mulsw")) {
+			opt->selftestImdctMulsw = 1;
 		} else if (!strcmp(argv[i], "--selftest-subband-cap")) {
 			opt->selftestSubbandCap = 1;
 		} else if (!strcmp(argv[i], "--selftest-antialias")) {
@@ -996,6 +1004,8 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->expHuff = 1;
 		} else if (!strcmp(argv[i], "--exp-imdct-thin")) {
 			opt->expImdctThin = 1;
+		} else if (!strcmp(argv[i], "--exp-imdct-mulsw")) {
+			opt->expImdctMulsw = 1;
 		} else if (!strcmp(argv[i], "--no-ms-mono-skip")) {
 			opt->noMonoMSSideSkip = 1;
 		} else if (!strcmp(argv[i], "--exp-reduced-taps")) {
@@ -1053,6 +1063,7 @@ if (opt->selftestMulshift ||
     opt->selftestFdct32 ||
     opt->selftestFdct32Half ||
     opt->selftestImdct ||
+    opt->selftestImdctMulsw ||
     opt->selftestImdctThin ||
     opt->selftestSubbandCap ||
     opt->selftestAntialias ||
@@ -2952,6 +2963,81 @@ static int SelftestImdct(void)
 	return failures ? 1 : 0;
 }
 
+
+
+static int SelftestImdctMulsw(void)
+{
+#if !defined(AMIGA_IMDCT_MULSW)
+	printf("IMDCT36Mulsw compile flag: no\n");
+	printf("IMDCT36Mulsw selftest not run: AMIGA_IMDCT_MULSW is not compiled in this build\n");
+	printf("IMDCT36Mulsw selftest PASS (unavailable in this build)\n");
+	return 0;
+#else
+	static int cx[18], ax[18], cp[9], ap[9];
+	static int cy[AMIGA_IMDCT_BLOCK_SIZE * AMIGA_IMDCT_NBANDS];
+	static int ay[AMIGA_IMDCT_BLOCK_SIZE * AMIGA_IMDCT_NBANDS];
+	unsigned long i, seed, failures, samples, structure;
+	double diffSquares, signalSquares;
+	int j, pattern, blockIdx, gb, cm, am;
+	int refMin = 0, refMax = 0, mulMin = 0, mulMax = 0;
+
+	failures = structure = samples = 0;
+	diffSquares = signalSquares = 0.0;
+	seed = 0x1d360016UL;
+	for (i = 0; i < 4096UL; i++) {
+		seed = seed * 1664525UL + 1013904223UL;
+		pattern = (i < 16UL) ? 0 : ((i < 32UL) ? 2 : 1);
+		blockIdx = (int)((seed >> 8) & 31);
+		gb = (int)((seed >> 13) % 8);
+		for (j = 0; j < 18; j++) {
+			seed = seed * 1664525UL + 1013904223UL;
+			cx[j] = (pattern == 0) ? 0 : ((pattern == 1) ? (((int)seed) >> 10) : ((j & 1) ? 0x03ffffff : (int)0xfc000000UL));
+			ax[j] = cx[j];
+		}
+		for (j = 0; j < 9; j++) {
+			seed = seed * 1664525UL + 1013904223UL;
+			cp[j] = (pattern == 0) ? 0 : ((pattern == 1) ? (((int)seed) >> 12) : ((j & 1) ? 0x01ffffff : (int)0xfe000000UL));
+			ap[j] = cp[j];
+		}
+		FillImdctSentinel(cy); FillImdctSentinel(ay);
+		cm = AMIGA_IMDCT36_C_REFERENCE(cx, cp, cy + blockIdx, 0, 0, blockIdx, gb);
+		am = AMIGA_IMDCT36_MULSW_C_REFERENCE(ax, ap, ay + blockIdx, 0, 0, blockIdx, gb);
+		(void)cm; (void)am;
+		for (j = 0; j < AMIGA_IMDCT_BLOCK_SIZE * AMIGA_IMDCT_NBANDS; j++) {
+			int sentinel = (int)(0x13570000UL ^ (unsigned long)j);
+			if ((cy[j] == sentinel) != (ay[j] == sentinel)) { structure++; failures++; }
+			if (cy[j] != sentinel) {
+				double d = (double)cy[j] - (double)ay[j];
+				diffSquares += d * d;
+				signalSquares += (double)cy[j] * (double)cy[j];
+				if (samples == 0 || cy[j] < refMin) refMin = cy[j];
+				if (samples == 0 || cy[j] > refMax) refMax = cy[j];
+				if (samples == 0 || ay[j] < mulMin) mulMin = ay[j];
+				if (samples == 0 || ay[j] > mulMax) mulMax = ay[j];
+				samples++;
+			}
+		}
+	}
+	{
+		double signalRms = SqrtApprox(signalSquares / (samples ? (double)samples : 1.0));
+		double diffRms = SqrtApprox(diffSquares / (samples ? (double)samples : 1.0));
+		int refMag = (refMax > -refMin) ? refMax : -refMin;
+		int mulMag = (mulMax > -mulMin) ? mulMax : -mulMin;
+		printf("IMDCT36Mulsw compile flag: yes\n");
+		printf("IMDCT36Mulsw path: common long blocks only (btCurr=0, btPrev=0); short/mixed/non-long windows fall back to 32-bit\n");
+		printf("IMDCT36Mulsw selftest cases: %lu\n", i);
+		printf("IMDCT36Mulsw output-structure mismatches: %lu\n", structure);
+		printf("IMDCT36Mulsw 32-bit output range: min=%ld max=%ld\n", (long)refMin, (long)refMax);
+		printf("IMDCT36Mulsw muls.w output range: min=%ld max=%ld\n", (long)mulMin, (long)mulMax);
+		printf("IMDCT36Mulsw magnitude ratio muls.w/full: %.6f\n", (double)mulMag / (double)(refMag ? refMag : 1));
+		printf("IMDCT36Mulsw signal RMS: %.2f counts\n", signalRms);
+		printf("IMDCT36Mulsw RMS difference vs 32-bit IMDCT36: %.2f counts\n", diffRms);
+		printf("IMDCT36Mulsw error/signal: %.2f%% (FDCT32Mulsw reference was about 14.4%%)\n", signalRms > 0.0 ? (100.0 * diffRms / signalRms) : 0.0);
+	}
+	printf("IMDCT36Mulsw selftest %s (lossy approximation)\n", failures ? "FAIL" : "PASS");
+	return failures ? 1 : 0;
+#endif
+}
 
 static int TestPolyphaseCase(unsigned long index, unsigned long seed, int pattern)
 {
@@ -7469,6 +7555,11 @@ int main(int argc, char **argv)
 		AmigaFreeNormalizedArgs(&normalized);
 		return selftestErr;
 	}
+	if (opt.selftestImdctMulsw) {
+		int selftestErr = SelftestImdctMulsw();
+		AmigaFreeNormalizedArgs(&normalized);
+		return selftestErr;
+	}
 	if (opt.selftestImdctThin) {
 		int selftestErr = AMIGA_IMDCT_THIN_SELFTEST();
 		AmigaFreeNormalizedArgs(&normalized);
@@ -7780,6 +7871,14 @@ int main(int argc, char **argv)
 	MP3ResetMonoStride2PolyphaseCounters();
 	MP3SetExperimentalHuffman(opt.expHuff);
 	MP3SetExperimentalIMDCTThin(decoder, opt.expImdctThin);
+	MP3SetExperimentalIMDCTMulsw(opt.expImdctMulsw);
+	if (opt.expImdctMulsw) {
+#if defined(AMIGA_IMDCT_MULSW)
+		fprintf(stderr, "warning: --exp-imdct-mulsw enables lossy 16x16 muls.w common long IMDCT36/windowing; other IMDCT paths stay 32-bit\n");
+#else
+		fprintf(stderr, "warning: --exp-imdct-mulsw requested, but this build lacks AMIGA_IMDCT_MULSW\n");
+#endif
+	}
 	MP3SetExperimentalReducedTaps(opt.expReducedTaps);
 	MP3SetExperimentalFDCT32Quarter(opt.expFdct32Quarter ||
 		(opt.superfastLowrate && opt.outputRate == 11025));

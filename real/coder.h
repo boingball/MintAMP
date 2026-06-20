@@ -147,6 +147,7 @@
 #define AntiAlias_HAS_AMIGA_M68K_ASM_RUNTIME STATNAME(AntiAlias_HAS_AMIGA_M68K_ASM_RUNTIME)
 #define IMDCT36_C_REFERENCE STATNAME(IMDCT36_C_REFERENCE)
 #define IMDCT36_TEST_ACTIVE STATNAME(IMDCT36_TEST_ACTIVE)
+#define IMDCT36_MULSW_C_REFERENCE STATNAME(IMDCT36_MULSW_C_REFERENCE)
 #define IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME STATNAME(IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME)
 #define IMDCTThinOutputSelftest STATNAME(IMDCTThinOutputSelftest)
 #define IMDCTSubbandCapSelftest STATNAME(IMDCTSubbandCapSelftest)
@@ -352,6 +353,7 @@ int FDCT32Half_AMIGA_M68K_ASM_RUNTIME(void);
 /* imdct.c selftest hooks */
 int IMDCT36_C_REFERENCE(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb);
 int IMDCT36_TEST_ACTIVE(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb);
+int IMDCT36_MULSW_C_REFERENCE(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb);
 int IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME(void);
 int IMDCTThinOutputSelftest(void);
 int IMDCTSubbandCapSelftest(void);

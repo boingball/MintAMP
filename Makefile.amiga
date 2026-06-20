@@ -38,6 +38,7 @@ FAST030_CPPFLAGS := \
 FAST030_CFLAGS := -m68030 $(STD) -O3 -fomit-frame-pointer
 FAST030_TARGET := amiga_mp3dec.fastexp
 FAST030_MULSW_TARGET := amiga_mp3dec.fast030-mulsw
+FAST030_IMDCT16_TARGET := amiga_mp3dec.fast030-imdct16
 PROF030_TARGET := amiga_mp3dec.prof
 PROF030_CPPFLAGS := -DAMIGA_PROFILE_DECODE
 FAST030_HALFASM_TEST_TARGET := amiga_mp3dec.fdcthalf-test
@@ -46,7 +47,7 @@ HALFASM_TEST_CPPFLAGS := -DAMIGA_M68K_ASM_FDCT32
 FAST030_ASM_SOURCES := real/amiga_m68k_polyphase.S
 AMIGA_HUNK_FAST_PREFERRED := python3 tools/amiga_fast_preferred_hunks.py
 
-.PHONY: all fast030 fast030-mulsw prof030 gui fast030-halfasm-test gui-halfasm-test clean print-command print-fast030-command print-gui-command
+.PHONY: all fast030 fast030-mulsw fast030-imdct16 prof030 gui fast030-halfasm-test gui-halfasm-test clean print-command print-fast030-command print-gui-command
 
 all: $(TARGET)
 
@@ -57,6 +58,8 @@ $(TARGET): $(SOURCES)
 fast030: $(FAST030_TARGET)
 
 fast030-mulsw: $(FAST030_MULSW_TARGET)
+
+fast030-imdct16: $(FAST030_IMDCT16_TARGET)
 
 prof030: $(PROF030_TARGET)
 
@@ -77,6 +80,10 @@ $(FAST030_TARGET): $(SOURCES) $(FAST030_ASM_SOURCES)
 
 $(FAST030_MULSW_TARGET): $(SOURCES) $(FAST030_ASM_SOURCES)
 	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(FAST030_CPPFLAGS) -DAMIGA_FDCT32_MULSW $(EXTRA_CFLAGS) -o $@ $(SOURCES) $(FAST030_ASM_SOURCES)
+	$(AMIGA_HUNK_FAST_PREFERRED) $@
+
+$(FAST030_IMDCT16_TARGET): $(SOURCES) $(FAST030_ASM_SOURCES)
+	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(FAST030_CPPFLAGS) -DAMIGA_IMDCT_MULSW $(EXTRA_CFLAGS) -o $@ $(SOURCES) $(FAST030_ASM_SOURCES)
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
 
 # Same as fast030 but with AMIGA_PROFILE_DECODE, so --bench prints the per-bucket
@@ -109,4 +116,4 @@ print-fast030-command:
 	@printf '%s\n' '$(AMIGA_HUNK_FAST_PREFERRED) $(FAST030_TARGET)'
 
 clean:
-	rm -f $(TARGET) $(FAST030_TARGET) $(FAST030_HALFASM_TEST_TARGET) $(GUI_TARGET) $(GUI_HALFASM_TEST_TARGET)
+	rm -f $(TARGET) $(FAST030_TARGET) $(FAST030_MULSW_TARGET) $(FAST030_IMDCT16_TARGET) $(FAST030_HALFASM_TEST_TARGET) $(GUI_TARGET) $(GUI_HALFASM_TEST_TARGET)
