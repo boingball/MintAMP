@@ -29,6 +29,8 @@
  */
 AmigaM68KPolyphaseMonoFast:
 	movem.l	%d2-%d7/%a2-%a6,-(%sp)
+	moveq	#15,%d6		| CLIP_STORE shift count for acc >> 15
+	moveq	#31,%d7		| CLIP_STORE shift count for acc >> 31
 	move.l	48(%sp),%a0
 	move.l	52(%sp),%a1
 	move.l	56(%sp),%a2
@@ -52,13 +54,9 @@ AmigaM68KPolyphaseMonoFast:
 .macro CLIP_STORE acc, poff
 	move.l	\acc,%d0
 	move.l	%d0,%d1
-	asr.l	#8,%d1
-	asr.l	#7,%d1		| d1 = acc >> 15
+	asr.l	%d6,%d1		| d1 = acc >> 15
 	move.l	%d0,%d2
-	asr.l	#8,%d2
-	asr.l	#8,%d2
-	asr.l	#8,%d2
-	asr.l	#7,%d2		| d2 = acc >> 31 (sign)
+	asr.l	%d7,%d2		| d2 = acc >> 31 (sign)
 	cmp.l	%d1,%d2		| if sign == x>>15, no clip needed
 	beq.s	990f
 	move.l	%d2,%d0
@@ -281,6 +279,8 @@ AmigaM68KPolyphaseMonoFast:
  */
 AmigaM68KPolyphaseMonoFastStride2:
 	movem.l	%d2-%d7/%a2-%a6,-(%sp)
+	moveq	#15,%d6		| CLIP_STORE shift count for acc >> 15
+	moveq	#31,%d7		| CLIP_STORE shift count for acc >> 31
 	move.l	48(%sp),%a0
 	move.l	52(%sp),%a1
 	move.l	56(%sp),%a2
@@ -317,6 +317,8 @@ AmigaM68KPolyphaseMonoFastStride2:
  */
 AmigaM68KPolyphaseMonoFastStride2Reduced:
 	movem.l	%d2-%d7/%a2-%a6,-(%sp)
+	moveq	#15,%d6		| CLIP_STORE shift count for acc >> 15
+	moveq	#31,%d7		| CLIP_STORE shift count for acc >> 31
 	move.l	48(%sp),%a0
 	move.l	52(%sp),%a1
 	move.l	56(%sp),%a2
@@ -350,6 +352,8 @@ AmigaM68KPolyphaseMonoFastStride2Reduced:
  */
 MonoFastPolyphaseStride4_Amiga_m68k:
 	movem.l	%d2-%d7/%a2-%a6,-(%sp)
+	moveq	#15,%d6		| CLIP_STORE shift count for acc >> 15
+	moveq	#31,%d7		| CLIP_STORE shift count for acc >> 31
 	move.l	48(%sp),%a0		| pcm
 	move.l	52(%sp),%a1		| vbuf
 	move.l	56(%sp),%a2		| coefBase
@@ -565,6 +569,8 @@ MonoFastPolyphaseStride4_Amiga_m68k:
  */
 StereoFastPolyphaseStride2Phase0_Amiga_m68k:
 	movem.l	%d2-%d7/%a2-%a6,-(%sp)
+	moveq	#15,%d6		| CLIP_STORE shift count for acc >> 15
+	moveq	#31,%d7		| CLIP_STORE shift count for acc >> 31
 	move.l	48(%sp),%a0		| pcm
 	move.l	52(%sp),%a1		| vbuf
 	move.l	56(%sp),%a2		| coefBase
@@ -596,6 +602,8 @@ StereoFastPolyphaseStride2Phase0_Amiga_m68k:
  */
 StereoFastPolyphaseStride2Phase0Reduced_Amiga_m68k:
 	movem.l	%d2-%d7/%a2-%a6,-(%sp)
+	moveq	#15,%d6		| CLIP_STORE shift count for acc >> 15
+	moveq	#31,%d7		| CLIP_STORE shift count for acc >> 31
 	move.l	48(%sp),%a0		| pcm
 	move.l	52(%sp),%a1		| vbuf
 	move.l	56(%sp),%a2		| coefBase
@@ -653,6 +661,8 @@ StereoFastPolyphaseStride4Half_Amiga_m68k:
  */
 StereoFastPolyphaseStride4Phase0_Amiga_m68k:
 	movem.l	%d2-%d7/%a2-%a6,-(%sp)
+	moveq	#15,%d6		| CLIP_STORE shift count for acc >> 15
+	moveq	#31,%d7		| CLIP_STORE shift count for acc >> 31
 	move.l	48(%sp),%a0		| pcm
 	move.l	52(%sp),%a1		| vbuf
 	move.l	56(%sp),%a2		| coefBase
@@ -675,6 +685,8 @@ StereoFastPolyphaseStride4Phase0_Amiga_m68k:
  */
 StereoFastPolyphaseStride4Phase1_Amiga_m68k:
 	movem.l	%d2-%d7/%a2-%a6,-(%sp)
+	moveq	#15,%d6		| CLIP_STORE shift count for acc >> 15
+	moveq	#31,%d7		| CLIP_STORE shift count for acc >> 31
 	move.l	48(%sp),%a0		| pcm
 	move.l	52(%sp),%a1		| vbuf
 	move.l	56(%sp),%a2		| coefBase
@@ -697,6 +709,8 @@ StereoFastPolyphaseStride4Phase1_Amiga_m68k:
  */
 StereoFastPolyphaseStride4Phase2_Amiga_m68k:
 	movem.l	%d2-%d7/%a2-%a6,-(%sp)
+	moveq	#15,%d6		| CLIP_STORE shift count for acc >> 15
+	moveq	#31,%d7		| CLIP_STORE shift count for acc >> 31
 	move.l	48(%sp),%a0		| pcm
 	move.l	52(%sp),%a1		| vbuf
 	move.l	56(%sp),%a2		| coefBase
@@ -719,6 +733,8 @@ StereoFastPolyphaseStride4Phase2_Amiga_m68k:
  */
 StereoFastPolyphaseStride4Phase3_Amiga_m68k:
 	movem.l	%d2-%d7/%a2-%a6,-(%sp)
+	moveq	#15,%d6		| CLIP_STORE shift count for acc >> 15
+	moveq	#31,%d7		| CLIP_STORE shift count for acc >> 31
 	move.l	48(%sp),%a0		| pcm
 	move.l	52(%sp),%a1		| vbuf
 	move.l	56(%sp),%a2		| coefBase
@@ -769,6 +785,8 @@ StereoFastPolyphaseStride5_Amiga_m68k:
 /* phase 0 samples: 0, 5, 10, 15, 20, 25, 30 (7 pairs) */
 StereoFastPolyphaseStride5Phase0_Amiga_m68k:
 	movem.l	%d2-%d7/%a2-%a6,-(%sp)
+	moveq	#15,%d6		| CLIP_STORE shift count for acc >> 15
+	moveq	#31,%d7		| CLIP_STORE shift count for acc >> 31
 	move.l	48(%sp),%a0		| pcm
 	move.l	52(%sp),%a1		| vbuf
 	move.l	56(%sp),%a2		| coefBase
@@ -789,6 +807,8 @@ StereoFastPolyphaseStride5Phase0_Amiga_m68k:
 /* phase 1 samples: 4, 9, 14, 19, 24, 29 (6 pairs) */
 StereoFastPolyphaseStride5Phase1_Amiga_m68k:
 	movem.l	%d2-%d7/%a2-%a6,-(%sp)
+	moveq	#15,%d6		| CLIP_STORE shift count for acc >> 15
+	moveq	#31,%d7		| CLIP_STORE shift count for acc >> 31
 	move.l	48(%sp),%a0		| pcm
 	move.l	52(%sp),%a1		| vbuf
 	move.l	56(%sp),%a2		| coefBase
@@ -808,6 +828,8 @@ StereoFastPolyphaseStride5Phase1_Amiga_m68k:
 /* phase 2 samples: 3, 8, 13, 18, 23, 28 (6 pairs) */
 StereoFastPolyphaseStride5Phase2_Amiga_m68k:
 	movem.l	%d2-%d7/%a2-%a6,-(%sp)
+	moveq	#15,%d6		| CLIP_STORE shift count for acc >> 15
+	moveq	#31,%d7		| CLIP_STORE shift count for acc >> 31
 	move.l	48(%sp),%a0		| pcm
 	move.l	52(%sp),%a1		| vbuf
 	move.l	56(%sp),%a2		| coefBase
@@ -827,6 +849,8 @@ StereoFastPolyphaseStride5Phase2_Amiga_m68k:
 /* phase 3 samples: 2, 7, 12, 17, 22, 27 (6 pairs) */
 StereoFastPolyphaseStride5Phase3_Amiga_m68k:
 	movem.l	%d2-%d7/%a2-%a6,-(%sp)
+	moveq	#15,%d6		| CLIP_STORE shift count for acc >> 15
+	moveq	#31,%d7		| CLIP_STORE shift count for acc >> 31
 	move.l	48(%sp),%a0		| pcm
 	move.l	52(%sp),%a1		| vbuf
 	move.l	56(%sp),%a2		| coefBase
@@ -846,6 +870,8 @@ StereoFastPolyphaseStride5Phase3_Amiga_m68k:
 /* phase 4 samples: 1, 6, 11, 16, 21, 26, 31 (7 pairs) */
 StereoFastPolyphaseStride5Phase4_Amiga_m68k:
 	movem.l	%d2-%d7/%a2-%a6,-(%sp)
+	moveq	#15,%d6		| CLIP_STORE shift count for acc >> 15
+	moveq	#31,%d7		| CLIP_STORE shift count for acc >> 31
 	move.l	48(%sp),%a0		| pcm
 	move.l	52(%sp),%a1		| vbuf
 	move.l	56(%sp),%a2		| coefBase
