@@ -138,7 +138,6 @@
 #define FDCT32Half			STATNAME(FDCT32Half)
 #define FDCT32Quarter			STATNAME(FDCT32Quarter)
 #define FDCT32_C_REFERENCE	STATNAME(FDCT32_C_REFERENCE)
-#define FDCT32_MULSW_C_REFERENCE STATNAME(FDCT32_MULSW_C_REFERENCE)
 #define FDCT32_HAS_AMIGA_M68K_ASM_RUNTIME STATNAME(FDCT32_HAS_AMIGA_M68K_ASM_RUNTIME)
 #define FDCT32Half_TEST_ACTIVE STATNAME(FDCT32Half_TEST_ACTIVE)
 #define FDCT32Half_AMIGA_M68K_ASM_RUNTIME STATNAME(FDCT32Half_AMIGA_M68K_ASM_RUNTIME)
@@ -147,7 +146,6 @@
 #define AntiAlias_HAS_AMIGA_M68K_ASM_RUNTIME STATNAME(AntiAlias_HAS_AMIGA_M68K_ASM_RUNTIME)
 #define IMDCT36_C_REFERENCE STATNAME(IMDCT36_C_REFERENCE)
 #define IMDCT36_TEST_ACTIVE STATNAME(IMDCT36_TEST_ACTIVE)
-#define IMDCT36_MULSW_C_REFERENCE STATNAME(IMDCT36_MULSW_C_REFERENCE)
 #define IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME STATNAME(IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME)
 #define IMDCTThinOutputSelftest STATNAME(IMDCTThinOutputSelftest)
 #define IMDCTSubbandCapSelftest STATNAME(IMDCTSubbandCapSelftest)
@@ -345,7 +343,6 @@ void FDCT32Quarter(int *x, int *d, int offset, int oddBlock, int gb, int phase, 
 void FDCT32FastLowrate(int *x, int *d, int offset, int oddBlock, int gb,
 	int stride, int phase);
 void FDCT32_C_REFERENCE(int *x, int *d, int offset, int oddBlock, int gb);
-void FDCT32_MULSW_C_REFERENCE(int *x, int *d, int offset, int oddBlock, int gb);
 int FDCT32_HAS_AMIGA_M68K_ASM_RUNTIME(void);
 void FDCT32Half_TEST_ACTIVE(int *x, int *d, int offset, int oddBlock, int gb);
 int FDCT32Half_AMIGA_M68K_ASM_RUNTIME(void);
@@ -353,7 +350,6 @@ int FDCT32Half_AMIGA_M68K_ASM_RUNTIME(void);
 /* imdct.c selftest hooks */
 int IMDCT36_C_REFERENCE(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb);
 int IMDCT36_TEST_ACTIVE(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb);
-int IMDCT36_MULSW_C_REFERENCE(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb);
 int IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME(void);
 int IMDCTThinOutputSelftest(void);
 int IMDCTSubbandCapSelftest(void);
