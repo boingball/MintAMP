@@ -201,6 +201,7 @@ extern volatile int gMiniAmp3EmbeddedPlayback;
 #define TRANSPORT_W     48
 #define TRANSPORT_H     20
 #define PLAY_X          (GUI_MARGIN_L + 154)
+#define NEXT_X          (PLAY_X + TRANSPORT_W + 4)
 #define STOP_X          (GUI_MARGIN_L + 306)
 #define FILTER_X         (GUI_MARGIN_L + 390)
 #define FILTER_W         54
@@ -273,6 +274,7 @@ enum {
 	GID_VOLUME,
 	GID_QUALITY,
 	GID_PLAY,
+	GID_NEXT,
 	GID_STOP,
 	GID_HARDWARE_FILTER,
 	GID_PLAYLIST,
@@ -291,11 +293,13 @@ enum {
 };
 
 /* Playlist window gadget IDs (separate range to avoid main window conflicts) */
-#define PL_GID_LIST    200
-#define PL_GID_ADD     201
-#define PL_GID_REMOVE  202
-#define PL_GID_CLEAR   203
-#define PL_GID_PLAY    204
+#define PL_GID_LIST      200
+#define PL_GID_ADD       201
+#define PL_GID_REMOVE    202
+#define PL_GID_CLEAR     203
+#define PL_GID_PLAY      204
+#define PL_GID_LOAD_M3U  205
+#define PL_GID_SAVE_M3U  206
 
 #define HELIXAMP3_PLAYLIST_MAX 128
 
@@ -385,6 +389,7 @@ typedef struct HelixAmp3Gui {
 	struct Gadget  *gadFakeStereoWidth;
 	struct Gadget  *gadFakeStereoDelay;
 	struct Gadget  *gadPlay;
+	struct Gadget  *gadNext;
 	struct Gadget  *gadStop;
 	struct Gadget  *gadHardwareFilter;
 	struct Gadget  *gadPlaylist;
@@ -443,6 +448,7 @@ typedef struct HelixAmp3Gui {
 	int   playbackActive;
 	int   playbackDonePending;
 	int   playbackStoppedByUser;
+	int   playlistNextPending;
 	unsigned long playbackRunId;
 	unsigned long playbackDoneRunId;
 	int lastCleanupStage;
@@ -2044,6 +2050,8 @@ static void ClosePlaylistWindow(HelixAmp3Gui *gui);
 static void OpenPlaylistWindow(HelixAmp3Gui *gui);
 static void RefreshPlaylistView(HelixAmp3Gui *gui);
 static void HandlePlaylistPoll(HelixAmp3Gui *gui);
+static void PlaylistLoadM3U(HelixAmp3Gui *gui);
+static void PlaylistSaveM3U(HelixAmp3Gui *gui);
 
 static int JpegGreySample(const pjpeg_image_info_t *info, int off)
 {
@@ -2529,6 +2537,8 @@ static void DrawTransportIcons(HelixAmp3Gui *gui)
 	int playY;
 	int stopX;
 	int stopY;
+	int nextX;
+	int nextY;
 	int i;
 
 	if (!gui || !gui->win || !gui->gadPlay || !gui->gadStop)
@@ -2545,6 +2555,22 @@ static void DrawTransportIcons(HelixAmp3Gui *gui)
 	stopX = gui->gadStop->LeftEdge + (gui->gadStop->Width / 2) - 5;
 	stopY = gui->gadStop->TopEdge + (gui->gadStop->Height / 2) - 5;
 	RectFill(rp, stopX, stopY, stopX + 9, stopY + 9);
+	/* Next: two small right-pointing triangles (skip-forward) */
+	if (gui->gadNext) {
+		nextX = gui->gadNext->LeftEdge + (gui->gadNext->Width / 2) - 7;
+		nextY = gui->gadNext->TopEdge + (gui->gadNext->Height / 2) - 4;
+		for (i = 0; i < 7; i++) {
+			int half = (6 - i) / 2;
+			RectFill(rp, nextX + i, nextY + 3 - half,
+				nextX + i, nextY + 3 + half);
+		}
+		nextX += 8;
+		for (i = 0; i < 7; i++) {
+			int half = (6 - i) / 2;
+			RectFill(rp, nextX + i, nextY + 3 - half,
+				nextX + i, nextY + 3 + half);
+		}
+	}
 }
 
 static void ReleaseArtColorPens(HelixAmp3Gui *gui)
@@ -2886,10 +2912,12 @@ static void GuiRunAmigaDosInputRegression(HelixAmp3Gui *gui, int afterInterrupte
 static void FinalizePlayback(HelixAmp3Gui *gui)
 {
 	int stoppedByUser = gui->playbackStoppedByUser;
+	int nextPending = gui->playlistNextPending;
 
 	gui->playbackDonePending = 0;
 	gui->playbackStoppedByUser = 0;
 	gui->playbackActive = 0;
+	gui->playlistNextPending = 0;
 	gGuiPlayer.process = NULL;
 	gDonePort = NULL;
 	if (gui->totalSecs > 0 && !stoppedByUser)
@@ -2937,10 +2965,10 @@ static void FinalizePlayback(HelixAmp3Gui *gui)
 			SendTimerRequest(gui, ART_TIMER_MICROS);
 		else
 			SetStatus(gui, "Next file ready.");
-	} else if (!stoppedByUser &&
+	} else if ((!stoppedByUser || nextPending) &&
 		gui->playlist.current >= 0 &&
 		gui->playlist.current + 1 < gui->playlist.count) {
-		/* Auto-advance to next playlist item */
+		/* Auto-advance to next playlist item (or forced via Next button) */
 		gui->playlist.current++;
 		gui->playlist.selected = gui->playlist.current;
 		RefreshPlaylistView(gui);
@@ -3541,6 +3569,15 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 	if (!gad)
 		return -1;
 
+	gui->gadNext = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_NEXT,
+		NEXT_X, ROW_BUTTONS, TRANSPORT_W, TRANSPORT_H, "",
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
 	gui->gadStop = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_STOP,
 		STOP_X, ROW_BUTTONS, TRANSPORT_W, TRANSPORT_H, "",
 		TAG_IGNORE, 0,
@@ -4048,10 +4085,11 @@ static void ClosePlaylistWindow(HelixAmp3Gui *gui)
 }
 
 #define PL_WIN_W  460
-#define PL_WIN_H  260
 #define PL_LIST_H 192
-#define PL_BTN_Y  (PL_LIST_H + 28)
 #define PL_BTN_H  18
+#define PL_BTN_Y  (PL_LIST_H + 28)
+#define PL_BTN_Y2 (PL_BTN_Y + PL_BTN_H + 4)
+#define PL_WIN_H  (PL_BTN_Y2 + PL_BTN_H + 10)
 
 static void OpenPlaylistWindow(HelixAmp3Gui *gui)
 {
@@ -4124,6 +4162,25 @@ static void OpenPlaylistWindow(HelixAmp3Gui *gui)
 	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE);
 	if (!gad) goto fail;
 
+	/* Second button row: Load M3U | Save M3U */
+	bx = 8;
+	bw = (PL_WIN_W - 16 - 4) / 2;
+	ng.ng_TopEdge = PL_BTN_Y2;
+	ng.ng_Width = bw;
+
+	ng.ng_LeftEdge = bx;
+	ng.ng_GadgetText = (UBYTE *)"Load M3U";
+	ng.ng_GadgetID = PL_GID_LOAD_M3U;
+	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE);
+	if (!gad) goto fail;
+	bx += bw + 4;
+
+	ng.ng_LeftEdge = bx;
+	ng.ng_GadgetText = (UBYTE *)"Save M3U";
+	ng.ng_GadgetID = PL_GID_SAVE_M3U;
+	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE);
+	if (!gad) goto fail;
+
 	memset(&nw, 0, sizeof(nw));
 	nw.LeftEdge = gui->win->LeftEdge + 20;
 	nw.TopEdge  = gui->win->TopEdge + 20;
@@ -4176,6 +4233,193 @@ static void PlaylistLoadAndShow(HelixAmp3Gui *gui, int index)
 	DrawProgress(gui);
 	if (gui->artDecode.active)
 		SendTimerRequest(gui, ART_TIMER_MICROS);
+}
+
+static void PlaylistLoadM3U(HelixAmp3Gui *gui)
+{
+	struct FileRequester *req;
+	BPTR fh;
+	char m3uPath[HELIXAMP3_MAX_PATH];
+	char drawer[HELIXAMP3_MAX_PATH];
+	char lineBuf[HELIXAMP3_MAX_PATH + 4];
+	char fullPath[HELIXAMP3_MAX_PATH];
+	char statusMsg[64];
+	int lineLen;
+	int addCount;
+	int isAbsolute;
+	int j;
+	int n;
+	char ch;
+
+	if (!AslBase) {
+		SetStatus(gui, "ASL library not available.");
+		return;
+	}
+	req = (struct FileRequester *)AllocAslRequestTags(ASL_FileRequest,
+		ASLFR_TitleText, (ULONG)"Load M3U Playlist",
+		ASLFR_DoPatterns, TRUE,
+		ASLFR_InitialPattern, (ULONG)"#?.m3u",
+		ASLFR_InitialDrawer,
+			(ULONG)(gui->lastDrawer[0] ? gui->lastDrawer : NULL),
+		TAG_DONE);
+	if (!req)
+		return;
+	if (!AslRequestTags(req, ASLFR_Window, (ULONG)gui->plWin,
+		ASLFR_SleepWindow, TRUE, TAG_DONE)) {
+		FreeAslRequest(req);
+		return;
+	}
+
+	m3uPath[0] = '\0';
+	drawer[0] = '\0';
+	if (req->fr_Drawer && req->fr_Drawer[0]) {
+		SafeCopy(gui->lastDrawer, sizeof(gui->lastDrawer), req->fr_Drawer);
+		SafeCopy(drawer, sizeof(drawer), req->fr_Drawer);
+		SafeCopy(m3uPath, sizeof(m3uPath), req->fr_Drawer);
+		AddPart(m3uPath, req->fr_File, sizeof(m3uPath));
+	} else if (req->fr_File && req->fr_File[0]) {
+		SafeCopy(m3uPath, sizeof(m3uPath), req->fr_File);
+	}
+	FreeAslRequest(req);
+	if (!m3uPath[0])
+		return;
+
+	fh = Open((STRPTR)m3uPath, MODE_OLDFILE);
+	if (!fh) {
+		SetStatus(gui, "Cannot open M3U file.");
+		return;
+	}
+
+	addCount = 0;
+	lineLen = 0;
+	while (Read(fh, &ch, 1) == 1) {
+		if (ch == '\n' || ch == '\r') {
+			if (lineLen > 0) {
+				lineBuf[lineLen] = '\0';
+				while (lineLen > 0 &&
+					(lineBuf[lineLen-1] == '\r' || lineBuf[lineLen-1] == ' '))
+					lineBuf[--lineLen] = '\0';
+				if (lineLen > 0 && lineBuf[0] != '#' &&
+					gui->playlist.count < HELIXAMP3_PLAYLIST_MAX) {
+					isAbsolute = 0;
+					for (j = 0; lineBuf[j] && lineBuf[j] != '/'; j++) {
+						if (lineBuf[j] == ':') { isAbsolute = 1; break; }
+					}
+					if (isAbsolute || lineBuf[0] == '/') {
+						SafeCopy(fullPath, sizeof(fullPath), lineBuf);
+					} else {
+						SafeCopy(fullPath, sizeof(fullPath), drawer);
+						AddPart(fullPath, lineBuf, sizeof(fullPath));
+					}
+					n = gui->playlist.count;
+					SafeCopy(gui->playlist.paths[n], HELIXAMP3_MAX_PATH, fullPath);
+					SafeCopy(gui->playlist.names[n], 80, PlaylistBaseName(fullPath));
+					gui->playlist.count++;
+					addCount++;
+				}
+				lineLen = 0;
+			}
+		} else if (lineLen < (int)(sizeof(lineBuf) - 1)) {
+			lineBuf[lineLen++] = ch;
+		}
+	}
+	/* Handle final line with no trailing newline */
+	if (lineLen > 0) {
+		lineBuf[lineLen] = '\0';
+		while (lineLen > 0 &&
+			(lineBuf[lineLen-1] == '\r' || lineBuf[lineLen-1] == ' '))
+			lineBuf[--lineLen] = '\0';
+		if (lineLen > 0 && lineBuf[0] != '#' &&
+			gui->playlist.count < HELIXAMP3_PLAYLIST_MAX) {
+			isAbsolute = 0;
+			for (j = 0; lineBuf[j] && lineBuf[j] != '/'; j++) {
+				if (lineBuf[j] == ':') { isAbsolute = 1; break; }
+			}
+			if (isAbsolute || lineBuf[0] == '/') {
+				SafeCopy(fullPath, sizeof(fullPath), lineBuf);
+			} else {
+				SafeCopy(fullPath, sizeof(fullPath), drawer);
+				AddPart(fullPath, lineBuf, sizeof(fullPath));
+			}
+			n = gui->playlist.count;
+			SafeCopy(gui->playlist.paths[n], HELIXAMP3_MAX_PATH, fullPath);
+			SafeCopy(gui->playlist.names[n], 80, PlaylistBaseName(fullPath));
+			gui->playlist.count++;
+			addCount++;
+		}
+	}
+	Close(fh);
+	RefreshPlaylistView(gui);
+	sprintf(statusMsg, "Loaded %d tracks from M3U.", addCount);
+	SetStatus(gui, statusMsg);
+}
+
+static void PlaylistSaveM3U(HelixAmp3Gui *gui)
+{
+	struct FileRequester *req;
+	BPTR fh;
+	char m3uPath[HELIXAMP3_MAX_PATH];
+	char lineBuf[HELIXAMP3_MAX_PATH + 2];
+	int i;
+	int len;
+
+	if (gui->playlist.count <= 0) {
+		SetStatus(gui, "Playlist is empty — nothing to save.");
+		return;
+	}
+	if (!AslBase) {
+		SetStatus(gui, "ASL library not available.");
+		return;
+	}
+	req = (struct FileRequester *)AllocAslRequestTags(ASL_FileRequest,
+		ASLFR_TitleText, (ULONG)"Save M3U Playlist",
+		ASLFR_DoSaveMode, TRUE,
+		ASLFR_InitialFile, (ULONG)"playlist.m3u",
+		ASLFR_InitialDrawer,
+			(ULONG)(gui->lastDrawer[0] ? gui->lastDrawer : NULL),
+		TAG_DONE);
+	if (!req)
+		return;
+	if (!AslRequestTags(req, ASLFR_Window, (ULONG)gui->plWin,
+		ASLFR_SleepWindow, TRUE, TAG_DONE)) {
+		FreeAslRequest(req);
+		return;
+	}
+
+	m3uPath[0] = '\0';
+	if (req->fr_Drawer && req->fr_Drawer[0]) {
+		SafeCopy(m3uPath, sizeof(m3uPath), req->fr_Drawer);
+		AddPart(m3uPath, req->fr_File, sizeof(m3uPath));
+	} else if (req->fr_File && req->fr_File[0]) {
+		SafeCopy(m3uPath, sizeof(m3uPath), req->fr_File);
+	}
+	FreeAslRequest(req);
+	if (!m3uPath[0])
+		return;
+
+	fh = Open((STRPTR)m3uPath, MODE_NEWFILE);
+	if (!fh) {
+		SetStatus(gui, "Cannot create M3U file.");
+		return;
+	}
+
+	len = (int)strlen("#EXTM3U\n");
+	if (Write(fh, (APTR)"#EXTM3U\n", len) != len)
+		goto fail;
+
+	for (i = 0; i < gui->playlist.count; i++) {
+		SafeCopy(lineBuf, sizeof(lineBuf) - 1, gui->playlist.paths[i]);
+		len = (int)strlen(lineBuf);
+		lineBuf[len] = '\n';
+		if (Write(fh, (APTR)lineBuf, len + 1) != len + 1)
+			goto fail;
+	}
+	Close(fh);
+	SetStatus(gui, "Playlist saved as M3U.");
+	return;
+fail:
+	Close(fh);
+	SetStatus(gui, "Error writing M3U file.");
 }
 
 static void HandlePlaylistPoll(HelixAmp3Gui *gui)
@@ -4301,6 +4545,12 @@ static void HandlePlaylistPoll(HelixAmp3Gui *gui)
 				PlaylistLoadAndShow(gui, gui->playlist.selected);
 				StartPlayback(gui);
 			}
+			break;
+		case PL_GID_LOAD_M3U:
+			PlaylistLoadM3U(gui);
+			break;
+		case PL_GID_SAVE_M3U:
+			PlaylistSaveM3U(gui);
 			break;
 		}
 	}
@@ -5081,6 +5331,26 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 			gui->artLoading = 1;
 		}
 		StartPlayback(gui);
+		break;
+	case GID_NEXT:
+		if (gui->playlist.count == 0 || gui->playlist.current < 0) {
+			SetStatus(gui, "No active playlist track to skip.");
+			break;
+		}
+		if (gui->playlist.current + 1 >= gui->playlist.count) {
+			SetStatus(gui, "Already at the last playlist track.");
+			break;
+		}
+		if (gui->playbackActive || gui->playbackDonePending) {
+			/* Stop playback; FinalizePlayback will advance to next */
+			gui->playlistNextPending = 1;
+			StopPlayback(gui);
+		} else {
+			/* Not playing — load next track immediately */
+			gui->playlist.current++;
+			gui->playlist.selected = gui->playlist.current;
+			PlaylistLoadAndShow(gui, gui->playlist.current);
+		}
 		break;
 	case GID_STOP:
 		StopPlayback(gui);
