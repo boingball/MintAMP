@@ -160,7 +160,11 @@ extern volatile int gMiniAmp3EmbeddedPlayback;
 #include <proto/graphics.h>
 #include <proto/diskfont.h>
 #include <proto/timer.h>
+#include <graphics/colormap.h>
 #include "picojpeg.h"
+#ifndef OBP_FailIfBad
+#define OBP_FailIfBad (TAG_USER + 0x01L)
+#endif
 
 #define HELIXAMP3_MAX_PATH 256
 #define HELIXAMP3_ARGC_MAX 28
@@ -246,8 +250,9 @@ extern volatile int gMiniAmp3EmbeddedPlayback;
 #define ITEMNUM_ARTCACHE  3
 #define ITEMNUM_ARTCOLOR  4
 #define ITEMNUM_ARTREFRESH 5
-#define ITEMNUM_ARTCLEAN  6
-#define ITEMNUM_PROGRESS  7
+#define ITEMNUM_ARTRELOAD  6
+#define ITEMNUM_ARTCLEAN   7
+#define ITEMNUM_PROGRESS   8
 
 enum {
 	GID_FILE = 1,
@@ -299,6 +304,9 @@ typedef struct ArtDecodeState {
 	unsigned char xMap[MAX_JPEG_DIM];
 	unsigned char yMap[MAX_JPEG_DIM];
 	unsigned long greyAccum[ART_W * ART_H];
+	unsigned long rAccum[ART_W * ART_H];
+	unsigned long gAccum[ART_W * ART_H];
+	unsigned long bAccum[ART_W * ART_H];
 	unsigned short greyCount[ART_W * ART_H];
 	unsigned char greyOut[ART_W * ART_H];
 	int reduce;
@@ -366,6 +374,7 @@ typedef struct HelixAmp3Gui {
 	int artRestartPending;
 	int artCacheSavePending;
 	unsigned char artGreyBuf[ART_W * ART_H];
+	unsigned char artRGBBuf[ART_W * ART_H * 3];
 	ArtDecodeState artDecode;
 	struct MsgPort *timerPort;
 	struct MsgPort *donePort;
@@ -548,9 +557,11 @@ static struct NewMenu myNewMenus[] = {
 		(APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_ARTCACHE) },
 	{ NM_ITEM,  (STRPTR)"Colour Artwork",   0, CHECKIT | MENUTOGGLE, 0,
 		(APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_ARTCOLOR) },
-	{ NM_ITEM,  (STRPTR)"Refresh Artwork",  0, 0, 0,
+	{ NM_ITEM,  (STRPTR)"Refresh Artwork",   0, 0, 0,
 		(APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_ARTREFRESH) },
-	{ NM_ITEM,  (STRPTR)"Clean Artwork Cache",0, 0, 0,
+	{ NM_ITEM,  (STRPTR)"Reload Art from File", 0, 0, 0,
+		(APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_ARTRELOAD) },
+	{ NM_ITEM,  (STRPTR)"Clean Artwork Cache", 0, 0, 0,
 		(APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_ARTCLEAN) },
 	{ NM_ITEM,  (STRPTR)"Progress Bar",     0, CHECKIT | MENUTOGGLE, 0,
 		(APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_PROGRESS) },
@@ -1583,12 +1594,46 @@ static void UpdateTagDisplay(HelixAmp3Gui *gui)
 }
 
 
-static const unsigned char kBayer4x4[4][4] = {
-	{  0,  8,  2, 10 },
-	{ 12,  4, 14,  6 },
-	{  3, 11,  1,  9 },
-	{ 15,  7, 13,  5 }
+static const unsigned char kBayer8x8[8][8] = {
+	{  0, 32,  8, 40,  2, 34, 10, 42 },
+	{ 48, 16, 56, 24, 50, 18, 58, 26 },
+	{ 12, 44,  4, 36, 14, 46,  6, 38 },
+	{ 60, 28, 52, 20, 62, 30, 54, 22 },
+	{  3, 35, 11, 43,  1, 33,  9, 41 },
+	{ 51, 19, 59, 27, 49, 17, 57, 25 },
+	{ 15, 47,  7, 39, 13, 45,  5, 37 },
+	{ 63, 31, 55, 23, 61, 29, 53, 21 }
 };
+
+static int PeekJpegDimensions(const unsigned char *data, unsigned long size,
+	int *outW, int *outH)
+{
+	unsigned long pos = 2;
+	if (size < 4 || data[0] != 0xFF || data[1] != 0xD8)
+		return 0;
+	while (pos + 4 <= size) {
+		unsigned int segLen;
+		unsigned char marker;
+		if (data[pos] != 0xFF)
+			return 0;
+		marker = data[pos + 1];
+		segLen = ((unsigned int)data[pos + 2] << 8) | data[pos + 3];
+		if ((marker >= 0xC0 && marker <= 0xC3) ||
+			(marker >= 0xC5 && marker <= 0xC7) ||
+			(marker >= 0xC9 && marker <= 0xCB) ||
+			(marker >= 0xCD && marker <= 0xCF)) {
+			if (pos + 9 <= size) {
+				*outH = ((int)data[pos + 5] << 8) | data[pos + 6];
+				*outW = ((int)data[pos + 7] << 8) | data[pos + 8];
+				return (*outW > 0 && *outH > 0) ? 1 : 0;
+			}
+		}
+		if (segLen < 2)
+			return 0;
+		pos += 2 + segLen;
+	}
+	return 0;
+}
 
 static unsigned char pjpeg_cb(unsigned char *buf, unsigned char buf_size,
 	unsigned char *bytes_actually_read, void *ud)
@@ -1706,6 +1751,66 @@ static void ArtAccumReducedBlock(const pjpeg_image_info_t *info,
 	}
 }
 
+static void ArtAccumSampleColor(unsigned long *greyAcc,
+	unsigned long *rAcc, unsigned long *gAcc, unsigned long *bAcc,
+	unsigned short *count, int dst,
+	int grey, unsigned char r, unsigned char g, unsigned char b,
+	unsigned long weight)
+{
+	if (!weight)
+		return;
+	greyAcc[dst] += (unsigned long)grey * weight;
+	rAcc[dst] += (unsigned long)r * weight;
+	gAcc[dst] += (unsigned long)g * weight;
+	bAcc[dst] += (unsigned long)b * weight;
+	if ((unsigned long)count[dst] + weight > 0xffffUL)
+		count[dst] = 0xffff;
+	else
+		count[dst] = (unsigned short)(count[dst] + weight);
+}
+
+static void ArtAccumReducedBlockColor(const pjpeg_image_info_t *info,
+	unsigned long *greyAcc, unsigned long *rAcc, unsigned long *gAcc,
+	unsigned long *bAcc, unsigned short *count, int outW, int outH,
+	int srcX0, int srcY0, int blockW, int blockH,
+	int grey, unsigned char r, unsigned char g, unsigned char b)
+{
+	int srcX1 = srcX0 + blockW;
+	int srcY1 = srcY0 + blockH;
+	int dstX0, dstX1, dstY0, dstY1;
+	int dy;
+	if (srcX0 >= info->m_width || srcY0 >= info->m_height)
+		return;
+	if (srcX1 > info->m_width)  srcX1 = info->m_width;
+	if (srcY1 > info->m_height) srcY1 = info->m_height;
+	dstX0 = (srcX0 * outW) / info->m_width;
+	dstX1 = ((srcX1 * outW) + info->m_width - 1) / info->m_width;
+	dstY0 = (srcY0 * outH) / info->m_height;
+	dstY1 = ((srcY1 * outH) + info->m_height - 1) / info->m_height;
+	if (dstX1 > outW) dstX1 = outW;
+	if (dstY1 > outH) dstY1 = outH;
+	for (dy = dstY0; dy < dstY1; dy++) {
+		int cellY0 = (dy * info->m_height + outH - 1) / outH;
+		int cellY1 = ((dy + 1) * info->m_height + outH - 1) / outH;
+		int oy0 = cellY0 > srcY0 ? cellY0 : srcY0;
+		int oy1 = cellY1 < srcY1 ? cellY1 : srcY1;
+		int dx;
+		if (oy1 <= oy0)
+			continue;
+		for (dx = dstX0; dx < dstX1; dx++) {
+			int cellX0 = (dx * info->m_width + outW - 1) / outW;
+			int cellX1 = ((dx + 1) * info->m_width + outW - 1) / outW;
+			int ox0 = cellX0 > srcX0 ? cellX0 : srcX0;
+			int ox1 = cellX1 < srcX1 ? cellX1 : srcX1;
+			if (ox1 > ox0)
+				ArtAccumSampleColor(greyAcc, rAcc, gAcc, bAcc, count,
+					dy * outW + dx, grey, r, g, b,
+					(unsigned long)(ox1 - ox0) *
+					(unsigned long)(oy1 - oy0));
+		}
+	}
+}
+
 static int McuSampleOffset(const pjpeg_image_info_t *info, int x, int y)
 {
 	int blockX = x / 8;
@@ -1717,6 +1822,8 @@ static int McuSampleOffset(const pjpeg_image_info_t *info, int x, int y)
 }
 
 static int JpegGreySample(const pjpeg_image_info_t *info, int off);
+static int JpegSampleRGB(const pjpeg_image_info_t *info, int off,
+	unsigned char *r, unsigned char *g, unsigned char *b);
 
 static int DecodeJpegToGreyMode(const unsigned char *jpegData, unsigned long jpegBytes,
 	unsigned char *greyOut, int outW, int outH, int isPng, int reduce,
@@ -1901,6 +2008,20 @@ static int JpegGreySample(const pjpeg_image_info_t *info, int off)
 #endif
 }
 
+static int JpegSampleRGB(const pjpeg_image_info_t *info, int off,
+	unsigned char *r, unsigned char *g, unsigned char *b)
+{
+	if (info->m_comps == 1) {
+		unsigned char y = info->m_pMCUBufR[off];
+		*r = *g = *b = y;
+		return (int)y;
+	}
+	*r = info->m_pMCUBufR[off];
+	*g = info->m_pMCUBufG[off];
+	*b = info->m_pMCUBufB[off];
+	return (int)((77UL * *r + 150UL * *g + 29UL * *b + 128UL) >> 8);
+}
+
 static void FinishArtDecode(HelixAmp3Gui *gui, int ok)
 {
 	ArtDecodeState *st = &gui->artDecode;
@@ -1914,9 +2035,14 @@ static void FinishArtDecode(HelixAmp3Gui *gui, int ok)
 			st->pumpCount, st->decodeMicros, st->processMicros, totalMicros);
 #endif
 		for (i = 0; i < ART_W * ART_H; i++) {
-			if (st->greyCount[i])
-				st->greyOut[i] = (unsigned char)((st->greyAccum[i] +
-					(st->greyCount[i] / 2)) / st->greyCount[i]);
+			if (st->greyCount[i]) {
+				unsigned long c = st->greyCount[i];
+				unsigned long half = c / 2;
+				st->greyOut[i] = (unsigned char)((st->greyAccum[i] + half) / c);
+				gui->artRGBBuf[i * 3    ] = (unsigned char)((st->rAccum[i] + half) / c);
+				gui->artRGBBuf[i * 3 + 1] = (unsigned char)((st->gAccum[i] + half) / c);
+				gui->artRGBBuf[i * 3 + 2] = (unsigned char)((st->bAccum[i] + half) / c);
+			}
 		}
 		memcpy(gui->artGreyBuf, st->greyOut, ART_W * ART_H);
 		gui->artValid = 1;
@@ -1986,9 +2112,12 @@ static void PumpArtDecode(HelixAmp3Gui *gui)
 			for (by = 0; by < st->info.m_MCUHeight; by += 8) {
 				for (bx = 0; bx < st->info.m_MCUWidth; bx += 8) {
 					int off = McuSampleOffset(&st->info, bx, by);
-					ArtAccumReducedBlock(&st->info, st->greyAccum,
-						st->greyCount, ART_W, ART_H, mcuX + bx,
-						mcuY + by, 8, 8, JpegGreySample(&st->info, off));
+					unsigned char r, g, b;
+					int grey = JpegSampleRGB(&st->info, off, &r, &g, &b);
+					ArtAccumReducedBlockColor(&st->info,
+						st->greyAccum, st->rAccum, st->gAccum, st->bAccum,
+						st->greyCount, ART_W, ART_H,
+						mcuX + bx, mcuY + by, 8, 8, grey, r, g, b);
 				}
 			}
 		} else for (y = 0; y < st->info.m_MCUHeight; y++) {
@@ -2002,12 +2131,17 @@ static void PumpArtDecode(HelixAmp3Gui *gui)
 			for (x = 0; x < st->info.m_MCUWidth; x++) {
 				int srcX = mcuX + x;
 				int dst;
+				unsigned char r, g, b;
+				int grey;
 
 				if (srcX >= st->info.m_width)
 					continue;
 				dst = dstY * ART_W + st->xMap[srcX];
-				ArtAccumSample(st->greyAccum, st->greyCount, dst,
-					JpegGreySample(&st->info, McuSampleOffset(&st->info, x, y)), 1);
+				grey = JpegSampleRGB(&st->info,
+					McuSampleOffset(&st->info, x, y), &r, &g, &b);
+				ArtAccumSampleColor(st->greyAccum, st->rAccum,
+					st->gAccum, st->bAccum, st->greyCount,
+					dst, grey, r, g, b, 1);
 			}
 		}
 		st->processMicros += ArtElapsedMicros(t0s, t0u);
@@ -2054,8 +2188,22 @@ static int LoadArtworkCache(HelixAmp3Gui *gui)
 	if (!f)
 		return 0;
 	if (fread(hdr, 1, sizeof(hdr), f) == sizeof(hdr) &&
-		memcmp(hdr, "M3AG64\0", 7) == 0 && hdr[7] == 1 &&
+		memcmp(hdr, "M3AG64\0", 7) == 0 &&
+		(hdr[7] == 1 || hdr[7] == 2) &&
 		fread(gui->artGreyBuf, 1, ART_W * ART_H, f) == ART_W * ART_H) {
+		int i;
+		if (hdr[7] == 2 &&
+			fread(gui->artRGBBuf, 1, ART_W * ART_H * 3, f) == ART_W * ART_H * 3) {
+			/* v2: grey + RGB loaded */
+		} else {
+			/* v1 or partial: derive RGB from grey */
+			for (i = 0; i < ART_W * ART_H; i++) {
+				unsigned char g = gui->artGreyBuf[i];
+				gui->artRGBBuf[i * 3    ] = g;
+				gui->artRGBBuf[i * 3 + 1] = g;
+				gui->artRGBBuf[i * 3 + 2] = g;
+			}
+		}
 		fclose(f);
 		gui->artValid = 1;
 		gui->artLoading = 0;
@@ -2070,7 +2218,7 @@ static void SaveArtworkCache(HelixAmp3Gui *gui)
 	char dir[64];
 	char path[HELIXAMP3_MAX_PATH];
 	FILE *f;
-	static const unsigned char hdr[8] = { 'M','3','A','G','6','4','\0', 1 };
+	static const unsigned char hdr[8] = { 'M','3','A','G','6','4','\0', 2 };
 
 	if (!gui->artCacheEnabled || !gui->inputName[0] || !gui->artValid)
 		return;
@@ -2082,6 +2230,7 @@ static void SaveArtworkCache(HelixAmp3Gui *gui)
 		return;
 	fwrite(hdr, 1, sizeof(hdr), f);
 	fwrite(gui->artGreyBuf, 1, ART_W * ART_H, f);
+	fwrite(gui->artRGBBuf, 1, ART_W * ART_H * 3, f);
 	fclose(f);
 }
 
@@ -2146,7 +2295,14 @@ static void StartArtDecode(HelixAmp3Gui *gui)
 		return;
 	}
 	memset(st->greyOut, 0x80, sizeof(st->greyOut));
-	st->reduce = MINIAMP3_ART_REDUCED_JPEG ? 1 : 0;
+	{
+		int jpegW = 0, jpegH = 0;
+		PeekJpegDimensions(gui->tags.artData, gui->tags.artBytes, &jpegW, &jpegH);
+		if (jpegW <= 0 || jpegH <= 0)
+			st->reduce = MINIAMP3_ART_REDUCED_JPEG ? 1 : 0;
+		else
+			st->reduce = (jpegW > ART_W * 4 || jpegH > ART_H * 4) ? 1 : 0;
+	}
 	ArtNow(&st->startSecs, &st->startMicros);
 #if MINIAMP3_ART_COMPARE_JPEG
 	{
@@ -2256,6 +2412,34 @@ static void DrawTransportIcons(HelixAmp3Gui *gui)
 	RectFill(rp, stopX, stopY, stopX + 9, stopY + 9);
 }
 
+#define ART_COLOR_CACHE 64
+typedef struct { unsigned long key; long pen; } ArtPenEntry;
+
+static long ArtGetPen(struct ColorMap *cm,
+	unsigned char r, unsigned char g, unsigned char b,
+	ArtPenEntry *cache, int *used)
+{
+	unsigned long key = ((unsigned long)r << 16) |
+	                    ((unsigned long)g <<  8) | b;
+	ULONG r32, g32, b32;
+	long pen;
+	int i;
+	for (i = 0; i < *used; i++)
+		if (cache[i].key == key)
+			return cache[i].pen;
+	r32 = (ULONG)r | ((ULONG)r << 8) | ((ULONG)r << 16) | ((ULONG)r << 24);
+	g32 = (ULONG)g | ((ULONG)g << 8) | ((ULONG)g << 16) | ((ULONG)g << 24);
+	b32 = (ULONG)b | ((ULONG)b << 8) | ((ULONG)b << 16) | ((ULONG)b << 24);
+	pen = ObtainBestPen(cm, r32, g32, b32,
+		OBP_FailIfBad, (Tag)FALSE, TAG_DONE);
+	if (*used < ART_COLOR_CACHE) {
+		cache[*used].key = key;
+		cache[*used].pen = pen;
+		(*used)++;
+	}
+	return pen;
+}
+
 static void DrawArtPanel(HelixAmp3Gui *gui)
 {
 	struct RastPort *rp;
@@ -2270,59 +2454,86 @@ static void DrawArtPanel(HelixAmp3Gui *gui)
 		GTBB_Recessed, TRUE,
 		TAG_DONE);
 	if (gui->artValid) {
-		/* Resolve all three pens with a single GetScreenDrawInfo/Free pair. */
-		int pens[3];
-		{
-			struct DrawInfo *dri = gui->win ?
-				GetScreenDrawInfo(gui->win->WScreen) : NULL;
-			if (dri) {
-				pens[0] = dri->dri_Pens[SHADOWPEN];
-				pens[1] = dri->dri_Pens[BACKGROUNDPEN];
-				pens[2] = dri->dri_Pens[SHINEPEN];
-				if (gui->artColorEnabled && gui->win->WScreen->ViewPort.ColorMap &&
-					gui->win->WScreen->BitMap.Depth >= 2)
-					pens[2] = 3;
-				FreeScreenDrawInfo(gui->win->WScreen, dri);
-			} else {
-				pens[0] = 0;
-				pens[1] = 1;
-				pens[2] = 1;
-			}
-		}
+		if (gui->artColorEnabled && gui->win->WScreen->ViewPort.ColorMap) {
+			/* True colour path: map each pixel to nearest screen pen via
+			 * ObtainBestPen, with a small per-draw cache to reduce calls. */
+			struct ColorMap *cm = gui->win->WScreen->ViewPort.ColorMap;
+			ArtPenEntry penCache[ART_COLOR_CACHE];
+			int penCacheUsed = 0;
+			int i;
 
-		/* Render using horizontal RectFill runs instead of per-pixel WritePixel. */
-		for (y = 0; y < ART_H; y++) {
-			int runStart = 0;
-			int runShade;
+			for (y = 0; y < ART_H; y++) {
+				const unsigned char *row = &gui->artRGBBuf[y * ART_W * 3];
+				int runStart = 0;
+				long runPen = ArtGetPen(cm, row[0], row[1], row[2],
+					penCache, &penCacheUsed);
 
-			/* Compute first pixel's shade to seed the run. */
-			{
-				int g0 = gui->artGreyBuf[y * ART_W];
-				int dv = kBayer4x4[y & 3][0] - 8;
-				int gd = g0 + dv * 2;
-
-				runShade = gd >= 176 ? 2 : (gd >= 80 ? 1 : 0);
-			}
-			for (x = 1; x <= ART_W; x++) {
-				int shade;
-
-				if (x < ART_W) {
-					int g = gui->artGreyBuf[y * ART_W + x];
-					int dv = kBayer4x4[y & 3][x & 3] - 8;
-					int gd = g + dv * 2;
-
-					shade = gd >= 176 ? 2 : (gd >= 80 ? 1 : 0);
-				} else {
-					shade = -1; /* sentinel to flush last run */
+				for (x = 1; x <= ART_W; x++) {
+					long pen;
+					if (x < ART_W) {
+						const unsigned char *p = row + x * 3;
+						pen = ArtGetPen(cm, p[0], p[1], p[2],
+							penCache, &penCacheUsed);
+					} else {
+						pen = -2; /* sentinel to flush last run */
+					}
+					if (pen != runPen) {
+						if (runPen >= 0) {
+							SetAPen(rp, (UWORD)runPen);
+							RectFill(rp, ART_X + runStart, ART_Y + y,
+								ART_X + x - 1, ART_Y + y);
+						}
+						runStart = x;
+						runPen = pen;
+					}
 				}
-				if (shade != runShade) {
-					/* Flush the completed run. */
-					SetAPen(rp, pens[runShade]);
-					RectFill(rp,
-						ART_X + runStart, ART_Y + y,
-						ART_X + x - 1, ART_Y + y);
-					runStart = x;
-					runShade = shade;
+			}
+			for (i = 0; i < penCacheUsed; i++)
+				if (penCache[i].pen >= 0)
+					ReleasePen(cm, penCache[i].pen);
+		} else {
+			/* Greyscale path: ordered dithering with 8x8 Bayer matrix and
+			 * three system pens (shadow / background / shine). */
+			int pens[3];
+			{
+				struct DrawInfo *dri =
+					GetScreenDrawInfo(gui->win->WScreen);
+				if (dri) {
+					pens[0] = dri->dri_Pens[SHADOWPEN];
+					pens[1] = dri->dri_Pens[BACKGROUNDPEN];
+					pens[2] = dri->dri_Pens[SHINEPEN];
+					FreeScreenDrawInfo(gui->win->WScreen, dri);
+				} else {
+					pens[0] = 0; pens[1] = 1; pens[2] = 1;
+				}
+			}
+
+			for (y = 0; y < ART_H; y++) {
+				int runStart = 0;
+				int runShade;
+				{
+					int g0 = gui->artGreyBuf[y * ART_W];
+					int dv = (int)kBayer8x8[y & 7][0] - 32;
+					int gd = g0 + dv * 3 / 4;
+					runShade = gd >= 171 ? 2 : (gd >= 85 ? 1 : 0);
+				}
+				for (x = 1; x <= ART_W; x++) {
+					int shade;
+					if (x < ART_W) {
+						int g = gui->artGreyBuf[y * ART_W + x];
+						int dv = (int)kBayer8x8[y & 7][x & 7] - 32;
+						int gd = g + dv * 3 / 4;
+						shade = gd >= 171 ? 2 : (gd >= 85 ? 1 : 0);
+					} else {
+						shade = -1; /* sentinel to flush last run */
+					}
+					if (shade != runShade) {
+						SetAPen(rp, pens[runShade]);
+						RectFill(rp, ART_X + runStart, ART_Y + y,
+							ART_X + x - 1, ART_Y + y);
+						runStart = x;
+						runShade = shade;
+					}
 				}
 			}
 		}
@@ -4448,6 +4659,18 @@ static void GuiPoll(HelixAmp3Gui *gui)
 						if (gui->artDecode.active)
 							SendTimerRequest(gui, ART_TIMER_MICROS);
 						SetStatus(gui, "Artwork refreshed.");
+					} else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_ARTRELOAD) {
+						if (gui->inputName[0]) {
+							CancelArtDecode(gui);
+							gui->artValid = 0;
+							ReadMp3Tags(gui->inputName, &gui->tags,
+								gui->artEnabled);
+							gui->artCacheBypass = 1;
+							UpdateArtDisplay(gui);
+							gui->artCacheBypass = 0;
+							if (gui->artDecode.active)
+								SendTimerRequest(gui, ART_TIMER_MICROS);
+						}
 					} else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_ARTCLEAN)
 						CleanArtworkCache(gui);
 					else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_PROGRESS) {
