@@ -175,7 +175,7 @@ extern volatile int gMiniAmp3EmbeddedPlayback;
 #define GUI_ENV_PREFIX  "ENVARC:MiniAMP3"
 
 #define GUI_WIN_W       560    /* inner width; wide enough for all controls */
-#define GUI_WIN_H       322    /* compact inner height with safe title-bar clearance */
+#define GUI_WIN_H       340    /* inner height */
 
 #define GUI_MARGIN_L     8     /* left margin */
 #define GUI_MARGIN_R     8     /* right margin */
@@ -204,6 +204,8 @@ extern volatile int gMiniAmp3EmbeddedPlayback;
 #define STOP_X          (GUI_MARGIN_L + 306)
 #define FILTER_X         (GUI_MARGIN_L + 390)
 #define FILTER_W         54
+#define PL_OPEN_X        (FILTER_X + FILTER_W + 8)
+#define PL_OPEN_W        (GUI_WIN_W - PL_OPEN_X - GUI_MARGIN_R)
 #define FILEINFO_X      (GUI_MARGIN_L + 84)
 #define FILEINFO_W      (GUI_WIN_W - FILEINFO_X - GUI_MARGIN_R)
 
@@ -221,8 +223,8 @@ extern volatile int gMiniAmp3EmbeddedPlayback;
 #define ROW_VOLUME      (GUI_TOP_Y + 11 * GUI_ROW_H + 4)
 #define ROW_PROGRESS    (GUI_TOP_Y + 12 * GUI_ROW_H + 8)
 #define ROW_BUTTONS     (GUI_TOP_Y + 13 * GUI_ROW_H + 12)
-#define ROW_STATUS      (GUI_TOP_Y + 14 * GUI_ROW_H + 12)
-#define ROW_FILEINFO    (GUI_TOP_Y + 15 * GUI_ROW_H + 12)
+#define ROW_STATUS      (ROW_BUTTONS + TRANSPORT_H + 4)
+#define ROW_FILEINFO    (ROW_STATUS + GUI_ROW_H + 4)
 
 #define PROG_X          (GUI_MARGIN_L + 8)
 #define PROG_W          (GUI_WIN_W - PROG_X - 90 - GUI_MARGIN_R)
@@ -260,10 +262,9 @@ enum {
 	GID_TITLE,
 	GID_ARTIST,
 	GID_ALBUM,
-	GID_FAST_LOWRATE,
-	GID_SUPERFAST_LOWRATE,
+	GID_SPEED_MODE,
 	GID_FAST_MEM,
-	GID_MONO,
+	GID_CHANNEL_MODE,
 	GID_FAKE_STEREO,
 	GID_FAKE_STEREO_WIDTH,
 	GID_FAKE_STEREO_DELAY,
@@ -274,6 +275,7 @@ enum {
 	GID_PLAY,
 	GID_STOP,
 	GID_HARDWARE_FILTER,
+	GID_PLAYLIST,
 	GID_STATUS,
 	GID_RATING_LABEL,
 	GID_RATING_VALUE,
@@ -287,6 +289,25 @@ enum {
 	GID_STAR5,
 	GID_COUNT
 };
+
+/* Playlist window gadget IDs (separate range to avoid main window conflicts) */
+#define PL_GID_LIST    200
+#define PL_GID_ADD     201
+#define PL_GID_REMOVE  202
+#define PL_GID_CLEAR   203
+#define PL_GID_PLAY    204
+
+#define HELIXAMP3_PLAYLIST_MAX 128
+
+typedef struct {
+	char paths[HELIXAMP3_PLAYLIST_MAX][HELIXAMP3_MAX_PATH];
+	char names[HELIXAMP3_PLAYLIST_MAX][80];
+	struct Node nodes[HELIXAMP3_PLAYLIST_MAX];
+	struct List list;
+	int count;
+	int selected;
+	int current;
+} Playlist;
 
 typedef struct {
 	const unsigned char *data;
@@ -356,18 +377,23 @@ typedef struct HelixAmp3Gui {
 	struct Gadget  *gadStatus;
 	struct Gadget  *gadBuffer;
 	struct Gadget  *gadVolume;
-	struct Gadget  *gadFastLowrate;
-	struct Gadget  *gadSuperfastLowrate;
+	struct Gadget  *gadSpeedMode;
 	struct Gadget  *gadRate;
 	struct Gadget  *gadFastMem;
-	struct Gadget  *gadMono;
+	struct Gadget  *gadChannelMode;
 	struct Gadget  *gadFakeStereo;
 	struct Gadget  *gadFakeStereoWidth;
 	struct Gadget  *gadFakeStereoDelay;
 	struct Gadget  *gadPlay;
 	struct Gadget  *gadStop;
 	struct Gadget  *gadHardwareFilter;
+	struct Gadget  *gadPlaylist;
 	struct VisualInfo *visualInfo;
+	struct Window  *plWin;
+	struct Gadget  *plGadgets;
+	struct Gadget  *plGadContext;
+	struct Gadget  *plGadList;
+	Playlist playlist;
 	struct Menu *menuStrip;
 	int artEnabled;
 	int artCacheEnabled;
@@ -516,6 +542,31 @@ static int DefaultSuperfastRateIndex(int mono)
 static int ChannelUsesMonoCost(const HelixAmp3Gui *gui)
 {
 	return gui->mono || gui->fakeStereo;
+}
+
+static const STRPTR kSpeedModeLabels[] = {
+	(STRPTR)"Normal",
+	(STRPTR)"Fast",
+	(STRPTR)"Superfast",
+	NULL
+};
+
+static const STRPTR kChannelModeLabels[] = {
+	(STRPTR)"Stereo",
+	(STRPTR)"Mono",
+	NULL
+};
+
+static int SpeedModeIndex(const HelixAmp3Gui *gui)
+{
+	if (gui->superfastLowrate) return 2;
+	if (gui->fastLowrate) return 1;
+	return 0;
+}
+
+static int ChannelModeIndex(const HelixAmp3Gui *gui)
+{
+	return gui->mono ? 1 : 0;
 }
 
 static const STRPTR kQualityLabels[] = {
@@ -1988,6 +2039,11 @@ static void HandleDoneSignal(HelixAmp3Gui *gui);
 static void SaveArtworkCache(HelixAmp3Gui *gui);
 static void BuildArtColorPens(HelixAmp3Gui *gui);
 static void ReleaseArtColorPens(HelixAmp3Gui *gui);
+static void StartPlayback(HelixAmp3Gui *gui);
+static void ClosePlaylistWindow(HelixAmp3Gui *gui);
+static void OpenPlaylistWindow(HelixAmp3Gui *gui);
+static void RefreshPlaylistView(HelixAmp3Gui *gui);
+static void HandlePlaylistPoll(HelixAmp3Gui *gui);
 
 static int JpegGreySample(const pjpeg_image_info_t *info, int off)
 {
@@ -2881,6 +2937,29 @@ static void FinalizePlayback(HelixAmp3Gui *gui)
 			SendTimerRequest(gui, ART_TIMER_MICROS);
 		else
 			SetStatus(gui, "Next file ready.");
+	} else if (!stoppedByUser &&
+		gui->playlist.current >= 0 &&
+		gui->playlist.current + 1 < gui->playlist.count) {
+		/* Auto-advance to next playlist item */
+		gui->playlist.current++;
+		gui->playlist.selected = gui->playlist.current;
+		RefreshPlaylistView(gui);
+		CancelArtDecode(gui);
+		SafeCopy(gui->inputName, sizeof(gui->inputName),
+			gui->playlist.paths[gui->playlist.current]);
+		SetFileDisplay(gui, gui->inputName);
+		ReadMp3Tags(gui->inputName, &gui->tags, gui->artEnabled);
+		gui->totalSecs = gui->tags.durationSecs;
+		gui->elapsedSecs = 0;
+		gui->launchBufferSecs = 0;
+		UpdateTagDisplay(gui);
+		UpdateArtDisplay(gui);
+		DrawProgress(gui);
+		if (gui->artDecode.active)
+			SendTimerRequest(gui, ART_TIMER_MICROS);
+		StartPlayback(gui);
+	} else {
+		gui->playlist.current = -1;
 	}
 }
 
@@ -3240,8 +3319,8 @@ static void UpdateChannelGadgetState(HelixAmp3Gui *gui)
 {
 	if (!gui->win)
 		return;
-	if (gui->gadMono)
-		GT_SetGadgetAttrs(gui->gadMono, gui->win, NULL,
+	if (gui->gadChannelMode)
+		GT_SetGadgetAttrs(gui->gadChannelMode, gui->win, NULL,
 			GA_Disabled, gui->fakeStereo, TAG_DONE);
 	if (gui->gadFakeStereoWidth)
 		GT_SetGadgetAttrs(gui->gadFakeStereoWidth, gui->win, NULL,
@@ -3358,27 +3437,18 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gad = MakeGadget(gui, gad, TEXT_KIND, GID_COUNT,
-		GUI_MARGIN_L + 14, ROW_CHECKS - 1, 68, 16, "",
-		GTTX_Text, (ULONG)"Processing:",
+		GUI_MARGIN_L + 14, ROW_CHECKS - 1, 60, 16, "",
+		GTTX_Text, (ULONG)"Speed:",
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0);
 	if (!gad)
 		return -1;
 
-	gui->gadFastLowrate = gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_FAST_LOWRATE,
-		GUI_MARGIN_L + 96, ROW_CHECKS, 20, 12, "Fast",
-		GTCB_Checked, gui->fastLowrate,
-		TAG_IGNORE, 0,
-		TAG_IGNORE, 0,
-		TAG_IGNORE, 0);
-	if (!gad)
-		return -1;
-
-	gui->gadSuperfastLowrate = gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_SUPERFAST_LOWRATE,
-		GUI_MARGIN_L + 178, ROW_CHECKS, 20, 12, "Superfast",
-		GTCB_Checked, gui->superfastLowrate,
-		TAG_IGNORE, 0,
+	gui->gadSpeedMode = gad = MakeGadget(gui, gad, CYCLE_KIND, GID_SPEED_MODE,
+		GUI_MARGIN_L + 86, ROW_CHECKS - 2, 130, 16, "",
+		GTCY_Labels, (ULONG)kSpeedModeLabels,
+		GTCY_Active, SpeedModeIndex(gui),
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0);
 	if (!gad)
@@ -3393,11 +3463,11 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 	if (!gad)
 		return -1;
 
-	gui->gadMono = gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_MONO,
-		GUI_MARGIN_L + 14, ROW_CHANNELS, 20, 12, "Mono",
-		GTCB_Checked, gui->mono,
-		TAG_IGNORE, 0,
-		TAG_IGNORE, 0,
+	gui->gadChannelMode = gad = MakeGadget(gui, gad, CYCLE_KIND, GID_CHANNEL_MODE,
+		GUI_MARGIN_L + 14, ROW_CHANNELS - 2, 74, 16, "",
+		GTCY_Labels, (ULONG)kChannelModeLabels,
+		GTCY_Active, ChannelModeIndex(gui),
+		GA_Disabled, gui->fakeStereo,
 		TAG_IGNORE, 0);
 	if (!gad)
 		return -1;
@@ -3482,6 +3552,15 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 
 	gui->gadHardwareFilter = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_HARDWARE_FILTER,
 		FILTER_X, ROW_BUTTONS, FILTER_W, TRANSPORT_H, "",
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gui->gadPlaylist = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_PLAYLIST,
+		PL_OPEN_X, ROW_BUTTONS, PL_OPEN_W, TRANSPORT_H, "Playlist",
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
@@ -3613,6 +3692,10 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	SafeCopy(gui->fileInfoText, sizeof(gui->fileInfoText), "-");
 	FormatRatingText(gui);
 	SetFileDisplay(gui, NULL);
+	NewList(&gui->playlist.list);
+	gui->playlist.count = 0;
+	gui->playlist.selected = -1;
+	gui->playlist.current = -1;
 
 	IntuitionBase = (struct IntuitionBase *)OpenLibrary("intuition.library", 37);
 	if (!IntuitionBase) {
@@ -3657,7 +3740,7 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	nw.MinWidth = GUI_WIN_W;
 	nw.MinHeight = GUI_WIN_H;
 	nw.MaxWidth = 680;
-	nw.MaxHeight = 420;
+	nw.MaxHeight = 440;
 	nw.Type = WBENCHSCREEN;
 	gui->win = OpenWindowTags(&nw,
 		WA_InnerWidth, GUI_WIN_W,
@@ -3776,6 +3859,7 @@ static void GuiClose(HelixAmp3Gui *gui)
 		DeleteMsgPort(gui->donePort);
 		gui->donePort = NULL;
 	}
+	ClosePlaylistWindow(gui);
 	ReleaseArtColorPens(gui);
 	FreeTags(&gui->tags);
 	if (gui->win && gui->menuStrip)
@@ -3901,6 +3985,328 @@ static void GuiDisableFastMemIfTooSmall(HelixAmp3Gui *gui)
 		SetStatus(gui, "Fast-mem disabled: not enough Fast RAM for this file.");
 	}
 }
+
+/* --- Playlist implementation -------------------------------------------- */
+
+static const char *PlaylistBaseName(const char *path)
+{
+	const char *p = path;
+	const char *last = path;
+	while (*p) {
+		if (*p == '/' || *p == ':')
+			last = p + 1;
+		p++;
+	}
+	return last;
+}
+
+static void PlaylistRebuildList(Playlist *pl)
+{
+	int i;
+	NewList(&pl->list);
+	for (i = 0; i < pl->count; i++) {
+		pl->nodes[i].ln_Name = pl->names[i];
+		pl->nodes[i].ln_Type = NT_USER;
+		pl->nodes[i].ln_Pri = 0;
+		AddTail(&pl->list, &pl->nodes[i]);
+	}
+}
+
+static void RefreshPlaylistView(HelixAmp3Gui *gui)
+{
+	PlaylistRebuildList(&gui->playlist);
+	if (gui->plWin && gui->plGadList) {
+		ULONG sel = (gui->playlist.selected >= 0) ?
+			(ULONG)gui->playlist.selected : (ULONG)~0;
+		GT_SetGadgetAttrs(gui->plGadList, gui->plWin, NULL,
+			GTLV_Labels, (ULONG)&gui->playlist.list,
+			GTLV_Selected, sel,
+			TAG_DONE);
+	}
+}
+
+static void ClosePlaylistWindow(HelixAmp3Gui *gui)
+{
+	if (!gui->plWin)
+		return;
+	ModifyIDCMP(gui->plWin, 0);
+	{
+		struct IntuiMessage *msg;
+		while ((msg = GT_GetIMsg(gui->plWin->UserPort)) != NULL)
+			GT_ReplyIMsg(msg);
+	}
+	if (gui->plGadgets)
+		RemoveGList(gui->plWin, gui->plGadgets, -1);
+	CloseWindow(gui->plWin);
+	gui->plWin = NULL;
+	if (gui->plGadgets) {
+		FreeGadgets(gui->plGadgets);
+		gui->plGadgets = NULL;
+		gui->plGadContext = NULL;
+		gui->plGadList = NULL;
+	}
+}
+
+#define PL_WIN_W  460
+#define PL_WIN_H  260
+#define PL_LIST_H 192
+#define PL_BTN_Y  (PL_LIST_H + 28)
+#define PL_BTN_H  18
+
+static void OpenPlaylistWindow(HelixAmp3Gui *gui)
+{
+	struct NewWindow nw;
+	struct Gadget *gad;
+	struct NewGadget ng;
+	int bw;
+	int bx;
+
+	if (gui->plWin || !gui->win || !gui->visualInfo)
+		return;
+
+	gui->plGadContext = CreateContext(&gui->plGadgets);
+	if (!gui->plGadContext)
+		return;
+	gad = gui->plGadContext;
+
+	PlaylistRebuildList(&gui->playlist);
+
+	memset(&ng, 0, sizeof(ng));
+	ng.ng_LeftEdge = 8;
+	ng.ng_TopEdge = 20;
+	ng.ng_Width = PL_WIN_W - 16;
+	ng.ng_Height = PL_LIST_H;
+	ng.ng_GadgetText = NULL;
+	ng.ng_GadgetID = PL_GID_LIST;
+	ng.ng_Flags = 0;
+	ng.ng_VisualInfo = gui->visualInfo;
+	gui->plGadList = gad = CreateGadget(LISTVIEW_KIND, gad, &ng,
+		GTLV_Labels, (ULONG)&gui->playlist.list,
+		GTLV_Selected, gui->playlist.selected >= 0 ? (ULONG)gui->playlist.selected : (ULONG)~0,
+		GTLV_ShowSelected, (ULONG)NULL,
+		GA_RelVerify, TRUE,
+		TAG_DONE);
+	if (!gad) goto fail;
+
+	bw = (PL_WIN_W - 16 - 12) / 4;
+	bx = 8;
+
+	memset(&ng, 0, sizeof(ng));
+	ng.ng_LeftEdge = bx;
+	ng.ng_TopEdge = PL_BTN_Y;
+	ng.ng_Width = bw;
+	ng.ng_Height = PL_BTN_H;
+	ng.ng_GadgetText = (UBYTE *)"Add";
+	ng.ng_GadgetID = PL_GID_ADD;
+	ng.ng_Flags = PLACETEXT_IN;
+	ng.ng_VisualInfo = gui->visualInfo;
+	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE);
+	if (!gad) goto fail;
+	bx += bw + 4;
+
+	ng.ng_LeftEdge = bx;
+	ng.ng_GadgetText = (UBYTE *)"Remove";
+	ng.ng_GadgetID = PL_GID_REMOVE;
+	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE);
+	if (!gad) goto fail;
+	bx += bw + 4;
+
+	ng.ng_LeftEdge = bx;
+	ng.ng_GadgetText = (UBYTE *)"Clear";
+	ng.ng_GadgetID = PL_GID_CLEAR;
+	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE);
+	if (!gad) goto fail;
+	bx += bw + 4;
+
+	ng.ng_LeftEdge = bx;
+	ng.ng_GadgetText = (UBYTE *)"Play";
+	ng.ng_GadgetID = PL_GID_PLAY;
+	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE);
+	if (!gad) goto fail;
+
+	memset(&nw, 0, sizeof(nw));
+	nw.LeftEdge = gui->win->LeftEdge + 20;
+	nw.TopEdge  = gui->win->TopEdge + 20;
+	nw.Width    = PL_WIN_W;
+	nw.Height   = PL_WIN_H;
+	nw.IDCMPFlags = IDCMP_GADGETUP | IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW;
+	nw.Flags = WFLG_CLOSEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET | WFLG_SMART_REFRESH;
+	nw.Title = (UBYTE *)"MiniAMP3 Playlist";
+	nw.MinWidth  = PL_WIN_W;
+	nw.MinHeight = PL_WIN_H;
+	nw.MaxWidth  = PL_WIN_W;
+	nw.MaxHeight = PL_WIN_H;
+	nw.Type = WBENCHSCREEN;
+	gui->plWin = OpenWindowTags(&nw, TAG_DONE);
+	if (!gui->plWin)
+		goto fail;
+	if (gui->smallFont)
+		SetFont(gui->plWin->RPort, gui->smallFont);
+	AddGList(gui->plWin, gui->plGadgets, (UWORD)-1, -1, NULL);
+	RefreshGList(gui->plGadgets, gui->plWin, NULL, -1);
+	GT_RefreshWindow(gui->plWin, NULL);
+	return;
+
+fail:
+	if (gui->plGadgets) {
+		FreeGadgets(gui->plGadgets);
+		gui->plGadgets = NULL;
+		gui->plGadContext = NULL;
+		gui->plGadList = NULL;
+	}
+}
+
+static void PlaylistLoadAndShow(HelixAmp3Gui *gui, int index)
+{
+	if (index < 0 || index >= gui->playlist.count)
+		return;
+	gui->playlist.current = index;
+	gui->playlist.selected = index;
+	RefreshPlaylistView(gui);
+	CancelArtDecode(gui);
+	SafeCopy(gui->inputName, sizeof(gui->inputName),
+		gui->playlist.paths[index]);
+	SetFileDisplay(gui, gui->inputName);
+	ReadMp3Tags(gui->inputName, &gui->tags, gui->artEnabled);
+	gui->totalSecs = gui->tags.durationSecs;
+	gui->elapsedSecs = 0;
+	gui->launchBufferSecs = 0;
+	UpdateTagDisplay(gui);
+	UpdateArtDisplay(gui);
+	DrawProgress(gui);
+	if (gui->artDecode.active)
+		SendTimerRequest(gui, ART_TIMER_MICROS);
+}
+
+static void HandlePlaylistPoll(HelixAmp3Gui *gui)
+{
+	struct IntuiMessage *msg;
+	ULONG classValue;
+	UWORD code;
+	struct Gadget *gad;
+
+	if (!gui->plWin)
+		return;
+	while ((msg = GT_GetIMsg(gui->plWin->UserPort)) != NULL) {
+		classValue = msg->Class;
+		code = msg->Code;
+		gad = (struct Gadget *)msg->IAddress;
+		GT_ReplyIMsg(msg);
+		if (classValue == IDCMP_CLOSEWINDOW) {
+			ClosePlaylistWindow(gui);
+			return;
+		}
+		if (classValue == IDCMP_REFRESHWINDOW) {
+			GT_BeginRefresh(gui->plWin);
+			GT_EndRefresh(gui->plWin, TRUE);
+			continue;
+		}
+		if (classValue != IDCMP_GADGETUP || !gad)
+			continue;
+		switch ((int)gad->GadgetID) {
+		case PL_GID_LIST:
+			gui->playlist.selected = (int)code;
+			break;
+		case PL_GID_ADD: {
+			struct FileRequester *req;
+			req = (struct FileRequester *)AllocAslRequestTags(ASL_FileRequest,
+				ASLFR_TitleText, (ULONG)"Add to playlist",
+				ASLFR_DoMultiSelect, TRUE,
+				ASLFR_DoPatterns, TRUE,
+				ASLFR_InitialPattern, (ULONG)"#?.mp3",
+				ASLFR_InitialDrawer,
+					(ULONG)(gui->lastDrawer[0] ? gui->lastDrawer : NULL),
+				TAG_DONE);
+			if (!req) break;
+			if (AslRequestTags(req, ASLFR_Window, (ULONG)gui->plWin,
+				ASLFR_SleepWindow, TRUE, TAG_DONE)) {
+				char path[HELIXAMP3_MAX_PATH];
+				if (req->fr_Drawer && req->fr_Drawer[0])
+					SafeCopy(gui->lastDrawer, sizeof(gui->lastDrawer),
+						req->fr_Drawer);
+				if (req->fr_NumArgs > 0 && req->fr_ArgList) {
+					/* Multi-select (asl v38+) */
+					int i;
+					for (i = 0; i < (int)req->fr_NumArgs && gui->playlist.count < HELIXAMP3_PLAYLIST_MAX; i++) {
+						int n;
+						path[0] = '\0';
+						if (req->fr_Drawer && req->fr_Drawer[0]) {
+							SafeCopy(path, sizeof(path), req->fr_Drawer);
+							AddPart(path, req->fr_ArgList[i].wa_Name, sizeof(path));
+						} else {
+							SafeCopy(path, sizeof(path), req->fr_ArgList[i].wa_Name);
+						}
+						if (!path[0]) continue;
+						n = gui->playlist.count;
+						SafeCopy(gui->playlist.paths[n], sizeof(gui->playlist.paths[0]), path);
+						SafeCopy(gui->playlist.names[n], sizeof(gui->playlist.names[0]),
+							PlaylistBaseName(path));
+						gui->playlist.count++;
+					}
+				} else if (req->fr_File && req->fr_File[0]) {
+					/* Single-select fallback */
+					int n;
+					path[0] = '\0';
+					if (req->fr_Drawer && req->fr_Drawer[0]) {
+						SafeCopy(path, sizeof(path), req->fr_Drawer);
+						AddPart(path, req->fr_File, sizeof(path));
+					} else {
+						SafeCopy(path, sizeof(path), req->fr_File);
+					}
+					if (path[0] && gui->playlist.count < HELIXAMP3_PLAYLIST_MAX) {
+						n = gui->playlist.count;
+						SafeCopy(gui->playlist.paths[n], sizeof(gui->playlist.paths[0]), path);
+						SafeCopy(gui->playlist.names[n], sizeof(gui->playlist.names[0]),
+							PlaylistBaseName(path));
+						gui->playlist.count++;
+					}
+				}
+				RefreshPlaylistView(gui);
+			}
+			FreeAslRequest(req);
+			break;
+		}
+		case PL_GID_REMOVE:
+			if (gui->playlist.selected >= 0 && gui->playlist.selected < gui->playlist.count) {
+				int i;
+				int sel = gui->playlist.selected;
+				for (i = sel; i < gui->playlist.count - 1; i++) {
+					SafeCopy(gui->playlist.paths[i], sizeof(gui->playlist.paths[0]),
+						gui->playlist.paths[i + 1]);
+					SafeCopy(gui->playlist.names[i], sizeof(gui->playlist.names[0]),
+						gui->playlist.names[i + 1]);
+				}
+				gui->playlist.count--;
+				if (gui->playlist.current > sel)
+					gui->playlist.current--;
+				else if (gui->playlist.current == sel)
+					gui->playlist.current = -1;
+				if (gui->playlist.selected >= gui->playlist.count)
+					gui->playlist.selected = gui->playlist.count - 1;
+				RefreshPlaylistView(gui);
+			}
+			break;
+		case PL_GID_CLEAR:
+			gui->playlist.count = 0;
+			gui->playlist.selected = -1;
+			gui->playlist.current = -1;
+			RefreshPlaylistView(gui);
+			break;
+		case PL_GID_PLAY:
+			if (gui->playlist.selected >= 0 && gui->playlist.selected < gui->playlist.count) {
+				if (gui->playbackActive || gui->playbackDonePending) {
+					SetStatus(gui, "Stop playback before starting playlist.");
+					break;
+				}
+				PlaylistLoadAndShow(gui, gui->playlist.selected);
+				StartPlayback(gui);
+			}
+			break;
+		}
+	}
+}
+
+/* --- End playlist implementation ---------------------------------------- */
 
 static void ChooseMp3(HelixAmp3Gui *gui)
 {
@@ -4512,50 +4918,27 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 	case GID_BROWSE:
 		ChooseMp3(gui);
 		break;
-	case GID_FAST_LOWRATE:
+	case GID_SPEED_MODE:
 		if (gui->playbackActive || gui->playbackDonePending) {
 			GT_SetGadgetAttrs(gad, gui->win, NULL,
-				GTCB_Checked, gui->fastLowrate, TAG_DONE);
-			SetStatus(gui, "Stop playback before changing rate mode.");
+				GTCY_Active, SpeedModeIndex(gui), TAG_DONE);
+			SetStatus(gui, "Stop playback before changing speed mode.");
 			break;
 		}
-		if (gui->superfastLowrate) {
-			gui->fastLowrate = 1;
-			GT_SetGadgetAttrs(gad, gui->win, NULL, GTCB_Checked, TRUE, TAG_DONE);
-			SetStatus(gui, "Superfast is a fast-lowrate mode; disable Superfast first.");
-			break;
-		}
-		gui->fastLowrate = !gui->fastLowrate;
-		GT_SetGadgetAttrs(gad, gui->win, NULL, GTCB_Checked, gui->fastLowrate, TAG_DONE);
-		SetStatus(gui, gui->fastLowrate ? "Fast-lowrate enabled." : "Fast-lowrate disabled.");
-		SaveGuiSettings(gui);
-		break;
-	case GID_SUPERFAST_LOWRATE:
-		if (gui->playbackActive || gui->playbackDonePending) {
-			GT_SetGadgetAttrs(gad, gui->win, NULL,
-				GTCB_Checked, gui->superfastLowrate, TAG_DONE);
-			SetStatus(gui, "Stop playback before changing superfast mode.");
-			break;
-		}
-		gui->superfastLowrate = !gui->superfastLowrate;
-		if (gui->superfastLowrate) {
-			gui->fastLowrate = 1;
-			if (!RateIndexSupportsSuperfast(gui->rateIndex, ChannelUsesMonoCost(gui)))
-				gui->rateIndex = DefaultSuperfastRateIndex(ChannelUsesMonoCost(gui));
-		}
-		GT_SetGadgetAttrs(gad, gui->win, NULL,
-			GTCB_Checked, gui->superfastLowrate, TAG_DONE);
-		if (gui->gadFastLowrate)
-			GT_SetGadgetAttrs(gui->gadFastLowrate, gui->win, NULL,
-				GTCB_Checked, gui->fastLowrate, TAG_DONE);
+		/* code: 0=Normal, 1=Fast, 2=Superfast */
+		gui->fastLowrate = (code >= 1) ? 1 : 0;
+		gui->superfastLowrate = (code >= 2) ? 1 : 0;
+		if (gui->superfastLowrate &&
+			!RateIndexSupportsSuperfast(gui->rateIndex, ChannelUsesMonoCost(gui)))
+			gui->rateIndex = DefaultSuperfastRateIndex(ChannelUsesMonoCost(gui));
 		if (gui->gadRate)
 			GT_SetGadgetAttrs(gui->gadRate, gui->win, NULL,
 				GTCY_Labels, (ULONG)kRateLabels,
 				GTCY_Active, gui->rateIndex,
 				TAG_DONE);
-		SetStatus(gui, gui->superfastLowrate ?
-			"Superfast enabled for 8287/8820/11025/22050 Hz (8287 mono-only)." :
-			"Superfast disabled; all output rates are available.");
+		SetStatus(gui, code == 2 ?
+			"Superfast enabled for 8287/8820/11025/22050 Hz." :
+			code == 1 ? "Fast-lowrate enabled." : "Standard speed enabled.");
 		SaveGuiSettings(gui);
 		break;
 	case GID_FAST_MEM:
@@ -4571,19 +4954,19 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 		GuiDisableFastMemIfTooSmall(gui);
 		SaveGuiSettings(gui);
 		break;
-	case GID_MONO:
+	case GID_CHANNEL_MODE:
 		if (gui->fakeStereo)
 			break;
 		if (gui->playbackActive || gui->playbackDonePending) {
 			GT_SetGadgetAttrs(gad, gui->win, NULL,
-				GTCB_Checked, gui->mono, TAG_DONE);
+				GTCY_Active, ChannelModeIndex(gui), TAG_DONE);
 			SetStatus(gui, "Stop playback before changing channel mode.");
 			break;
 		}
-		gui->mono = !gui->mono;
+		/* code: 0=Stereo, 1=Mono */
+		gui->mono = (code == 1) ? 1 : 0;
 		if (gui->superfastLowrate && !RateIndexSupportsSuperfast(gui->rateIndex, ChannelUsesMonoCost(gui)))
 			gui->rateIndex = DefaultSuperfastRateIndex(ChannelUsesMonoCost(gui));
-		GT_SetGadgetAttrs(gad, gui->win, NULL, GTCB_Checked, gui->mono, TAG_DONE);
 		if (gui->gadRate)
 			GT_SetGadgetAttrs(gui->gadRate, gui->win, NULL,
 				GTCY_Labels, (ULONG)kRateLabels,
@@ -4643,9 +5026,9 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 		if (gui->superfastLowrate &&
 			!RateIndexSupportsSuperfast(gui->rateIndex, ChannelUsesMonoCost(gui))) {
 			gui->superfastLowrate = 0;
-			if (gui->gadSuperfastLowrate)
-				GT_SetGadgetAttrs(gui->gadSuperfastLowrate, gui->win, NULL,
-					GTCB_Checked, FALSE, TAG_DONE);
+			if (gui->gadSpeedMode)
+				GT_SetGadgetAttrs(gui->gadSpeedMode, gui->win, NULL,
+					GTCY_Active, SpeedModeIndex(gui), TAG_DONE);
 			SetStatus(gui, "Selected rate uses standard playback; Superfast disabled.");
 		} else {
 			SetStatus(gui, "Output sample rate updated.");
@@ -4709,6 +5092,12 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 		SetStatus(gui, gui->hardwareFilter ?
 			"Hardware filter enabled." : "Hardware filter disabled.");
 		SaveGuiSettings(gui);
+		break;
+	case GID_PLAYLIST:
+		if (gui->plWin)
+			ClosePlaylistWindow(gui);
+		else
+			OpenPlaylistWindow(gui);
 		break;
 	}
 }
@@ -4840,14 +5229,16 @@ int main(int argc, char **argv)
 	while (!gui.closeRequested) {
 		ULONG timerMask = gui.timerPort ? (1UL << gui.timerPort->mp_SigBit) : 0;
 		ULONG doneMask = gui.donePort ? (1UL << gui.donePort->mp_SigBit) : 0;
+		ULONG plMask = gui.plWin ? (1UL << gui.plWin->UserPort->mp_SigBit) : 0;
 		ULONG sigs = Wait(HELIXAMP3_SIGMASK(&gui) | timerMask |
-			doneMask | SIGBREAKF_CTRL_C);
+			doneMask | plMask | SIGBREAKF_CTRL_C);
 		if (sigs & SIGBREAKF_CTRL_C)
 			gui.closeRequested = 1;
 		if (doneMask && (sigs & doneMask))
 			HandleDoneSignal(&gui);
 		if (timerMask && (sigs & timerMask))
 			HandleTimerSignal(&gui);
+		HandlePlaylistPoll(&gui);
 		GuiPoll(&gui);
 	}
 	if (gui.playbackActive)
