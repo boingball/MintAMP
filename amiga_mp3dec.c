@@ -5528,6 +5528,7 @@ static int AmigaAudioLiveSlots(int stereo)
 typedef struct AmigaAudioPlayer {
 	struct MsgPort *port;
 	struct IOAudio *req[3][2];
+	struct IOAudio *closeReq[2]; /* dedicated close request per channel */
 	int deviceOpen[2];
 	int sent[3][2];
 	int prepared[3];
@@ -5681,6 +5682,22 @@ static void AmigaAudioClose(AmigaAudioPlayer *player,
 			}
 		}
 	}
+	/* Close audio.device before waiting: stops DMA hardware immediately and
+	 * causes all pending CMD_WRITE requests to reply to the port, so the
+	 * WaitIO loop below returns instantly instead of waiting for buffers to
+	 * drain.  Uses closeReq (not req[0][ch]) to avoid reusing the IORequest
+	 * that may still have a live CMD_WRITE pending on it. */
+	for (ch = 0; ch < 2; ch++) {
+		if (player->deviceOpen[ch] && player->closeReq[ch]) {
+			CloseDevice((struct IORequest *)player->closeReq[ch]);
+			AmigaAudioCleanupTrace4(player, "channel=%ld device closed=1\n",
+				(unsigned long)ch, 0, 0, 0);
+			player->deviceOpen[ch] = 0;
+			if (status)
+				status->devicesClosed++;
+		}
+	}
+	gGuiPlaybackStatus.cleanupStage = GUIPLAY_CLEANUP_DEVICE_CLOSED;
 	for (i = 0; i < AMIGA_AUDIO_PLAYBACK_SLOTS; i++) {
 		for (ch = 0; ch < 2; ch++) {
 			if (player->req[i][ch] && player->sent[i][ch]) {
@@ -5698,17 +5715,6 @@ static void AmigaAudioClose(AmigaAudioPlayer *player,
 		AmigaAudioCleanupTrace4(player, "reply drained=%ld\n",
 			drained, 0, 0, 0);
 	}
-	for (ch = 0; ch < 2; ch++) {
-		if (player->deviceOpen[ch] && player->req[0][ch]) {
-			CloseDevice((struct IORequest *)player->req[0][ch]);
-			AmigaAudioCleanupTrace4(player, "channel=%ld device closed=1\n",
-				(unsigned long)ch, 0, 0, 0);
-			player->deviceOpen[ch] = 0;
-			if (status)
-				status->devicesClosed++;
-		}
-	}
-	gGuiPlaybackStatus.cleanupStage = GUIPLAY_CLEANUP_DEVICE_CLOSED;
 	for (i = 0; i < AMIGA_AUDIO_PLAYBACK_SLOTS; i++) {
 		for (ch = 0; ch < 2; ch++) {
 			if (player->splitBase[i][ch]) {
@@ -5755,6 +5761,16 @@ static void AmigaAudioClose(AmigaAudioPlayer *player,
 				if (status)
 					status->ioRequestsDeleted++;
 			}
+		}
+	}
+	for (ch = 0; ch < 2; ch++) {
+		if (player->closeReq[ch]) {
+			DeleteIORequest((struct IORequest *)player->closeReq[ch]);
+			AmigaAudioCleanupTrace4(player, "channel=%ld closeReq deleted\n",
+				(unsigned long)ch, 0, 0, 0);
+			player->closeReq[ch] = NULL;
+			if (status)
+				status->ioRequestsDeleted++;
 		}
 	}
 	if (player->port) {
@@ -5812,6 +5828,20 @@ static int AmigaAudioOpenOne(AmigaAudioPlayer *player, int ch,
 			return -1;
 	}
 	player->deviceOpen[ch] = 1;
+	{
+		/* Allocate a dedicated IORequest for CloseDevice so req[0][ch] remains
+		 * free for CMD_WRITE even when CloseDevice is called mid-playback. */
+		struct Message message;
+
+		player->closeReq[ch] = (struct IOAudio *)CreateIORequest(player->port,
+			sizeof(struct IOAudio));
+		if (!player->closeReq[ch])
+			return -1;
+		message = player->closeReq[ch]->ioa_Request.io_Message;
+		memcpy(player->closeReq[ch], player->req[0][ch], sizeof(struct IOAudio));
+		player->closeReq[ch]->ioa_Request.io_Message = message;
+		player->closeReq[ch]->ioa_Request.io_Message.mn_ReplyPort = player->port;
+	}
 	{
 		int i;
 		for (i = 1; i < AmigaAudioLiveSlots(player->stereo); i++) {
@@ -6088,10 +6118,20 @@ static int AmigaAudioWaitOne(AmigaAudioPlayer *player, int index, int ch)
 		ULONG sigs = (1UL << player->port->mp_SigBit) | SIGBREAKF_CTRL_C;
 		ULONG got = Wait(sigs);
 		if (got & SIGBREAKF_CTRL_C) {
+			int cls;
 			gPlaybackInterrupted = 1;
 			player->stopping = 1;
 			if (!CheckIO(req))
 				AbortIO(req);
+			/* Close audio.device immediately: clears DMA and causes all
+			 * pending CMD_WRITE requests to reply now, so WaitIO below
+			 * returns without waiting for the buffer to finish playing. */
+			for (cls = 0; cls < 2; cls++) {
+				if (player->deviceOpen[cls] && player->closeReq[cls]) {
+					CloseDevice((struct IORequest *)player->closeReq[cls]);
+					player->deviceOpen[cls] = 0;
+				}
+			}
 			break;
 		}
 	}
@@ -6118,6 +6158,14 @@ static int AmigaAudioAbortOutstanding(AmigaAudioPlayer *player)
 			struct IORequest *req = (struct IORequest *)player->req[i][ch];
 			if (req && player->sent[i][ch] && !CheckIO(req))
 				AbortIO(req);
+		}
+	}
+	/* Close audio.device now: stops DMA hardware immediately and causes all
+	 * AbortIO'd CMD_WRITE requests to reply so WaitIO below returns fast. */
+	for (ch = 0; ch < 2; ch++) {
+		if (player->deviceOpen[ch] && player->closeReq[ch]) {
+			CloseDevice((struct IORequest *)player->closeReq[ch]);
+			player->deviceOpen[ch] = 0;
 		}
 	}
 	err = 0;
