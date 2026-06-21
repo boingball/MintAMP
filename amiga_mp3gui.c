@@ -160,7 +160,7 @@ extern volatile int gMiniAmp3EmbeddedPlayback;
 #include <proto/graphics.h>
 #include <proto/diskfont.h>
 #include <proto/timer.h>
-#include <graphics/colormap.h>
+/* #include <graphics/colormap.h> */
 #include "picojpeg.h"
 #ifndef OBP_FailIfBad
 #define OBP_FailIfBad (TAG_USER + 0x01L)
