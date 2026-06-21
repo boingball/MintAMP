@@ -5065,9 +5065,18 @@ static void StopPlayback(HelixAmp3Gui *gui)
 	gGuiPlayer.stopRequested = 1;
 	gPlaybackInterrupted = 1;
 	/* Wake the playback subprocess immediately so it does not sit in WaitIO
-	 * for the remainder of a multi-second audio buffer. */
-	if (gGuiPlayer.process)
-		Signal((struct Task *)gGuiPlayer.process, SIGBREAKF_CTRL_C);
+	 * for the remainder of a multi-second audio buffer.
+	 * Use Forbid/FindTask/Signal/Permit to avoid AN_SignalError: if the child
+	 * process is between FreeSignal and RemTask during DOS exit cleanup,
+	 * FindTask will fail and we skip the Signal safely. */
+	{
+		struct Task *child;
+		Forbid();
+		child = FindTask((STRPTR)"MiniAMP3 playback");
+		if (child)
+			Signal(child, SIGBREAKF_CTRL_C);
+		Permit();
+	}
 	SetStatus(gui, "Stopping...");
 }
 
@@ -5105,8 +5114,18 @@ static void WaitForPlaybackShutdown(HelixAmp3Gui *gui)
 
 		gGuiPlayer.stopRequested = 1;
 		gPlaybackInterrupted = 1;
-		if (gGuiPlayer.process)
-			Signal((struct Task *)gGuiPlayer.process, SIGBREAKF_CTRL_C);
+		/* Skip signal if done message already received: child is in DOS exit
+		 * cleanup where SIGBREAKF_CTRL_C may already be freed, causing
+		 * AN_SignalError (0x0100000F).  Use Forbid/FindTask/Signal/Permit to
+		 * close the race between FreeSignal and RemTask in all other cases. */
+		if (!gui->playbackDonePending) {
+			struct Task *child;
+			Forbid();
+			child = FindTask((STRPTR)"MiniAMP3 playback");
+			if (child)
+				Signal(child, SIGBREAKF_CTRL_C);
+			Permit();
+		}
 		Delay(1);
 	}
 }
