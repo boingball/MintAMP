@@ -34,6 +34,7 @@
 #include "statname.h"
 
 volatile int gMiniAmp3EmbeddedPlayback;
+static int gMiniAmp3DebugPlayRequested;
 
 #if defined(AMIGA_M68K)
 /* Shared GUI/decoder stop latch. */
@@ -337,6 +338,7 @@ typedef struct DecodeOptions {
 	int debugArgv;
 	int debugFastLowrate;
 	int debugPlay;
+	int debugTone;
 	int debugCleanup;
 	int play;
 	int stereo;
@@ -745,6 +747,7 @@ static void PrintUsage(const char *prog)
 	printf("  --no-ms-mono-skip force full two-channel M/S decode before mono regression checks\n");
 	printf("  --debug-fastlowrate print per-frame/granule fast-lowrate placement\n");
 	printf("  --debug-play print audio.device playback startup diagnostics\n");
+	printf("  --debug-tone submit a generated signed-8 Paula test tone through --play audio path\n");
 	printf("  --debug-cleanup print playback resource cleanup diagnostics\n");
 	printf("  --debug-argv print argc/argv after Amiga argument normalization\n");
 	printf("  --show-argv  alias for --debug-argv\n");
@@ -1024,6 +1027,11 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->debugFastLowrate = 1;
 		} else if (!strcmp(argv[i], "--debug-play")) {
 			opt->debugPlay = 1;
+		} else if (!strcmp(argv[i], "--debug-tone")) {
+			opt->debugTone = 1;
+			opt->debugPlay = 1;
+			opt->play = 1;
+			opt->outFormat = OUT_S8;
 		} else if (!strcmp(argv[i], "--debug-cleanup")) {
 			opt->debugCleanup = 1;
 		} else if (!strcmp(argv[i], "--debug-argv") ||
@@ -5919,6 +5927,13 @@ static int AmigaAudioOpenOne(AmigaAudioPlayer *player, int ch,
 			gGuiPlaybackStatus.openDeviceResult = openDeviceResult;
 #endif
 		GuiPublishStartupStage(GUISTART_OPEN_DEVICE_DONE);
+		if (player->debugPlay) {
+			printf("debug-play: audio setup OpenDevice ch=%d rc=%d allocatedChannels=",
+				ch, openDeviceResult);
+			for (i = 0; i < (int)channelCount; i++)
+				printf("%s%u", i ? "," : "", (unsigned int)channels[i]);
+			printf("\n");
+		}
 		if (openDeviceResult != 0)
 			return -1;
 	}
@@ -5965,6 +5980,7 @@ static int AmigaAudioOpen(AmigaAudioPlayer *player, unsigned int period,
 	memset(player, 0, sizeof(*player));
 	player->period = period;
 	player->stereo = stereo;
+	player->debugPlay = gMiniAmp3DebugPlayRequested;
 	if (initialVolumePercent < 0)
 		initialVolumePercent = 0;
 	if (initialVolumePercent > 100)
@@ -5972,6 +5988,13 @@ static int AmigaAudioOpen(AmigaAudioPlayer *player, unsigned int period,
 	player->lastVolumePercent = (unsigned short)initialVolumePercent;
 	player->lastVolumeSequence = gMiniAmp3VolumeSequence;
 	player->requestVolume = VolumePercentToAudioDevice(initialVolumePercent);
+	if (player->debugPlay) {
+		printf("debug-play: audio setup mode=%s outputRate=%d requestedPeriod=%u calculatedPeriod=%u volume=%u maxTotalBytes=%lu perChannelBytes=%lu signedness=signed-8\n",
+			stereo ? "stereo" : "mono", gGuiPlaybackStatus.effectiveRate, period,
+			AmigaPalAudioPeriod(gGuiPlaybackStatus.effectiveRate),
+			(unsigned int)player->requestVolume, maxBytes,
+			stereo ? maxBytes / 2UL : maxBytes);
+	}
 	GuiPublishStartupStage(GUISTART_CREATE_PORT);
 	player->port = CreateMsgPort();
 	if (!player->port)
@@ -6041,6 +6064,36 @@ static void AmigaAudioPrepareOne(AmigaAudioPlayer *player, int index,
 	req->ioa_Cycles = 1;
 }
 
+
+static void AmigaAudioPrintBufferStats(const char *label,
+	const signed char *buf, unsigned long len)
+{
+	unsigned long i;
+	unsigned long nonzero;
+	int minv;
+	int maxv;
+
+	if (!buf || len == 0) {
+		printf("debug-play: %s stats ptr=%p len=%lu empty=1\n",
+			label, (const void *)buf, len);
+		return;
+	}
+	minv = buf[0];
+	maxv = buf[0];
+	nonzero = 0;
+	for (i = 0; i < len; i++) {
+		int v = buf[i];
+		if (v < minv) minv = v;
+		if (v > maxv) maxv = v;
+		if (v != 0) nonzero++;
+	}
+	printf("debug-play: %s stats ptr=%p len=%lu min=%d max=%d nonzero=%lu first16=",
+		label, (const void *)buf, len, minv, maxv, nonzero);
+	for (i = 0; i < len && i < 16UL; i++)
+		printf("%s%02x", i ? " " : "", (unsigned int)((unsigned char)buf[i]));
+	printf("\n");
+}
+
 static void AmigaAudioPrintStartupVolumeDebug(AmigaAudioPlayer *player,
 	int index)
 {
@@ -6079,7 +6132,24 @@ static void AmigaAudioCommitOne(AmigaAudioPlayer *player, int index, int ch)
 	player->req[index][ch]->ioa_Request.io_Error = 0;
 	player->req[index][ch]->ioa_Volume = player->requestVolume;
 	player->sent[index][ch] = 1;
+	if (player->debugPlay) {
+		printf("debug-play: submit buffer=%s ch=%d leftPtr=%p rightPtr=%p ioa_Data=%p ioa_Length=%lu ioa_Period=%u ioa_Volume=%u ioa_Cycles=%u CheckIOBefore=%ld\n",
+			PlaybackBufferName(index), ch, (void *)player->splitBuf[index][0],
+			(void *)player->splitBuf[index][1],
+			(void *)player->req[index][ch]->ioa_Data,
+			(unsigned long)player->req[index][ch]->ioa_Length,
+			(unsigned int)player->req[index][ch]->ioa_Period,
+			(unsigned int)player->req[index][ch]->ioa_Volume,
+			(unsigned int)player->req[index][ch]->ioa_Cycles,
+			(long)CheckIO((struct IORequest *)player->req[index][ch]));
+		AmigaAudioPrintBufferStats(ch ? "right-before-BeginIO" : "left-before-BeginIO",
+			(signed char *)player->req[index][ch]->ioa_Data,
+			(unsigned long)player->req[index][ch]->ioa_Length);
+	}
 	BeginIO((struct IORequest *)player->req[index][ch]);
+	if (player->debugPlay)
+		printf("debug-play: BeginIO called buffer=%s ch=%d\n",
+			PlaybackBufferName(index), ch);
 }
 
 static void AmigaPlaybackCopy(const signed char *src, signed char *dest,
@@ -6089,6 +6159,7 @@ static void AmigaPlaybackCopy(const signed char *src, signed char *dest,
 }
 
 static unsigned long PlaybackMaxChunkBytes(int stereo);
+static const char *PlaybackBufferName(int index);
 
 static int AmigaAudioPrepare(AmigaAudioPlayer *player, int index,
 	signed char *buf, unsigned long len)
@@ -6119,6 +6190,11 @@ static int AmigaAudioPrepare(AmigaAudioPlayer *player, int index,
 		} else if (!player->splitBuf[index][0] || !player->splitBuf[index][1]) {
 			return -1;
 		}
+		if (player->debugPlay)
+			printf("debug-play: planar stereo layout buffer %s totalLen=%lu perChannelLen=%lu leftBase=%p rightBase=%p source=%s\n",
+				PlaybackBufferName(index), len, frames,
+				(void *)player->splitBuf[index][0], (void *)player->splitBuf[index][1],
+				player->splitWorkBuf[index][0] ? "planar-work" : (buf ? "interleaved-copy" : "chip-planar"));
 		AmigaAudioPrepareOne(player, index, 1, player->splitBuf[index][1], frames);
 		AmigaAudioPrepareOne(player, index, 0, player->splitBuf[index][0], frames);
 	} else {
@@ -6235,6 +6311,10 @@ static int AmigaAudioWaitOne(AmigaAudioPlayer *player, int index, int ch)
 	err = WaitIO(req);
 	if (!err)
 		err = player->req[index][ch]->ioa_Request.io_Error;
+	if (player->debugPlay)
+		printf("debug-play: WaitIO buffer=%s ch=%d result=%d io_Error=%d CheckIOAfter=%ld\n",
+			PlaybackBufferName(index), ch, err,
+			(int)player->req[index][ch]->ioa_Request.io_Error, (long)CheckIO(req));
 	player->sent[index][ch] = 0;
 	return err;
 }
@@ -6584,6 +6664,34 @@ static int AmigaAudioPreparePlaybackBuffer(AmigaAudioPlayer *player, int index,
 	return AmigaAudioPrepare(player, index, buf, len);
 }
 
+static void FillDebugToneBuffer(const DecodeOptions *opt,
+	AmigaAudioPlayer *player, int index, signed char *buf,
+	unsigned long len)
+{
+	unsigned long i;
+
+	if (opt->stereo) {
+		unsigned long frames = len / 2UL;
+		signed char *left = player->splitWorkBuf[index][0] ?
+			player->splitWorkBuf[index][0] : player->splitBuf[index][0];
+		signed char *right = player->splitWorkBuf[index][1] ?
+			player->splitWorkBuf[index][1] : player->splitBuf[index][1];
+
+		for (i = 0; i < frames; i++) {
+			signed char v = (i & 32UL) ? 96 : -96;
+			left[i] = v;
+			right[i] = (signed char)-v;
+		}
+		printf("debug-play: debug tone filled planar signed-8 buffer %s leftBase=%p rightBase=%p perChannelLen=%lu\n",
+			PlaybackBufferName(index), (void *)left, (void *)right, frames);
+	} else {
+		for (i = 0; i < len; i++)
+			buf[i] = (i & 32UL) ? 96 : -96;
+		printf("debug-play: debug tone filled mono signed-8 buffer %s base=%p len=%lu\n",
+			PlaybackBufferName(index), (void *)buf, len);
+	}
+}
+
 static int AmigaAudioCommitPlaybackBuffer(AmigaAudioPlayer *player, int index)
 {
 	return AmigaAudioCommit(player, index);
@@ -6741,6 +6849,7 @@ static int AmigaSetupPlaybackBuffers(AmigaAudioPlayer *player,
 	while (tryBytes >= minBytes) {
 		gGuiPlaybackStatus.tryBytes = tryBytes;
 		GuiPublishStartupStage(GUISTART_AUDIO_SETUP);
+		gMiniAmp3DebugPlayRequested = opt->debugPlay;
 		if (AmigaAudioOpen(player, period, opt->stereo, tryBytes, opt->volumePercent) == 0) {
 			int workReady;
 
@@ -7705,6 +7814,27 @@ static int AmigaPlayStreamingGeneric(InputSource *input,
 
 	if (AmigaPlaybackStopRequested(opt, "after generic audio setup"))
 		goto cleanup;
+
+	if (opt->debugTone) {
+		int toneSlot;
+		int toneSlots;
+
+		printf("debug-play: debug tone mode active; decoder PCM is bypassed after audio buffer allocation\n");
+		toneSlots = AmigaAudioLiveSlots(opt->stereo);
+		for (toneSlot = 0; toneSlot < toneSlots; toneSlot++) {
+			FillDebugToneBuffer(opt, &player, toneSlot, buf[toneSlot], bufBytes);
+			if (AmigaAudioPreparePlaybackBuffer(&player, toneSlot,
+				opt->stereo ? NULL : buf[toneSlot], bufBytes) != 0 ||
+				AmigaAudioCommitPlaybackBuffer(&player, toneSlot) != 0)
+				goto cleanup;
+		}
+		for (toneSlot = 0; toneSlot < toneSlots; toneSlot++) {
+			if (AmigaAudioWait(&player, toneSlot) != 0)
+				goto cleanup;
+		}
+		err = 0;
+		goto cleanup;
+	}
 
 	gGuiPlaybackStatus.phase = GUIPLAY_PHASE_BUFFERING;
 	playbackChannels   = opt->stereo ? 2UL : 1UL;
