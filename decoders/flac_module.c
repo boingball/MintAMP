@@ -400,6 +400,29 @@ static DecLong FlacDecode(DecHandle handle, short *outBuf, DecULong maxSamplesPe
             src = st->outbuf + st->outbufPos;
             dst = outBuf + produced * (unsigned long)ch;
             total = take * (unsigned long)ch;
+#if defined(AMIGA_M68K) && defined(__GNUC__)
+            /*
+             * On big-endian m68k, int32 >> 16 is the high 16-bit word sitting
+             * at the first two bytes of each int32.  Copy it with a word move
+             * + dbf loop instead of loading the full longword and shifting.
+             * shift is always 16 for FLAC (set in FlacOpen).
+             */
+            if (__builtin_expect(st->shift == 16 && total > 0, 1)) {
+                const int32_t *s = src;
+                short *d = dst;
+                unsigned long cnt = total;
+                __asm__ volatile (
+                    "subq.l  #1,%2\n"
+                    "1:\n\t"
+                    "move.w  (%1),(%0)+\n\t"
+                    "addq.l  #4,%1\n\t"
+                    "dbf     %2,1b\n"
+                    : "+a"(d), "+a"(s), "+d"(cnt)
+                    :
+                    : "cc", "memory"
+                );
+            } else
+#endif
             for (i = 0; i < total; i++)
                 dst[i] = (short)(src[i] >> st->shift);
 

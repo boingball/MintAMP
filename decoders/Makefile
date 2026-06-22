@@ -53,7 +53,9 @@ flac_module.o flac/src/foxen-flac.o: flac/src/foxen-flac.h
 flac/src/foxen-flac.o: FLAC_CFLAGS += -include flac_standalone.h \
 	-Dmalloc=FlacModuleMalloc -Dcalloc=FlacModuleCalloc \
 	-Drealloc=FlacModuleRealloc -Dfree=FlacModuleFree \
-	-Dexit=FlacModuleExit -DNDEBUG
+	-Dexit=FlacModuleExit -DNDEBUG \
+	-DFX_FLAC_NO_CRC \
+	-DAMIGA_M68K_ASM
 
 %.o: %.c
 	$(CC) $(FLAC_CFLAGS) -c -o $@ $<
