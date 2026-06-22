@@ -4694,6 +4694,31 @@ static int SelftestMulshift(void)
 /* Path to the decoders/ directory (including trailing slash).
  * Set by the GUI on startup so the playback subprocess can find modules. */
 char gDecoderModulesPath[512];
+
+static void InitDecoderModulesPath(void)
+{
+	BPTR progDir;
+	char dirPath[512];
+
+	if (gDecoderModulesPath[0])
+		return;
+
+	progDir = GetProgramDir();
+	if (!progDir || !NameFromLock(progDir, (STRPTR)dirPath, (LONG)sizeof(dirPath))) {
+		strncpy(dirPath, "PROGDIR:", sizeof(dirPath) - 1);
+		dirPath[sizeof(dirPath) - 1] = '\0';
+	} else {
+		int l = (int)strlen(dirPath);
+		if (l > 0 && l + 1 < (int)sizeof(dirPath) &&
+			dirPath[l - 1] != '/' && dirPath[l - 1] != ':') {
+			dirPath[l]     = '/';
+			dirPath[l + 1] = '\0';
+		}
+	}
+	strncat(dirPath, "decoders/", sizeof(dirPath) - strlen(dirPath) - 1);
+	strncpy(gDecoderModulesPath, dirPath, sizeof(gDecoderModulesPath) - 1);
+	gDecoderModulesPath[sizeof(gDecoderModulesPath) - 1] = '\0';
+}
 #endif
 
 /* Returns pointer to the extension part of a filename (after the last dot),
@@ -7375,12 +7400,22 @@ static int LoadDecoderModuleForExt(const char *ext,
 	const struct DecoderOps *ops;
 	const char *exts;
 
-	if (!gDecoderModulesPath[0] || !ext)
+	InitDecoderModulesPath();
+
+	if (!gDecoderModulesPath[0] || !ext) {
+		fprintf(stderr, "decoder module discovery: no decoder directory configured\n");
 		return 0;
+	}
+
+	fprintf(stderr, "decoder module discovery: searching %s for .%s\n",
+		gDecoderModulesPath, ext);
 
 	lock = Lock((STRPTR)gDecoderModulesPath, ACCESS_READ);
-	if (!lock)
+	if (!lock) {
+		fprintf(stderr, "decoder module discovery: cannot lock %s (IoErr=%ld)\n",
+			gDecoderModulesPath, (long)IoErr());
 		return 0;
+	}
 
 	fib = (struct FileInfoBlock *)AllocMem(sizeof(*fib), MEMF_CLEAR);
 	if (!fib) {
@@ -7418,21 +7453,37 @@ static int LoadDecoderModuleForExt(const char *ext,
 		}
 
 		seg = LoadSeg((STRPTR)path);
-		if (!seg)
+		fprintf(stderr, "decoder module discovery: trying %s\n", path);
+		if (!seg) {
+			fprintf(stderr, "decoder module discovery: LoadSeg failed for %s (IoErr=%ld)\n",
+				path, (long)IoErr());
 			continue;
+		}
 
 		entry = (DecoderModuleEntryFn)((unsigned char *)BADDR(seg) + 4);
 		ops   = entry();
-		if (!ops || ops->info->magic != DECODER_MODULE_MAGIC ||
+		if (!ops || !ops->info) {
+			fprintf(stderr, "decoder module discovery: %s has no DecoderOps/info\n",
+				path);
+			UnLoadSeg(seg);
+			continue;
+		}
+		if (ops->info->magic != DECODER_MODULE_MAGIC ||
 			ops->info->version > DECODER_MODULE_VERSION) {
+			fprintf(stderr, "decoder module discovery: %s ABI mismatch (magic=%08lx version=%lu)\n",
+				path, (unsigned long)ops->info->magic,
+				(unsigned long)ops->info->version);
 			UnLoadSeg(seg);
 			continue;
 		}
 
 		/* Walk the extension list: "flac\0fla\0\0" */
+		fprintf(stderr, "decoder module discovery: %s registers extensions:", path);
 		for (exts = ops->info->extensions; exts && *exts;
 			 exts += strlen(exts) + 1) {
+			fprintf(stderr, " %s", exts);
 			if (StrCaseCmp(exts, ext) == 0) {
+				fprintf(stderr, "\n");
 				out->segment = seg;
 				out->ops     = ops;
 				FreeMem(fib, sizeof(*fib));
@@ -7440,6 +7491,7 @@ static int LoadDecoderModuleForExt(const char *ext,
 				return 1;
 			}
 		}
+		fprintf(stderr, "\n");
 
 		UnLoadSeg(seg);
 	}

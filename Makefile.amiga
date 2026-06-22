@@ -48,17 +48,17 @@ AMIGA_HUNK_FAST_PREFERRED := python3 tools/amiga_fast_preferred_hunks.py
 
 .PHONY: all fast030 prof030 gui fast030-halfasm-test gui-halfasm-test decoder-modules clean print-command print-fast030-command print-gui-command
 
-all: $(TARGET)
+all: $(TARGET) decoder-modules
 
 $(TARGET): $(SOURCES)
 	$(CC) $(CFLAGS_COMMON) $(CPPFLAGS_COMMON) $(EXTRA_CFLAGS) -o $@ $(SOURCES)
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
 
-fast030: $(FAST030_TARGET)
+fast030: $(FAST030_TARGET) decoder-modules
 
 prof030: $(PROF030_TARGET)
 
-gui: $(GUI_TARGET)
+gui: $(GUI_TARGET) decoder-modules
 
 fast030-halfasm-test: $(FAST030_HALFASM_TEST_TARGET)
 
