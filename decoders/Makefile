@@ -1,9 +1,8 @@
 # decoders/Makefile — builds pluggable audio decoder modules for MiniAMP3
 #
 # Each module is a standalone Amiga hunk-format binary loaded at runtime with
-# LoadSeg().  flac_entry.c is compiled and linked FIRST so that
-# DecoderModuleEntry() lands at BADDR(seg)+4 (first callable LONG in the code
-# hunk).
+# LoadSeg().  flac_entry.c is compiled and linked FIRST so that its first
+# function lands at BADDR(seg)+4 (the decoder module ABI entry point).
 #
 # Prerequisites
 # -------------
@@ -47,18 +46,28 @@ FLAC_CFLAGS := $(filter-out -std=gnu89 -std=gnu11,$(CFLAGS)) -std=gnu99 -I. -Ifl
 flac_entry.o flac_alloc.o flac_module.o: decoder_module.h
 flac_alloc.o flac_module.o: flac_alloc.h
 flac_module.o flac/src/foxen-flac.o: flac/src/foxen-flac.h
+flac/src/foxen-flac.o: FLAC_CFLAGS += -include flac_alloc.h \
+	-Dmalloc=FlacModuleMalloc -Dcalloc=FlacModuleCalloc \
+	-Drealloc=FlacModuleRealloc -Dfree=FlacModuleFree \
+	-Dexit=FlacModuleExit
 
 %.o: %.c
 	$(CC) $(FLAC_CFLAGS) -c -o $@ $<
 
 flac.decoder: $(FLAC_OBJS) decoder_module.h flac/src/foxen-flac.h
 	rm -f $@ $@.map
-	$(CC) $(FLAC_CFLAGS) -nostartfiles -Wl,-e,DecoderModuleEntry -Wl,--gc-sections -Wl,-Map,$@.map -o $@ $(FLAC_OBJS)
-	@if grep -iE 'printf|fprintf|puts|putchar|fflush|stdio|vfprintf|malloc\.o|abort|assert|(^|[^A-Za-z0-9_])exit([^A-Za-z0-9_]|$$)|_exit|__EXIT_LIST__|DOSBase|SysBase' $@.map; then \
+	@echo "FLAC decoder unresolved-symbol audit:"; \
+	    $(NM) -u flac_entry.o flac_alloc.o flac_module.o flac/src/foxen-flac.o || true
+	@if $(NM) -u flac_entry.o flac_module.o flac/src/foxen-flac.o 2>/dev/null | grep -iE '(^|[[:space:]])(_?malloc_r|_?calloc_r|_?realloc_r|_?free_r|malloc|calloc|realloc|free|exit|_exit|abort|assert|printf|fprintf|puts|putchar|fflush|stdio|vfprintf)$$'; then \
+	    echo "ERROR: FLAC decoder objects reference forbidden libc/startup symbols outside flac_alloc.o" >&2; \
+	    exit 1; \
+	fi
+	$(CC) $(FLAC_CFLAGS) -nostartfiles -Wl,--gc-sections -Wl,-Map,$@.map -o $@ $(FLAC_OBJS)
+	@if grep -iE "printf|fprintf|puts|putchar|fflush|stdio|vfprintf|malloc\.o|lib_a-exit|abort|assert|_exit|__EXIT_LIST__|DOSBase|SysBase" $@.map; then \
 	    echo "ERROR: FLAC decoder linked forbidden libc/startup symbols" >&2; \
 	    exit 1; \
 	fi
-	@if $(NM) -u $@ 2>/dev/null | grep -iE 'printf|fprintf|puts|putchar|fflush|stdio|vfprintf|malloc\.o|abort|assert|(^|[[:space:]])_?exit$$|__EXIT_LIST__|DOSBase|SysBase'; then \
+	@if $(NM) -u $@ 2>/dev/null | grep -iE 'printf|fprintf|puts|putchar|fflush|stdio|vfprintf|malloc\.o|lib_a-exit|abort|assert|(^|[[:space:]])_?exit$$|__EXIT_LIST__|DOSBase|SysBase'; then \
 	    echo "ERROR: FLAC decoder has forbidden unresolved libc/startup symbols" >&2; \
 	    exit 1; \
 	fi

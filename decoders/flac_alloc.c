@@ -167,3 +167,37 @@ void free(void *ptr)
 {
     FlacModuleFree(ptr);
 }
+
+/*
+ * Some newlib-built objects call the reentrant allocator entry points instead
+ * of the plain ANSI names.  Keep those references inside this module too; do
+ * not let the linker satisfy them from libc.a(malloc.o).
+ */
+void *_malloc_r(void *reent, size_t bytes)
+{
+    (void)reent;
+    return FlacModuleMalloc(bytes);
+}
+
+void *_calloc_r(void *reent, size_t count, size_t bytes)
+{
+    (void)reent;
+    return FlacModuleCalloc(count, bytes);
+}
+
+void *_realloc_r(void *reent, void *ptr, size_t bytes)
+{
+    (void)reent;
+    return FlacModuleRealloc(ptr, bytes);
+}
+
+void _free_r(void *reent, void *ptr)
+{
+    (void)reent;
+    FlacModuleFree(ptr);
+}
+
+void exit(int status)
+{
+    FlacModuleExit(status);
+}
