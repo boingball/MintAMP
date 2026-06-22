@@ -5636,6 +5636,33 @@ static void AmigaAudioCleanupTrace4(const AmigaAudioPlayer *player,
 	printf(fmt, a, b, c, d);
 }
 
+static unsigned long AmigaAudioDrainReplies(AmigaAudioPlayer *player)
+{
+	unsigned long drained = 0;
+
+	if (player->port) {
+		while (GetMsg(player->port))
+			drained++;
+	}
+	return drained;
+}
+
+static void AmigaAudioClearSent(AmigaAudioPlayer *player)
+{
+	int i;
+	int ch;
+
+	for (i = 0; i < AMIGA_AUDIO_PLAYBACK_SLOTS; i++)
+		for (ch = 0; ch < 2; ch++)
+			player->sent[i][ch] = 0;
+}
+
+static void AmigaAudioDrainRepliesAndClearSent(AmigaAudioPlayer *player)
+{
+	AmigaAudioDrainReplies(player);
+	AmigaAudioClearSent(player);
+}
+
 static void AmigaAudioClose(AmigaAudioPlayer *player,
 	PlaybackCleanupStatus *status)
 {
@@ -5682,11 +5709,9 @@ static void AmigaAudioClose(AmigaAudioPlayer *player,
 			}
 		}
 	}
-	/* Close audio.device before waiting: stops DMA hardware immediately and
-	 * causes all pending CMD_WRITE requests to reply to the port, so the
-	 * WaitIO loop below returns instantly instead of waiting for buffers to
-	 * drain.  Uses closeReq (not req[0][ch]) to avoid reusing the IORequest
-	 * that may still have a live CMD_WRITE pending on it. */
+	/* Close audio.device before reaping: stops DMA hardware immediately.
+	 * Uses closeReq (not req[0][ch]) to avoid reusing the IORequest that may
+	 * still have a live CMD_WRITE pending on it. */
 	for (ch = 0; ch < 2; ch++) {
 		if (player->deviceOpen[ch] && player->closeReq[ch]) {
 			CloseDevice((struct IORequest *)player->closeReq[ch]);
@@ -5698,23 +5723,23 @@ static void AmigaAudioClose(AmigaAudioPlayer *player,
 		}
 	}
 	gGuiPlaybackStatus.cleanupStage = GUIPLAY_CLEANUP_DEVICE_CLOSED;
-	for (i = 0; i < AMIGA_AUDIO_PLAYBACK_SLOTS; i++) {
-		for (ch = 0; ch < 2; ch++) {
-			if (player->req[i][ch] && player->sent[i][ch]) {
-				WaitIO((struct IORequest *)player->req[i][ch]);
-				AmigaAudioCleanupTrace4(player, "request index=%ld channel=%ld WaitIO completed=1\n",
-					(unsigned long)i, (unsigned long)ch, 0, 0);
-				player->sent[i][ch] = 0;
-			}
-		}
-	}
-	if (player->port) {
-		unsigned long drained = 0;
-		while (GetMsg(player->port))
-			drained++;
+	/* CloseDevice stops DMA immediately.  In-flight CMD_WRITE replies are not
+	 * required before freeing chip buffers because the hardware is no longer
+	 * reading them; avoid WaitIO, which can block while Stop is in progress. */
+	{
+		unsigned long drained = AmigaAudioDrainReplies(player);
 		AmigaAudioCleanupTrace4(player, "reply drained=%ld\n",
 			drained, 0, 0, 0);
 	}
+	for (i = 0; i < AMIGA_AUDIO_PLAYBACK_SLOTS; i++) {
+		for (ch = 0; ch < 2; ch++) {
+			if (player->req[i][ch] && player->sent[i][ch])
+				AmigaAudioCleanupTrace4(player,
+					"request index=%ld channel=%ld sent cleared (DMA stopped)\n",
+					(unsigned long)i, (unsigned long)ch, 0, 0);
+		}
+	}
+	AmigaAudioClearSent(player);
 	for (i = 0; i < AMIGA_AUDIO_PLAYBACK_SLOTS; i++) {
 		for (ch = 0; ch < 2; ch++) {
 			if (player->splitBase[i][ch]) {
@@ -6123,16 +6148,17 @@ static int AmigaAudioWaitOne(AmigaAudioPlayer *player, int index, int ch)
 			player->stopping = 1;
 			if (!CheckIO(req))
 				AbortIO(req);
-			/* Close audio.device immediately: clears DMA and causes all
-			 * pending CMD_WRITE requests to reply now, so WaitIO below
-			 * returns without waiting for the buffer to finish playing. */
+			/* CloseDevice stops DMA immediately.  Pending CMD_WRITE
+			 * replies may not arrive until end-of-buffer, so do not
+			 * WaitIO here; drain the port and forget in-flight writes. */
 			for (cls = 0; cls < 2; cls++) {
 				if (player->deviceOpen[cls] && player->closeReq[cls]) {
 					CloseDevice((struct IORequest *)player->closeReq[cls]);
 					player->deviceOpen[cls] = 0;
 				}
 			}
-			break;
+			AmigaAudioDrainRepliesAndClearSent(player);
+			return -1;
 		}
 	}
 #endif
@@ -6147,7 +6173,6 @@ static int AmigaAudioAbortOutstanding(AmigaAudioPlayer *player)
 {
 	int i;
 	int ch;
-	int err;
 
 	if (!player)
 		return 0;
@@ -6160,29 +6185,16 @@ static int AmigaAudioAbortOutstanding(AmigaAudioPlayer *player)
 				AbortIO(req);
 		}
 	}
-	/* Close audio.device now: stops DMA hardware immediately and causes all
-	 * AbortIO'd CMD_WRITE requests to reply so WaitIO below returns fast. */
+	/* Close audio.device now: stops DMA hardware immediately.  Avoid WaitIO
+	 * after close; drain replies and clear sent flags instead. */
 	for (ch = 0; ch < 2; ch++) {
 		if (player->deviceOpen[ch] && player->closeReq[ch]) {
 			CloseDevice((struct IORequest *)player->closeReq[ch]);
 			player->deviceOpen[ch] = 0;
 		}
 	}
-	err = 0;
-	for (i = 0; i < AMIGA_AUDIO_PLAYBACK_SLOTS; i++) {
-		for (ch = 0; ch < 2; ch++) {
-			struct IORequest *req = (struct IORequest *)player->req[i][ch];
-			if (req && player->sent[i][ch]) {
-				int err2 = WaitIO(req);
-				if (!err2)
-					err2 = player->req[i][ch]->ioa_Request.io_Error;
-				player->sent[i][ch] = 0;
-				if (!err)
-					err = err2;
-			}
-		}
-	}
-	return err;
+	AmigaAudioDrainRepliesAndClearSent(player);
+	return -1;
 }
 
 static int AmigaAudioWait(AmigaAudioPlayer *player, int index)
