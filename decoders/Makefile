@@ -34,7 +34,7 @@ all: $(if $(wildcard flac/src/foxen-flac.h),flac,)
 # --------------------------------------------------------------------------
 # FLAC — libfoxenflac (https://github.com/astoeckel/libfoxenflac)
 # --------------------------------------------------------------------------
-FLAC_SRCS := flac_entry.c flac_module.c flac/src/foxen-flac.c
+FLAC_SRCS := flac_entry.c flac_alloc.c flac_module.c flac/src/foxen-flac.c
 
 flac: flac.decoder
 

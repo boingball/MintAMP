@@ -8,38 +8,19 @@
  */
 
 #include "decoder_module.h"
+#include "flac_alloc.h"
 #include "flac/src/foxen-flac.h"
 
-#ifdef HAVE_AMIGA_AUDIO_DEVICE
-#include <exec/types.h>
-#include <exec/memory.h>
-#include <proto/exec.h>
-
-extern struct ExecBase *SysBase;
-
 static void *ModuleAlloc(unsigned long bytes)
 {
-    return AllocMem(bytes, MEMF_FAST | MEMF_CLEAR);
+    return FlacModuleCalloc(1, (size_t)bytes);
 }
-static void ModuleFree(void *ptr, unsigned long bytes)
-{
-    if (ptr) FreeMem(ptr, bytes);
-}
-#else
-#include <stdlib.h>
-#include <string.h>
-static void *ModuleAlloc(unsigned long bytes)
-{
-    void *p = malloc((size_t)bytes);
-    if (p) memset(p, 0, (size_t)bytes);
-    return p;
-}
+
 static void ModuleFree(void *ptr, unsigned long bytes)
 {
     (void)bytes;
-    free(ptr);
+    FlacModuleFree(ptr);
 }
-#endif
 
 /* Maximum block size and channels we support (Subset DAT: 4608 samples, 2 ch).
  * Files outside this range will fail to open. */
