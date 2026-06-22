@@ -7224,6 +7224,51 @@ static int GenericDecodeStreamCopySpill(GenericDecodeStream *gs,
 	return n;
 }
 
+
+static int GenericRateConvertFrame(RateState *rate, const short *in, short *out,
+	int nSamps, int inRate, int outRate, int channels, int outCapacity)
+{
+	unsigned long inFrames;
+	unsigned long produced;
+	unsigned long consume;
+
+	if (outRate <= 0 || outRate == inRate || channels <= 0) {
+		if (nSamps > outCapacity)
+			nSamps = outCapacity;
+		if (out != in)
+			memmove(out, in, (size_t)nSamps * sizeof(short));
+		return nSamps;
+	}
+
+	if (rate->inRate != inRate || rate->outRate != outRate ||
+		rate->channels != channels) {
+		rate->inRate = inRate;
+		rate->outRate = outRate;
+		rate->channels = channels;
+		rate->phase = 0;
+	}
+
+	inFrames = (unsigned long)(nSamps / channels);
+	produced = 0;
+	while (rate->phase / (unsigned long)outRate < inFrames &&
+		(produced + 1UL) * (unsigned long)channels <= (unsigned long)outCapacity) {
+		unsigned long srcFrame = rate->phase / (unsigned long)outRate;
+		int ch;
+		for (ch = 0; ch < channels; ch++)
+			out[produced * (unsigned long)channels + (unsigned long)ch] =
+				in[srcFrame * (unsigned long)channels + (unsigned long)ch];
+		produced++;
+		rate->phase += (unsigned long)inRate;
+	}
+	consume = inFrames * (unsigned long)outRate;
+	if (rate->phase >= consume)
+		rate->phase -= consume;
+	else
+		rate->phase = 0;
+
+	return (int)(produced * (unsigned long)channels);
+}
+
 static int GenericDecodeStreamFillS8(GenericDecodeStream *gs,
 	const DecodeOptions *opt, signed char *dest, int maxBytes)
 {
@@ -7286,14 +7331,13 @@ static int GenericDecodeStreamFillS8(GenericDecodeStream *gs,
 			outSamps = (int)nDecoded;
 		}
 
-		/* Optional rate downsampling (e.g. 44100 → 22050) */
-		if (!opt->fastLowrate && opt->outputRate > 0 &&
-			gs->sampleRate > opt->outputRate) {
-			outSamps = DownsampleFrame(&gs->rateState,
-				gs->writeBuf, gs->rateBuf,
-				outSamps, gs->sampleRate, opt->outputRate, 1);
+		/* Convert source-rate frames to output-rate frames before S8 output. */
+		if (opt->outputRate > 0 && gs->sampleRate != opt->outputRate) {
+			outSamps = GenericRateConvertFrame(&gs->rateState,
+				gs->writeBuf, gs->rateBuf, outSamps,
+				gs->sampleRate, opt->outputRate, 1, OUTBUF_SAMPS);
 			memmove(gs->writeBuf, gs->rateBuf,
-				(size_t)((int)outSamps * (int)sizeof(short)));
+				(size_t)outSamps * sizeof(short));
 		}
 
 		if (gs->stats)
@@ -7328,9 +7372,9 @@ static int GenericDecodeStreamFillS8(GenericDecodeStream *gs,
 					Sample16ToS8(gs->writeBuf[direct + i]);
 		}
 		if (opt->debugDecoder)
-			printf("generic-debug: mono summary sourceRate=%ld outputRate=%ld sourceFramesDecoded=%ld outputFramesWritten=%ld outputBytesWritten=%ld ratio=%ld/%ld phase=%lu\n",
+			printf("generic-debug: mono summary sourceRate=%ld outputRate=%ld sourceFramesDecoded=%ld outputFramesWritten=%ld bytesWrittenThisIteration=%ld totalBytesWritten=%ld ratio=%ld/%ld phase=%lu\n",
 				(long)gs->sampleRate, (long)(opt->outputRate > 0 ? opt->outputRate : gs->sampleRate),
-				(long)nDecoded, (long)direct, (long)direct,
+				(long)nDecoded, (long)direct, (long)direct, (long)produced,
 				(long)gs->sampleRate, (long)(opt->outputRate > 0 ? opt->outputRate : gs->sampleRate),
 				gs->rateState.phase);
 	}
@@ -7438,9 +7482,8 @@ static int GenericDecodeStreamFillPlanarS8(GenericDecodeStream *gs,
 		frames   = (int)nDecoded;  /* samples per channel */
 		pcm      = gs->decodeBuf;
 
-		/* Optional rate downsampling — work in interleaved stereo */
-		if (!opt->fastLowrate && opt->outputRate > 0 &&
-			gs->sampleRate > opt->outputRate) {
+		/* Convert source-rate frames to output-rate frames before planar S8 output. */
+		if (opt->outputRate > 0 && gs->sampleRate != opt->outputRate) {
 			if (channels == 1) {
 				/* Expand mono to interleaved-stereo for the resampler */
 				for (i = frames - 1; i >= 0; i--) {
@@ -7449,9 +7492,9 @@ static int GenericDecodeStreamFillPlanarS8(GenericDecodeStream *gs,
 				}
 				pcm = gs->writeBuf;
 			}
-			frames = DownsampleFrame(&gs->rateState, pcm, gs->rateBuf,
+			frames = GenericRateConvertFrame(&gs->rateState, pcm, gs->rateBuf,
 				frames * (channels == 1 ? 2 : channels),
-				gs->sampleRate, opt->outputRate, 2) / 2;
+				gs->sampleRate, opt->outputRate, 2, OUTBUF_SAMPS) / 2;
 			pcm      = gs->rateBuf;
 			channels = 2;
 		}
@@ -7499,7 +7542,7 @@ static int GenericDecodeStreamFillPlanarS8(GenericDecodeStream *gs,
 			}
 		}
 		if (opt->debugDecoder)
-			printf("generic-debug: planar summary sourceRate=%ld outputRate=%ld sourceFramesDecoded=%ld outputFramesWritten=%ld outputBytesWritten=%ld totalBytesWritten=%ld targetBufBytes=%ld ratio=%ld/%ld phase=%lu enough=%d\n",
+			printf("generic-debug: planar summary sourceRate=%ld outputRate=%ld sourceFramesDecoded=%ld outputFramesWritten=%ld bytesWrittenThisIteration=%ld totalBytesWritten=%ld targetBufBytes=%ld ratio=%ld/%ld phase=%lu enough=%d\n",
 				(long)gs->sampleRate, (long)(opt->outputRate > 0 ? opt->outputRate : gs->sampleRate),
 				(long)nDecoded, (long)direct, (long)direct * 2L,
 				(long)(produced + direct) * 2L, (long)maxFrames * 2L,
