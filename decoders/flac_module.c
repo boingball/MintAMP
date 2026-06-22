@@ -292,17 +292,11 @@ static void FlacClose(DecHandle handle)
     ModuleFree(st, sizeof(FlacState));
 }
 
-static DecLong FlacGetTag(DecHandle handle, const char *key,
-                          char *buf, DecULong bufSize)
-{
-    (void)handle; (void)key; (void)buf; (void)bufSize;
-    return -1;
-}
-
-static const struct DecoderModuleInfo gFlacInfo = {
+static struct DecoderModuleInfo gFlacInfo = {
     DECODER_MODULE_MAGIC,
     DECODER_MODULE_VERSION,
-    "foxen-flac",
+    0,
+    "FLAC",
     "flac\0fla\0",
     0
 };
@@ -313,5 +307,5 @@ struct DecoderOps gFlacOps = {
     FlacDecode,
     FlacSeek,
     FlacClose,
-    FlacGetTag
+    NULL
 };
