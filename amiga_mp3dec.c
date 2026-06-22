@@ -7677,7 +7677,7 @@ static int AmigaPlayStreamingGeneric(InputSource *input,
 	}
 
 cleanup:
-	AmigaAudioClose(&player, &cleanupStatus, opt);
+	AmigaAudioClose(&player, &cleanupStatus);
 	return err;
 }
 
