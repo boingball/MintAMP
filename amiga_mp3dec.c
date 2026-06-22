@@ -5313,7 +5313,9 @@ GuiPlaybackStatus gGuiPlaybackStatus;
 #define GUIPLAY_PHASE_PLAYING   2   /* steady-state streaming */
 #define GUIPLAY_PHASE_UNDERRUN  3   /* underrun just occurred */
 #define GUIPLAY_PHASE_DONE      4   /* playback finished normally */
-#define GUIPLAY_PHASE_STOPPING  5   /* Stop/EOF cleanup is releasing audio */
+#define GUIPLAY_PHASE_STOPPING  5
+#define GUIPLAY_PHASE_ERROR     6
+#define GUIPLAY_PHASE_ERROR     6   /* Stop/EOF cleanup is releasing audio */
 
 #define GUIPLAY_CLEANUP_NONE          0
 #define GUIPLAY_CLEANUP_ABORT_REAP    1

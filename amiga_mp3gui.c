@@ -49,6 +49,8 @@ typedef struct GuiPlaybackStatus {
 #define GUIPLAY_PHASE_UNDERRUN  3
 #define GUIPLAY_PHASE_DONE      4
 #define GUIPLAY_PHASE_STOPPING  5
+#define GUIPLAY_PHASE_ERROR     6
+#define GUIPLAY_PHASE_ERROR     6
 #define GUIPLAY_CLEANUP_NONE          0
 #define GUIPLAY_CLEANUP_ABORT_REAP    1
 #define GUIPLAY_CLEANUP_DEVICE_CLOSED 2
