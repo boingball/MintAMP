@@ -5821,9 +5821,12 @@ static void AmigaAudioClose(AmigaAudioPlayer *player,
 	for (i = 0; i < AMIGA_AUDIO_PLAYBACK_SLOTS; i++) {
 		for (ch = 0; ch < 2; ch++) {
 			if (player->splitBase[i][ch]) {
-				AmigaFreeGuarded(&player->splitBase[i][ch], player->splitBytes, 1,
-					status);
+				AmigaFreeGuarded(&player->splitBase[i][ch],
+					(player->stereo && ch == 0) ? player->splitBytes * 2UL : player->splitBytes,
+					1, status);
 				player->splitBuf[i][ch] = NULL;
+				if (player->stereo && ch == 0)
+					player->splitBuf[i][1] = NULL;
 				AmigaAudioCleanupTrace4(player, "slot=%ld channel=%ld chip buffer freed\n",
 					(unsigned long)i, (unsigned long)ch, 0, 0);
 				if (status)
@@ -5975,8 +5978,6 @@ static int AmigaAudioOpen(AmigaAudioPlayer *player, unsigned int period,
 	UBYTE leftChannels[] = { 1, 8 };
 	UBYTE rightChannels[] = { 2, 4 };
 	int i;
-	int ch;
-
 	memset(player, 0, sizeof(*player));
 	player->period = period;
 	player->stereo = stereo;
@@ -6004,18 +6005,20 @@ static int AmigaAudioOpen(AmigaAudioPlayer *player, unsigned int period,
 		if (player->splitBytes == 0)
 			player->splitBytes = 1;
 		for (i = 0; i < AMIGA_STEREO_AUDIO_SLOTS; i++) {
-			for (ch = 0; ch < 2; ch++) {
-				GuiPublishStartupStage(GUISTART_ALLOC_CHIP_BUFFERS);
-				player->splitBuf[i][ch] = AmigaAllocGuarded(player->splitBytes, 1,
-					&player->splitBase[i][ch]);
-				if (!player->splitBuf[i][ch]) {
-					int wasInterrupted = gPlaybackInterrupted;
-					AmigaAudioClose(player, NULL);
-					if (!wasInterrupted)
-						gPlaybackInterrupted = 0;
-					return -1;
-				}
+			GuiPublishStartupStage(GUISTART_ALLOC_CHIP_BUFFERS);
+			/* Allocate one contiguous chip buffer per stereo slot so Paula sees
+			 * left at base and right immediately after the per-channel span. */
+			player->splitBuf[i][0] = AmigaAllocGuarded(player->splitBytes * 2UL, 1,
+				&player->splitBase[i][0]);
+			if (!player->splitBuf[i][0]) {
+				int wasInterrupted = gPlaybackInterrupted;
+				AmigaAudioClose(player, NULL);
+				if (!wasInterrupted)
+					gPlaybackInterrupted = 0;
+				return -1;
 			}
+			player->splitBuf[i][1] = player->splitBuf[i][0] + player->splitBytes;
+			player->splitBase[i][1] = NULL;
 		}
 		if (AmigaAudioOpenOne(player, 0, leftChannels, sizeof(leftChannels)) != 0 ||
 			AmigaAudioOpenOne(player, 1, rightChannels, sizeof(rightChannels)) != 0) {
@@ -6070,6 +6073,7 @@ static void AmigaAudioPrintBufferStats(const char *label,
 {
 	unsigned long i;
 	unsigned long nonzero;
+	unsigned long unsignedSilence80;
 	int minv;
 	int maxv;
 
@@ -6081,14 +6085,16 @@ static void AmigaAudioPrintBufferStats(const char *label,
 	minv = buf[0];
 	maxv = buf[0];
 	nonzero = 0;
+	unsignedSilence80 = 0;
 	for (i = 0; i < len; i++) {
 		int v = buf[i];
 		if (v < minv) minv = v;
 		if (v > maxv) maxv = v;
 		if (v != 0) nonzero++;
+		if (((unsigned char)buf[i]) == 0x80U) unsignedSilence80++;
 	}
-	printf("debug-play: %s stats ptr=%p len=%lu min=%d max=%d nonzero=%lu first16=",
-		label, (const void *)buf, len, minv, maxv, nonzero);
+	printf("debug-play: %s stats ptr=%p len=%lu min=%d max=%d nonzero=%lu unsignedSilence0x80=%lu signedSilenceExpected=0 first16=",
+		label, (const void *)buf, len, minv, maxv, nonzero, unsignedSilence80);
 	for (i = 0; i < len && i < 16UL; i++)
 		printf("%s%02x", i ? " " : "", (unsigned int)((unsigned char)buf[i]));
 	printf("\n");
@@ -6150,8 +6156,9 @@ static void AmigaAudioCommitOne(AmigaAudioPlayer *player, int index, int ch)
 	}
 	BeginIO((struct IORequest *)player->req[index][ch]);
 	if (player->debugPlay)
-		printf("debug-play: BeginIO called buffer=%s ch=%d\n",
-			PlaybackBufferName(index), ch);
+		printf("debug-play: BeginIO called buffer=%s ch=%d result=unavailable(void) io_Error=%ld\n",
+			PlaybackBufferName(index), ch,
+			(long)player->req[index][ch]->ioa_Request.io_Error);
 }
 
 static void AmigaPlaybackCopy(const signed char *src, signed char *dest,
@@ -6192,9 +6199,12 @@ static int AmigaAudioPrepare(AmigaAudioPlayer *player, int index,
 			return -1;
 		}
 		if (player->debugPlay)
-			printf("debug-play: planar stereo layout buffer %s totalLen=%lu perChannelLen=%lu leftBase=%p rightBase=%p source=%s\n",
+			printf("debug-play: planar stereo layout buffer %s combinedLen=%lu perChannelLen=%lu leftBase=%p rightBase=%p expectedRight=%p rightMatchesExpected=%d ioa_Length(per-channel)=%lu source=%s\n",
 				PlaybackBufferName(index), len, frames,
 				(void *)player->splitBuf[index][0], (void *)player->splitBuf[index][1],
+				(void *)(player->splitBuf[index][0] + frames),
+				player->splitBuf[index][1] == player->splitBuf[index][0] + frames ? 1 : 0,
+				frames,
 				player->splitWorkBuf[index][0] ? "planar-work" : (buf ? "interleaved-copy" : "chip-planar"));
 		AmigaAudioPrepareOne(player, index, 1, player->splitBuf[index][1], frames);
 		AmigaAudioPrepareOne(player, index, 0, player->splitBuf[index][0], frames);
@@ -7539,6 +7549,8 @@ static unsigned long GenericDecodeStreamFillPlaybackBuffer(
 			(int)(maxBytes / 2UL));
 		if (gPlaybackInterrupted)
 			return 0;
+		printf("generic-debug: fill return combinedBytes=%lu perChannelBytes=%lu signedness=signed-8 center=0 matches-mp3-Sample16ToS8\n",
+			(unsigned long)frames * 2UL, (unsigned long)frames);
 		return (unsigned long)frames * 2UL;
 	}
 	{
