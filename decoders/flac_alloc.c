@@ -11,7 +11,10 @@
 #define FLAC_ALLOC_IMPLEMENTATION
 #include "flac_alloc.h"
 
-#ifdef HAVE_AMIGA_AUDIO_DEVICE
+#ifndef HAVE_AMIGA_AUDIO_DEVICE
+#error "flac_alloc.c is for the Amiga decoder module build and must not fall back to libc allocation"
+#endif
+
 #include <exec/types.h>
 #include <exec/memory.h>
 #include <proto/exec.h>
@@ -138,35 +141,7 @@ void free(void *ptr)
 
 void exit(int status)
 {
-    FlacModuleExit(status);
+    (void)status;
+    for (;;)
+        ;
 }
-
-#else
-#include <stdlib.h>
-#include <string.h>
-
-void *FlacModuleMalloc(size_t bytes)
-{
-    return malloc(bytes);
-}
-
-void *FlacModuleCalloc(size_t count, size_t bytes)
-{
-    return calloc(count, bytes);
-}
-
-void *FlacModuleRealloc(void *ptr, size_t bytes)
-{
-    return realloc(ptr, bytes);
-}
-
-void FlacModuleFree(void *ptr)
-{
-    free(ptr);
-}
-
-void FlacModuleExit(int status)
-{
-    exit(status);
-}
-#endif
