@@ -4694,6 +4694,7 @@ static int SelftestMulshift(void)
 /* Path to the decoders/ directory (including trailing slash).
  * Set by the GUI on startup so the playback subprocess can find modules. */
 char gDecoderModulesPath[512];
+#define EXPECTED_FLAC_DECODER_PATH "VHD0:libhelix-mp3/decoders/flac.decoder"
 
 static void InitDecoderModulesPath(void)
 {
@@ -7477,6 +7478,12 @@ static int LoadDecoderModuleForExt(const char *ext,
 			continue;
 		}
 
+		fprintf(stderr, "decoder module discovery: loaded %s name=\"%s\" abi=%u revision=%u flags=%lu\n",
+			path, ops->info->name ? ops->info->name : "(null)",
+			(unsigned int)ops->info->version,
+			(unsigned int)ops->info->revision,
+			(unsigned long)ops->info->flags);
+
 		/* Walk the extension list: "flac\0fla\0\0" */
 		fprintf(stderr, "decoder module discovery: %s registers extensions:", path);
 		for (exts = ops->info->extensions; exts && *exts;
@@ -7484,6 +7491,15 @@ static int LoadDecoderModuleForExt(const char *ext,
 			fprintf(stderr, " %s", exts);
 			if (StrCaseCmp(exts, ext) == 0) {
 				fprintf(stderr, "\n");
+				if (StrCaseCmp(ext, "flac") == 0 || StrCaseCmp(ext, "fla") == 0) {
+					if (strcmp(path, EXPECTED_FLAC_DECODER_PATH) == 0) {
+						fprintf(stderr, "decoder module discovery: FLAC loader path verified: %s\n",
+							path);
+					} else {
+						fprintf(stderr, "decoder module discovery: FLAC loader path WARNING: loaded %s, expected %s\n",
+							path, EXPECTED_FLAC_DECODER_PATH);
+					}
+				}
 				out->segment = seg;
 				out->ops     = ops;
 				FreeMem(fib, sizeof(*fib));

@@ -38,13 +38,22 @@ all: $(if $(wildcard flac/src/foxen-flac.h),flac,)
 # FLAC — libfoxenflac (https://github.com/astoeckel/libfoxenflac)
 # --------------------------------------------------------------------------
 FLAC_SRCS := flac_entry.c flac_alloc.c flac_module.c flac/src/foxen-flac.c
+FLAC_OBJS := $(FLAC_SRCS:.c=.o)
 
 flac: flac.decoder
 
 FLAC_CFLAGS := $(filter-out -std=gnu89 -std=gnu11,$(CFLAGS)) -std=gnu99 -I. -Iflac/src
 
-flac.decoder: $(FLAC_SRCS) decoder_module.h flac/src/foxen-flac.h
-	$(CC) $(FLAC_CFLAGS) -nostartfiles -Wl,-Map,$@.map -o $@ $(FLAC_SRCS)
+flac_entry.o flac_alloc.o flac_module.o: decoder_module.h
+flac_alloc.o flac_module.o: flac_alloc.h
+flac_module.o flac/src/foxen-flac.o: flac/src/foxen-flac.h
+
+%.o: %.c
+	$(CC) $(FLAC_CFLAGS) -c -o $@ $<
+
+flac.decoder: $(FLAC_OBJS) decoder_module.h flac/src/foxen-flac.h
+	rm -f $@ $@.map
+	$(CC) $(FLAC_CFLAGS) -nostartfiles -Wl,-Map,$@.map -o $@ $(FLAC_OBJS)
 	@if grep -E '(^|/)(malloc\.o|lib_a-exit\.o)([)[:space:]]|$$)' $@.map; then \
 	    echo "ERROR: FLAC decoder linked libc malloc.o or lib_a-exit.o" >&2; \
 	    exit 1; \
@@ -53,10 +62,18 @@ flac.decoder: $(FLAC_SRCS) decoder_module.h flac/src/foxen-flac.h
 	    echo "ERROR: FLAC decoder has unresolved SysBase or _exit" >&2; \
 	    exit 1; \
 	fi
+	@if ! grep -q 'flac_module\.o' $@.map; then \
+	    echo "ERROR: FLAC decoder map does not mention flac_module.o" >&2; \
+	    exit 1; \
+	fi
+	@if ! strings $@ | grep -q 'FLAC MODULE BUILD MARKER 12345'; then \
+	    echo "ERROR: FLAC decoder is missing build marker string" >&2; \
+	    exit 1; \
+	fi
 	$(FIXHUNKS) $@
 	@echo "Built $@"
 
 # --------------------------------------------------------------------------
 
 clean:
-	rm -f flac.decoder flac.decoder.map
+	rm -f flac.decoder flac.decoder.map $(FLAC_OBJS)

@@ -8,6 +8,8 @@
 
 #include "decoder_module.h"
 
+#include <stdio.h>
+
 #ifdef HAVE_AMIGA_AUDIO_DEVICE
 #include <exec/types.h>
 #include <exec/execbase.h>
@@ -30,5 +32,7 @@ struct DecoderOps *DecoderModuleEntry(void)
 #ifdef HAVE_AMIGA_AUDIO_DEVICE
     SysBase = *((struct ExecBase **)4L);
 #endif
+    printf("FLAC MODULE BUILD MARKER 12345\n");
+    fflush(stdout);
     return &gFlacOps;
 }

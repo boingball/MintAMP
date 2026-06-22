@@ -35,6 +35,7 @@ static void ModuleFree(void *ptr, unsigned long bytes)
 /* Output sample buffer capacity: full block * channels (interleaved int32_t) */
 #define FLAC_OUT_CAP ((unsigned long)(FLAC_BLK) * (unsigned long)(FLAC_CH))
 #define FLAC_STALL_LIMIT 64
+#define FLAC_MODULE_BUILD_ID "FLAC MODULE BUILD MARKER 12345 rev 2"
 
 static const char *FlacStateName(fx_flac_state_t state)
 {
@@ -304,6 +305,9 @@ static DecLong FlacDecode(DecHandle handle, short *outBuf, DecULong maxSamplesPe
     int32_t      *src;
     short        *dst;
 
+    printf("FLACDECODE MARKER 12345\n");
+    fflush(stdout);
+
     if (!st)
         return -1;
 
@@ -383,7 +387,7 @@ static struct DecoderModuleInfo gFlacInfo = {
     DECODER_MODULE_MAGIC,
     DECODER_MODULE_VERSION,
     0,
-    "FLAC",
+    FLAC_MODULE_BUILD_ID,
     "flac\0fla\0",
     0
 };
