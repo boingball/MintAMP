@@ -348,7 +348,10 @@ static DecHandle FlacOpen(DecoderReadCb readFn, DecoderSeekCb seekFn,
     }
 
     st->channels = (int)nch;
-    st->shift    = (ss > 16) ? (int)(ss - 16) : 0;
+    /* foxen-flac left-aligns every decoded sample to the int32_t MSB:
+     * stored_value = pcm_sample << (32 - sample_bits).
+     * Right-shift by 16 to recover a signed 16-bit PCM value. */
+    st->shift    = 16;
 
     infoOut->sampleRate    = (DecULong)sr;
     infoOut->channels      = (unsigned short)st->channels;
