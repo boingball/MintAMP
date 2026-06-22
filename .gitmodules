@@ -1,0 +1,3 @@
+[submodule "decoders/flac"]
+	path = decoders/flac
+	url = https://github.com/astoeckel/libfoxenflac
