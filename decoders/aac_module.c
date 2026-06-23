@@ -16,7 +16,7 @@
 #include "aac_alloc.h"
 #include "aac/aacdec.h"
 
-#define AAC_MODULE_BUILD_ID "AAC MODULE BUILD MARKER 12345 rev 1"
+#define AAC_MODULE_BUILD_ID "AAC MODULE BUILD MARKER 12345 rev 2"
 
 /* Compressed input ring buffer.  Must hold at least two maximum ADTS frames
  * (AAC_MAINBUF_SIZE = 768*2 = 1536 bytes each) to guarantee AACDecode always
@@ -241,6 +241,9 @@ static int AacDecodeFrame(AacState *st)
         return -1;
     }
 
+    /* Helix AAC reports outputSamps as total interleaved PCM shorts across
+     * all channels (stereo AAC-LC normally reports 2048 total samples:
+     * 1024 sample frames * 2 channels). */
     st->lastSamplesProduced = (unsigned long)fi.outputSamps;
     if (st->iobufReadPtr == oldInputPtr && st->iobufLeft == oldBytesLeft &&
         fi.outputSamps <= 0) {
@@ -248,6 +251,7 @@ static int AacDecodeFrame(AacState *st)
         return -1;
     }
 
+    /* Store total interleaved shorts; decode() converts to ABI sample frames. */
     st->outbufFill = (unsigned long)fi.outputSamps;
     st->outbufPos  = 0;
     return 1;
@@ -339,6 +343,7 @@ static DecHandle AacOpen(DecoderReadCb readFn, DecoderSeekCb seekFn,
     }
 
     st->channels   = fi.nChans;
+    /* fi.outputSamps is total interleaved shorts, not samples/channel. */
     st->outbufFill = (unsigned long)fi.outputSamps;
     st->outbufPos  = 0;
     st->lastSamplesProduced = (unsigned long)fi.outputSamps;
@@ -356,7 +361,7 @@ static DecLong AacDecode(DecHandle handle, short *outBuf,
                           DecULong maxSamplesPerChan)
 {
     AacState    *st = (AacState *)handle;
-    DecULong     produced = 0;
+    DecULong     produced = 0; /* ABI return value: sample frames per channel */
     unsigned long ch;
 
     if (!st || !outBuf || maxSamplesPerChan == 0) return -1;

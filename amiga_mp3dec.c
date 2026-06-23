@@ -7172,6 +7172,7 @@ typedef struct GenericDecodeStream {
 	DecHandle                handle;
 	int                      channels;    /* as reported by ops->open()          */
 	int                      sampleRate;  /* native rate reported by the module  */
+	int                      bitsPerSample;
 	short                    decodeBuf[OUTBUF_SAMPS]; /* module output (S16 IL)  */
 	short                    writeBuf[OUTBUF_SAMPS];  /* post-processed S16      */
 	short                    rateBuf[OUTBUF_SAMPS];   /* rate-converted S16      */
@@ -7196,7 +7197,7 @@ typedef struct GenericDecodeStream {
 
 static void GenericDecodeStreamInit(GenericDecodeStream *gs,
 	const struct DecoderOps *ops, DecHandle handle,
-	int channels, int sampleRate,
+	int channels, int sampleRate, int bitsPerSample,
 	DecodeStats *stats, TimingStats *timing)
 {
 	memset(gs, 0, sizeof(*gs));
@@ -7204,6 +7205,7 @@ static void GenericDecodeStreamInit(GenericDecodeStream *gs,
 	gs->handle     = handle;
 	gs->channels   = channels > 2 ? 2 : (channels < 1 ? 1 : channels);
 	gs->sampleRate = sampleRate;
+	gs->bitsPerSample = bitsPerSample;
 	gs->stats      = stats;
 	gs->timing     = timing;
 }
@@ -7289,6 +7291,44 @@ static int GenericRateConvertFrame(RateState *rate, const short *in, short *out,
 	return (int)(produced * (unsigned long)channels);
 }
 
+
+static void GenericPrintFirstDecodePcmDebug(const GenericDecodeStream *gs,
+	const DecodeOptions *opt, DecLong moduleFrames)
+{
+	long frames;
+	long totalSamples;
+	long calculatedBytes;
+	long i;
+	short minSample = 32767;
+	short maxSample = -32768;
+
+	if (!opt->debugDecoder || !gs || moduleFrames <= 0)
+		return;
+
+	frames = (long)moduleFrames;
+	totalSamples = frames * (long)gs->channels;
+	calculatedBytes = totalSamples * (long)sizeof(short);
+	if (totalSamples <= 0) {
+		minSample = 0;
+		maxSample = 0;
+	} else {
+		for (i = 0; i < totalSamples; i++) {
+			short sample = gs->decodeBuf[i];
+			if (sample < minSample) minSample = sample;
+			if (sample > maxSample) maxSample = sample;
+		}
+	}
+
+	fprintf(stderr,
+		"generic-debug: first decoded PCM channels=%ld bitsPerSample=%ld moduleFrames=%ld moduleTotalSamples=%ld moduleBytes=%ld calculatedFrames=%ld calculatedBytes=%ld first16=",
+		(long)gs->channels, (long)gs->bitsPerSample, frames, totalSamples, calculatedBytes,
+		frames, calculatedBytes);
+	for (i = 0; i < 16 && i < totalSamples; i++)
+		fprintf(stderr, "%s%ld", i ? "," : "", (long)gs->decodeBuf[i]);
+	fprintf(stderr, " minSample=%ld maxSample=%ld\n",
+		(long)minSample, (long)maxSample);
+}
+
 static int GenericDecodeStreamFillS8(GenericDecodeStream *gs,
 	const DecodeOptions *opt, signed char *dest, int maxBytes)
 {
@@ -7317,9 +7357,11 @@ static int GenericDecodeStreamFillS8(GenericDecodeStream *gs,
 			gs->ops->info->extensions && StrCaseCmp(gs->ops->info->extensions, "aac") == 0)
 			fprintf(stderr, "AAC: after first decode rc=%ld\n", (long)nDecoded);
 		if (opt->debugDecoder && !gs->firstDecodeDebugPrinted) {
-			fprintf(stderr, "generic-debug: first decode call result rc=%ld pcmSamplesProduced=%ld sampleRate=%ld channels=%ld\n",
+			fprintf(stderr, "generic-debug: first decode call result rc=%ld moduleFrames=%ld totalSamples=%ld sampleRate=%ld channels=%ld\n",
 				(long)nDecoded, (long)(nDecoded > 0 ? nDecoded : 0),
+				(long)(nDecoded > 0 ? nDecoded * (DecLong)gs->channels : 0),
 				(long)gs->sampleRate, (long)gs->channels);
+			GenericPrintFirstDecodePcmDebug(gs, opt, nDecoded);
 			gs->firstDecodeDebugPrinted = 1;
 		}
 
@@ -7330,8 +7372,9 @@ static int GenericDecodeStreamFillS8(GenericDecodeStream *gs,
 		if (gPlaybackInterrupted)
 			break;
 
-		if (opt->debugDecoder) printf("generic-debug: decode rc=%ld pcmSamples=%ld stopRequested=%d zeroOutput=%d eof=%d error=%d\n",
+		if (opt->debugDecoder) printf("generic-debug: decode rc=%ld moduleFrames=%ld totalSamples=%ld stopRequested=%d zeroOutput=%d eof=%d error=%d\n",
 			(long)nDecoded, (long)(nDecoded > 0 ? nDecoded : 0),
+			(long)(nDecoded > 0 ? nDecoded * (DecLong)gs->channels : 0),
 			gPlaybackInterrupted ? 1 : 0, gs->consecutiveZeroOutput,
 			gs->outOfData, gs->decodeError);
 
@@ -7488,9 +7531,11 @@ static int GenericDecodeStreamFillPlanarS8(GenericDecodeStream *gs,
 			gs->ops->info->extensions && StrCaseCmp(gs->ops->info->extensions, "aac") == 0)
 			fprintf(stderr, "AAC: after first decode rc=%ld\n", (long)nDecoded);
 		if (opt->debugDecoder && !gs->firstDecodeDebugPrinted) {
-			fprintf(stderr, "generic-debug: first decode call result rc=%ld pcmSamplesProduced=%ld sampleRate=%ld channels=%ld\n",
+			fprintf(stderr, "generic-debug: first decode call result rc=%ld moduleFrames=%ld totalSamples=%ld sampleRate=%ld channels=%ld\n",
 				(long)nDecoded, (long)(nDecoded > 0 ? nDecoded : 0),
+				(long)(nDecoded > 0 ? nDecoded * (DecLong)gs->channels : 0),
 				(long)gs->sampleRate, (long)gs->channels);
+			GenericPrintFirstDecodePcmDebug(gs, opt, nDecoded);
 			gs->firstDecodeDebugPrinted = 1;
 		}
 		decodeCalls++;
@@ -7502,8 +7547,9 @@ static int GenericDecodeStreamFillPlanarS8(GenericDecodeStream *gs,
 		if (gPlaybackInterrupted)
 			break;
 
-		if (opt->debugDecoder) printf("generic-debug: decode rc=%ld pcmSamples=%ld stopRequested=%d zeroOutput=%d eof=%d error=%d\n",
+		if (opt->debugDecoder) printf("generic-debug: decode rc=%ld moduleFrames=%ld totalSamples=%ld stopRequested=%d zeroOutput=%d eof=%d error=%d\n",
 			(long)nDecoded, (long)(nDecoded > 0 ? nDecoded : 0),
+			(long)(nDecoded > 0 ? nDecoded * (DecLong)gs->channels : 0),
 			gPlaybackInterrupted ? 1 : 0, gs->consecutiveZeroOutput,
 			gs->outOfData, gs->decodeError);
 
@@ -8037,7 +8083,8 @@ static int AmigaPlayStreamingGeneric(InputSource *input,
 		goto cleanup;
 
 	GenericDecodeStreamInit(&stream, ops, handle,
-		(int)sinfo->channels, (int)sinfo->sampleRate, stats, timing);
+		(int)sinfo->channels, (int)sinfo->sampleRate,
+		(int)sinfo->bitsPerSample, stats, timing);
 
 	period = AmigaPalAudioPeriod(playbackRate);
 	gGuiPlaybackStatus.paulaPeriod = period;
@@ -8440,13 +8487,15 @@ static int AmigaAacSmokeTest(const char *filename, const DecodeOptions *opt)
 		goto done_handle;
 	}
 	printf("AAC: before first decode\n");
-	nDecoded = mod.ops->decode(handle, pcm, 2048UL);
+	nDecoded = mod.ops->decode(handle, pcm, 1024UL);
 	printf("AAC: after first decode rc=%ld\n", (long)nDecoded);
 	if (nDecoded <= 0) {
 		fprintf(stderr, "AAC test: decode one frame failed rc=%ld\n", (long)nDecoded);
 		goto done_handle;
 	}
-	printf("AAC test: decoded %ld samples/channel\n", (long)nDecoded);
+	printf("AAC test: decoded %ld sample frames (%ld total int16 samples, %ld bytes)\n",
+		(long)nDecoded, (long)nDecoded * (long)sinfo.channels,
+		(long)nDecoded * (long)sinfo.channels * (long)sizeof(short));
 	ret = 0;
 
 done_handle:
