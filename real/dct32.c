@@ -670,13 +670,15 @@ static void FDCT32Half_C_REFERENCE(int *buf, int *dest, int offset, int oddBlock
 #if FDCT32_HAS_AMIGA_M68K_ASM
 static void FDCT32Half_AMIGA_M68K_ASM(int *buf, int *dest, int offset, int oddBlock, int gb)
 {
-	int oddBase, evenBase, delayOff;
+	int i, s, es, oddBase, evenBase, delayOff, clipBits;
 	const int *cptr = dcttab;
 	int *d;
 
+	es = 0;
 	if (gb < 6) {
-		FDCT32Half_C_REFERENCE(buf, dest, offset, oddBlock, gb);
-		return;
+		es = 6 - gb;
+		for (i = 0; i < 32; i++)
+			buf[i] >>= es;
 	}
 
 	cptr = FDCT32_AMIGA_M68K_FIRST_PASS(buf, cptr);
@@ -694,6 +696,22 @@ static void FDCT32Half_AMIGA_M68K_ASM(int *buf, int *dest, int offset, int oddBl
 
 	d = dest + 16 + delayOff + evenBase;
 	FDCT32_AMIGA_M68K_OUTPUT_HALF_LOW(buf, d);
+
+	if (es) {
+		clipBits = 31 - es;
+		d = dest + 64 * 16 + delayOff + evenBase;
+		s = d[0];   CLIP_2N(s, clipBits);   d[0] = d[8] = (s << es);
+
+		d = dest + offset + oddBase;
+		for (i = 0; i < 8; i++) {
+			s = d[0];   CLIP_2N(s, clipBits);   d[0] = d[8] = (s << es);   d += 128;
+		}
+
+		d = dest + 16 + delayOff + evenBase;
+		for (i = 0; i < 8; i++) {
+			s = d[0];   CLIP_2N(s, clipBits);   d[0] = d[8] = (s << es);   d += 128;
+		}
+	}
 }
 #endif
 
@@ -733,10 +751,8 @@ int FDCT32Half_AMIGA_M68K_ASM_RUNTIME(void)
 void FDCT32Half_TEST_ACTIVE(int *buf, int *dest, int offset, int oddBlock, int gb)
 {
 #if FDCT32_HAS_AMIGA_M68K_ASM && !defined(AMIGA_FORCE_FDCT32_HALF_C)
-	if (gb >= 6) {
-		FDCT32Half_AMIGA_M68K_ASM(buf, dest, offset, oddBlock, gb);
-		return;
-	}
+	FDCT32Half_AMIGA_M68K_ASM(buf, dest, offset, oddBlock, gb);
+	return;
 #endif
 	FDCT32Half_C_REFERENCE(buf, dest, offset, oddBlock, gb);
 }
@@ -757,10 +773,8 @@ void FDCT32Half(int *buf, int *dest, int offset, int oddBlock, int gb)
 	return;
 #endif
 #if FDCT32_HAS_AMIGA_M68K_ASM && !defined(AMIGA_FORCE_FDCT32_HALF_C)
-	if (gb >= 6) {
-		FDCT32Half_AMIGA_M68K_ASM(buf, dest, offset, oddBlock, gb);
-		return;
-	}
+	FDCT32Half_AMIGA_M68K_ASM(buf, dest, offset, oddBlock, gb);
+	return;
 #endif
 	FDCT32Half_C_REFERENCE(buf, dest, offset, oddBlock, gb);
 }
