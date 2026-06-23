@@ -1219,9 +1219,10 @@ static int MrOpenWindow(MrApp *app)
 	app->trackGad = ReadonlyString(GID_TRACK, "-", 12);
 	app->genreGad = ReadonlyString(GID_GENRE, "-", 20);
 	app->ratingGad = ReadonlyString(GID_RATING, "0/5", 16);
-	/* ReAction artwork render target: keep this as a fixed right-hand box.
-	 * TODO: reuse the GadTools picojpg artwork cache/decode path and render into
-	 * this reserved rectangle when the ReAction rastport geometry is stable. */
+	/* ReAction artwork render target: a fixed right-hand box.  The picojpeg
+	 * decode/dither path (shared with the GadTools frontend) renders the 64x64
+	 * thumbnail straight into this gadget's rectangle via DrawArtPanel(), which
+	 * is re-stamped on every window refresh/resize. */
 	app->artGad = (Object *)NewObject(BUTTON_GetClass(), NULL,
 	                GA_ID, GID_LAST,
 	                GA_ReadOnly, TRUE,
@@ -1253,85 +1254,105 @@ static int MrOpenWindow(MrApp *app)
 		LAYOUT_SpaceOuter, TRUE,
 		LAYOUT_DeferLayout, TRUE,
 
+		/* File chooser spans the full width at the top. */
 		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
 			LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
+			ADD_LABELLED(app->fileGad, "File"),
+			TAG_DONE),
+		CHILD_WeightedHeight, 0,
+
+		/* Track metadata stacked on the left, artwork box on the right. */
+		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
+			LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
+			LAYOUT_SpaceInner, TRUE,
+
 			LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
 				LAYOUT_Orientation, LAYOUT_ORIENT_VERT,
+				LAYOUT_BevelStyle, BVS_GROUP,
+				LAYOUT_Label, (ULONG)"Track",
+				LAYOUT_SpaceInner, TRUE,
 
-				LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
-					LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
-					ADD_LABELLED(app->fileGad, "File"),
-					TAG_DONE),
+				ADD_LABELLED(app->titleGad, "Title"),
+				CHILD_WeightedHeight, 0,
+				ADD_LABELLED(app->artistGad, "Artist"),
+				CHILD_WeightedHeight, 0,
+				ADD_LABELLED(app->albumGad, "Album"),
+				CHILD_WeightedHeight, 0,
+				ADD_LABELLED(app->genreGad, "Genre"),
 				CHILD_WeightedHeight, 0,
 
-				LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
-					LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
-					ADD_LABELLED(app->titleGad, "Title"),
-					ADD_LABELLED(app->artistGad, "Artist"),
-					TAG_DONE),
-				CHILD_WeightedHeight, 0,
-
-				LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
-					LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
-					ADD_LABELLED(app->albumGad, "Album"),
-					ADD_LABELLED(app->genreGad, "Genre"),
-					TAG_DONE),
-				CHILD_WeightedHeight, 0,
-
+				/* Compact rating row: read-out, five small stars, track no. */
 				LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
 					LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
 					ADD_LABELLED(app->ratingGad, "Rating"),
+					CHILD_MaxWidth, 44,
+					CHILD_WeightedWidth, 0,
+					LAYOUT_AddChild, (ULONG)app->starGad[0], CHILD_MaxWidth, 18, CHILD_WeightedWidth, 0,
+					LAYOUT_AddChild, (ULONG)app->starGad[1], CHILD_MaxWidth, 18, CHILD_WeightedWidth, 0,
+					LAYOUT_AddChild, (ULONG)app->starGad[2], CHILD_MaxWidth, 18, CHILD_WeightedWidth, 0,
+					LAYOUT_AddChild, (ULONG)app->starGad[3], CHILD_MaxWidth, 18, CHILD_WeightedWidth, 0,
+					LAYOUT_AddChild, (ULONG)app->starGad[4], CHILD_MaxWidth, 18, CHILD_WeightedWidth, 0,
 					ADD_LABELLED(app->trackGad, "Track"),
-					LAYOUT_AddChild, (ULONG)app->starGad[0],
-					LAYOUT_AddChild, (ULONG)app->starGad[1],
-					LAYOUT_AddChild, (ULONG)app->starGad[2],
-					LAYOUT_AddChild, (ULONG)app->starGad[3],
-					LAYOUT_AddChild, (ULONG)app->starGad[4],
+					CHILD_MaxWidth, 60,
 					TAG_DONE),
 				CHILD_WeightedHeight, 0,
 				TAG_DONE),
+
 			LAYOUT_AddChild, (ULONG)app->artGad,
-			CHILD_MinWidth, 80,
-			CHILD_MinHeight, 80,
+			CHILD_MinWidth, 72,
+			CHILD_MinHeight, 72,
+			CHILD_MaxWidth, 72,
 			CHILD_WeightedWidth, 0,
+			CHILD_WeightedHeight, 0,
 			TAG_DONE),
 		CHILD_WeightedHeight, 0,
 
+		/* All decoder/playback controls grouped in one tidy block. */
 		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
-			LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
-			ADD_LABELLED(app->speedGad, "Speed"),
-			ADD_LABELLED(app->widthGad, "Mode/width"),
-			ADD_LABELLED(app->delayGad, "Delay"),
+			LAYOUT_Orientation, LAYOUT_ORIENT_VERT,
+			LAYOUT_BevelStyle, BVS_GROUP,
+			LAYOUT_Label, (ULONG)"Decoder",
+			LAYOUT_SpaceInner, TRUE,
+
+			LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
+				LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
+				ADD_LABELLED(app->rateGad, "Rate"),
+				ADD_LABELLED(app->qualityGad, "Quality"),
+				ADD_LABELLED(app->channelGad, "Mono/Stereo"),
+				TAG_DONE),
+			CHILD_WeightedHeight, 0,
+
+			LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
+				LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
+				ADD_LABELLED(app->speedGad, "Speed"),
+				ADD_LABELLED(app->widthGad, "Mode/width"),
+				ADD_LABELLED(app->delayGad, "Delay"),
+				TAG_DONE),
+			CHILD_WeightedHeight, 0,
+
+			LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
+				LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
+				ADD_LABELLED(app->bufferGad, "Buffer"),
+				ADD_LABELLED(app->volumeGad, "Volume"),
+				TAG_DONE),
+			CHILD_WeightedHeight, 0,
+
+			LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
+				LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
+				LAYOUT_AddChild, (ULONG)app->fastMemGad,
+				LAYOUT_AddChild, (ULONG)app->fastLowGad,
+				TAG_DONE),
+			CHILD_WeightedHeight, 0,
 			TAG_DONE),
 		CHILD_WeightedHeight, 0,
 
-		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
-			LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
-			ADD_LABELLED(app->rateGad, "Rate"),
-			ADD_LABELLED(app->qualityGad, "Quality"),
-			ADD_LABELLED(app->channelGad, "Mono/Stereo"),
-			LAYOUT_AddChild, (ULONG)app->fastMemGad,
-			LAYOUT_AddChild, (ULONG)app->fastLowGad,
-			TAG_DONE),
-		CHILD_WeightedHeight, 0,
-
-		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
-			LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
-			ADD_LABELLED(app->bufferGad, "Buffer"),
-			CHILD_MaxWidth, 260,
-			TAG_DONE),
-		CHILD_WeightedHeight, 0,
-		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
-			LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
-			ADD_LABELLED(app->volumeGad, "Volume"),
-			CHILD_MaxWidth, 260,
-			TAG_DONE),
-		CHILD_WeightedHeight, 0,
-
+		/* File info readout, with the track time pinned to the right. */
 		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
 			LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
 			ADD_LABELLED(app->fileInfoGad, "File info"),
 			ADD_LABELLED(app->timeGad, "Time"),
+			CHILD_MaxWidth, 96,
+			CHILD_WeightedWidth, 0,
 			TAG_DONE),
 		CHILD_WeightedHeight, 0,
 
@@ -1366,9 +1387,9 @@ static int MrOpenWindow(MrApp *app)
 		WA_CloseGadget, TRUE,
 		WA_SizeGadget, TRUE,
 		WA_IDCMP, IDCMP_GADGETUP | IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
-			IDCMP_IDCMPUPDATE | IDCMP_MENUPICK,
-		WA_Width, 520,
-		WA_Height, 360,
+			IDCMP_IDCMPUPDATE | IDCMP_MENUPICK | IDCMP_NEWSIZE,
+		WA_Width, 440,
+		WA_Height, 290,
 		WINDOW_Position, WPOS_CENTERSCREEN,
 		WINDOW_ParentGroup, (ULONG)root,
                 TAG_DONE);
@@ -1526,7 +1547,12 @@ static void FreeMp3Info(MrMp3Info *info)
 static void ReadId3v2(FILE *f, MrMp3Info *info)
 {
 	unsigned char hdr[10], fh[10]; long end; int version;
-	if (fseek(f, 0, SEEK_SET) != 0 || fread(hdr, 1, 10, f) != 10 || memcmp(hdr, "ID3", 3)) return;
+	if (fseek(f, 0, SEEK_SET) != 0 || fread(hdr, 1, 10, f) != 10 || memcmp(hdr, "ID3", 3)) {
+		/* No ID3v2 tag: leave the file rewound so the MPEG scan starts at
+		 * the top of the file. */
+		fseek(f, 0, SEEK_SET);
+		return;
+	}
 	version = hdr[3];
 	end = 10 + Id3Synchsafe(hdr + 6);
 	while (ftell(f) + 10 <= end && fread(fh, 1, 10, f) == 10) {
@@ -1557,6 +1583,10 @@ static void ReadId3v2(FILE *f, MrMp3Info *info)
 		}
 		free(payload);
 	}
+	/* Position the file pointer just past the ID3v2 tag so the MPEG frame
+	 * scan that follows does not mistake bytes inside the tag (e.g. an
+	 * embedded JPEG's FFE0/FFD8 markers) for an MPEG frame sync. */
+	fseek(f, end, SEEK_SET);
 }
 
 static void ReadId3v1(FILE *f, MrMp3Info *info)
@@ -1571,20 +1601,40 @@ static void ReadId3v1(FILE *f, MrMp3Info *info)
 	if (b[127] < sizeof(genres) / sizeof(genres[0])) SafeCopy(info->genre, sizeof(info->genre), genres[b[127]]);
 }
 
+/* Strict MPEG-1/2 Layer III frame-sync test, matching the GadTools frontend.
+ * The loose "(h[1] & 0xe0) == 0xe0" test used previously matched JPEG APPn
+ * markers (0xFFEn) and Layer I/II frames, so embedded cover art or a stray
+ * byte run produced bogus bitrate/sample-rate readouts. */
+static int IsMpegSyncHeaderMr(const unsigned char *h)
+{
+	return h[0] == 0xff && (h[1] == 0xfb || h[1] == 0xfa ||
+		h[1] == 0xf3 || h[1] == 0xf2 || h[1] == 0xe3 || h[1] == 0xe2);
+}
+
 static void ReadMpegHeader(FILE *f, MrMp3Info *info, long *firstFrame)
 {
-	unsigned char h[4]; long pos = 0;
 	static const int br[16] = {0,32,40,48,56,64,80,96,112,128,160,192,224,256,320,0};
 	static const int sr[4] = {44100,48000,32000,0};
-	fseek(f, 0, SEEK_SET);
-	while (fread(h, 1, 4, f) == 4 && pos < 65536) {
-		if (h[0] == 0xff && (h[1] & 0xe0) == 0xe0) {
+	unsigned char h[4];
+	int b;
+	if (firstFrame) *firstFrame = -1;
+	if (!f || !info) return;
+	/* Scan forward from the current position (already advanced past any
+	 * ID3v2 tag by ReadId3v2) using a 4-byte sliding window. */
+	h[0] = h[1] = h[2] = h[3] = 0;
+	while ((b = fgetc(f)) != EOF) {
+		h[0] = h[1]; h[1] = h[2]; h[2] = h[3]; h[3] = (unsigned char)b;
+		if (IsMpegSyncHeaderMr(h)) {
+			long pos = ftell(f);
 			int bi = (h[2] >> 4) & 15, si = (h[2] >> 2) & 3;
-			info->bitrateKbps = br[bi]; info->sampleRate = sr[si];
-			info->channelMode = (h[3] >> 6) & 3; info->modeExtension = (h[3] >> 4) & 3; info->channels = info->channelMode == 3 ? 1 : 2;
-			*firstFrame = pos; return;
+			if (firstFrame && pos >= 4) *firstFrame = pos - 4;
+			info->bitrateKbps = br[bi];
+			info->sampleRate = sr[si];
+			info->channelMode = (h[3] >> 6) & 3;
+			info->modeExtension = (h[3] >> 4) & 3;
+			info->channels = info->channelMode == 3 ? 1 : 2;
+			return;
 		}
-		pos++; fseek(f, pos, SEEK_SET);
 	}
 }
 
@@ -1799,16 +1849,9 @@ static const char *MrChannelModeName(const MrMp3Info *info)
 	return "stereo";
 }
 
-static void AppendInfoPart(char *dst, size_t size, const char *part)
-{
-	if (!part || !part[0] || !dst || size == 0) return;
-	if (dst[0]) strncat(dst, ", ", size - strlen(dst) - 1);
-	strncat(dst, part, size - strlen(dst) - 1);
-}
-
 static void RefreshFileInfoAndTags(MrApp *app)
 {
-	MrMp3Info info; char fileInfo[128], part[32]; const char *ch; unsigned long kb;
+	MrMp3Info info; char fileInfo[128]; const char *ch; unsigned long kb;
 	if (!app->inputName[0]) {
 		if (app->fileInfoGad && app->win) SetGadgetAttrs((struct Gadget *)app->fileInfoGad, app->win, NULL, STRINGA_TextVal, (ULONG)"No file info", TAG_DONE);
 		return;
@@ -1817,13 +1860,14 @@ static void RefreshFileInfoAndTags(MrApp *app)
 	app->rating = info.rating; app->totalSecs = info.durationSecs; app->elapsedSecs = 0; app->lastFrames = 0;
 	ch = MrChannelModeName(&info);
 	kb = (info.fileSize + 1023UL) / 1024UL;
+	/* Same one-line summary the GadTools frontend shows; the track length is
+	 * presented separately in the Time field rather than crammed in here. */
 	fileInfo[0] = '\0';
-	if (info.bitrateKbps > 0) { sprintf(part, "%d kbps", info.bitrateKbps); AppendInfoPart(fileInfo, sizeof(fileInfo), part); }
-	if (info.channels > 0) AppendInfoPart(fileInfo, sizeof(fileInfo), ch);
-	if (info.sampleRate > 0) { sprintf(part, "%d Hz", info.sampleRate); AppendInfoPart(fileInfo, sizeof(fileInfo), part); }
-	if (info.durationSecs > 0) { char t[8]; FormatTime(info.durationSecs, t); AppendInfoPart(fileInfo, sizeof(fileInfo), t); }
-	if (info.fileSize > 0) { sprintf(part, "%lu KB", kb); AppendInfoPart(fileInfo, sizeof(fileInfo), part); }
-	if (!fileInfo[0]) SafeCopy(fileInfo, sizeof(fileInfo), "-");
+	if (info.bitrateKbps > 0 || info.sampleRate > 0 || info.fileSize > 0)
+		sprintf(fileInfo, "%d kbps, %s, %d Hz, %lu KB",
+			info.bitrateKbps, ch, info.sampleRate, kb);
+	else
+		SafeCopy(fileInfo, sizeof(fileInfo), "-");
 	if (app->titleGad && app->win) SetGadgetAttrs((struct Gadget *)app->titleGad, app->win, NULL, STRINGA_TextVal, (ULONG)(info.title[0] ? info.title : "-"), TAG_DONE);
 	if (app->artistGad && app->win) SetGadgetAttrs((struct Gadget *)app->artistGad, app->win, NULL, STRINGA_TextVal, (ULONG)(info.artist[0] ? info.artist : "-"), TAG_DONE);
 	if (app->albumGad && app->win) SetGadgetAttrs((struct Gadget *)app->albumGad, app->win, NULL, STRINGA_TextVal, (ULONG)(info.album[0] ? info.album : "-"), TAG_DONE);
@@ -2424,6 +2468,10 @@ int main(int argc, char **argv)
 				if (done)
 					break;
 			}
+			/* window.class repaints its gadgets on refresh/resize but it does
+			 * not know about our hand-drawn artwork, so re-stamp the thumbnail
+			 * after every batch of window input. */
+			DrawArtPanel(&app);
 		}
 	}
 
