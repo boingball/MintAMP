@@ -200,6 +200,7 @@ static const STRPTR kSpeedLabels[] = {
 	(STRPTR)"Normal",
 	(STRPTR)"Superfast low-rate",
 	(STRPTR)"Ultrafast",
+	(STRPTR)"22050 Mono Ultrafast",
 	NULL
 };
 
@@ -360,6 +361,7 @@ typedef struct MrApp {
 	int   fastLowrate;
 	int   superfastLowrate;
 	int   ultrafast;
+	int   cd32Ultrafast;
 	int   fakeStereo;
 	int   fakeStereoWidthIndex;
 	int   fakeStereoDelayIndex;
@@ -511,7 +513,12 @@ static void LoadSettings(MrApp *app)
 	app->fastLowrate = LoadEnvInt("FastLowrate", app->fastLowrate, 0, 1);
 	app->superfastLowrate = LoadEnvInt("SuperfastLowrate", app->superfastLowrate, 0, 1);
 	app->ultrafast = LoadEnvInt("Ultrafast", app->ultrafast, 0, 1);
-	if (app->ultrafast) {
+	app->cd32Ultrafast = LoadEnvInt("CD32Ultrafast", app->cd32Ultrafast, 0, 1);
+	if (app->cd32Ultrafast) {
+		app->ultrafast = 0;
+		app->fastLowrate = 1;
+		app->superfastLowrate = 1;
+	} else if (app->ultrafast) {
 		app->fastLowrate = 0;
 		app->superfastLowrate = 0;
 	}
@@ -522,6 +529,10 @@ static void LoadSettings(MrApp *app)
 	app->fakeStereoDelayIndex = LoadEnvInt("FakeStereoDelayIndex", app->fakeStereoDelayIndex, 0, 4);
 	app->hardwareFilter = LoadEnvInt("HardwareFilter", app->hardwareFilter, 0, 1);
 	app->rateIndex = LoadEnvInt("RateIndex", app->rateIndex, 0, MR_RATE_COUNT - 1);
+	if (app->cd32Ultrafast) {
+		app->mono = 1;
+		app->rateIndex = 3;
+	}
 	app->bufferSeconds = LoadEnvInt("BufferSeconds", app->bufferSeconds, 1, 10);
 	app->volumePercent = LoadEnvInt("Volume", app->volumePercent, 0, 100);
 	app->qualityIndex = LoadEnvInt("QualityIndex", app->qualityIndex, 0, 3);
@@ -539,6 +550,7 @@ static void SaveSettings(MrApp *app)
 	SaveEnvInt("FastLowrate", app->fastLowrate);
 	SaveEnvInt("SuperfastLowrate", app->superfastLowrate);
 	SaveEnvInt("Ultrafast", app->ultrafast);
+	SaveEnvInt("CD32Ultrafast", app->cd32Ultrafast);
 	SaveEnvInt("FastMem", app->fastMem);
 	SaveEnvInt("Mono", app->mono);
 	SaveEnvInt("FakeStereo", app->fakeStereo);
@@ -631,7 +643,13 @@ static void BuildPlaybackArgs(MrApp *app, MrPlayArgs *args)
 	AddArg(args, "--play");
 	if (app->fastMem)
 		AddArg(args, "--fast-mem");
-	if (app->superfastLowrate ||
+	if (app->cd32Ultrafast) {
+		AddArg(args, "--fast-lowrate");
+		AddArg(args, "--superfast-lowrate");
+		AddArg(args, "--exp-reduced-taps");
+		AddArg(args, "--subband-cap");
+		AddArg(args, "12");
+	} else if (app->superfastLowrate ||
 		(app->ultrafast && strcmp(kRates[app->rateIndex], "28600") != 0)) {
 		AddArg(args, "--fast-lowrate");
 		AddArg(args, "--superfast-lowrate");
@@ -1189,7 +1207,7 @@ static int MrOpenWindow(MrApp *app)
 	                GA_ID, GID_SPEED,
 	                GA_RelVerify, TRUE,
 	                CHOOSER_LabelArray, (ULONG)kSpeedLabels,
-	                CHOOSER_Selected, (ULONG)(app->ultrafast ? 2 : (app->superfastLowrate ? 1 : 0)),
+	                CHOOSER_Selected, (ULONG)(app->cd32Ultrafast ? 3 : (app->ultrafast ? 2 : (app->superfastLowrate ? 1 : 0))),
 	                TAG_DONE);
 
 	app->widthGad = (Object *)NewObject(CHOOSER_GetClass(), NULL,
@@ -2845,9 +2863,14 @@ static void SyncFromGadgets(MrApp *app)
 	if (app->fastLowGad && GetAttr(GA_Selected, app->fastLowGad, &v))
 		app->fastLowrate = (v != 0);
 	if (app->speedGad && GetAttr(CHOOSER_Selected, app->speedGad, &v)) {
+		app->cd32Ultrafast = ((int)v == 3);
 		app->ultrafast = ((int)v == 2);
-		app->superfastLowrate = ((int)v == 1);
-		if (app->ultrafast)
+		app->superfastLowrate = ((int)v == 1 || app->cd32Ultrafast);
+		if (app->cd32Ultrafast) {
+			app->fastLowrate = 1;
+			app->mono = 1;
+			app->rateIndex = 3;
+		} else if (app->ultrafast)
 			app->fastLowrate = 0;
 	}
 	if (app->widthGad && GetAttr(CHOOSER_Selected, app->widthGad, &v)) {
@@ -2883,6 +2906,7 @@ int main(int argc, char **argv)
 	app.fastMem = 0;
 	app.fastLowrate = 0;
 	app.ultrafast = 0;
+	app.cd32Ultrafast = 0;
 	app.volumePercent = 100;
 	app.bufferSeconds = 10;
 	app.fakeStereoDelayIndex = 0;
