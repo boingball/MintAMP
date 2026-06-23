@@ -103,24 +103,67 @@ The playback implementation does not call `CurrentDir()`, `Lock()`, `Forbid()`,
 directory lock or interrupt/task-switch nesting state.
 
 
-## Minimal GadTools GUI build
+## Pluggable decoder modules and FLAC playback
 
-A small Workbench 2.x/3.x GadTools frontend is available as `miniamp3`. It links
-the same decoder object files as the command-line tool, so the decoder does not
-have to be converted into a separate static library first:
+MiniAMP3 can now play non-MP3 formats through loadable Amiga hunk decoder
+modules.  The host scans the configured decoder-module directory for
+`*.decoder` files, calls the module ABI entry point, and matches the selected
+file extension against the module extension list.  MP3 remains built in; other
+formats use the same Paula streaming path once the module has produced signed
+16-bit PCM blocks.
+
+FLAC support is provided by `decoders/flac.decoder`, a standalone module built
+from `decoders/flac_entry.c`, `decoders/flac_module.c`, the allocator shim in
+`decoders/flac_alloc.c`, and the `libfoxenflac` submodule.  Initialise the FLAC
+submodule, then build the modules with either the top-level Amiga makefile or
+the decoder makefile directly:
 
 ```sh
-make -f Makefile.amiga gui
+git submodule update --init decoders/flac
+make -f Makefile.amiga decoder-modules
 # or
-make -f Makefile.amiga miniamp3
+make -C decoders flac
 ```
 
-`miniamp3` opens the MiniAMP3 window with an ASL file requester for choosing an
-MP3, checkboxes for the fast-lowrate, fast-mem, and mono playback flags, sample
-rate and quality cycle gadgets, a 1-30 second buffer slider, a read-only file
-path display, a status bar, and Play/Stop buttons. The GUI uses
-`gadtools.library` through the AmigaOS m68k pragmas, so no `-lauto` linker flag
-is needed.
+`make -f Makefile.amiga`, `fast030`, `gui`, and `guir` all depend on
+`decoder-modules`; if `decoders/flac/src/foxen-flac.h` is not present the module
+makefile skips FLAC and prints the submodule command instead of failing the main
+build.  The FLAC module is linked with `-nostartfiles`, keeps its allocation
+inside the module through an Exec `AllocMem`/`FreeMem` shim, and audits for
+forbidden libc/startup symbols before producing `flac.decoder`.
+
+At runtime, keep the decoder modules next to MiniAMP3 or in the discovered
+module directory.  Use `--debug-decoder` when diagnosing module discovery, ABI
+revision checks, extension matching, stream format probing, or generic decoder
+startup.  Current FLAC support targets subset FLAC streams up to 48 kHz stereo;
+the playback engine downmixes/resamples through the same mono, stereo,
+fast-lowrate, fake-stereo, volume, and buffer handling used for MP3 playback.
+
+## GUI builds
+
+Two native Amiga frontends are available.  `miniamp3` is the Workbench
+2.x/3.x GadTools frontend; `minimp3r` is the ReAction/ClassAct frontend for
+newer 3.x systems.  Both reuse the command-line decoder/playback core and both
+participate in the decoder-module build, so MP3 stays built in while FLAC and
+future formats are supplied by `*.decoder` modules.
+
+```sh
+make -f Makefile.amiga gui      # GadTools: miniamp3
+make -f Makefile.amiga guir     # ReAction/ClassAct: minimp3r
+# or the explicit target names
+make -f Makefile.amiga miniamp3
+make -f Makefile.amiga minimp3r
+```
+
+
+`miniamp3` opens the MiniAMP3 window with an ASL file requester whose pattern is
+expanded from built-in MP3 plus discovered decoder-module extensions such as
+FLAC.  The main window includes speed-mode, channel-mode, fake-stereo,
+fast-mem, sample-rate, quality, buffer, and volume controls; metadata/artwork
+fields; progress and time displays; transport buttons for Play, Next, Stop, the
+Paula hardware filter, and the playlist window; a status bar; and a file-info
+row.  The GUI uses `gadtools.library` through the AmigaOS m68k pragmas, so no
+`-lauto` linker flag is needed.
 
 The quality cycle maps directly to the same decoder quality levels used by
 `amiga_mp3dec`, and GUI playback always passes an explicit `--quality N` value:
@@ -151,6 +194,25 @@ mode-extension bit marks mid/side stereo. Artwork greyscale conversion uses a
 68030-friendly m68k inline path in fast builds that replaces the previous
 per-pixel divide with an 8-bit luma approximation.
 
+Speed mode is now a single cycle gadget:
+
+- **Normal**: no fast-lowrate flags.
+- **Fast**: adds `--fast-lowrate` for supported non-28600 Hz playback rates.
+- **Superfast**: adds `--fast-lowrate --superfast-lowrate`, capping sparse
+  low-rate synthesis work for 8287, 8820, 11025, or 22050 Hz output.
+- **Ultrafast**: uses Superfast for low-rate playback, or `--ultrafast` at
+  28600 Hz to cap IMDCT work to 26 subbands.
+- **22050 Mono Ultrafast**: a CD32/030-oriented preset that forces 22050 Hz
+  mono-style cost, enables `--fast-lowrate --superfast-lowrate`, adds reduced
+  taps, and applies `--subband-cap 12` for maximum throughput.
+
+The playlist window supports Add, Remove, Clear, and Play actions, ASL
+multi-select where available, `Next`/automatic end-of-track advance, and M3U
+Load/Save.  M3U loading accepts `#EXTM3U`/comment lines, keeps absolute Amiga
+volume paths as-is, resolves relative entries against the playlist drawer, and
+adds entries up to the internal playlist limit.  Saving writes `#EXTM3U` plus
+one path per playlist entry.
+
 A separate library can still be added later if multiple frontends need to share
 higher-level application code. For now, `amiga_mp3gui.c` includes the existing
 CLI frontend with its `main` renamed internally, keeping a single compiled GUI
@@ -162,6 +224,7 @@ source while reusing the public decoder and Paula playback implementation.
 amiga_mp3dec [options] infile.mp3 outfile
 amiga_mp3dec --info infile.mp3
 amiga_mp3dec --play [--stereo|--fake-stereo] [--rate 8287|8820|11025|22050|28600] [--quality 0|1|2|3] [--buffer-seconds N] [--volume N] [--fast-mem] infile.mp3
+amiga_mp3dec --play [playback options] infile.flac
 amiga_mp3dec --selftest-play-cleanup [--debug-cleanup] [--buffer-seconds N]
 ```
 
@@ -188,6 +251,13 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   `--info infile.mp3`, it exits after inspection without decoding. It can also
   be combined with `--play` (or a normal decode command) to print the metadata
   before playback or decoding begins.
+- Non-MP3 playback is handled by generic decoder modules.  If the input
+  extension is not `.mp3`, `--play` opens the file through a matching
+  `*.decoder` module, currently including `.flac`/`.fla` when
+  `decoders/flac.decoder` is installed.  The module reports sample rate,
+  channel count, bit depth, and total samples, then feeds the common Paula
+  playback pipeline.  Use `--debug-decoder` for module-directory scanning,
+  LoadSeg, ABI, extension-list, and stream-format diagnostics.
 - `--play` is an experimental AmigaOS Paula streaming mode for CD32/TF330-style
   68030 testing. It opens `audio.device`, decodes to mono signed 8-bit PCM into
   Fast RAM work buffers, and bulk-copies each completed half-buffer into the
@@ -340,6 +410,16 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   `--bench` reports the huffman, dequant, stereo/post, imdct, subband/dct32,
   and polyphase buckets used to profile that path, plus stereo stride-2 and
   stride-4 polyphase ASM/C call counters when decode-core profiling is enabled.
+- `--superfast-lowrate` is the sparse low-rate mode used by the GUI Superfast
+  speed setting.  It implies fast-lowrate, defaults to 11025 Hz if no rate is
+  supplied, and supports 8287, 8820, 11025, and 22050 Hz output.  It caps active
+  subbands to the output bandwidth so skipped high-frequency IMDCT/overlap work
+  is not generated merely to be discarded by the low-rate selector.
+- `--ultrafast` is a full-rate/high-rate speed option that applies
+  `--subband-cap 26`, capping IMDCT work to roughly the first 18 kHz of a
+  44.1 kHz source.  The GUI's 22050 Mono Ultrafast preset goes further by
+  combining 22050 Hz Superfast mono-style playback with reduced taps and
+  `--subband-cap 12` for the lowest CPU cost.
 - `--debug-fastlowrate` prints one line per decoded frame/granule with the
   full-rate sample count, low-rate samples emitted, cumulative low-rate samples,
   and destination offset range used for contiguous placement.
