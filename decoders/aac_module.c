@@ -318,12 +318,16 @@ static DecHandle AacOpen(DecoderReadCb readFn, DecoderSeekCb seekFn,
         st->lastDecodeErr = err;
         st->lastBytesAfter = (unsigned long)(st->iobufLeft < 0 ? 0 : st->iobufLeft);
         st->lastInputAfter = (unsigned long)(st->iobufReadPtr - st->iobuf);
-        if (err != 0 || (st->iobufReadPtr == oldInputPtr && st->iobufLeft == oldBytesLeft)) {
+        if (err != 0) {
             AacFreeState(st); return NULL;
         }
     }
 
     AACGetLastFrameInfo(st->aacHandle, &fi);
+    if (st->iobufReadPtr == st->iobuf + st->lastInputBefore &&
+        st->iobufLeft == (int)st->lastBytesBefore && fi.outputSamps <= 0) {
+        AacFreeState(st); return NULL;
+    }
     if (fi.nChans <= 0 || fi.sampRateOut <= 0 ||
         fi.nChans > 2  || fi.outputSamps <= 0 ||
         (unsigned long)fi.outputSamps > AAC_OUT_CAP) {

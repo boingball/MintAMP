@@ -342,6 +342,7 @@ typedef struct DecodeOptions {
 	int debugTone;
 	int debugCleanup;
 	int debugDecoder;
+	int testAac;
 	int play;
 	int stereo;
 	int fakeStereo;
@@ -755,6 +756,7 @@ static void PrintUsage(const char *prog)
 	printf("  --debug-tone submit a generated signed-8 Paula test tone through --play audio path\n");
 	printf("  --debug-cleanup print playback resource cleanup diagnostics\n");
 	printf("  --debug-decoder print generic decoder module/rate diagnostics\n");
+	printf("  --test-aac FILE smoke-test ADTS AAC module loading and one-frame decode\n");
 	printf("  --debug-argv print argc/argv after Amiga argument normalization\n");
 	printf("  --show-argv  alias for --debug-argv\n");
 	printf("\n");
@@ -1054,6 +1056,9 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 		} else if (!strcmp(argv[i], "--debug-cleanup")) {
 			opt->debugCleanup = 1;
 		} else if (!strcmp(argv[i], "--debug-decoder")) {
+			opt->debugDecoder = 1;
+		} else if (!strcmp(argv[i], "--test-aac")) {
+			opt->testAac = 1;
 			opt->debugDecoder = 1;
 		} else if (!strcmp(argv[i], "--debug-argv") ||
 			!strcmp(argv[i], "--show-argv")) {
@@ -7304,7 +7309,13 @@ static int GenericDecodeStreamFillS8(GenericDecodeStream *gs,
 		if (opt->debugDecoder && !gs->firstDecodeDebugPrinted)
 			fprintf(stderr, "generic-debug: first decode call entered maxSamplesPerChan=%lu\n",
 				(unsigned long)GENERIC_DECODE_CHUNK);
+		if (opt->debugDecoder && !gs->firstDecodeDebugPrinted && gs->ops && gs->ops->info &&
+			gs->ops->info->extensions && StrCaseCmp(gs->ops->info->extensions, "aac") == 0)
+			fprintf(stderr, "AAC: before first decode\n");
 		nDecoded = gs->ops->decode(gs->handle, gs->decodeBuf, GENERIC_DECODE_CHUNK);
+		if (opt->debugDecoder && !gs->firstDecodeDebugPrinted && gs->ops && gs->ops->info &&
+			gs->ops->info->extensions && StrCaseCmp(gs->ops->info->extensions, "aac") == 0)
+			fprintf(stderr, "AAC: after first decode rc=%ld\n", (long)nDecoded);
 		if (opt->debugDecoder && !gs->firstDecodeDebugPrinted) {
 			fprintf(stderr, "generic-debug: first decode call result rc=%ld pcmSamplesProduced=%ld sampleRate=%ld channels=%ld\n",
 				(long)nDecoded, (long)(nDecoded > 0 ? nDecoded : 0),
@@ -7469,7 +7480,13 @@ static int GenericDecodeStreamFillPlanarS8(GenericDecodeStream *gs,
 		if (opt->debugDecoder && !gs->firstDecodeDebugPrinted)
 			fprintf(stderr, "generic-debug: first decode call entered maxSamplesPerChan=%lu\n",
 				(unsigned long)GENERIC_DECODE_CHUNK);
+		if (opt->debugDecoder && !gs->firstDecodeDebugPrinted && gs->ops && gs->ops->info &&
+			gs->ops->info->extensions && StrCaseCmp(gs->ops->info->extensions, "aac") == 0)
+			fprintf(stderr, "AAC: before first decode\n");
 		nDecoded = gs->ops->decode(gs->handle, gs->decodeBuf, GENERIC_DECODE_CHUNK);
+		if (opt->debugDecoder && !gs->firstDecodeDebugPrinted && gs->ops && gs->ops->info &&
+			gs->ops->info->extensions && StrCaseCmp(gs->ops->info->extensions, "aac") == 0)
+			fprintf(stderr, "AAC: after first decode rc=%ld\n", (long)nDecoded);
 		if (opt->debugDecoder && !gs->firstDecodeDebugPrinted) {
 			fprintf(stderr, "generic-debug: first decode call result rc=%ld pcmSamplesProduced=%ld sampleRate=%ld channels=%ld\n",
 				(long)nDecoded, (long)(nDecoded > 0 ? nDecoded : 0),
@@ -7662,6 +7679,47 @@ typedef struct LoadedDecoderModule {
 	char                     path[600];
 } LoadedDecoderModule;
 
+static int ValidateDecoderModuleOps(const struct DecoderOps *ops,
+	const char *path, int debugDecoder)
+{
+	if (!ops) {
+		fprintf(stderr, "decoder module validation failed: %s returned null ops\n",
+			path ? path : "(unknown)");
+		return 0;
+	}
+	if (!ops->info) {
+		fprintf(stderr, "decoder module validation failed: %s has null info\n",
+			path ? path : "(unknown)");
+		return 0;
+	}
+	if (ops->info->magic != DECODER_MODULE_MAGIC ||
+		ops->info->version > DECODER_MODULE_VERSION) {
+		fprintf(stderr, "decoder module validation failed: %s ABI mismatch (magic=%08lx version=%lu expectedMagic=%08lx maxVersion=%lu)\n",
+			path ? path : "(unknown)", (unsigned long)ops->info->magic,
+			(unsigned long)ops->info->version,
+			(unsigned long)DECODER_MODULE_MAGIC,
+			(unsigned long)DECODER_MODULE_VERSION);
+		return 0;
+	}
+	if (!ops->open || !ops->decode || !ops->close) {
+		fprintf(stderr, "decoder module validation failed: %s missing required callbacks (open=%p decode=%p close=%p)\n",
+			path ? path : "(unknown)", (void *)ops->open,
+			(void *)ops->decode, (void *)ops->close);
+		return 0;
+	}
+	if (!ops->info->name || !ops->info->extensions || !ops->info->extensions[0]) {
+		fprintf(stderr, "decoder module validation failed: %s missing name/extensions\n",
+			path ? path : "(unknown)");
+		return 0;
+	}
+	if (debugDecoder)
+		fprintf(stderr, "decoder module validation: %s ops OK (name=%s abi=%u revision=%u)\n",
+			path ? path : "(unknown)", ops->info->name,
+			(unsigned int)ops->info->version,
+			(unsigned int)ops->info->revision);
+	return 1;
+}
+
 /* Scan gDecoderModulesPath for a module whose extension list matches ext.
  * Returns non-zero and fills *out on success; caller must call
  * UnloadDecoderModule() when done. */
@@ -7731,9 +7789,13 @@ static int LoadDecoderModuleForExt(const char *ext,
 			memcpy(path + dlen, fname, (size_t)(flen + 1));
 		}
 
-		seg = LoadSeg((STRPTR)path);
 		if (debugDecoder)
 			fprintf(stderr, "decoder module discovery: trying %s\n", path);
+		if (debugDecoder && ext && StrCaseCmp(ext, "aac") == 0)
+			fprintf(stderr, "AAC: before LoadSeg\n");
+		seg = LoadSeg((STRPTR)path);
+		if (debugDecoder && ext && StrCaseCmp(ext, "aac") == 0)
+			fprintf(stderr, "AAC: after LoadSeg segment=%p\n", (void *)seg);
 		if (!seg) {
 			if (debugDecoder)
 				fprintf(stderr, "decoder module discovery: LoadSeg failed for %s (IoErr=%ld)\n",
@@ -7742,27 +7804,28 @@ static int LoadDecoderModuleForExt(const char *ext,
 		}
 
 		entry = (DecoderModuleEntryFn)((unsigned char *)BADDR(seg) + 4);
+		if (!entry) {
+			fprintf(stderr, "decoder module discovery: %s has null entry pointer\n", path);
+			UnLoadSeg(seg);
+			continue;
+		}
 		if (debugDecoder)
 			fprintf(stderr, "decoder module discovery: entry pointer=%p\n", (void *)entry);
+		if (debugDecoder && ext && StrCaseCmp(ext, "aac") == 0)
+			fprintf(stderr, "AAC: before entry\n");
 		ops   = entry();
+		if (debugDecoder && ext && StrCaseCmp(ext, "aac") == 0)
+			fprintf(stderr, "AAC: after entry ops=%p\n", (void *)ops);
 		if (debugDecoder)
 			fprintf(stderr, "decoder module discovery: ops pointer=%p\n", (void *)ops);
-		if (!ops || !ops->info) {
-			if (debugDecoder)
-				fprintf(stderr, "decoder module discovery: %s has no DecoderOps/info\n",
-				path);
+		if (debugDecoder && ext && StrCaseCmp(ext, "aac") == 0)
+			fprintf(stderr, "AAC: before ops validation\n");
+		if (!ValidateDecoderModuleOps(ops, path, debugDecoder)) {
 			UnLoadSeg(seg);
 			continue;
 		}
-		if (ops->info->magic != DECODER_MODULE_MAGIC ||
-			ops->info->version > DECODER_MODULE_VERSION) {
-			if (debugDecoder)
-				fprintf(stderr, "decoder module discovery: %s ABI mismatch (magic=%08lx version=%lu)\n",
-				path, (unsigned long)ops->info->magic,
-				(unsigned long)ops->info->version);
-			UnLoadSeg(seg);
-			continue;
-		}
+		if (debugDecoder && ext && StrCaseCmp(ext, "aac") == 0)
+			fprintf(stderr, "AAC: after ops validation\n");
 
 		if (debugDecoder)
 			fprintf(stderr, "decoder module discovery: loaded %s name=\"%s\" abi=%u revision=%u flags=%lu\n",
@@ -8249,6 +8312,8 @@ static int AmigaGenericFormatPlay(const char *filename, const char *ext,
 	if (opt->debugDecoder)
 		fprintf(stderr, "generic-debug: selected file extension=.%s decoder type=%s\n",
 			ext ? ext : "(null)", (ext && StrCaseCmp(ext, "mp3") == 0) ? "internal-mp3" : "external-module");
+	if (opt->debugDecoder && ext && StrCaseCmp(ext, "aac") == 0)
+		fprintf(stderr, "AAC: selected\n");
 	if (ext && StrCaseCmp(ext, "aac") == 0 && !ValidateAacAdtsInput(&input, opt->debugDecoder)) {
 		gGuiPlaybackStatus.phase = GUIPLAY_PHASE_ERROR;
 		gGuiPlaybackStatus.startupStage = GUISTART_FAILED;
@@ -8273,7 +8338,11 @@ static int AmigaGenericFormatPlay(const char *filename, const char *ext,
 	GuiPublishStartupStage(GUISTART_INPUT_PREPARE);
 	if (opt->debugDecoder)
 		fprintf(stderr, "generic-debug: AAC/open init entering inputPos=%lu\n", InputSourceTell(&input));
+	if (opt->debugDecoder && ext && StrCaseCmp(ext, "aac") == 0)
+		fprintf(stderr, "AAC: before open\n");
 	handle = mod.ops->open(DecModReadCb, DecModSeekCb, &input, &sinfo);
+	if (opt->debugDecoder && ext && StrCaseCmp(ext, "aac") == 0)
+		fprintf(stderr, "AAC: after open handle=%p\n", (void *)handle);
 	if (opt->debugDecoder)
 		fprintf(stderr, "generic-debug: AAC/open init result handle=%p sampleRate=%lu channels=%u bits=%u\n",
 			(void *)handle, sinfo.sampleRate, sinfo.channels, sinfo.bitsPerSample);
@@ -8305,6 +8374,92 @@ done_module:
 done_input:
 	InputSourceClose(&input);
 	return ret ? 1 : 0;
+}
+
+static int AmigaAacSmokeTest(const char *filename, const DecodeOptions *opt)
+{
+	BPTR amigaFile = (BPTR)0;
+	InputSource input;
+	LoadedDecoderModule mod;
+	struct DecoderStreamInfo sinfo;
+	DecHandle handle = NULL;
+	short *pcm = NULL;
+	DecLong nDecoded;
+	int ret = 1;
+
+	(void)opt;
+	memset(&mod, 0, sizeof(mod));
+	memset(&sinfo, 0, sizeof(sinfo));
+	if (!filename || !GetFileExtension(filename) ||
+		StrCaseCmp(GetFileExtension(filename), "aac") != 0) {
+		fprintf(stderr, "AAC test: input must have .aac extension\n");
+		return 1;
+	}
+	printf("AAC test: open file\n");
+	amigaFile = Open((STRPTR)filename, MODE_OLDFILE);
+	if (!amigaFile) {
+		fprintf(stderr, "AAC test: cannot open input: %s\n", filename);
+		return 1;
+	}
+	InputSourceInitAmigaDos(&input, amigaFile);
+	amigaFile = (BPTR)0;
+
+	printf("AAC test: first bytes\n");
+	if (!ValidateAacAdtsInput(&input, 1))
+		goto done_input;
+
+	printf("AAC test: load module\n");
+	printf("AAC: selected\n");
+	if (!LoadDecoderModuleForExt("aac", &mod, 1)) {
+		fprintf(stderr, "AAC test: no aac.decoder module found\n");
+		goto done_input;
+	}
+
+	printf("AAC test: module entry\n");
+	printf("AAC test: validate ops\n");
+	if (!ValidateDecoderModuleOps(mod.ops, mod.path, 1))
+		goto done_module;
+
+	printf("AAC test: open/init\n");
+	printf("AAC: before open\n");
+	handle = mod.ops->open(DecModReadCb, DecModSeekCb, &input, &sinfo);
+	printf("AAC: after open handle=%p\n", (void *)handle);
+	if (!handle) {
+		fprintf(stderr, "AAC test: decoder open/init failed\n");
+		goto done_module;
+	}
+	printf("AAC test: stream %lu Hz %u ch %u-bit\n",
+		sinfo.sampleRate, sinfo.channels, sinfo.bitsPerSample);
+
+	printf("AAC test: decode one frame\n");
+	pcm = (short *)AllocMem(4096UL * sizeof(short), MEMF_FAST);
+	if (!pcm)
+		pcm = (short *)AllocMem(4096UL * sizeof(short), MEMF_PUBLIC);
+	if (!pcm) {
+		fprintf(stderr, "AAC test: cannot allocate PCM smoke-test buffer\n");
+		goto done_handle;
+	}
+	printf("AAC: before first decode\n");
+	nDecoded = mod.ops->decode(handle, pcm, 2048UL);
+	printf("AAC: after first decode rc=%ld\n", (long)nDecoded);
+	if (nDecoded <= 0) {
+		fprintf(stderr, "AAC test: decode one frame failed rc=%ld\n", (long)nDecoded);
+		goto done_handle;
+	}
+	printf("AAC test: decoded %ld samples/channel\n", (long)nDecoded);
+	ret = 0;
+
+done_handle:
+	if (pcm)
+		FreeMem(pcm, 4096UL * sizeof(short));
+	printf("AAC test: close\n");
+	mod.ops->close(handle);
+done_module:
+	UnloadDecoderModule(&mod);
+done_input:
+	InputSourceClose(&input);
+	printf("AAC test: done\n");
+	return ret;
 }
 
 #endif /* HAVE_AMIGA_AUDIO_DEVICE */
@@ -8939,6 +9094,27 @@ int main(int argc, char **argv)
 		AmigaFreeNormalizedArgs(&normalized);
 		return selftestErr == 0 ? 0 : 1;
 	}
+#ifdef HAVE_AMIGA_AUDIO_DEVICE
+	if (opt.testAac) {
+		int aacTestErr;
+		if (!opt.inName) {
+			fprintf(stderr, "--test-aac requires an input .aac file\n");
+			AmigaFreeNormalizedArgs(&normalized);
+			return 1;
+		}
+		aacTestErr = AmigaAacSmokeTest(opt.inName, &opt);
+		AmigaFreeNormalizedArgs(&normalized);
+		return aacTestErr == 0 ? 0 : 1;
+	}
+#else
+	if (opt.testAac) {
+		if (!opt.inName)
+			fprintf(stderr, "--test-aac requires an input .aac file\n");
+		fprintf(stderr, "--test-aac requires an AmigaOS LoadSeg decoder-module build\n");
+		AmigaFreeNormalizedArgs(&normalized);
+		return 1;
+	}
+#endif
 	if (opt.audioOpenSilentTest) {
 		int audioTestErr = AmigaAudioOpenSilentSelftest(&opt);
 		AmigaFreeNormalizedArgs(&normalized);
