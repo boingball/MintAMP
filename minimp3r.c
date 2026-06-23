@@ -326,6 +326,16 @@ typedef struct MrApp {
 	Object         *starGad[5];
 	Object         *gaugeGad;
 	Object         *statusGad;
+	Object         *artGad;
+
+	struct Window  *plWin;
+	struct Gadget  *plGadgets;
+	struct Gadget  *plGadContext;
+	struct Gadget  *plGadList;
+	struct List     plList;
+	struct Node     plNodes[MR_PLAYLIST_MAX];
+	char            plNames[MR_PLAYLIST_MAX][80];
+	APTR            plVisualInfo;
 
 	struct MsgPort   *timerPort;
 	struct timerequest *timerReq;
@@ -373,6 +383,9 @@ static void RefreshFileInfoAndTags(MrApp *app);
 static void ApplyHardwareAudioFilter(MrApp *app);
 static void UpdateChannelGadgetState(MrApp *app);
 static void SaveSettings(MrApp *app);
+static void RefreshPlaylistView(MrApp *app);
+static void ClosePlaylistWindow(MrApp *app);
+static void OpenPlaylistWindow(MrApp *app);
 
 static void SyncMenuChecks(MrApp *app);
 
@@ -1161,7 +1174,7 @@ static int MrOpenWindow(MrApp *app)
 	app->filterGad = (Object *)NewObject(BUTTON_GetClass(), NULL,
 	                GA_ID, GID_FILTER, GA_RelVerify, TRUE, GA_Text, (ULONG)"FLT", TAG_DONE);
 	app->playlistGad = (Object *)NewObject(BUTTON_GetClass(), NULL,
-	                GA_ID, GID_PLAYLIST, GA_RelVerify, TRUE, GA_Text, (ULONG)"M3U", TAG_DONE);
+	                GA_ID, GID_PLAYLIST, GA_RelVerify, TRUE, GA_Text, (ULONG)"Playlist", TAG_DONE);
 
 	app->gaugeGad = (Object *)NewObject(FUELGAUGE_GetClass(), NULL,
 	                FUELGAUGE_Min, 0,
@@ -1185,6 +1198,11 @@ static int MrOpenWindow(MrApp *app)
 	app->trackGad = ReadonlyString(GID_TRACK, "-", 16);
 	app->genreGad = ReadonlyString(GID_GENRE, "-", 32);
 	app->ratingGad = ReadonlyString(GID_RATING, "0/5", 16);
+	/* ReAction artwork is intentionally visible as a fixed placeholder for now.
+	 * TODO: reuse the GadTools picojpg artwork cache/decode path and draw it
+	 * into this right-hand metadata panel when the ReAction rastport geometry is
+	 * stable enough to share safely. */
+	app->artGad = ReadonlyString(GID_LAST, "No art", 12);
 	{ int i; for (i = 0; i < 5; i++) app->starGad[i] = (Object *)NewObject(BUTTON_GetClass(), NULL, GA_ID, GID_STAR1 + i, GA_RelVerify, TRUE, GA_Text, (ULONG)"-", TAG_DONE); }
 
 	if (!CheckGadget(app->fileGad, "file") || !CheckGadget(app->rateGad, "rate") ||
@@ -1202,7 +1220,7 @@ static int MrOpenWindow(MrApp *app)
 		!CheckGadget(app->genreGad, "genre") || !CheckGadget(app->ratingGad, "rating") ||
 		!CheckGadget(app->starGad[0], "star1") || !CheckGadget(app->starGad[1], "star2") ||
 		!CheckGadget(app->starGad[2], "star3") || !CheckGadget(app->starGad[3], "star4") ||
-		!CheckGadget(app->starGad[4], "star5"))
+		!CheckGadget(app->starGad[4], "star5") || !CheckGadget(app->artGad, "artwork placeholder"))
 		return 0;
 
 	root = (Object *)NewObject(LAYOUT_GetClass(), NULL,
@@ -1210,7 +1228,11 @@ static int MrOpenWindow(MrApp *app)
 		LAYOUT_SpaceOuter, TRUE,
 		LAYOUT_DeferLayout, TRUE,
 
-		ADD_LABELLED(app->fileGad, "Audio file"),
+		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
+			LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
+			ADD_LABELLED(app->fileGad, "Audio file"),
+			ADD_LABELLED(app->artGad, "Artwork"),
+                  TAG_DONE),
 		CHILD_WeightedHeight, 0,
 
 		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
@@ -1307,8 +1329,8 @@ static int MrOpenWindow(MrApp *app)
 		WA_SizeGadget, TRUE,
 		WA_IDCMP, IDCMP_GADGETUP | IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
 			IDCMP_IDCMPUPDATE | IDCMP_MENUPICK,
-		WA_Width, 460,
-		WA_Height, 300,
+		WA_Width, 480,
+		WA_Height, 330,
 		WINDOW_Position, WPOS_CENTERSCREEN,
 		WINDOW_ParentGroup, (ULONG)root,
                 TAG_DONE);
@@ -1335,6 +1357,7 @@ static int MrOpenWindow(MrApp *app)
 
 static void MrCloseWindow(MrApp *app)
 {
+	ClosePlaylistWindow(app);
 	if (app->win && app->menuStrip) {
 		ClearMenuStrip(app->win);
 	}
@@ -1467,14 +1490,29 @@ static void UpdateRatingDisplay(MrApp *app)
 	for (i = 0; i < 5; i++) if (app->starGad[i] && app->win) SetGadgetAttrs((struct Gadget *)app->starGad[i], app->win, NULL, GA_Text, (ULONG)(i < app->rating ? "*" : "-"), TAG_DONE);
 }
 
+static const char *MrChannelModeName(const MrMp3Info *info)
+{
+	if (!info || info->channels <= 0) return "-";
+	if (info->channels == 1) return "mono";
+	if (info->channelMode == 1) return "joint-stereo";
+	return "stereo";
+}
+
 static void RefreshFileInfoAndTags(MrApp *app)
 {
-	MrMp3Info info; char fileInfo[128]; const char *ch;
-	if (!app->inputName[0]) return;
+	MrMp3Info info; char fileInfo[128]; const char *ch; unsigned long kb;
+	if (!app->inputName[0]) {
+		if (app->fileInfoGad && app->win) SetGadgetAttrs((struct Gadget *)app->fileInfoGad, app->win, NULL, STRINGA_TextVal, (ULONG)"No file info", TAG_DONE);
+		return;
+	}
 	ReadMp3Info(app->inputName, &info);
 	app->rating = info.rating; app->totalSecs = info.durationSecs; app->elapsedSecs = 0; app->lastFrames = 0;
-	ch = info.channels == 1 ? "mono" : (info.channels == 2 ? "stereo" : "-");
-	sprintf(fileInfo, "%d kbps, %d Hz, %s, %02d:%02d, %lu KB", info.bitrateKbps, info.sampleRate, ch, info.durationSecs / 60, info.durationSecs % 60, (info.fileSize + 1023UL) / 1024UL);
+	ch = MrChannelModeName(&info);
+	kb = (info.fileSize + 1023UL) / 1024UL;
+	if (info.bitrateKbps > 0 || info.sampleRate > 0 || info.fileSize > 0)
+		sprintf(fileInfo, "%d kbps, %s, %d Hz, %lu KB", info.bitrateKbps, ch, info.sampleRate, kb);
+	else
+		SafeCopy(fileInfo, sizeof(fileInfo), "-");
 	if (app->titleGad && app->win) SetGadgetAttrs((struct Gadget *)app->titleGad, app->win, NULL, STRINGA_TextVal, (ULONG)(info.title[0] ? info.title : "-"), TAG_DONE);
 	if (app->artistGad && app->win) SetGadgetAttrs((struct Gadget *)app->artistGad, app->win, NULL, STRINGA_TextVal, (ULONG)(info.artist[0] ? info.artist : "-"), TAG_DONE);
 	if (app->albumGad && app->win) SetGadgetAttrs((struct Gadget *)app->albumGad, app->win, NULL, STRINGA_TextVal, (ULONG)(info.album[0] ? info.album : "-"), TAG_DONE);
@@ -1570,6 +1608,7 @@ static void PlaylistNext(MrApp *app)
 	app->playlistCurrent++;
 	SafeCopy(app->inputName, sizeof(app->inputName), app->playlist[app->playlistCurrent]);
 	UpdateFileGadget(app);
+	RefreshFileInfoAndTags(app);
 	if (wasPlaying) {
 		app->playlistNextPending = 1;
 		StopPlayback(app);
@@ -1619,10 +1658,126 @@ static void LoadPlaylistPath(MrApp *app, const char *m3uPath, const char *drawer
 		SafeCopy(app->inputName, sizeof(app->inputName), app->playlist[0]);
 		UpdateFileGadget(app);
 		RefreshFileInfoAndTags(app);
+		RefreshPlaylistView(app);
 		SetStatus(app, "Playlist loaded (No art).");
 	} else {
+		RefreshPlaylistView(app);
 		SetStatus(app, "Playlist had no playable entries.");
 	}
+}
+
+enum {
+	PL_GID_LIST = 200,
+	PL_GID_LOAD_M3U,
+	PL_GID_PLAY,
+	PL_GID_CLOSE
+};
+
+static const char *PlaylistBaseName(const char *path)
+{
+	const char *p = path;
+	const char *last = path;
+	while (*p) {
+		if (*p == '/' || *p == ':')
+			last = p + 1;
+		p++;
+	}
+	return last;
+}
+
+static void RefreshPlaylistView(MrApp *app)
+{
+	int i;
+	NewList(&app->plList);
+	for (i = 0; i < app->playlistCount; i++) {
+		SafeCopy(app->plNames[i], sizeof(app->plNames[i]), PlaylistBaseName(app->playlist[i]));
+		app->plNodes[i].ln_Name = app->plNames[i];
+		app->plNodes[i].ln_Type = NT_USER;
+		app->plNodes[i].ln_Pri = 0;
+		AddTail(&app->plList, &app->plNodes[i]);
+	}
+	if (app->plWin && app->plGadList)
+		GT_SetGadgetAttrs(app->plGadList, app->plWin, NULL,
+			GTLV_Labels, (ULONG)&app->plList,
+			GTLV_Selected, app->playlistCurrent >= 0 ? (ULONG)app->playlistCurrent : (ULONG)~0,
+			TAG_DONE);
+}
+
+static void ClosePlaylistWindow(MrApp *app)
+{
+	struct IntuiMessage *msg;
+	if (!app->plWin)
+		return;
+	ModifyIDCMP(app->plWin, 0);
+	while ((msg = GT_GetIMsg(app->plWin->UserPort)) != NULL)
+		GT_ReplyIMsg(msg);
+	if (app->plGadgets)
+		RemoveGList(app->plWin, app->plGadgets, -1);
+	CloseWindow(app->plWin);
+	app->plWin = NULL;
+	if (app->plGadgets) {
+		FreeGadgets(app->plGadgets);
+		app->plGadgets = NULL;
+		app->plGadContext = NULL;
+		app->plGadList = NULL;
+	}
+	if (app->plVisualInfo) {
+		FreeVisualInfo(app->plVisualInfo);
+		app->plVisualInfo = NULL;
+	}
+}
+
+static void OpenPlaylistWindow(MrApp *app)
+{
+	struct NewWindow nw;
+	struct NewGadget ng;
+	struct Gadget *gad;
+	if (app->plWin || !app->win || !GadToolsBase)
+		return;
+	app->plVisualInfo = GetVisualInfoA(app->win->WScreen, NULL);
+	if (!app->plVisualInfo)
+		return;
+	app->plGadContext = CreateContext(&app->plGadgets);
+	if (!app->plGadContext) {
+		FreeVisualInfo(app->plVisualInfo);
+		app->plVisualInfo = NULL;
+		return;
+	}
+	gad = app->plGadContext;
+	RefreshPlaylistView(app);
+	memset(&ng, 0, sizeof(ng));
+	ng.ng_LeftEdge = 8; ng.ng_TopEdge = 20; ng.ng_Width = 344; ng.ng_Height = 120;
+	ng.ng_GadgetID = PL_GID_LIST; ng.ng_Flags = 0; ng.ng_VisualInfo = app->plVisualInfo;
+	app->plGadList = gad = CreateGadget(LISTVIEW_KIND, gad, &ng,
+		GTLV_Labels, (ULONG)&app->plList,
+		GTLV_Selected, app->playlistCurrent >= 0 ? (ULONG)app->playlistCurrent : (ULONG)~0,
+		GA_RelVerify, TRUE, TAG_DONE);
+	if (!gad) goto fail;
+	ng.ng_TopEdge = 148; ng.ng_Width = 112; ng.ng_Height = 18; ng.ng_Flags = PLACETEXT_IN;
+	ng.ng_LeftEdge = 8; ng.ng_GadgetText = (UBYTE *)"Load M3U"; ng.ng_GadgetID = PL_GID_LOAD_M3U;
+	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 128; ng.ng_GadgetText = (UBYTE *)"Play"; ng.ng_GadgetID = PL_GID_PLAY;
+	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 248; ng.ng_GadgetText = (UBYTE *)"Close"; ng.ng_GadgetID = PL_GID_CLOSE;
+	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
+	memset(&nw, 0, sizeof(nw));
+	nw.LeftEdge = app->win->LeftEdge + 20; nw.TopEdge = app->win->TopEdge + 20;
+	nw.Width = 368; nw.Height = 176;
+	nw.IDCMPFlags = IDCMP_GADGETUP | IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW;
+	nw.Flags = WFLG_CLOSEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET | WFLG_SMART_REFRESH;
+	nw.Title = (UBYTE *)"MiniAMP3 Playlist";
+	nw.MinWidth = nw.MaxWidth = 368; nw.MinHeight = nw.MaxHeight = 176;
+	nw.Type = WBENCHSCREEN;
+	app->plWin = OpenWindowTags(&nw, TAG_DONE);
+	if (!app->plWin) goto fail;
+	AddGList(app->plWin, app->plGadgets, (UWORD)-1, -1, NULL);
+	RefreshGList(app->plGadgets, app->plWin, NULL, -1);
+	GT_RefreshWindow(app->plWin, NULL);
+	RefreshPlaylistView(app);
+	return;
+fail:
+	if (app->plGadgets) { FreeGadgets(app->plGadgets); app->plGadgets = NULL; app->plGadContext = NULL; app->plGadList = NULL; }
+	if (app->plVisualInfo) { FreeVisualInfo(app->plVisualInfo); app->plVisualInfo = NULL; }
 }
 
 static void BrowseForPlaylist(MrApp *app)
@@ -1650,6 +1805,50 @@ static void BrowseForPlaylist(MrApp *app)
 		}
 	}
 	FreeAslRequest(fr);
+}
+
+static void PlaylistLoadCurrent(MrApp *app, int index, int startPlayback)
+{
+	if (index < 0 || index >= app->playlistCount)
+		return;
+	app->playlistCurrent = index;
+	SafeCopy(app->inputName, sizeof(app->inputName), app->playlist[index]);
+	UpdateFileGadget(app);
+	RefreshFileInfoAndTags(app);
+	RefreshPlaylistView(app);
+	SetStatus(app, "Playlist item selected.");
+	if (startPlayback)
+		StartPlayback(app);
+}
+
+static void HandlePlaylistWindow(MrApp *app)
+{
+	struct IntuiMessage *msg;
+	if (!app->plWin)
+		return;
+	while ((msg = GT_GetIMsg(app->plWin->UserPort)) != NULL) {
+		ULONG cls = msg->Class;
+		struct Gadget *gad = (struct Gadget *)msg->IAddress;
+		UWORD gid = gad ? gad->GadgetID : 0;
+		UWORD code = msg->Code;
+		GT_ReplyIMsg(msg);
+		if (cls == IDCMP_CLOSEWINDOW) {
+			ClosePlaylistWindow(app);
+			return;
+		}
+		if (cls == IDCMP_GADGETUP) {
+			if (gid == PL_GID_LIST) {
+				PlaylistLoadCurrent(app, (int)code, 0);
+			} else if (gid == PL_GID_LOAD_M3U) {
+				BrowseForPlaylist(app);
+			} else if (gid == PL_GID_PLAY) {
+				PlaylistLoadCurrent(app, app->playlistCurrent, 1);
+			} else if (gid == PL_GID_CLOSE) {
+				ClosePlaylistWindow(app);
+				return;
+			}
+		}
+	}
 }
 
 static void SetMenuItemChecked(MrApp *app, int menuNum, int itemNum, int checked)
@@ -1822,7 +2021,8 @@ int main(int argc, char **argv)
 	doneSig  = 1UL << app.donePort->mp_SigBit;
 
 	while (!done) {
-		ULONG sigs = Wait(winSig | timerSig | doneSig | SIGBREAKF_CTRL_C);
+		ULONG plSig = (app.plWin && app.plWin->UserPort) ? (1UL << app.plWin->UserPort->mp_SigBit) : 0;
+		ULONG sigs = Wait(winSig | timerSig | doneSig | plSig | SIGBREAKF_CTRL_C);
 
 		if (sigs & SIGBREAKF_CTRL_C)
 			done = 1;
@@ -1838,6 +2038,9 @@ int main(int argc, char **argv)
 			PollPlaybackStatus(&app);
 			ArmTimer(&app, MR_TICK_MICROS);
 		}
+
+		if (plSig && (sigs & plSig))
+			HandlePlaylistWindow(&app);
 
 		if (sigs & winSig) {
 			ULONG result;
@@ -1874,7 +2077,10 @@ int main(int argc, char **argv)
 						SetStatus(&app, app.hardwareFilter ? "Hardware filter enabled." : "Hardware filter disabled.");
 						break;
 					case GID_PLAYLIST:
-						BrowseForPlaylist(&app);
+						if (app.plWin)
+							ClosePlaylistWindow(&app);
+						else
+							OpenPlaylistWindow(&app);
 						break;
 					case GID_STAR1: case GID_STAR2: case GID_STAR3: case GID_STAR4: case GID_STAR5:
 						app.rating = (int)(result & WMHI_GADGETMASK) - GID_STAR1 + 1;
