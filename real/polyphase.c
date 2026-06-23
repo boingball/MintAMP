@@ -2102,9 +2102,8 @@ int PolyphaseStereoFastLowrate(short *pcm, int *vbuf, const int *coefBase, int s
 void PolyphaseMono(short *pcm, int *vbuf, const int *coefBase)
 {
 #if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_M68K_ASM_POLYPHASE)
-	if (MP3ExperimentalPolyphaseEnabled() &&
-		PolyphaseMonoFast_HAS_AMIGA_M68K_ASM_RUNTIME()) {
-		PolyphaseMonoFast_TEST_ACTIVE(pcm, vbuf, coefBase);
+	if (AmigaM68KPolyphaseMonoFast_IsActive()) {
+		AmigaM68KPolyphaseMonoFast(pcm, vbuf, PolyAsmCoef(coefBase));
 		return;
 	}
 	PolyphaseMonoFast_C_REFERENCE(pcm, vbuf, coefBase);
