@@ -128,7 +128,7 @@ extern volatile int gMiniAmp3EmbeddedPlayback;
 
 /* Decoder module discovery (set at startup, read by playback subprocess). */
 extern char gDecoderModulesPath[512];
-/* ASL pattern covering mp3 + all discovered decoder extensions, e.g. "#?.(mp3|flac)" */
+/* ASL pattern covering mp3/aac + all discovered decoder extensions, e.g. "#?.(mp3|aac|flac)" */
 static char gSupportedExtPattern[512];
 
 #ifdef MINIAMP3_DEBUG
@@ -3724,7 +3724,7 @@ static void DrainWindowMessages(HelixAmp3Gui *gui)
  * ScanDecoderModules — find all *.decoder files in PROGDIR:decoders/, load
  * each one briefly to read its extension list, then build:
  *   gDecoderModulesPath  — absolute path for the playback subprocess
- *   gSupportedExtPattern — AmigaDOS ASL pattern like "#?.(mp3|flac)"
+ *   gSupportedExtPattern — AmigaDOS ASL pattern like "#?.(mp3|aac|flac)"
  */
 static void ScanDecoderModules(void)
 {
@@ -3733,7 +3733,7 @@ static void ScanDecoderModules(void)
 	BPTR     lock;
 	struct FileInfoBlock *fib;
 	char     dirPath[512];
-	char     extList[256];   /* collected "mp3|flac|..." */
+	char     extList[256];   /* collected "mp3|aac|flac|..." */
 	int      extLen;
 
 	extList[0] = '\0';
@@ -3760,9 +3760,9 @@ static void ScanDecoderModules(void)
 	strncpy(gDecoderModulesPath, dirPath, sizeof(gDecoderModulesPath) - 1);
 	gDecoderModulesPath[sizeof(gDecoderModulesPath) - 1] = '\0';
 
-	/* Always include mp3 as base */
-	strncpy(extList, "mp3", sizeof(extList) - 1);
-	extLen = 3;
+	/* Always include built-in MP3 and the standard AAC module extension. */
+	strncpy(extList, "mp3|aac", sizeof(extList) - 1);
+	extLen = 7;
 
 	lock = Lock((STRPTR)gDecoderModulesPath, ACCESS_READ);
 	if (lock) {
@@ -3815,7 +3815,7 @@ static void ScanDecoderModules(void)
 		UnLock(lock);
 	}
 
-	/* Build pattern: "#?.(mp3|flac)" or "#?.mp3" if only one */
+	/* Build pattern: "#?.(mp3|aac|flac)" or "#?.mp3" if only one */
 	if (strchr(extList, '|')) {
 		int written = 0;
 		written += snprintf(gSupportedExtPattern + written,
@@ -3831,7 +3831,7 @@ static void ScanDecoderModules(void)
 			"#?.%s", extList);
 	}
 #else
-	strncpy(gSupportedExtPattern, "#?.mp3", sizeof(gSupportedExtPattern) - 1);
+	strncpy(gSupportedExtPattern, "#?.(mp3|aac)", sizeof(gSupportedExtPattern) - 1);
 	gSupportedExtPattern[sizeof(gSupportedExtPattern) - 1] = '\0';
 #endif
 }

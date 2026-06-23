@@ -10,8 +10,9 @@
 #
 # Usage
 # -----
-#   make -C decoders          # build all modules whose libraries are present
+#   make -C decoders          # build FLAC and AAC modules
 #   make -C decoders flac     # build only the FLAC module
+#   make -C decoders aac      # build only the AAC module
 
 CC     := m68k-amigaos-gcc
 NM     := m68k-amigaos-nm
@@ -29,18 +30,9 @@ FIXHUNKS := python3 ../tools/amiga_fast_preferred_hunks.py
 
 .PHONY: all flac aac clean
 
-# Build whichever modules have their upstream library checked out
-all: $(if $(wildcard flac/src/foxen-flac.h),flac,) \
-     $(if $(wildcard aac/aacdec.h),aac,)
+# The normal decoder build must produce every supported external module.
+all: flac aac
 	@echo "Decoder build complete."
-	@if [ ! -f flac/src/foxen-flac.h ]; then \
-	    echo "  FLAC skipped: run 'git submodule update --init decoders/flac'"; \
-	fi
-	@if [ ! -f aac/aacdec.h ]; then \
-	    echo "  AAC  skipped: clone libhelix-aac into decoders/aac/"; \
-	    echo "    e.g. git submodule add https://github.com/earlephilhower/ESP8266Audio decoders/esp8266audio"; \
-	    echo "         then symlink or copy esp8266audio/src/libhelix-aac/ to decoders/aac/"; \
-	fi
 
 # --------------------------------------------------------------------------
 # FLAC — libfoxenflac (https://github.com/astoeckel/libfoxenflac)

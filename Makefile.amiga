@@ -121,7 +121,7 @@ print-fast030-command:
 	@printf '%s\n' '$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(FAST030_CPPFLAGS) $(EXTRA_CFLAGS) -o $(FAST030_TARGET) $(SOURCES) $(FAST030_ASM_SOURCES)'
 	@printf '%s\n' '$(AMIGA_HUNK_FAST_PREFERRED) $(FAST030_TARGET)'
 
-# Build all decoder modules (FLAC etc.) — requires upstream submodules cloned
+# Build all decoder modules (FLAC and AAC) — requires upstream decoder libraries
 decoder-modules:
 	$(MAKE) -C decoders \
 		CC="$(CC)" \

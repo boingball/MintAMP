@@ -103,7 +103,7 @@ The playback implementation does not call `CurrentDir()`, `Lock()`, `Forbid()`,
 directory lock or interrupt/task-switch nesting state.
 
 
-## Pluggable decoder modules and FLAC playback
+## Pluggable decoder modules and FLAC/AAC playback
 
 MiniAMP3 can now play non-MP3 formats through loadable Amiga hunk decoder
 modules.  The host scans the configured decoder-module directory for
@@ -123,12 +123,11 @@ git submodule update --init decoders/flac
 make -f Makefile.amiga decoder-modules
 # or
 make -C decoders flac
+make -C decoders aac
 ```
 
 `make -f Makefile.amiga`, `fast030`, `gui`, and `guir` all depend on
-`decoder-modules`; if `decoders/flac/src/foxen-flac.h` is not present the module
-makefile skips FLAC and prints the submodule command instead of failing the main
-build.  The FLAC module is linked with `-nostartfiles`, keeps its allocation
+`decoder-modules`; the module makefile now builds both `flac.decoder` and `aac.decoder` by default.  The FLAC module is linked with `-nostartfiles`, keeps its allocation
 inside the module through an Exec `AllocMem`/`FreeMem` shim, and audits for
 forbidden libc/startup symbols before producing `flac.decoder`.
 
@@ -144,7 +143,7 @@ fast-lowrate, fake-stereo, volume, and buffer handling used for MP3 playback.
 Two native Amiga frontends are available.  `miniamp3` is the Workbench
 2.x/3.x GadTools frontend; `minimp3r` is the ReAction/ClassAct frontend for
 newer 3.x systems.  Both reuse the command-line decoder/playback core and both
-participate in the decoder-module build, so MP3 stays built in while FLAC and
+participate in the decoder-module build, so MP3 stays built in while FLAC, AAC, and
 future formats are supplied by `*.decoder` modules.
 
 ```sh
@@ -158,7 +157,7 @@ make -f Makefile.amiga minimp3r
 
 `miniamp3` opens the MiniAMP3 window with an ASL file requester whose pattern is
 expanded from built-in MP3 plus discovered decoder-module extensions such as
-FLAC.  The main window includes speed-mode, channel-mode, fake-stereo,
+FLAC and AAC.  The main window includes speed-mode, channel-mode, fake-stereo,
 fast-mem, sample-rate, quality, buffer, and volume controls; metadata/artwork
 fields; progress and time displays; transport buttons for Play, Next, Stop, the
 Paula hardware filter, and the playlist window; a status bar; and a file-info
@@ -225,6 +224,7 @@ amiga_mp3dec [options] infile.mp3 outfile
 amiga_mp3dec --info infile.mp3
 amiga_mp3dec --play [--stereo|--fake-stereo] [--rate 8287|8820|11025|22050|28600] [--quality 0|1|2|3] [--buffer-seconds N] [--volume N] [--fast-mem] infile.mp3
 amiga_mp3dec --play [playback options] infile.flac
+amiga_mp3dec --play [playback options] infile.aac
 amiga_mp3dec --selftest-play-cleanup [--debug-cleanup] [--buffer-seconds N]
 ```
 
@@ -254,7 +254,8 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
 - Non-MP3 playback is handled by generic decoder modules.  If the input
   extension is not `.mp3`, `--play` opens the file through a matching
   `*.decoder` module, currently including `.flac`/`.fla` when
-  `decoders/flac.decoder` is installed.  The module reports sample rate,
+  `decoders/flac.decoder` is installed and `.aac` when
+  `decoders/aac.decoder` is installed.  The module reports sample rate,
   channel count, bit depth, and total samples, then feeds the common Paula
   playback pipeline.  Use `--debug-decoder` for module-directory scanning,
   LoadSeg, ABI, extension-list, and stream-format diagnostics.

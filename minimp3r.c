@@ -1142,7 +1142,7 @@ static int MrOpenWindow(MrApp *app)
 		GA_ID, GID_FILE,
 		GA_RelVerify, TRUE,
 		GETFILE_TitleText, (ULONG)"Choose an audio file",
-		GETFILE_Pattern, (ULONG)"#?.(mp3|flac|wav|aif|aiff)",
+		GETFILE_Pattern, (ULONG)"#?.(mp3|flac|aac|wav|aif|aiff)",
 		GETFILE_DoPatterns, TRUE,
 		GETFILE_FullFile, (ULONG)(app->inputName[0] ? app->inputName : ""),
 		TAG_DONE);
@@ -2222,7 +2222,7 @@ char path[MR_MAX_PATH];
 fr = (struct FileRequester *)AllocAslRequestTags(ASL_FileRequest,
 ASLFR_TitleText, (ULONG)"Choose an audio file",
 ASLFR_DoPatterns, TRUE,
-ASLFR_InitialPattern, (ULONG)"#?.(mp3|flac|wav|aif|aiff)",
+ASLFR_InitialPattern, (ULONG)"#?.(mp3|flac|aac|wav|aif|aiff)",
 ASLFR_InitialDrawer, (ULONG)(app->lastDrawer[0] ? app->lastDrawer : NULL),
 TAG_DONE);
 
@@ -2407,7 +2407,7 @@ static void PlaylistAddFiles(MrApp *app)
 		ASLFR_TitleText, (ULONG)"Add to playlist",
 		ASLFR_DoMultiSelect, TRUE,
 		ASLFR_DoPatterns, TRUE,
-		ASLFR_InitialPattern, (ULONG)"#?.(mp3|flac|wav|aif|aiff)",
+		ASLFR_InitialPattern, (ULONG)"#?.(mp3|flac|aac|wav|aif|aiff)",
 		ASLFR_InitialDrawer, (ULONG)(app->lastDrawer[0] ? app->lastDrawer : NULL),
 		TAG_DONE);
 	if (!fr) {
