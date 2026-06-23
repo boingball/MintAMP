@@ -199,6 +199,7 @@ static const STRPTR kChannelLabels[] = {
 static const STRPTR kSpeedLabels[] = {
 	(STRPTR)"Normal",
 	(STRPTR)"Superfast low-rate",
+	(STRPTR)"Ultrafast",
 	NULL
 };
 
@@ -358,6 +359,7 @@ typedef struct MrApp {
 	int   fastMem;
 	int   fastLowrate;
 	int   superfastLowrate;
+	int   ultrafast;
 	int   fakeStereo;
 	int   fakeStereoWidthIndex;
 	int   fakeStereoDelayIndex;
@@ -508,6 +510,11 @@ static void LoadSettings(MrApp *app)
 {
 	app->fastLowrate = LoadEnvInt("FastLowrate", app->fastLowrate, 0, 1);
 	app->superfastLowrate = LoadEnvInt("SuperfastLowrate", app->superfastLowrate, 0, 1);
+	app->ultrafast = LoadEnvInt("Ultrafast", app->ultrafast, 0, 1);
+	if (app->ultrafast) {
+		app->fastLowrate = 0;
+		app->superfastLowrate = 0;
+	}
 	app->fastMem = LoadEnvInt("FastMem", app->fastMem, 0, 1);
 	app->mono = LoadEnvInt("Mono", app->mono, 0, 1);
 	app->fakeStereo = LoadEnvInt("FakeStereo", app->fakeStereo, 0, 1);
@@ -531,6 +538,7 @@ static void SaveSettings(MrApp *app)
 {
 	SaveEnvInt("FastLowrate", app->fastLowrate);
 	SaveEnvInt("SuperfastLowrate", app->superfastLowrate);
+	SaveEnvInt("Ultrafast", app->ultrafast);
 	SaveEnvInt("FastMem", app->fastMem);
 	SaveEnvInt("Mono", app->mono);
 	SaveEnvInt("FakeStereo", app->fakeStereo);
@@ -629,6 +637,8 @@ static void BuildPlaybackArgs(MrApp *app, MrPlayArgs *args)
 	} else if (app->fastLowrate && strcmp(kRates[app->rateIndex], "28600")) {
 		AddArg(args, "--fast-lowrate");
 	}
+	if (app->ultrafast)
+		AddArg(args, "--ultrafast");
 	if (app->fakeStereo) {
 		AddArg(args, "--fake-stereo");
 		AddArg(args, "--fake-stereo-delay");
@@ -1178,7 +1188,7 @@ static int MrOpenWindow(MrApp *app)
 	                GA_ID, GID_SPEED,
 	                GA_RelVerify, TRUE,
 	                CHOOSER_LabelArray, (ULONG)kSpeedLabels,
-	                CHOOSER_Selected, (ULONG)(app->superfastLowrate ? 1 : 0),
+	                CHOOSER_Selected, (ULONG)(app->ultrafast ? 2 : (app->superfastLowrate ? 1 : 0)),
 	                TAG_DONE);
 
 	app->widthGad = (Object *)NewObject(CHOOSER_GetClass(), NULL,
@@ -2834,7 +2844,10 @@ static void SyncFromGadgets(MrApp *app)
 	if (app->fastLowGad && GetAttr(GA_Selected, app->fastLowGad, &v))
 		app->fastLowrate = (v != 0);
 	if (app->speedGad && GetAttr(CHOOSER_Selected, app->speedGad, &v)) {
-		app->superfastLowrate = ((int)v >= 1);
+		app->ultrafast = ((int)v == 2);
+		app->superfastLowrate = ((int)v == 1);
+		if (app->ultrafast)
+			app->fastLowrate = 0;
 	}
 	if (app->widthGad && GetAttr(CHOOSER_Selected, app->widthGad, &v)) {
 		app->fakeStereo = ((int)v > 0);
@@ -2868,6 +2881,7 @@ int main(int argc, char **argv)
 	app.mono = 0;
 	app.fastMem = 0;
 	app.fastLowrate = 0;
+	app.ultrafast = 0;
 	app.volumePercent = 100;
 	app.bufferSeconds = 10;
 	app.fakeStereoDelayIndex = 0;

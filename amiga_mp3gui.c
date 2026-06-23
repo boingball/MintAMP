@@ -439,6 +439,7 @@ typedef struct HelixAmp3Gui {
 	char  ratingText[16];
 	int   fastLowrate;
 	int   superfastLowrate;
+	int   ultrafast;
 	int   fastMem;
 	int   mono;
 	int   fakeStereo;
@@ -561,6 +562,7 @@ static const STRPTR kSpeedModeLabels[] = {
 	(STRPTR)"Normal",
 	(STRPTR)"Fast",
 	(STRPTR)"Superfast",
+	(STRPTR)"Ultrafast",
 	NULL
 };
 
@@ -572,6 +574,7 @@ static const STRPTR kChannelModeLabels[] = {
 
 static int SpeedModeIndex(const HelixAmp3Gui *gui)
 {
+	if (gui->ultrafast) return 3;
 	if (gui->superfastLowrate) return 2;
 	if (gui->fastLowrate) return 1;
 	return 0;
@@ -748,6 +751,7 @@ static void SaveGuiSettings(HelixAmp3Gui *gui)
 {
 	SaveEnvInt("FastLowrate", gui->fastLowrate);
 	SaveEnvInt("SuperfastLowrate", gui->superfastLowrate);
+	SaveEnvInt("Ultrafast", gui->ultrafast);
 	SaveEnvInt("FastMem", gui->fastMem);
 	SaveEnvInt("Mono", gui->mono);
 	SaveEnvInt("FakeStereo", gui->fakeStereo);
@@ -3839,6 +3843,7 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	memset(gui, 0, sizeof(*gui));
 	gui->fastLowrate = LoadEnvInt("FastLowrate", 1, 0, 1);
 	gui->superfastLowrate = LoadEnvInt("SuperfastLowrate", 0, 0, 1);
+	gui->ultrafast = LoadEnvInt("Ultrafast", 0, 0, 1);
 	gui->fastMem = LoadEnvInt("FastMem", 1, 0, 1);
 	gui->mono = LoadEnvInt("Mono", 1, 0, 1);
 	gui->fakeStereo = LoadEnvInt("FakeStereo", 0, 0, 1);
@@ -3846,6 +3851,10 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	gui->fakeStereoDelayIndex = LoadEnvInt("FakeStereoDelayIndex", 2, 0, 4);
 	gui->hardwareFilter = LoadEnvInt("HardwareFilter", 0, 0, 1);
 	gui->rateIndex = LoadEnvInt("RateIndex", 2, 0, 4);
+	if (gui->ultrafast) {
+		gui->fastLowrate = 0;
+		gui->superfastLowrate = 0;
+	}
 	if (gui->superfastLowrate) {
 		gui->fastLowrate = 1;
 		if (!RateIndexSupportsSuperfast(gui->rateIndex, ChannelUsesMonoCost(gui)))
@@ -4797,6 +4806,8 @@ static void BuildPlaybackArgs(HelixAmp3Gui *gui, HelixAmp3Args *args)
 	} else if (gui->fastLowrate && strcmp(kRates[gui->rateIndex], "28600")) {
 		AddArg(args, "--fast-lowrate");
 	}
+	if (gui->ultrafast)
+		AddArg(args, "--ultrafast");
 	if (gui->fakeStereo) {
 		AddArg(args, "--fake-stereo");
 		AddArg(args, "--fake-stereo-delay");
@@ -5354,9 +5365,10 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 			SetStatus(gui, "Stop playback before changing speed mode.");
 			break;
 		}
-		/* code: 0=Normal, 1=Fast, 2=Superfast */
-		gui->fastLowrate = (code >= 1) ? 1 : 0;
-		gui->superfastLowrate = (code >= 2) ? 1 : 0;
+		/* code: 0=Normal, 1=Fast, 2=Superfast, 3=Ultrafast */
+		gui->ultrafast = (code == 3) ? 1 : 0;
+		gui->fastLowrate = (code >= 1 && code <= 2) ? 1 : 0;
+		gui->superfastLowrate = (code == 2) ? 1 : 0;
 		if (gui->superfastLowrate &&
 			!RateIndexSupportsSuperfast(gui->rateIndex, ChannelUsesMonoCost(gui)))
 			gui->rateIndex = DefaultSuperfastRateIndex(ChannelUsesMonoCost(gui));
@@ -5365,8 +5377,9 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 				GTCY_Labels, (ULONG)kRateLabels,
 				GTCY_Active, gui->rateIndex,
 				TAG_DONE);
-		SetStatus(gui, code == 2 ?
-			"Superfast enabled for 8287/8820/11025/22050 Hz." :
+		SetStatus(gui, code == 3 ?
+			"Ultrafast enabled (26 subband cap)." :
+			code == 2 ? "Superfast enabled for 8287/8820/11025/22050 Hz." :
 			code == 1 ? "Fast-lowrate enabled." : "Standard speed enabled.");
 		SaveGuiSettings(gui);
 		break;
