@@ -262,6 +262,10 @@ static DecHandle AacOpen(DecoderReadCb readFn, DecoderSeekCb seekFn,
 
     if (!readFn || !infoOut) return NULL;
 
+#ifdef HAVE_AMIGA_AUDIO_DEVICE
+    AacModuleSetExecBase(*((void **)4L));
+#endif
+
     st = (AacState *)ModuleAlloc(sizeof(AacState));
     if (!st) return NULL;
 
@@ -418,6 +422,7 @@ static struct DecoderModuleInfo gAacInfo = {
     0
 };
 
+__attribute__((used))
 struct DecoderOps gAacOps = {
     &gAacInfo,
     AacOpen,

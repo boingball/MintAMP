@@ -8,16 +8,15 @@
 
 #include "decoder_module.h"
 
-#ifdef HAVE_AMIGA_AUDIO_DEVICE
-extern void AacModuleSetExecBase(void *execBase);
-#endif
-
 extern struct DecoderOps gAacOps;
 
+/*
+ * Keep the LoadSeg entry path as small as possible.  The host crash report
+ * shows failures before the returned ops table can be validated, so avoid
+ * touching ExecBase or running any AAC setup here.  AacOpen() initialises the
+ * module allocator before the first allocation.
+ */
 struct DecoderOps *DecoderModuleEntry(void)
 {
-#ifdef HAVE_AMIGA_AUDIO_DEVICE
-    AacModuleSetExecBase(*((void **)4L));
-#endif
     return &gAacOps;
 }
