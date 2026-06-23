@@ -49,6 +49,7 @@
 #include <intuition/icclass.h>
 #include <libraries/gadtools.h>
 #include <hardware/cia.h>
+#include "picojpeg.h"
 
 #define MR_ENV_PREFIX "ENVARC:MiniAMP3"
 #define MR_SETTINGS_VERSION 1
@@ -87,6 +88,7 @@
 #include <proto/string.h>
 #include <proto/label.h>
 #include <proto/gadtools.h>
+#include <proto/graphics.h>
 
 /* ------------------------------------------------------------------------- */
 /* Tunables                                                                  */
@@ -103,6 +105,9 @@
 #define MR_MAX_PATH      256
 #define MR_ARGC_MAX      40
 #define MR_PLAYLIST_MAX  128
+#define MR_ART_W        64
+#define MR_ART_H        64
+#define MR_MAX_JPEG_DIM 1024
 #define MR_QUALITY_MIN   0
 #define MR_QUALITY_MAX   3
 
@@ -376,12 +381,16 @@ typedef struct MrApp {
 	int   playbackDonePending;
 	int   stoppedByUser;
 	int   lastPhaseShown;
+	unsigned char artGreyBuf[MR_ART_W * MR_ART_H];
+	int artValid;
 } MrApp;
 
 static void UpdateTimeDisplay(MrApp *app);
 static void RefreshFileInfoAndTags(MrApp *app);
 static void ApplyHardwareAudioFilter(MrApp *app);
 static void UpdateChannelGadgetState(MrApp *app);
+static void UpdateNextButtonState(MrApp *app);
+static void DrawArtPanel(MrApp *app);
 static void SaveSettings(MrApp *app);
 static void RefreshPlaylistView(MrApp *app);
 static void ClosePlaylistWindow(MrApp *app);
@@ -559,6 +568,16 @@ static void UpdateChannelGadgetState(MrApp *app)
 			GA_Disabled, (ULONG)(app->fakeStereo ? TRUE : FALSE), TAG_DONE);
 }
 
+static void UpdateNextButtonState(MrApp *app)
+{
+	int enabled = app->playlistCount > 0 && app->playlistCurrent >= 0 &&
+		app->playlistCurrent + 1 < app->playlistCount &&
+		!app->playbackDonePending && !gPlayer.stopRequested;
+	if (app->win && app->nextGad)
+		SetGadgetAttrs((struct Gadget *)app->nextGad, app->win, NULL,
+			GA_Disabled, (ULONG)(enabled ? FALSE : TRUE), TAG_DONE);
+}
+
 static void EnablePlayStop(MrApp *app, int playing)
 {
 	if (app->win) {
@@ -569,6 +588,7 @@ static void EnablePlayStop(MrApp *app, int playing)
 			SetGadgetAttrs((struct Gadget *)app->stopGad, app->win, NULL,
 				GA_Disabled, (ULONG)(playing ? FALSE : TRUE), TAG_DONE);
 	}
+	UpdateNextButtonState(app);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -810,6 +830,7 @@ static void StopPlayback(MrApp *app)
 	Permit();
 
 	SetStatus(app, "Stopping...");
+	UpdateNextButtonState(app);
 }
 
 static void FinalizePlayback(MrApp *app)
@@ -1170,7 +1191,7 @@ static int MrOpenWindow(MrApp *app)
 	                TAG_DONE);
 
 	app->nextGad = (Object *)NewObject(BUTTON_GetClass(), NULL,
-	                GA_ID, GID_NEXT, GA_RelVerify, TRUE, GA_Text, (ULONG)"_Next", TAG_DONE);
+	                GA_ID, GID_NEXT, GA_RelVerify, TRUE, GA_Disabled, TRUE, GA_Text, (ULONG)"_Next", TAG_DONE);
 	app->filterGad = (Object *)NewObject(BUTTON_GetClass(), NULL,
 	                GA_ID, GID_FILTER, GA_RelVerify, TRUE, GA_Text, (ULONG)"FLT", TAG_DONE);
 	app->playlistGad = (Object *)NewObject(BUTTON_GetClass(), NULL,
@@ -1270,8 +1291,8 @@ static int MrOpenWindow(MrApp *app)
 				CHILD_WeightedHeight, 0,
 				TAG_DONE),
 			LAYOUT_AddChild, (ULONG)app->artGad,
-			CHILD_MinWidth, 96,
-			CHILD_MinHeight, 96,
+			CHILD_MinWidth, 80,
+			CHILD_MinHeight, 80,
 			CHILD_WeightedWidth, 0,
 			TAG_DONE),
 		CHILD_WeightedHeight, 0,
@@ -1294,9 +1315,17 @@ static int MrOpenWindow(MrApp *app)
 			TAG_DONE),
 		CHILD_WeightedHeight, 0,
 
-		ADD_LABELLED(app->bufferGad, "Buffer"),
+		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
+			LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
+			ADD_LABELLED(app->bufferGad, "Buffer"),
+			CHILD_MaxWidth, 260,
+			TAG_DONE),
 		CHILD_WeightedHeight, 0,
-		ADD_LABELLED(app->volumeGad, "Volume"),
+		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
+			LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
+			ADD_LABELLED(app->volumeGad, "Volume"),
+			CHILD_MaxWidth, 260,
+			TAG_DONE),
 		CHILD_WeightedHeight, 0,
 
 		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
@@ -1338,8 +1367,8 @@ static int MrOpenWindow(MrApp *app)
 		WA_SizeGadget, TRUE,
 		WA_IDCMP, IDCMP_GADGETUP | IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
 			IDCMP_IDCMPUPDATE | IDCMP_MENUPICK,
-		WA_Width, 620,
-		WA_Height, 420,
+		WA_Width, 520,
+		WA_Height, 360,
 		WINDOW_Position, WPOS_CENTERSCREEN,
 		WINDOW_ParentGroup, (ULONG)root,
                 TAG_DONE);
@@ -1384,8 +1413,11 @@ static void MrCloseWindow(MrApp *app)
 
 typedef struct MrMp3Info {
 	char title[64], artist[64], album[64], track[16], genre[32];
-	int bitrateKbps, sampleRate, channels, channelMode, durationSecs, rating;
+	int bitrateKbps, sampleRate, channels, channelMode, modeExtension, durationSecs, rating;
 	unsigned long fileSize;
+	unsigned char *artData;
+	unsigned long artBytes;
+	int artIsPng;
 } MrMp3Info;
 
 static void CopyTrim(char *dst, size_t size, const unsigned char *src, int n)
@@ -1400,6 +1432,11 @@ static void CopyTrim(char *dst, size_t size, const unsigned char *src, int n)
 static int Id3Synchsafe(const unsigned char *p)
 {
 	return ((p[0] & 0x7f) << 21) | ((p[1] & 0x7f) << 14) | ((p[2] & 0x7f) << 7) | (p[3] & 0x7f);
+}
+
+static long Id3BigEndian32(const unsigned char *p)
+{
+	return ((long)p[0] << 24) | ((long)p[1] << 16) | ((long)p[2] << 8) | (long)p[3];
 }
 
 static void CopyId3Text(char *dst, size_t size, const unsigned char *p, long n)
@@ -1419,13 +1456,81 @@ static int RatingFromPopmByte(unsigned char b)
 	return 5;
 }
 
+static int ContainsTextNoCase(const char *s, const char *needle)
+{
+	int i, j;
+	if (!s || !needle || !needle[0]) return 0;
+	for (i = 0; s[i]; i++) {
+		for (j = 0; needle[j]; j++) {
+			char a = s[i + j], b = needle[j];
+			if (!a) return 0;
+			if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+			if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+			if (a != b) break;
+		}
+		if (!needle[j]) return 1;
+	}
+	return 0;
+}
+
+static unsigned long ApicImageOffset(const unsigned char *p, unsigned long n)
+{
+	unsigned long i = 1;
+	if (!p || n < 4) return n;
+	while (i < n && p[i]) i++; /* MIME */
+	if (i < n) i++;
+	if (i < n) i++;          /* picture type */
+	while (i < n && p[i]) i++; /* description (ISO-8859-1/UTF-8 common case) */
+	if (i < n) i++;
+	return i;
+}
+
+static unsigned long PicImageOffset(const unsigned char *p, unsigned long n)
+{
+	unsigned long i = 5;
+	if (!p || n < 6) return n;
+	while (i < n && p[i]) i++;
+	if (i < n) i++;
+	return i;
+}
+
+static void DetectPictureMime(const unsigned char *payload,
+	unsigned long payloadBytes, int version, int *isJpeg, int *isPng)
+{
+	char mime[40];
+	unsigned long i;
+	*isJpeg = 0; *isPng = 0;
+	if (!payload || payloadBytes < 4) return;
+	memset(mime, 0, sizeof(mime));
+	if (version == 2) {
+		for (i = 0; i < 3 && i + 1 < payloadBytes; i++) mime[i] = (char)payload[i + 1];
+	} else {
+		for (i = 1; i < payloadBytes && i < sizeof(mime); i++) {
+			if (!payload[i]) break;
+			mime[i - 1] = (char)payload[i];
+		}
+	}
+	if (ContainsTextNoCase(mime, "jpeg") || ContainsTextNoCase(mime, "jpg")) *isJpeg = 1;
+	else if (ContainsTextNoCase(mime, "png")) *isPng = 1;
+}
+
+static void FreeMp3Info(MrMp3Info *info)
+{
+	if (info && info->artData) {
+		FreeMem(info->artData, info->artBytes);
+		info->artData = NULL;
+		info->artBytes = 0;
+	}
+}
+
 static void ReadId3v2(FILE *f, MrMp3Info *info)
 {
-	unsigned char hdr[10], fh[10]; long end;
+	unsigned char hdr[10], fh[10]; long end; int version;
 	if (fseek(f, 0, SEEK_SET) != 0 || fread(hdr, 1, 10, f) != 10 || memcmp(hdr, "ID3", 3)) return;
+	version = hdr[3];
 	end = 10 + Id3Synchsafe(hdr + 6);
 	while (ftell(f) + 10 <= end && fread(fh, 1, 10, f) == 10) {
-		long sz = Id3Synchsafe(fh + 4); unsigned char *payload;
+		long sz = version == 4 ? Id3Synchsafe(fh + 4) : Id3BigEndian32(fh + 4); unsigned char *payload;
 		if (fh[0] == 0 || sz <= 0 || ftell(f) + sz > end) break;
 		payload = (unsigned char *)malloc((size_t)sz);
 		if (!payload) { fseek(f, sz, SEEK_CUR); continue; }
@@ -1436,6 +1541,20 @@ static void ReadId3v2(FILE *f, MrMp3Info *info)
 		else if (!memcmp(fh, "TRCK", 4) && !info->track[0]) CopyId3Text(info->track, sizeof(info->track), payload, sz);
 		else if (!memcmp(fh, "TCON", 4) && !info->genre[0]) CopyId3Text(info->genre, sizeof(info->genre), payload, sz);
 		else if (!memcmp(fh, "POPM", 4)) { long i; for (i = 0; i + 1 < sz; i++) if (payload[i] == 0) { info->rating = RatingFromPopmByte(payload[i + 1]); break; } }
+		else if (!info->artData && (!memcmp(fh, "APIC", 4)) && sz > 4 && sz <= 512L * 1024L) {
+			unsigned long off, bytes; int isJpeg, isPng;
+			DetectPictureMime(payload, (unsigned long)sz, version, &isJpeg, &isPng);
+			off = ApicImageOffset(payload, (unsigned long)sz);
+			bytes = (unsigned long)sz - off;
+			if (off < (unsigned long)sz && bytes > 4) {
+				info->artData = (unsigned char *)AllocMem(bytes, MEMF_ANY);
+				if (info->artData) {
+					memcpy(info->artData, payload + off, bytes);
+					info->artBytes = bytes;
+					info->artIsPng = isPng || (!isJpeg && !isPng);
+				}
+			}
+		}
 		free(payload);
 	}
 }
@@ -1462,10 +1581,48 @@ static void ReadMpegHeader(FILE *f, MrMp3Info *info, long *firstFrame)
 		if (h[0] == 0xff && (h[1] & 0xe0) == 0xe0) {
 			int bi = (h[2] >> 4) & 15, si = (h[2] >> 2) & 3;
 			info->bitrateKbps = br[bi]; info->sampleRate = sr[si];
-			info->channelMode = (h[3] >> 6) & 3; info->channels = info->channelMode == 3 ? 1 : 2;
+			info->channelMode = (h[3] >> 6) & 3; info->modeExtension = (h[3] >> 4) & 3; info->channels = info->channelMode == 3 ? 1 : 2;
 			*firstFrame = pos; return;
 		}
 		pos++; fseek(f, pos, SEEK_SET);
+	}
+}
+
+static void TryFolderArt(const char *inputName, MrMp3Info *info)
+{
+	static const char *names[] = { "folder.jpg", "cover.jpg", "album.jpg", "front.jpg", NULL };
+	char dirPath[MR_MAX_PATH], artPath[MR_MAX_PATH];
+	int i;
+	if (!inputName || !info || info->artData) return;
+	SafeCopy(dirPath, sizeof(dirPath), inputName);
+	{
+		char *q = dirPath + strlen(dirPath);
+		while (q > dirPath && *q != '/' && *q != ':') q--;
+		if (*q == '/' || *q == ':') *(q + 1) = '\0';
+		else dirPath[0] = '\0';
+	}
+	for (i = 0; names[i] && !info->artData; i++) {
+		FILE *af;
+		SafeCopy(artPath, sizeof(artPath), dirPath);
+		strncat(artPath, names[i], sizeof(artPath) - strlen(artPath) - 1);
+		af = fopen(artPath, "rb");
+		if (af) {
+			long sz;
+			fseek(af, 0, SEEK_END); sz = ftell(af); fseek(af, 0, SEEK_SET);
+			if (sz > 4 && sz <= 512L * 1024L) {
+				info->artData = (unsigned char *)AllocMem((unsigned long)sz, MEMF_ANY);
+				if (info->artData) {
+					if (fread(info->artData, 1, (size_t)sz, af) == (size_t)sz) {
+						info->artBytes = (unsigned long)sz;
+						info->artIsPng = 0;
+					} else {
+						FreeMem(info->artData, (unsigned long)sz);
+						info->artData = NULL;
+					}
+				}
+			}
+			fclose(af);
+		}
 	}
 }
 
@@ -1481,6 +1638,141 @@ static void ReadMp3Info(const char *path, MrMp3Info *info)
 		info->durationSecs = (int)(((info->fileSize - (unsigned long)first) * 8UL) / ((unsigned long)info->bitrateKbps * 1000UL));
 	ReadId3v1(f, info);
 	fclose(f);
+	TryFolderArt(path, info);
+}
+
+typedef struct MrPjpegSrc {
+	const unsigned char *data;
+	unsigned long pos;
+	unsigned long size;
+} MrPjpegSrc;
+
+static unsigned char MrPjpegCb(unsigned char *buf, unsigned char bufSize,
+	unsigned char *bytesRead, void *ud)
+{
+	MrPjpegSrc *src = (MrPjpegSrc *)ud;
+	unsigned long left = src->size - src->pos;
+	unsigned char n = (unsigned char)(left < (unsigned long)bufSize ? left : (unsigned long)bufSize);
+	if (n) {
+		memcpy(buf, src->data + src->pos, n);
+		src->pos += n;
+	}
+	*bytesRead = n;
+	return 0;
+}
+
+static int MrJpegGreySample(const pjpeg_image_info_t *info, int off)
+{
+	unsigned long r, g, b;
+	if (info->m_comps == 1) return info->m_pMCUBufR[off];
+	r = info->m_pMCUBufR[off]; g = info->m_pMCUBufG[off]; b = info->m_pMCUBufB[off];
+	return (int)((77UL * r + 150UL * g + 29UL * b + 128UL) >> 8);
+}
+
+static int MrMcuSampleOffset(const pjpeg_image_info_t *info, int x, int y)
+{
+	int blockX = x / 8, blockY = y / 8, blocksPerRow = info->m_MCUWidth / 8;
+	return (blockY * blocksPerRow + blockX) * 64 + (y & 7) * 8 + (x & 7);
+}
+
+static int DecodeJpegToGrey(const unsigned char *jpegData, unsigned long jpegBytes,
+	unsigned char *greyOut, int outW, int outH, int isPng)
+{
+	pjpeg_image_info_t info;
+	MrPjpegSrc src;
+	unsigned char status;
+	unsigned char xMap[MR_MAX_JPEG_DIM], yMap[MR_MAX_JPEG_DIM];
+	static unsigned long greyAccum[MR_ART_W * MR_ART_H];
+	static unsigned short greyCount[MR_ART_W * MR_ART_H];
+	int mcuIndex, i;
+	if (isPng || !jpegData || jpegBytes <= 4 || !greyOut ||
+		outW <= 0 || outW > MR_ART_W || outH <= 0 || outH > MR_ART_H)
+		return -1;
+	src.data = jpegData; src.pos = 0; src.size = jpegBytes;
+	memset(greyOut, 0x80, (size_t)(outW * outH));
+	memset(greyAccum, 0, sizeof(greyAccum));
+	memset(greyCount, 0, sizeof(greyCount));
+	status = pjpeg_decode_init(&info, MrPjpegCb, &src, 0);
+	if (status != 0 || info.m_width <= 0 || info.m_height <= 0 ||
+		info.m_width > MR_MAX_JPEG_DIM || info.m_height > MR_MAX_JPEG_DIM)
+		return -1;
+	for (i = 0; i < info.m_width; i++) xMap[i] = (unsigned char)((i * outW) / info.m_width);
+	for (i = 0; i < info.m_height; i++) yMap[i] = (unsigned char)((i * outH) / info.m_height);
+	for (mcuIndex = 0; mcuIndex < info.m_MCUSPerRow * info.m_MCUSPerCol; mcuIndex++) {
+		int mcuX, mcuY, y;
+		status = pjpeg_decode_mcu();
+		if (status == PJPG_NO_MORE_BLOCKS) break;
+		if (status != 0) return -1;
+		mcuX = (mcuIndex % info.m_MCUSPerRow) * info.m_MCUWidth;
+		mcuY = (mcuIndex / info.m_MCUSPerRow) * info.m_MCUHeight;
+		for (y = 0; y < info.m_MCUHeight; y++) {
+			int srcY = mcuY + y, dstY, x;
+			if (srcY >= info.m_height) continue;
+			dstY = yMap[srcY];
+			for (x = 0; x < info.m_MCUWidth; x++) {
+				int srcX = mcuX + x, dst;
+				if (srcX >= info.m_width) continue;
+				dst = dstY * outW + xMap[srcX];
+				greyAccum[dst] += (unsigned long)MrJpegGreySample(&info, MrMcuSampleOffset(&info, x, y));
+				if (greyCount[dst] != 0xffff) greyCount[dst]++;
+			}
+		}
+	}
+	for (i = 0; i < outW * outH; i++)
+		if (greyCount[i]) greyOut[i] = (unsigned char)((greyAccum[i] + (greyCount[i] / 2)) / greyCount[i]);
+	return 0;
+}
+
+static void UpdateArtwork(MrApp *app, MrMp3Info *info)
+{
+	app->artValid = 0;
+	if (app->artGad && app->win)
+		SetGadgetAttrs((struct Gadget *)app->artGad, app->win, NULL, GA_Text, (ULONG)"No art", TAG_DONE);
+	if (app->artEnabled && info && info->artData && info->artBytes > 4 &&
+		DecodeJpegToGrey(info->artData, info->artBytes, app->artGreyBuf, MR_ART_W, MR_ART_H, info->artIsPng) == 0) {
+		app->artValid = 1;
+		if (app->artGad && app->win)
+			SetGadgetAttrs((struct Gadget *)app->artGad, app->win, NULL, GA_Text, (ULONG)"", TAG_DONE);
+	}
+	DrawArtPanel(app);
+}
+
+static void DrawArtPanel(MrApp *app)
+{
+	struct Gadget *gad;
+	struct RastPort *rp;
+	int x, y, w, h;
+	static const unsigned char bayer[8][8] = {
+		{0,32,8,40,2,34,10,42},{48,16,56,24,50,18,58,26},{12,44,4,36,14,46,6,38},{60,28,52,20,62,30,54,22},
+		{3,35,11,43,1,33,9,41},{51,19,59,27,49,17,57,25},{15,47,7,39,13,45,5,37},{63,31,55,23,61,29,53,21}
+	};
+	if (!app || !app->win || !app->artGad) return;
+	gad = (struct Gadget *)app->artGad;
+	rp = app->win->RPort;
+	x = gad->LeftEdge + 4; y = gad->TopEdge + 4;
+	w = gad->Width - 8; h = gad->Height - 8;
+	if (w > MR_ART_W) { x += (w - MR_ART_W) / 2; w = MR_ART_W; }
+	if (h > MR_ART_H) { y += (h - MR_ART_H) / 2; h = MR_ART_H; }
+	if (w <= 0 || h <= 0) return;
+	if (app->artValid) {
+		int pens[3] = {0, 1, 1};
+		struct DrawInfo *dri = GetScreenDrawInfo(app->win->WScreen);
+		if (dri) {
+			pens[0] = dri->dri_Pens[SHADOWPEN];
+			pens[1] = dri->dri_Pens[BACKGROUNDPEN];
+			pens[2] = dri->dri_Pens[SHINEPEN];
+			FreeScreenDrawInfo(app->win->WScreen, dri);
+		}
+		for (y = 0; y < h; y++) {
+			int yy = (y * MR_ART_H) / h;
+			for (x = 0; x < w; x++) {
+				int xx = (x * MR_ART_W) / w;
+				int g = app->artGreyBuf[yy * MR_ART_W + xx] + (((int)bayer[yy & 7][xx & 7] - 32) * 3 / 4);
+				SetAPen(rp, (UWORD)pens[g >= 171 ? 2 : (g >= 85 ? 1 : 0)]);
+				WritePixel(rp, gad->LeftEdge + 4 + x + ((gad->Width - 8 - w) / 2), gad->TopEdge + 4 + y + ((gad->Height - 8 - h) / 2));
+			}
+		}
+	}
 }
 
 static void UpdateTimeDisplay(MrApp *app)
@@ -1503,13 +1795,20 @@ static const char *MrChannelModeName(const MrMp3Info *info)
 {
 	if (!info || info->channels <= 0) return "-";
 	if (info->channels == 1) return "mono";
-	if (info->channelMode == 1) return "joint-stereo";
+	if (info->channelMode == 1) return (info->modeExtension & 0x02) ? "M/S" : "joint-stereo";
 	return "stereo";
+}
+
+static void AppendInfoPart(char *dst, size_t size, const char *part)
+{
+	if (!part || !part[0] || !dst || size == 0) return;
+	if (dst[0]) strncat(dst, ", ", size - strlen(dst) - 1);
+	strncat(dst, part, size - strlen(dst) - 1);
 }
 
 static void RefreshFileInfoAndTags(MrApp *app)
 {
-	MrMp3Info info; char fileInfo[128]; const char *ch; unsigned long kb;
+	MrMp3Info info; char fileInfo[128], part[32]; const char *ch; unsigned long kb;
 	if (!app->inputName[0]) {
 		if (app->fileInfoGad && app->win) SetGadgetAttrs((struct Gadget *)app->fileInfoGad, app->win, NULL, STRINGA_TextVal, (ULONG)"No file info", TAG_DONE);
 		return;
@@ -1518,17 +1817,21 @@ static void RefreshFileInfoAndTags(MrApp *app)
 	app->rating = info.rating; app->totalSecs = info.durationSecs; app->elapsedSecs = 0; app->lastFrames = 0;
 	ch = MrChannelModeName(&info);
 	kb = (info.fileSize + 1023UL) / 1024UL;
-	if (info.bitrateKbps > 0 || info.sampleRate > 0 || info.fileSize > 0)
-		sprintf(fileInfo, "%d kbps, %s, %d Hz, %lu KB", info.bitrateKbps, ch, info.sampleRate, kb);
-	else
-		SafeCopy(fileInfo, sizeof(fileInfo), "-");
+	fileInfo[0] = '\0';
+	if (info.bitrateKbps > 0) { sprintf(part, "%d kbps", info.bitrateKbps); AppendInfoPart(fileInfo, sizeof(fileInfo), part); }
+	if (info.channels > 0) AppendInfoPart(fileInfo, sizeof(fileInfo), ch);
+	if (info.sampleRate > 0) { sprintf(part, "%d Hz", info.sampleRate); AppendInfoPart(fileInfo, sizeof(fileInfo), part); }
+	if (info.durationSecs > 0) { char t[8]; FormatTime(info.durationSecs, t); AppendInfoPart(fileInfo, sizeof(fileInfo), t); }
+	if (info.fileSize > 0) { sprintf(part, "%lu KB", kb); AppendInfoPart(fileInfo, sizeof(fileInfo), part); }
+	if (!fileInfo[0]) SafeCopy(fileInfo, sizeof(fileInfo), "-");
 	if (app->titleGad && app->win) SetGadgetAttrs((struct Gadget *)app->titleGad, app->win, NULL, STRINGA_TextVal, (ULONG)(info.title[0] ? info.title : "-"), TAG_DONE);
 	if (app->artistGad && app->win) SetGadgetAttrs((struct Gadget *)app->artistGad, app->win, NULL, STRINGA_TextVal, (ULONG)(info.artist[0] ? info.artist : "-"), TAG_DONE);
 	if (app->albumGad && app->win) SetGadgetAttrs((struct Gadget *)app->albumGad, app->win, NULL, STRINGA_TextVal, (ULONG)(info.album[0] ? info.album : "-"), TAG_DONE);
 	if (app->trackGad && app->win) SetGadgetAttrs((struct Gadget *)app->trackGad, app->win, NULL, STRINGA_TextVal, (ULONG)(info.track[0] ? info.track : "-"), TAG_DONE);
 	if (app->genreGad && app->win) SetGadgetAttrs((struct Gadget *)app->genreGad, app->win, NULL, STRINGA_TextVal, (ULONG)(info.genre[0] ? info.genre : "-"), TAG_DONE);
 	if (app->fileInfoGad && app->win) SetGadgetAttrs((struct Gadget *)app->fileInfoGad, app->win, NULL, STRINGA_TextVal, (ULONG)fileInfo, TAG_DONE);
-	UpdateRatingDisplay(app); UpdateTimeDisplay(app); SetGauge(app, 0); SetStatus(app, "File ready (No art).");
+	UpdateRatingDisplay(app); UpdateTimeDisplay(app); SetGauge(app, 0); UpdateArtwork(app, &info); SetStatus(app, app->artValid ? "File ready." : "File ready (No art).");
+	FreeMp3Info(&info);
 }
 
 static void ApplyHardwareAudioFilter(MrApp *app)
@@ -1592,6 +1895,10 @@ GETFILE_FullFile, (ULONG)app->inputName,
 TAG_DONE);
 }
 
+app->playlistCount = 0;
+app->playlistCurrent = -1;
+RefreshPlaylistView(app);
+UpdateNextButtonState(app);
 RefreshFileInfoAndTags(app);
 }
 }
@@ -1610,6 +1917,11 @@ static void UpdateFileGadget(MrApp *app)
 static void PlaylistNext(MrApp *app)
 {
 	int wasPlaying = app->playbackActive;
+	if (app->playbackDonePending || gPlayer.stopRequested) {
+		SetStatus(app, "Previous playback is still exiting.");
+		UpdateNextButtonState(app);
+		return;
+	}
 	if (app->playlistCount <= 0 || app->playlistCurrent + 1 >= app->playlistCount) {
 		SetStatus(app, "No next playlist item.");
 		return;
@@ -1668,9 +1980,11 @@ static void LoadPlaylistPath(MrApp *app, const char *m3uPath, const char *drawer
 		UpdateFileGadget(app);
 		RefreshFileInfoAndTags(app);
 		RefreshPlaylistView(app);
-		SetStatus(app, "Playlist loaded (No art).");
+		UpdateNextButtonState(app);
+		SetStatus(app, app->artValid ? "Playlist loaded." : "Playlist loaded (No art).");
 	} else {
 		RefreshPlaylistView(app);
+		UpdateNextButtonState(app);
 		SetStatus(app, "Playlist had no playable entries.");
 	}
 }
@@ -1825,6 +2139,7 @@ static void PlaylistLoadCurrent(MrApp *app, int index, int startPlayback)
 	UpdateFileGadget(app);
 	RefreshFileInfoAndTags(app);
 	RefreshPlaylistView(app);
+	UpdateNextButtonState(app);
 	SetStatus(app, "Playlist item selected.");
 	if (startPlayback)
 		StartPlayback(app);
@@ -1899,11 +2214,12 @@ static void HandleMenu(MrApp *app, UWORD code, int *done)
 			}
 			else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_DTP) app->decodeThenPlay = !app->decodeThenPlay;
 			else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_BENCH) app->bench = !app->bench;
-			else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_ARTWORK) { app->artEnabled = !app->artEnabled; SetStatus(app, "No art placeholder."); }
+			else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_ARTWORK) { app->artEnabled = !app->artEnabled; RefreshFileInfoAndTags(app); }
 			else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_ARTCACHE) app->artCacheEnabled = !app->artCacheEnabled;
-			else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_ARTCOLOR) app->artColorEnabled = !app->artColorEnabled;
-			else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_PROGRESS) app->progressEnabled = !app->progressEnabled;
-			else if (mn == MENUNUM_PLAYBACK) SetStatus(app, "Artwork action placeholder (No art).");
+			else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_ARTCOLOR) { app->artColorEnabled = !app->artColorEnabled; DrawArtPanel(app); }
+			else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_PROGRESS) { app->progressEnabled = !app->progressEnabled; SetGauge(app, app->progressEnabled && app->totalSecs > 0 ? (app->elapsedSecs * 100) / app->totalSecs : 0); }
+			else if (mn == MENUNUM_PLAYBACK && (it == ITEMNUM_ARTREFRESH || it == ITEMNUM_ARTRELOAD)) RefreshFileInfoAndTags(app);
+			else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_ARTCLEAN) { app->artValid = 0; DrawArtPanel(app); SetStatus(app, "Artwork cache cleared."); }
 			SyncMenuChecks(app);
 			code = item->NextSelect;
 		} else code = MENUNULL;

@@ -22,7 +22,7 @@ GUI_SOURCES := amiga_mp3gui.c picojpeg.c
 # minimp3r is the ReAction/ClassAct frontend; it pulls amiga_mp3dec.c in itself
 # (like amiga_mp3gui.c) so only the shared decoder modules are listed here.  The
 # ReAction classes are opened at runtime, so no extra linker flag is needed.
-GUIR_SOURCES := minimp3r.c
+GUIR_SOURCES := minimp3r.c picojpeg.c
 
 FAST030_CPPFLAGS := \
 	-DAMIGA_M68K_ASM \
