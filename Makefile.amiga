@@ -11,6 +11,7 @@ STD ?= -std=gnu89
 OPTFLAGS ?= -O2 -fomit-frame-pointer
 TARGET ?= amiga_mp3dec
 GUI_TARGET ?= miniamp3
+GUIR_TARGET ?= minimp3r
 
 CPPFLAGS_COMMON := -Ipub -Ireal -DAMIGA_M68K
 CFLAGS_COMMON := $(CPU) $(STD) $(OPTFLAGS)
@@ -18,6 +19,10 @@ DECODER_SOURCES := mp3dec.c mp3tabs.c $(wildcard real/*.c)
 SOURCES := amiga_mp3dec.c $(DECODER_SOURCES)
 GUI_SOURCES := amiga_mp3gui.c picojpeg.c
 # The GUI uses gadtools.library via proto/gadtools.h; no linker flag is needed.
+# minimp3r is the ReAction/ClassAct frontend; it pulls amiga_mp3dec.c in itself
+# (like amiga_mp3gui.c) so only the shared decoder modules are listed here.  The
+# ReAction classes are opened at runtime, so no extra linker flag is needed.
+GUIR_SOURCES := minimp3r.c
 
 FAST030_CPPFLAGS := \
 	-DAMIGA_M68K_ASM \
@@ -46,7 +51,7 @@ HALFASM_TEST_CPPFLAGS := -DAMIGA_M68K_ASM_FDCT32
 FAST030_ASM_SOURCES := real/amiga_m68k_polyphase.S
 AMIGA_HUNK_FAST_PREFERRED := python3 tools/amiga_fast_preferred_hunks.py
 
-.PHONY: all fast030 prof030 gui fast030-halfasm-test gui-halfasm-test decoder-modules clean print-command print-fast030-command print-gui-command
+.PHONY: all fast030 prof030 gui guir fast030-halfasm-test gui-halfasm-test decoder-modules clean print-command print-fast030-command print-gui-command print-guir-command
 
 all: $(TARGET) decoder-modules
 
@@ -60,6 +65,8 @@ prof030: $(PROF030_TARGET)
 
 gui: $(GUI_TARGET) decoder-modules
 
+guir: $(GUIR_TARGET) decoder-modules
+
 fast030-halfasm-test: $(FAST030_HALFASM_TEST_TARGET)
 
 gui-halfasm-test: $(GUI_HALFASM_TEST_TARGET)
@@ -67,6 +74,14 @@ gui-halfasm-test: $(GUI_HALFASM_TEST_TARGET)
 $(GUI_TARGET): $(GUI_SOURCES) amiga_mp3dec.c $(DECODER_SOURCES) $(FAST030_ASM_SOURCES)
 	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(FAST030_CPPFLAGS) $(EXTRA_CFLAGS) \
 		-o $@ $(GUI_SOURCES) $(DECODER_SOURCES) $(FAST030_ASM_SOURCES)
+	$(AMIGA_HUNK_FAST_PREFERRED) $@
+
+# minimp3r — ReAction/ClassAct frontend.  Built with the same fast030 ASM path
+# as the GadTools GUI since it targets 030+/3.5/3.9 machines.  minimp3r.c
+# #includes amiga_mp3dec.c, so only the shared decoder modules are linked.
+$(GUIR_TARGET): $(GUIR_SOURCES) amiga_mp3dec.c $(DECODER_SOURCES) $(FAST030_ASM_SOURCES)
+	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(FAST030_CPPFLAGS) $(EXTRA_CFLAGS) \
+		-o $@ $(GUIR_SOURCES) $(DECODER_SOURCES) $(FAST030_ASM_SOURCES)
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
 
 $(FAST030_TARGET): $(SOURCES) $(FAST030_ASM_SOURCES)
@@ -98,6 +113,10 @@ print-gui-command:
 	@printf '%s\n' '$(CC) $(CFLAGS_COMMON) $(CPPFLAGS_COMMON) $(EXTRA_CFLAGS) -o $(GUI_TARGET) $(GUI_SOURCES)'
 	@printf '%s\n' '$(AMIGA_HUNK_FAST_PREFERRED) $(GUI_TARGET)'
 
+print-guir-command:
+	@printf '%s\n' '$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(FAST030_CPPFLAGS) $(EXTRA_CFLAGS) -o $(GUIR_TARGET) $(GUIR_SOURCES) $(DECODER_SOURCES) $(FAST030_ASM_SOURCES)'
+	@printf '%s\n' '$(AMIGA_HUNK_FAST_PREFERRED) $(GUIR_TARGET)'
+
 print-fast030-command:
 	@printf '%s\n' '$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(FAST030_CPPFLAGS) $(EXTRA_CFLAGS) -o $(FAST030_TARGET) $(SOURCES) $(FAST030_ASM_SOURCES)'
 	@printf '%s\n' '$(AMIGA_HUNK_FAST_PREFERRED) $(FAST030_TARGET)'
@@ -110,5 +129,5 @@ decoder-modules:
 		CFLAGS="$(CFLAGS_COMMON) $(CPPFLAGS_COMMON) -DHAVE_AMIGA_AUDIO_DEVICE"
 
 clean:
-	rm -f $(TARGET) $(FAST030_TARGET) $(FAST030_HALFASM_TEST_TARGET) $(GUI_TARGET) $(GUI_HALFASM_TEST_TARGET)
+	rm -f $(TARGET) $(FAST030_TARGET) $(FAST030_HALFASM_TEST_TARGET) $(GUI_TARGET) $(GUIR_TARGET) $(GUI_HALFASM_TEST_TARGET)
 	$(MAKE) -C decoders clean
