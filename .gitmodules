@@ -1,3 +1,6 @@
 [submodule "decoders/flac"]
 	path = decoders/flac
 	url = https://github.com/astoeckel/libfoxenflac
+[submodule "decoders/esp8266audio"]
+	path = decoders/esp8266audio
+	url = https://github.com/earlephilhower/ESP8266Audio

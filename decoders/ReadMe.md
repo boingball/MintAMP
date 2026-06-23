@@ -6,7 +6,8 @@ Re-license as LGPLv2.1 or later
 WAV
 
 AAC - https://github.com/earlephilhower/ESP8266Audio/blob/master/src/libhelix-aac/aacdec.c
-LibHelix ACC Decoder
+LibHelix AAC Decoder
+Source: place libhelix-aac files in decoders/aac/ (see Makefile for instructions)
 
 ALAC  - https://github.com/FFmpeg/FFmpeg/blob/master/libavcodec/alac.c
 FFMPEG ALAC
