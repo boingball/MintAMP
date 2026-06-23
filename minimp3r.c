@@ -50,6 +50,13 @@
 #include <libraries/gadtools.h>
 #include <hardware/cia.h>
 
+#define MR_ENV_PREFIX "ENVARC:MiniAMP3"
+#define MR_SETTINGS_VERSION 1
+#if !defined(__AROS__) && !defined(MR_DISABLE_CIA_FILTER)
+#define MR_ENABLE_CIA_FILTER 1
+#endif
+
+
 #include <classes/window.h>
 #include <gadgets/layout.h>
 #include <gadgets/button.h>
@@ -326,6 +333,7 @@ typedef struct MrApp {
 	struct MsgPort   *donePort;
 
 	char  inputName[MR_MAX_PATH];
+	char  lastDrawer[MR_MAX_PATH];
 	char  playlist[MR_PLAYLIST_MAX][MR_MAX_PATH];
 	int   rateIndex;
 	int   qualityIndex;
@@ -363,6 +371,8 @@ typedef struct MrApp {
 static void UpdateTimeDisplay(MrApp *app);
 static void RefreshFileInfoAndTags(MrApp *app);
 static void ApplyHardwareAudioFilter(MrApp *app);
+static void UpdateChannelGadgetState(MrApp *app);
+static void SaveSettings(MrApp *app);
 
 static void SyncMenuChecks(MrApp *app);
 
@@ -399,6 +409,116 @@ static void FormatTime(int secs, char *buf)
 	sprintf(buf, "%02d:%02d", secs / 60, secs % 60);
 }
 
+
+static void CopyDrawerFromPath(char *drawer, size_t drawerSize, const char *path)
+{
+	char *q;
+	if (!drawer || drawerSize == 0) return;
+	drawer[0] = '\0';
+	if (!path || !path[0]) return;
+	SafeCopy(drawer, drawerSize, path);
+	q = drawer + strlen(drawer);
+	while (q > drawer && *q != '/' && *q != ':') q--;
+	if (*q == '/' || *q == ':') *(q + 1) = '\0';
+	else drawer[0] = '\0';
+}
+
+static void EnvName(char *dst, size_t dstSize, const char *key)
+{
+	SafeCopy(dst, dstSize, MR_ENV_PREFIX);
+	strncat(dst, "/", dstSize - strlen(dst) - 1);
+	strncat(dst, key, dstSize - strlen(dst) - 1);
+}
+
+static int LoadEnvIntMaybe(const char *key, int *outValue, int minValue, int maxValue)
+{
+	char name[64], value[32]; long n; int v;
+	if (!outValue) return 0;
+	EnvName(name, sizeof(name), key);
+	n = GetVar((STRPTR)name, (STRPTR)value, sizeof(value) - 1, 0);
+	if (n <= 0) return 0;
+	value[n] = '\0';
+	v = atoi(value);
+	*outValue = ClampInt(v, minValue, maxValue);
+	return 1;
+}
+
+static int LoadEnvInt(const char *key, int fallback, int minValue, int maxValue)
+{
+	int v;
+	return LoadEnvIntMaybe(key, &v, minValue, maxValue) ? v : fallback;
+}
+
+static void LoadEnvString(const char *key, char *dst, size_t dstSize)
+{
+	char name[64]; long n;
+	if (!dst || dstSize == 0) return;
+	EnvName(name, sizeof(name), key);
+	n = GetVar((STRPTR)name, (STRPTR)dst, dstSize - 1, 0);
+	if (n > 0) dst[n] = '\0'; else dst[0] = '\0';
+}
+
+static void SaveEnvString(const char *key, const char *value)
+{
+	char name[64];
+	EnvName(name, sizeof(name), key);
+	if (!value) value = "";
+	SetVar((STRPTR)name, (STRPTR)value, strlen(value), GVF_GLOBAL_ONLY);
+	SetVar((STRPTR)name, (STRPTR)value, strlen(value), GVF_SAVE_VAR);
+}
+
+static void SaveEnvInt(const char *key, int value)
+{
+	char text[16]; sprintf(text, "%d", value); SaveEnvString(key, text);
+}
+
+static void LoadSettings(MrApp *app)
+{
+	app->fastLowrate = LoadEnvInt("FastLowrate", app->fastLowrate, 0, 1);
+	app->superfastLowrate = LoadEnvInt("SuperfastLowrate", app->superfastLowrate, 0, 1);
+	app->fastMem = LoadEnvInt("FastMem", app->fastMem, 0, 1);
+	app->mono = LoadEnvInt("Mono", app->mono, 0, 1);
+	app->fakeStereo = LoadEnvInt("FakeStereo", app->fakeStereo, 0, 1);
+	app->fakeStereoWidthIndex = LoadEnvInt("FakeStereoWidthIndex", app->fakeStereoWidthIndex, 0, 4);
+	app->fakeStereoDelayIndex = LoadEnvInt("FakeStereoDelayIndex", app->fakeStereoDelayIndex, 0, 4);
+	app->hardwareFilter = LoadEnvInt("HardwareFilter", app->hardwareFilter, 0, 1);
+	app->rateIndex = LoadEnvInt("RateIndex", app->rateIndex, 0, MR_RATE_COUNT - 1);
+	app->bufferSeconds = LoadEnvInt("BufferSeconds", app->bufferSeconds, 1, 10);
+	app->volumePercent = LoadEnvInt("Volume", app->volumePercent, 0, 100);
+	app->qualityIndex = LoadEnvInt("QualityIndex", app->qualityIndex, 0, 3);
+	app->decodeThenPlay = LoadEnvInt("DecodeThenPlay", app->decodeThenPlay, 0, 1);
+	app->bench = LoadEnvInt("Bench", app->bench, 0, 1);
+	app->artEnabled = LoadEnvInt("Artwork", app->artEnabled, 0, 1);
+	app->artCacheEnabled = LoadEnvInt("ArtworkCache", app->artCacheEnabled, 0, 1);
+	app->artColorEnabled = LoadEnvInt("ArtworkColour", app->artColorEnabled, 0, 1);
+	app->progressEnabled = LoadEnvInt("ProgressBar", app->progressEnabled, 0, 1);
+	LoadEnvString("LastDrawer", app->lastDrawer, sizeof(app->lastDrawer));
+}
+
+static void SaveSettings(MrApp *app)
+{
+	SaveEnvInt("FastLowrate", app->fastLowrate);
+	SaveEnvInt("SuperfastLowrate", app->superfastLowrate);
+	SaveEnvInt("FastMem", app->fastMem);
+	SaveEnvInt("Mono", app->mono);
+	SaveEnvInt("FakeStereo", app->fakeStereo);
+	SaveEnvInt("FakeStereoWidthIndex", app->fakeStereoWidthIndex);
+	SaveEnvInt("FakeStereoDelayIndex", app->fakeStereoDelayIndex);
+	SaveEnvInt("HardwareFilter", app->hardwareFilter);
+	SaveEnvInt("RateIndex", app->rateIndex);
+	SaveEnvInt("BufferSeconds", ClampInt(app->bufferSeconds, 1, 10));
+	SaveEnvInt("Volume", ClampInt(app->volumePercent, 0, 100));
+	SaveEnvInt("QualityIndex", app->qualityIndex);
+	SaveEnvInt("SettingsVersion", MR_SETTINGS_VERSION);
+	SaveEnvInt("DecodeThenPlay", app->decodeThenPlay);
+	SaveEnvInt("Bench", app->bench);
+	SaveEnvInt("Artwork", app->artEnabled);
+	SaveEnvInt("ArtworkCache", app->artCacheEnabled);
+	SaveEnvInt("ArtworkColour", app->artColorEnabled);
+	SaveEnvInt("ProgressBar", app->progressEnabled);
+	SaveEnvString("LastDrawer", app->lastDrawer);
+}
+
 static void SetStatus(MrApp *app, const char *text)
 {
 	if (app->statusGad && app->win)
@@ -417,6 +537,13 @@ static void SetGauge(MrApp *app, int level)
 		SetGadgetAttrs((struct Gadget *)app->gaugeGad, app->win, NULL,
 			FUELGAUGE_Level, (ULONG)level,
 			TAG_DONE);
+}
+
+static void UpdateChannelGadgetState(MrApp *app)
+{
+	if (app->win && app->channelGad)
+		SetGadgetAttrs((struct Gadget *)app->channelGad, app->win, NULL,
+			GA_Disabled, (ULONG)(app->fakeStereo ? TRUE : FALSE), TAG_DONE);
 }
 
 static void EnablePlayStop(MrApp *app, int playing)
@@ -726,6 +853,7 @@ static void PollPlaybackStatus(MrApp *app)
 	long spareMs;
 	unsigned long halfMs;
 	char buf[96];
+	long audioSecs;
 
 	/* A late done where the child had already vanished before we drained the
 	 * port: finalize now. */
@@ -744,8 +872,11 @@ static void PollPlaybackStatus(MrApp *app)
 
 	if (rate > 0 && frames != app->lastFrames) {
 		app->lastFrames = frames;
-		app->elapsedSecs = (int)((frames * 1152UL) / (unsigned long)rate);
-		if (app->totalSecs > 0 && app->elapsedSecs > app->totalSecs) app->elapsedSecs = app->totalSecs;
+		audioSecs = (long)((frames * 1152UL) / (unsigned long)rate);
+		audioSecs -= halfMs ? (long)((halfMs + 999UL) / 1000UL) : app->bufferSeconds;
+		if (audioSecs < 0) audioSecs = 0;
+		if (app->totalSecs > 0 && audioSecs > app->totalSecs) audioSecs = app->totalSecs;
+		app->elapsedSecs = (int)audioSecs;
 		UpdateTimeDisplay(app);
 		SetGauge(app, (app->progressEnabled && app->totalSecs > 0) ? (app->elapsedSecs * 100) / app->totalSecs : 0);
 	}
@@ -954,6 +1085,7 @@ static int MrOpenWindow(MrApp *app)
 	                GA_RelVerify, TRUE,
 	                CHOOSER_LabelArray, (ULONG)kChannelLabels,
 	                CHOOSER_Selected, (ULONG)(app->mono ? 1 : 0),
+	                GA_Disabled, (ULONG)(app->fakeStereo ? TRUE : FALSE),
 	                TAG_DONE);
 
 	app->volumeGad = (Object *)NewObject(SLIDER_GetClass(), NULL,
@@ -1042,14 +1174,14 @@ static int MrOpenWindow(MrApp *app)
 	app->statusGad = (Object *)NewObject(STRING_GetClass(), NULL,
 	                GA_ReadOnly, TRUE,
 	                STRINGA_TextVal, (ULONG)"Ready.",
-	                STRINGA_MaxChars, 128,
+	                STRINGA_MaxChars, 80,
 	                TAG_DONE);
 
 	app->timeGad = ReadonlyString(GID_TIME, "00:00 / --:--", 32);
-	app->fileInfoGad = ReadonlyString(GID_FILEINFO, "No file info", 128);
-	app->titleGad = ReadonlyString(GID_TITLE, "-", 64);
-	app->artistGad = ReadonlyString(GID_ARTIST, "-", 64);
-	app->albumGad = ReadonlyString(GID_ALBUM, "-", 64);
+	app->fileInfoGad = ReadonlyString(GID_FILEINFO, "No file info", 80);
+	app->titleGad = ReadonlyString(GID_TITLE, "-", 40);
+	app->artistGad = ReadonlyString(GID_ARTIST, "-", 40);
+	app->albumGad = ReadonlyString(GID_ALBUM, "-", 40);
 	app->trackGad = ReadonlyString(GID_TRACK, "-", 16);
 	app->genreGad = ReadonlyString(GID_GENRE, "-", 32);
 	app->ratingGad = ReadonlyString(GID_RATING, "0/5", 16);
@@ -1175,8 +1307,8 @@ static int MrOpenWindow(MrApp *app)
 		WA_SizeGadget, TRUE,
 		WA_IDCMP, IDCMP_GADGETUP | IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
 			IDCMP_IDCMPUPDATE | IDCMP_MENUPICK,
-		WA_Width, 640,
-		WA_Height, 260,
+		WA_Width, 460,
+		WA_Height, 300,
 		WINDOW_Position, WPOS_CENTERSCREEN,
 		WINDOW_ParentGroup, (ULONG)root,
                 TAG_DONE);
@@ -1354,12 +1486,16 @@ static void RefreshFileInfoAndTags(MrApp *app)
 
 static void ApplyHardwareAudioFilter(MrApp *app)
 {
-volatile UBYTE *ciapra = (volatile UBYTE *)0xbfe001;
+#ifdef MR_ENABLE_CIA_FILTER
+	volatile UBYTE *ciapra = (volatile UBYTE *)0xbfe001;
 
-if (app && app->hardwareFilter)
-*ciapra &= (UBYTE)~CIAF_LED;
-else
-*ciapra |= (UBYTE)CIAF_LED;
+	if (app && app->hardwareFilter)
+		*ciapra &= (UBYTE)~CIAF_LED;
+	else
+		*ciapra |= (UBYTE)CIAF_LED;
+#else
+	(void)app;
+#endif
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1376,6 +1512,7 @@ fr = (struct FileRequester *)AllocAslRequestTags(ASL_FileRequest,
 ASLFR_TitleText, (ULONG)"Choose an audio file",
 ASLFR_DoPatterns, TRUE,
 ASLFR_InitialPattern, (ULONG)"#?.(mp3|flac|wav|aif|aiff)",
+ASLFR_InitialDrawer, (ULONG)(app->lastDrawer[0] ? app->lastDrawer : NULL),
 TAG_DONE);
 
 if (!fr) {
@@ -1399,6 +1536,8 @@ return;
 }
 
 SafeCopy(app->inputName, sizeof(app->inputName), path);
+CopyDrawerFromPath(app->lastDrawer, sizeof(app->lastDrawer), app->inputName);
+SaveSettings(app);
 
 if (app->fileGad && app->win) {
 SetGadgetAttrs((struct Gadget *)app->fileGad, app->win, NULL,
@@ -1493,7 +1632,9 @@ static void BrowseForPlaylist(MrApp *app)
 	fr = (struct FileRequester *)AllocAslRequestTags(ASL_FileRequest,
 		ASLFR_TitleText, (ULONG)"Choose an M3U playlist",
 		ASLFR_DoPatterns, TRUE,
-		ASLFR_InitialPattern, (ULONG)"#?.(m3u|m3u8)", TAG_DONE);
+		ASLFR_InitialPattern, (ULONG)"#?.(m3u|m3u8)",
+		ASLFR_InitialDrawer, (ULONG)(app->lastDrawer[0] ? app->lastDrawer : NULL),
+		TAG_DONE);
 	if (!fr) {
 		SetStatus(app, "Could not allocate playlist requester.");
 		return;
@@ -1502,8 +1643,11 @@ static void BrowseForPlaylist(MrApp *app)
 		path[0] = '\0';
 		if (fr->fr_Drawer && fr->fr_Drawer[0])
 			SafeCopy(path, sizeof(path), (const char *)fr->fr_Drawer);
-		if (fr->fr_File && fr->fr_File[0] && AddPart((STRPTR)path, fr->fr_File, sizeof(path)))
+		if (fr->fr_File && fr->fr_File[0] && AddPart((STRPTR)path, fr->fr_File, sizeof(path))) {
+			CopyDrawerFromPath(app->lastDrawer, sizeof(app->lastDrawer), path);
+			SaveSettings(app);
 			LoadPlaylistPath(app, path, (const char *)fr->fr_Drawer);
+		}
 	}
 	FreeAslRequest(fr);
 }
@@ -1596,6 +1740,7 @@ static void SyncFromGadgets(MrApp *app)
 	if (app->widthGad && GetAttr(CHOOSER_Selected, app->widthGad, &v)) {
 		app->fakeStereo = ((int)v > 0);
 		app->fakeStereoWidthIndex = app->fakeStereo ? (int)v - 1 : 0;
+		UpdateChannelGadgetState(app);
 	}
 	if (app->delayGad && GetAttr(CHOOSER_Selected, app->delayGad, &v)) {
 		if ((int)v >= 0 && (int)v < 5)
@@ -1645,6 +1790,8 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
+	LoadSettings(&app);
+
 	app.donePort = CreateMsgPort();
 	if (!app.donePort) {
 		fprintf(stderr, "minimp3r: could not create the reply port.\n");
@@ -1661,6 +1808,8 @@ int main(int argc, char **argv)
 	}
 
 	if (!MrOpenWindow(&app)) {
+		SyncFromGadgets(&app);
+		SaveSettings(&app);
 		MrCloseWindow(&app);
 		CloseTimer(&app);
 		DeleteMsgPort(app.donePort);
@@ -1756,6 +1905,8 @@ int main(int argc, char **argv)
 		HandleDoneSignal(&app);
 	}
 
+	SyncFromGadgets(&app);
+	SaveSettings(&app);
 	MrCloseWindow(&app);
 	CloseTimer(&app);
 	if (app.donePort) {
