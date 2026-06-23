@@ -367,6 +367,12 @@ typedef struct MrApp {
 	int   artCacheEnabled;
 	int   artColorEnabled;
 	int   progressEnabled;
+	int   artCacheBypass;
+	int   artPensBuilt;
+	int   artPenCacheUsed;
+	struct { unsigned long key; long pen; } artPenCache[64];
+	unsigned char artRGBBuf[MR_ART_W * MR_ART_H * 3];
+	unsigned char artPenIdx[MR_ART_W * MR_ART_H];
 	int   playlistCount;
 	int   playlistCurrent;
 	int   playlistSelected;
@@ -389,6 +395,7 @@ typedef struct MrApp {
 
 static void UpdateTimeDisplay(MrApp *app);
 static void RefreshFileInfoAndTags(MrApp *app);
+static void SaveSettings(MrApp *app);
 static void ApplyHardwareAudioFilter(MrApp *app);
 static void UpdateChannelGadgetState(MrApp *app);
 static void UpdateNextButtonState(MrApp *app);
@@ -801,6 +808,9 @@ static void StartPlayback(MrApp *app)
 	app->playbackDonePending = 0;
 	app->stoppedByUser = 0;
 	app->lastPhaseShown = -1;
+	app->elapsedSecs = 0;
+	app->lastFrames = 0;
+	UpdateTimeDisplay(app);
 	EnablePlayStop(app, 1);
 	SetStatus(app, "Starting playback...");
 	SetGauge(app, 0);
@@ -849,7 +859,9 @@ static void FinalizePlayback(MrApp *app)
 	ResetCliParser();
 
 	EnablePlayStop(app, 0);
-	SetGauge(app, stoppedByUser ? 0 : 100);
+	app->elapsedSecs = (stoppedByUser || app->totalSecs <= 0) ? 0 : app->totalSecs;
+	UpdateTimeDisplay(app);
+	SetGauge(app, app->progressEnabled && !stoppedByUser ? 100 : 0);
 	SetStatus(app, stoppedByUser ? "Stopped." : "Finished.");
 	if (app->playlistNextPending) {
 		app->playlistNextPending = 0;
@@ -906,7 +918,7 @@ static void PollPlaybackStatus(MrApp *app)
 	spareMs = gGuiPlaybackStatus.spareMs;
 	halfMs  = gGuiPlaybackStatus.halfBufferMs;
 
-	if (rate > 0 && frames != app->lastFrames) {
+	if (rate > 0 && frames > 0 && frames != app->lastFrames) {
 		app->lastFrames = frames;
 		audioSecs = (long)((frames * 1152UL) / (unsigned long)rate);
 		audioSecs -= halfMs ? (long)((halfMs + 999UL) / 1000UL) : app->bufferSeconds;
@@ -928,8 +940,11 @@ static void PollPlaybackStatus(MrApp *app)
 		SetStatus(app, "Buffering...");
 		break;
 	case GUIPLAY_PHASE_PLAYING:
-		sprintf(buf, "Playing - %lu frames @ %d Hz", frames, rate);
-		SetStatus(app, buf);
+		if (frames > 0 && rate > 0) {
+			sprintf(buf, "Playing - %lu frames @ %d Hz", frames, rate);
+			SetStatus(app, buf);
+		} else
+			SetStatus(app, "Playing...");
 		break;
 	case GUIPLAY_PHASE_UNDERRUN:
 		SetStatus(app, "Playing (buffer low)...");
@@ -1409,6 +1424,10 @@ static int MrOpenWindow(MrApp *app)
 		fprintf(stderr, "minimp3r: could not open the window.\n");
 		return 0;
 	}
+	if (app->bufferGad)
+		SetGadgetAttrs((struct Gadget *)app->bufferGad, app->win, NULL,
+			GA_Disabled, app->decodeThenPlay,
+			TAG_DONE);
 	/* A visual-info handle is needed both to lay the menu strip out (without
 	 * LayoutMenus the items have no size, so the drop-downs never render) and
 	 * to draw the recessed artwork bevel. */
@@ -1737,6 +1756,19 @@ static int MrJpegGreySample(const pjpeg_image_info_t *info, int off)
 	return (int)((77UL * r + 150UL * g + 29UL * b + 128UL) >> 8);
 }
 
+static int MrJpegRgbSample(const pjpeg_image_info_t *info, int off,
+	unsigned char *r, unsigned char *g, unsigned char *b)
+{
+	if (info->m_comps == 1) {
+		*r = *g = *b = info->m_pMCUBufR[off];
+		return (int)*r;
+	}
+	*r = info->m_pMCUBufR[off];
+	*g = info->m_pMCUBufG[off];
+	*b = info->m_pMCUBufB[off];
+	return MrJpegGreySample(info, off);
+}
+
 static int MrMcuSampleOffset(const pjpeg_image_info_t *info, int x, int y)
 {
 	int blockX = x / 8, blockY = y / 8, blocksPerRow = info->m_MCUWidth / 8;
@@ -1744,13 +1776,16 @@ static int MrMcuSampleOffset(const pjpeg_image_info_t *info, int x, int y)
 }
 
 static int DecodeJpegToGrey(const unsigned char *jpegData, unsigned long jpegBytes,
-	unsigned char *greyOut, int outW, int outH, int isPng)
+	unsigned char *greyOut, unsigned char *rgbOut, int outW, int outH, int isPng)
 {
 	pjpeg_image_info_t info;
 	MrPjpegSrc src;
 	unsigned char status;
 	unsigned char xMap[MR_MAX_JPEG_DIM], yMap[MR_MAX_JPEG_DIM];
 	static unsigned long greyAccum[MR_ART_W * MR_ART_H];
+	static unsigned long rAccum[MR_ART_W * MR_ART_H];
+	static unsigned long gAccum[MR_ART_W * MR_ART_H];
+	static unsigned long bAccum[MR_ART_W * MR_ART_H];
 	static unsigned short greyCount[MR_ART_W * MR_ART_H];
 	int mcuIndex, i;
 	if (isPng || !jpegData || jpegBytes <= 4 || !greyOut ||
@@ -1758,7 +1793,12 @@ static int DecodeJpegToGrey(const unsigned char *jpegData, unsigned long jpegByt
 		return -1;
 	src.data = jpegData; src.pos = 0; src.size = jpegBytes;
 	memset(greyOut, 0x80, (size_t)(outW * outH));
+	if (rgbOut)
+		memset(rgbOut, 0x80, (size_t)(outW * outH * 3));
 	memset(greyAccum, 0, sizeof(greyAccum));
+	memset(rAccum, 0, sizeof(rAccum));
+	memset(gAccum, 0, sizeof(gAccum));
+	memset(bAccum, 0, sizeof(bAccum));
 	memset(greyCount, 0, sizeof(greyCount));
 	status = pjpeg_decode_init(&info, MrPjpegCb, &src, 0);
 	if (status != 0 || info.m_width <= 0 || info.m_height <= 0 ||
@@ -1779,24 +1819,190 @@ static int DecodeJpegToGrey(const unsigned char *jpegData, unsigned long jpegByt
 			dstY = yMap[srcY];
 			for (x = 0; x < info.m_MCUWidth; x++) {
 				int srcX = mcuX + x, dst;
+				unsigned char r, g, b;
 				if (srcX >= info.m_width) continue;
 				dst = dstY * outW + xMap[srcX];
-				greyAccum[dst] += (unsigned long)MrJpegGreySample(&info, MrMcuSampleOffset(&info, x, y));
+				greyAccum[dst] += (unsigned long)MrJpegRgbSample(&info, MrMcuSampleOffset(&info, x, y), &r, &g, &b);
+				rAccum[dst] += r; gAccum[dst] += g; bAccum[dst] += b;
 				if (greyCount[dst] != 0xffff) greyCount[dst]++;
 			}
 		}
 	}
 	for (i = 0; i < outW * outH; i++)
-		if (greyCount[i]) greyOut[i] = (unsigned char)((greyAccum[i] + (greyCount[i] / 2)) / greyCount[i]);
+		if (greyCount[i]) {
+			unsigned short c = greyCount[i];
+			greyOut[i] = (unsigned char)((greyAccum[i] + (c / 2)) / c);
+			if (rgbOut) {
+				rgbOut[i * 3    ] = (unsigned char)((rAccum[i] + (c / 2)) / c);
+				rgbOut[i * 3 + 1] = (unsigned char)((gAccum[i] + (c / 2)) / c);
+				rgbOut[i * 3 + 2] = (unsigned char)((bAccum[i] + (c / 2)) / c);
+			}
+		}
 	return 0;
+}
+
+static void ReleaseArtColorPens(MrApp *app)
+{
+	if (app && app->artPensBuilt && app->win) {
+		struct ColorMap *cm = app->win->WScreen->ViewPort.ColorMap;
+		int i;
+		if (cm)
+			for (i = 0; i < app->artPenCacheUsed; i++)
+				if (app->artPenCache[i].pen >= 0)
+					ReleasePen(cm, app->artPenCache[i].pen);
+	}
+	if (app) {
+		app->artPensBuilt = 0;
+		app->artPenCacheUsed = 0;
+	}
+}
+
+static void BuildArtColorPens(MrApp *app)
+{
+	struct ColorMap *cm;
+	int i;
+	ReleaseArtColorPens(app);
+	if (!app || !app->win || !app->artValid)
+		return;
+	cm = app->win->WScreen->ViewPort.ColorMap;
+	if (!cm)
+		return;
+	for (i = 0; i < MR_ART_W * MR_ART_H; i++) {
+		const unsigned char *p = &app->artRGBBuf[i * 3];
+		unsigned long key = ((unsigned long)p[0] << 16) | ((unsigned long)p[1] << 8) | p[2];
+		int j;
+		for (j = 0; j < app->artPenCacheUsed; j++)
+			if (app->artPenCache[j].key == key)
+				break;
+		if (j == app->artPenCacheUsed && app->artPenCacheUsed < 64) {
+			ULONG r32 = (ULONG)p[0] | ((ULONG)p[0] << 8) | ((ULONG)p[0] << 16) | ((ULONG)p[0] << 24);
+			ULONG g32 = (ULONG)p[1] | ((ULONG)p[1] << 8) | ((ULONG)p[1] << 16) | ((ULONG)p[1] << 24);
+			ULONG b32 = (ULONG)p[2] | ((ULONG)p[2] << 8) | ((ULONG)p[2] << 16) | ((ULONG)p[2] << 24);
+			app->artPenCache[j].key = key;
+			app->artPenCache[j].pen = ObtainBestPen(cm, r32, g32, b32,
+				OBP_FailIfBad, (Tag)FALSE, TAG_DONE);
+			app->artPenCacheUsed++;
+		}
+		app->artPenIdx[i] = (unsigned char)j;
+	}
+	app->artPensBuilt = (app->artPenCacheUsed > 0);
+}
+
+static void ArtworkCacheName(MrApp *app, char *dst, size_t dstSize)
+{
+	const char *base;
+	char safe[80];
+	int i, j;
+	EnvName(dst, dstSize, "ArtCache");
+	base = app->inputName + strlen(app->inputName);
+	while (base > app->inputName && base[-1] != '/' && base[-1] != ':')
+		base--;
+	for (i = 0, j = 0; base[i] && j < (int)sizeof(safe) - 1; i++) {
+		unsigned char c = (unsigned char)base[i];
+		if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))
+			safe[j++] = (char)c;
+		else if (c == '.')
+			safe[j++] = '_';
+	}
+	safe[j] = '\0';
+	if (!safe[0])
+		SafeCopy(safe, sizeof(safe), "art");
+	strncat(dst, "/", dstSize - strlen(dst) - 1);
+	strncat(dst, safe, dstSize - strlen(dst) - 1);
+	strncat(dst, ".grey64", dstSize - strlen(dst) - 1);
+}
+
+static int LoadArtworkCache(MrApp *app)
+{
+	char path[MR_MAX_PATH], hdr[8];
+	FILE *f;
+	if (!app->artCacheEnabled || app->artCacheBypass || !app->inputName[0])
+		return 0;
+	ArtworkCacheName(app, path, sizeof(path));
+	f = fopen(path, "rb");
+	if (!f)
+		return 0;
+	if (fread(hdr, 1, sizeof(hdr), f) == sizeof(hdr) &&
+		memcmp(hdr, "M3AG64\0", 7) == 0 && (hdr[7] == 1 || hdr[7] == 2) &&
+		fread(app->artGreyBuf, 1, MR_ART_W * MR_ART_H, f) == MR_ART_W * MR_ART_H) {
+		int i;
+		if (hdr[7] != 2 ||
+			fread(app->artRGBBuf, 1, MR_ART_W * MR_ART_H * 3, f) != MR_ART_W * MR_ART_H * 3)
+			for (i = 0; i < MR_ART_W * MR_ART_H; i++)
+				app->artRGBBuf[i * 3] = app->artRGBBuf[i * 3 + 1] = app->artRGBBuf[i * 3 + 2] = app->artGreyBuf[i];
+		fclose(f);
+		app->artValid = 1;
+		return 1;
+	}
+	fclose(f);
+	return 0;
+}
+
+static void SaveArtworkCache(MrApp *app)
+{
+	char dir[64], path[MR_MAX_PATH];
+	FILE *f;
+	static const unsigned char hdr[8] = { 'M','3','A','G','6','4','\0', 2 };
+	if (!app->artCacheEnabled || !app->inputName[0] || !app->artValid)
+		return;
+	EnvName(dir, sizeof(dir), "ArtCache");
+	CreateDir((STRPTR)dir);
+	ArtworkCacheName(app, path, sizeof(path));
+	f = fopen(path, "wb");
+	if (!f)
+		return;
+	fwrite(hdr, 1, sizeof(hdr), f);
+	fwrite(app->artGreyBuf, 1, MR_ART_W * MR_ART_H, f);
+	fwrite(app->artRGBBuf, 1, MR_ART_W * MR_ART_H * 3, f);
+	fclose(f);
+}
+
+static void CleanArtworkCache(MrApp *app)
+{
+	char dir[64];
+	BPTR lock;
+	struct FileInfoBlock *fib;
+	int removed = 0;
+	EnvName(dir, sizeof(dir), "ArtCache");
+	lock = Lock((STRPTR)dir, ACCESS_READ);
+	if (!lock) { SetStatus(app, "Artwork cache is empty."); return; }
+	fib = (struct FileInfoBlock *)AllocDosObject(DOS_FIB, NULL);
+	if (fib && Examine(lock, fib)) {
+		while (ExNext(lock, fib)) {
+			char path[MR_MAX_PATH];
+			int len = strlen(fib->fib_FileName);
+			if (fib->fib_DirEntryType >= 0 || len < 7 || strcmp(fib->fib_FileName + len - 7, ".grey64") != 0)
+				continue;
+			SafeCopy(path, sizeof(path), dir);
+			strncat(path, "/", sizeof(path) - strlen(path) - 1);
+			strncat(path, fib->fib_FileName, sizeof(path) - strlen(path) - 1);
+			if (DeleteFile((STRPTR)path))
+				removed++;
+		}
+	}
+	if (fib) FreeDosObject(DOS_FIB, fib);
+	UnLock(lock);
+	if (removed) {
+		char msg[64];
+		sprintf(msg, "Removed %d cached artwork file(s).", removed);
+		SetStatus(app, msg);
+	} else
+		SetStatus(app, "No cached artwork files to remove.");
 }
 
 static void UpdateArtwork(MrApp *app, MrMp3Info *info)
 {
+	ReleaseArtColorPens(app);
 	app->artValid = 0;
-	if (app->artEnabled && info && info->artData && info->artBytes > 4 &&
-		DecodeJpegToGrey(info->artData, info->artBytes, app->artGreyBuf, MR_ART_W, MR_ART_H, info->artIsPng) == 0)
+	if (app->artEnabled && LoadArtworkCache(app)) {
+		/* cache hit */
+	} else if (app->artEnabled && info && info->artData && info->artBytes > 4 &&
+		DecodeJpegToGrey(info->artData, info->artBytes, app->artGreyBuf, app->artRGBBuf, MR_ART_W, MR_ART_H, info->artIsPng) == 0) {
 		app->artValid = 1;
+		SaveArtworkCache(app);
+	}
+	if (app->artColorEnabled && app->artValid)
+		BuildArtColorPens(app);
 	/* The panel (frame + thumbnail or "No art") is hand-drawn over the
 	 * placeholder gadget rather than via the button's own text. */
 	DrawArtPanel(app);
@@ -1846,8 +2052,15 @@ static void DrawArtPanel(MrApp *app)
 			int yy = (y * MR_ART_H) / h;
 			for (x = 0; x < w; x++) {
 				int xx = (x * MR_ART_W) / w;
-				int g = app->artGreyBuf[yy * MR_ART_W + xx] + (((int)bayer[yy & 7][xx & 7] - 32) * 3 / 4);
-				SetAPen(rp, (UWORD)pens[g >= 171 ? 2 : (g >= 85 ? 1 : 0)]);
+				int idx = yy * MR_ART_W + xx;
+				if (app->artColorEnabled && app->artPensBuilt &&
+					app->artPenIdx[idx] < app->artPenCacheUsed &&
+					app->artPenCache[app->artPenIdx[idx]].pen >= 0) {
+					SetAPen(rp, (UWORD)app->artPenCache[app->artPenIdx[idx]].pen);
+				} else {
+					int g = app->artGreyBuf[idx] + (((int)bayer[yy & 7][xx & 7] - 32) * 3 / 4);
+					SetAPen(rp, (UWORD)pens[g >= 171 ? 2 : (g >= 85 ? 1 : 0)]);
+				}
 				WritePixel(rp, ox + x, oy + y);
 			}
 		}
@@ -2477,6 +2690,19 @@ static void SyncMenuChecks(MrApp *app)
 	SetMenuItemChecked(app, MENUNUM_PLAYBACK, ITEMNUM_PROGRESS, app->progressEnabled);
 }
 
+static void SetDecodeThenPlay(MrApp *app, int enabled)
+{
+	app->decodeThenPlay = enabled ? 1 : 0;
+	if (app->bufferGad && app->win)
+		SetGadgetAttrs((struct Gadget *)app->bufferGad, app->win, NULL,
+			GA_Disabled, app->decodeThenPlay,
+			TAG_DONE);
+	SetStatus(app, app->decodeThenPlay ?
+		"Decode-then-play enabled; Buffer slider disabled." :
+		"Streaming playback mode enabled.");
+	SaveSettings(app);
+}
+
 static void HandleMenu(MrApp *app, UWORD code, int *done)
 {
 	while (code != MENUNULL) {
@@ -2494,14 +2720,45 @@ static void HandleMenu(MrApp *app, UWORD code, int *done)
 				es.es_GadgetFormat = (UBYTE *)"OK";
 				EasyRequest(app->win, &es, NULL, TAG_DONE);
 			}
-			else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_DTP) app->decodeThenPlay = !app->decodeThenPlay;
-			else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_BENCH) app->bench = !app->bench;
-			else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_ARTWORK) { app->artEnabled = !app->artEnabled; RefreshFileInfoAndTags(app); }
-			else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_ARTCACHE) app->artCacheEnabled = !app->artCacheEnabled;
-			else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_ARTCOLOR) { app->artColorEnabled = !app->artColorEnabled; DrawArtPanel(app); }
-			else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_PROGRESS) { app->progressEnabled = !app->progressEnabled; SetGauge(app, app->progressEnabled && app->totalSecs > 0 ? (app->elapsedSecs * 100) / app->totalSecs : 0); }
-			else if (mn == MENUNUM_PLAYBACK && (it == ITEMNUM_ARTREFRESH || it == ITEMNUM_ARTRELOAD)) RefreshFileInfoAndTags(app);
-			else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_ARTCLEAN) { app->artValid = 0; DrawArtPanel(app); SetStatus(app, "Artwork cache cleared."); }
+			else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_DTP)
+				SetDecodeThenPlay(app, !app->decodeThenPlay);
+			else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_BENCH) {
+				app->bench = !app->bench;
+				SetStatus(app, app->bench ? "Bench mode enabled." : "Bench mode disabled.");
+				SaveSettings(app);
+			} else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_ARTWORK) {
+				app->artEnabled = !app->artEnabled;
+				app->artCacheBypass = 0;
+				RefreshFileInfoAndTags(app);
+				SetStatus(app, app->artEnabled ? (app->artValid ? "Artwork enabled." : "No artwork.") : "Artwork disabled.");
+				SaveSettings(app);
+			} else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_ARTCACHE) {
+				app->artCacheEnabled = !app->artCacheEnabled;
+				SetStatus(app, app->artCacheEnabled ? "Artwork cache enabled." : "Artwork cache disabled.");
+				SaveSettings(app);
+			} else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_ARTCOLOR) {
+				app->artColorEnabled = !app->artColorEnabled;
+				if (app->artColorEnabled && app->artValid) BuildArtColorPens(app);
+				else ReleaseArtColorPens(app);
+				DrawArtPanel(app);
+				SetStatus(app, app->artColorEnabled ? "Colour artwork enabled." : "Colour artwork disabled.");
+				SaveSettings(app);
+			} else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_PROGRESS) {
+				app->progressEnabled = !app->progressEnabled;
+				SetGauge(app, app->progressEnabled && app->totalSecs > 0 ? (app->elapsedSecs * 100) / app->totalSecs : 0);
+				SetStatus(app, app->progressEnabled ? "Progress bar enabled." : "Progress bar disabled.");
+				SaveSettings(app);
+			} else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_ARTREFRESH) {
+				DrawArtPanel(app);
+				SetStatus(app, app->artValid ? "Artwork refreshed." : "No artwork.");
+			} else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_ARTRELOAD) {
+				app->artCacheBypass = 1;
+				RefreshFileInfoAndTags(app);
+				app->artCacheBypass = 0;
+				SetStatus(app, app->artValid ? "Artwork refreshed." : "No artwork.");
+			} else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_ARTCLEAN) {
+				CleanArtworkCache(app);
+			}
 			SyncMenuChecks(app);
 			code = item->NextSelect;
 		} else code = MENUNULL;
