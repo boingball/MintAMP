@@ -1191,18 +1191,22 @@ static int MrOpenWindow(MrApp *app)
 	                TAG_DONE);
 
 	app->timeGad = ReadonlyString(GID_TIME, "00:00 / --:--", 32);
-	app->fileInfoGad = ReadonlyString(GID_FILEINFO, "No file info", 80);
-	app->titleGad = ReadonlyString(GID_TITLE, "-", 40);
-	app->artistGad = ReadonlyString(GID_ARTIST, "-", 40);
-	app->albumGad = ReadonlyString(GID_ALBUM, "-", 40);
-	app->trackGad = ReadonlyString(GID_TRACK, "-", 16);
-	app->genreGad = ReadonlyString(GID_GENRE, "-", 32);
+	app->fileInfoGad = ReadonlyString(GID_FILEINFO, "No file info", 56);
+	app->titleGad = ReadonlyString(GID_TITLE, "-", 32);
+	app->artistGad = ReadonlyString(GID_ARTIST, "-", 28);
+	app->albumGad = ReadonlyString(GID_ALBUM, "-", 32);
+	app->trackGad = ReadonlyString(GID_TRACK, "-", 12);
+	app->genreGad = ReadonlyString(GID_GENRE, "-", 20);
 	app->ratingGad = ReadonlyString(GID_RATING, "0/5", 16);
-	/* ReAction artwork is intentionally visible as a fixed placeholder for now.
-	 * TODO: reuse the GadTools picojpg artwork cache/decode path and draw it
-	 * into this right-hand metadata panel when the ReAction rastport geometry is
-	 * stable enough to share safely. */
-	app->artGad = ReadonlyString(GID_LAST, "No art", 12);
+	/* ReAction artwork render target: keep this as a fixed right-hand box.
+	 * TODO: reuse the GadTools picojpg artwork cache/decode path and render into
+	 * this reserved rectangle when the ReAction rastport geometry is stable. */
+	app->artGad = (Object *)NewObject(BUTTON_GetClass(), NULL,
+	                GA_ID, GID_LAST,
+	                GA_ReadOnly, TRUE,
+	                GA_Disabled, TRUE,
+	                GA_Text, (ULONG)"No art",
+	                TAG_DONE);
 	{ int i; for (i = 0; i < 5; i++) app->starGad[i] = (Object *)NewObject(BUTTON_GetClass(), NULL, GA_ID, GID_STAR1 + i, GA_RelVerify, TRUE, GA_Text, (ULONG)"-", TAG_DONE); }
 
 	if (!CheckGadget(app->fileGad, "file") || !CheckGadget(app->rateGad, "rate") ||
@@ -1230,75 +1234,80 @@ static int MrOpenWindow(MrApp *app)
 
 		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
 			LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
-			ADD_LABELLED(app->fileGad, "Audio file"),
-			ADD_LABELLED(app->artGad, "Artwork"),
-                  TAG_DONE),
+			LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
+				LAYOUT_Orientation, LAYOUT_ORIENT_VERT,
+
+				LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
+					LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
+					ADD_LABELLED(app->fileGad, "File"),
+					TAG_DONE),
+				CHILD_WeightedHeight, 0,
+
+				LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
+					LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
+					ADD_LABELLED(app->titleGad, "Title"),
+					ADD_LABELLED(app->artistGad, "Artist"),
+					TAG_DONE),
+				CHILD_WeightedHeight, 0,
+
+				LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
+					LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
+					ADD_LABELLED(app->albumGad, "Album"),
+					ADD_LABELLED(app->genreGad, "Genre"),
+					TAG_DONE),
+				CHILD_WeightedHeight, 0,
+
+				LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
+					LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
+					ADD_LABELLED(app->ratingGad, "Rating"),
+					ADD_LABELLED(app->trackGad, "Track"),
+					LAYOUT_AddChild, (ULONG)app->starGad[0],
+					LAYOUT_AddChild, (ULONG)app->starGad[1],
+					LAYOUT_AddChild, (ULONG)app->starGad[2],
+					LAYOUT_AddChild, (ULONG)app->starGad[3],
+					LAYOUT_AddChild, (ULONG)app->starGad[4],
+					TAG_DONE),
+				CHILD_WeightedHeight, 0,
+				TAG_DONE),
+			LAYOUT_AddChild, (ULONG)app->artGad,
+			CHILD_MinWidth, 96,
+			CHILD_MinHeight, 96,
+			CHILD_WeightedWidth, 0,
+			TAG_DONE),
 		CHILD_WeightedHeight, 0,
 
 		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
 			LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
-			LAYOUT_EvenSize, TRUE,
-			ADD_LABELLED(app->rateGad, "Output rate"),
-			ADD_LABELLED(app->qualityGad, "Quality"),
-			ADD_LABELLED(app->channelGad, "Channels"),
-                  TAG_DONE),
-		CHILD_WeightedHeight, 0,
-
-		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
-			LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
-			LAYOUT_EvenSize, TRUE,
 			ADD_LABELLED(app->speedGad, "Speed"),
-			ADD_LABELLED(app->widthGad, "Playback mode / width"),
+			ADD_LABELLED(app->widthGad, "Mode/width"),
 			ADD_LABELLED(app->delayGad, "Delay"),
-                  TAG_DONE),
+			TAG_DONE),
 		CHILD_WeightedHeight, 0,
 
 		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
 			LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
-			LAYOUT_EvenSize, TRUE,
-			ADD_LABELLED(app->titleGad, "Title"),
-			ADD_LABELLED(app->artistGad, "Artist"),
-			ADD_LABELLED(app->albumGad, "Album"),
-                  TAG_DONE),
-		CHILD_WeightedHeight, 0,
-
-		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
-			LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
-			LAYOUT_EvenSize, TRUE,
-			ADD_LABELLED(app->trackGad, "Track"),
-			ADD_LABELLED(app->genreGad, "Genre"),
-			ADD_LABELLED(app->ratingGad, "Rating"),
-			LAYOUT_AddChild, (ULONG)app->starGad[0],
-			LAYOUT_AddChild, (ULONG)app->starGad[1],
-			LAYOUT_AddChild, (ULONG)app->starGad[2],
-			LAYOUT_AddChild, (ULONG)app->starGad[3],
-			LAYOUT_AddChild, (ULONG)app->starGad[4],
-                  TAG_DONE),
-		CHILD_WeightedHeight, 0,
-
-		ADD_LABELLED(app->volumeGad, "Volume"),
+			ADD_LABELLED(app->rateGad, "Rate"),
+			ADD_LABELLED(app->qualityGad, "Quality"),
+			ADD_LABELLED(app->channelGad, "Mono/Stereo"),
+			LAYOUT_AddChild, (ULONG)app->fastMemGad,
+			LAYOUT_AddChild, (ULONG)app->fastLowGad,
+			TAG_DONE),
 		CHILD_WeightedHeight, 0,
 
 		ADD_LABELLED(app->bufferGad, "Buffer"),
 		CHILD_WeightedHeight, 0,
-
-		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
-			LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
-			LAYOUT_AddChild, (ULONG)app->fastMemGad,
-			LAYOUT_AddChild, (ULONG)app->fastLowGad,
-                  TAG_DONE),
+		ADD_LABELLED(app->volumeGad, "Volume"),
 		CHILD_WeightedHeight, 0,
 
 		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
 			LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
 			ADD_LABELLED(app->fileInfoGad, "File info"),
 			ADD_LABELLED(app->timeGad, "Time"),
-                  TAG_DONE),
+			TAG_DONE),
 		CHILD_WeightedHeight, 0,
 
 		LAYOUT_AddChild, (ULONG)app->gaugeGad,
 		CHILD_WeightedHeight, 0,
-
 		LAYOUT_AddChild, (ULONG)app->statusGad,
 		CHILD_WeightedHeight, 0,
 
@@ -1310,9 +1319,9 @@ static int MrOpenWindow(MrApp *app)
 			LAYOUT_AddChild, (ULONG)app->stopGad,
 			LAYOUT_AddChild, (ULONG)app->filterGad,
 			LAYOUT_AddChild, (ULONG)app->playlistGad,
-                  TAG_DONE),
+			TAG_DONE),
 		CHILD_WeightedHeight, 0,
-                TAG_DONE);
+		TAG_DONE);
 
         if (!root) {
 		fprintf(stderr, "minimp3r: could not build the gadget layout.\n");
@@ -1329,8 +1338,8 @@ static int MrOpenWindow(MrApp *app)
 		WA_SizeGadget, TRUE,
 		WA_IDCMP, IDCMP_GADGETUP | IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
 			IDCMP_IDCMPUPDATE | IDCMP_MENUPICK,
-		WA_Width, 480,
-		WA_Height, 330,
+		WA_Width, 620,
+		WA_Height, 420,
 		WINDOW_Position, WPOS_CENTERSCREEN,
 		WINDOW_ParentGroup, (ULONG)root,
                 TAG_DONE);
