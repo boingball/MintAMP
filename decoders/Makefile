@@ -108,9 +108,9 @@ flac.decoder: $(FLAC_OBJS) decoder_module.h flac/src/foxen-flac.h
 
 # Exclude SBR files — enabled by default to keep memory footprint small.
 # Remove the filter-out to build with HE-AAC/SBR support.
-# Temporarily exclude TNS for AAC diagnostics.
-AAC_LIB_SRCS := $(filter-out aac/tns.c $(wildcard aac/sbr%.c), $(wildcard aac/*.c))
-AAC_SRCS     := aac_entry.c aac_alloc.c aac_module.c aac_tns_disable.c $(AAC_LIB_SRCS)
+# Exclude SBR files from the AAC module.
+AAC_LIB_SRCS := $(filter-out $(wildcard aac/sbr%.c), $(wildcard aac/*.c))
+AAC_SRCS     := aac_entry.c aac_alloc.c aac_module.c $(AAC_LIB_SRCS)
 AAC_OBJS     := $(AAC_SRCS:.c=.o)
 
 aac: aac.decoder
