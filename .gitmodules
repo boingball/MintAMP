@@ -3,4 +3,4 @@
 	url = https://github.com/astoeckel/libfoxenflac
 [submodule "decoders/esp8266audio"]
 	path = decoders/esp8266audio
-	url = https://github.com/earlephilhower/ESP8266Audio
+	url = https://github.com/boingball/ESP8266Audio.git
