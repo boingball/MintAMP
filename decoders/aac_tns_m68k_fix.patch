@@ -1,0 +1,59 @@
+Patch to apply to decoders/aac/tns.c (the symlinked libhelix-aac source):
+
+- Keep AMIGA_AAC_DISABLE_TNS_TEST as an early return fallback in TNSFilter.
+- Replace the U64 hi32/lo32 accumulator usage in FilterRegion with signed
+  long long scalar Q20 arithmetic. The Arduino libhelix assembly.h declares
+  U64 with little-endian lo32/hi32 field order, so tns.c corrupts sum64 on
+  big-endian m68k when it writes sum64.r.hi32 and sum64.r.lo32 directly.
+- Replace DecodeLPCCoefs' MULSHIFT32 use with an explicit signed 64-bit
+  high-word multiply helper for m68k fixed-point parity.
+- Avoid left-shifting negative 32-bit ints in the Q20 accumulator path; convert
+  the signed 64-bit accumulator back to int by selecting bits [51:20] via an
+  unsigned right shift, then perform the original high-word saturation test.
+
+Suggested code substitutions:
+
+static int TNSMulShift32(int x, int y)
+{
+    return (int)(((long long)x * (long long)y) >> 32);
+}
+
+static int TNSQ20ToInt(long long v)
+{
+    unsigned long long u = (unsigned long long)v;
+    return (int)(u >> FBITS_LPC_COEFS);
+}
+
+static int TNSClipQ20ToInt(long long v)
+{
+    long long hi = v >> 32;
+    int y = TNSQ20ToInt(v);
+
+    if ((hi >> 31) != (hi >> (FBITS_LPC_COEFS - 1)))
+        y = (int)((hi >> 31) ^ 0x7fffffff);
+    return y;
+}
+
+In DecodeLPCCoefs(), change:
+    b[i] = a[i] - (MULSHIFT32(t, a[m - i - 1]) << 1);
+to:
+    b[i] = a[i] - (TNSMulShift32(t, a[m - i - 1]) << 1);
+
+In FilterRegion(), replace the U64 sum64/hi32/lo32 path with:
+    long long sum64;
+    ...
+    y = *audioCoef;
+    sum64 = ((long long)y) << FBITS_LPC_COEFS;
+    for (j = order - 1; j > 0; j--) {
+        sum64 += (long long)hist[j] * (long long)a[j];
+        hist[j] = hist[j - 1];
+    }
+    sum64 += (long long)hist[0] * (long long)a[0];
+    y = TNSClipQ20ToInt(sum64);
+
+At the top of TNSFilter(), keep the fallback:
+#ifdef AMIGA_AAC_DISABLE_TNS_TEST
+    (void)aacDecInfo;
+    (void)ch;
+    return 0;
+#endif
