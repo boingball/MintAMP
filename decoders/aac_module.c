@@ -27,7 +27,7 @@ extern void AacModuleDebug(const char *fmt, ...);
 #define AAC_DEBUG(...) ((void)0)
 #endif
 
-#define AAC_MODULE_BUILD_ID "AAC MODULE BUILD MARKER 12345 rev 3"
+#define AAC_MODULE_BUILD_ID "AAC MODULE CRASH TRACE 20260624"
 
 /* Compressed input ring buffer.  Must hold at least two maximum ADTS frames
  * (AAC_MAINBUF_SIZE = 768*2 = 1536 bytes each) to guarantee AACDecode always
@@ -102,6 +102,7 @@ typedef struct AacState {
     unsigned long  outbufPos;    /* read cursor in shorts */
 
     int  channels;
+    int  sampleRateOut;
     int  errCount;
 
     DecoderReadCb  readFn;
@@ -375,12 +376,16 @@ static int AacPcmBurstCheck(AacState *st, int outputSamps)
  * Decode exactly one AAC frame into st->outbuf.
  * Returns 1 with PCM ready, 0 for EOF, -1 for a recoverable frame error.
  */
-static int AacDecodeFrame(AacState *st)
+static int AacDecodeFrame(AacState *st, int probe)
 {
     int offset, err, frameLen, adtsChannels;
     unsigned char *decodePtr;
     int decodeLeft;
     AACFrameInfo fi;
+
+    fi.outputSamps = 0;
+    fi.nChans = 0;
+    fi.sampRateOut = 0;
 
     if (st->error)
         return -1;
@@ -429,10 +434,20 @@ static int AacDecodeFrame(AacState *st)
 
         decodePtr = st->iobufReadPtr;
         decodeLeft = frameLen;
+        AAC_DEBUG("aac-crash-trace: %s before AACDecode iobufLeft=%ld readOff=%ld bytesLeftBefore=%ld outputSamps=%ld nChans=%ld sampRateOut=%ld\n",
+                  probe ? "probe" : "normal", (long)st->iobufLeft,
+                  (long)(st->iobufReadPtr - st->iobuf), (long)decodeLeft,
+                  (long)fi.outputSamps, (long)fi.nChans,
+                  (long)fi.sampRateOut);
         err = AACDecode(st->aacHandle, &decodePtr, &decodeLeft, st->outbuf);
         st->lastDecodeErr = err;
         st->lastBytesAfter = (unsigned long)(decodeLeft < 0 ? 0 : decodeLeft);
         st->lastInputAfter = (unsigned long)(decodePtr - st->iobuf);
+        AAC_DEBUG("aac-crash-trace: %s after AACDecode iobufLeft=%ld readOff=%ld bytesLeftBefore=%lu bytesLeftAfter=%ld err=%ld outputSamps=%ld nChans=%ld sampRateOut=%ld\n",
+                  probe ? "probe" : "normal", (long)st->iobufLeft,
+                  (long)(st->iobufReadPtr - st->iobuf), st->lastBytesBefore,
+                  (long)decodeLeft, (long)err, (long)fi.outputSamps,
+                  (long)fi.nChans, (long)fi.sampRateOut);
 
         if (err != 0) {
             AAC_DEBUG("aac-debug: decode error err=%ld frameLen=%lu bytesBefore=%lu bytesAfter=%lu consecutiveErrors=%ld\n",
@@ -455,6 +470,11 @@ static int AacDecodeFrame(AacState *st)
         }
 
         AACGetLastFrameInfo(st->aacHandle, &fi);
+        AAC_DEBUG("aac-crash-trace: %s after AACGetLastFrameInfo iobufLeft=%ld readOff=%ld bytesLeftBefore=%lu bytesLeftAfter=%lu err=%ld outputSamps=%ld nChans=%ld sampRateOut=%ld\n",
+                  probe ? "probe" : "normal", (long)st->iobufLeft,
+                  (long)(st->iobufReadPtr - st->iobuf), st->lastBytesBefore,
+                  st->lastBytesAfter, (long)err, (long)fi.outputSamps,
+                  (long)fi.nChans, (long)fi.sampRateOut);
         st->lastSamplesProduced = (unsigned long)(fi.outputSamps > 0 ? fi.outputSamps : 0);
         if (fi.outputSamps <= 0 || (unsigned long)fi.outputSamps > AAC_OUT_CAP ||
             (fi.nChans != 1 && fi.nChans != 2) ||
@@ -483,6 +503,11 @@ static int AacDecodeFrame(AacState *st)
             st->iobufReadPtr = st->iobuf + st->lastInputBefore;
             st->iobufLeft = (int)st->lastBytesBefore;
             st->error = 1;
+            AAC_DEBUG("aac-crash-trace: decode return value=-1 iobufLeft=%ld readOff=%ld bytesLeftBefore=%lu bytesLeftAfter=%lu err=%ld outputSamps=%lu nChans=%ld sampRateOut=%ld\n",
+                      (long)st->iobufLeft, (long)(st->iobufReadPtr - st->iobuf),
+                      st->lastBytesBefore, st->lastBytesAfter,
+                      (long)st->lastDecodeErr, st->lastSamplesProduced,
+                      (long)st->channels, (long)st->sampleRateOut);
             return -1;
         }
 
@@ -502,6 +527,7 @@ static int AacDecodeFrame(AacState *st)
                   st->lastFullScaleCount, (long)st->errCount);
 
         st->channels = fi.nChans;
+        st->sampleRateOut = fi.sampRateOut;
         st->outbufFill = (unsigned long)fi.outputSamps;
         st->outbufPos  = 0;
         return 1;
@@ -514,6 +540,8 @@ static DecHandle AacOpen(DecoderReadCb readFn, DecoderSeekCb seekFn,
     AacState    *st;
     AACFrameInfo fi;
     int          offset, frameLen, adtsChannels;
+
+    AAC_DEBUG("aac-crash-trace: AacOpen entry marker=%s\n", AAC_MODULE_BUILD_ID);
 
     if (!readFn || !infoOut) return NULL;
 
@@ -540,6 +568,10 @@ static DecHandle AacOpen(DecoderReadCb readFn, DecoderSeekCb seekFn,
     /* AACInitDecoder() allocates its internal state via malloc()
      * which is remapped to AacModuleMalloc through the -D flags. */
     st->aacHandle = AACInitDecoder();
+    AAC_DEBUG("aac-crash-trace: after AACInitDecoder handle=0x%lx iobufLeft=%ld readOff=%ld bytesLeftBefore=%lu bytesLeftAfter=%lu err=%ld outputSamps=%ld nChans=%ld sampRateOut=%ld\n",
+              (unsigned long)st->aacHandle, (long)st->iobufLeft,
+              (long)(st->iobufReadPtr - st->iobuf), st->lastBytesBefore,
+              st->lastBytesAfter, (long)st->lastDecodeErr, 0L, 0L, 0L);
     if (!st->aacHandle) { AacFreeState(st); return NULL; }
 
     /* Prime buffer and find first ADTS sync word.  Do not feed MP4/M4A
@@ -562,11 +594,20 @@ static DecHandle AacOpen(DecoderReadCb readFn, DecoderSeekCb seekFn,
     st->lastFrameLen = (unsigned long)frameLen;
 
     /* Decode first frame — probes sample rate, channel count, bit depth. */
-    if (AacDecodeFrame(st) <= 0) {
+    AAC_DEBUG("aac-crash-trace: before first AACDecode/probe iobufLeft=%ld readOff=%ld bytesLeftBefore=%lu bytesLeftAfter=%lu err=%ld outputSamps=%ld nChans=%ld sampRateOut=%ld\n",
+              (long)st->iobufLeft, (long)(st->iobufReadPtr - st->iobuf),
+              st->lastBytesBefore, st->lastBytesAfter,
+              (long)st->lastDecodeErr, 0L, (long)st->channels, (long)st->sampleRateOut);
+    if (AacDecodeFrame(st, 1) <= 0) {
         AacFreeState(st); return NULL;
     }
 
     AACGetLastFrameInfo(st->aacHandle, &fi);
+    AAC_DEBUG("aac-crash-trace: AacOpen after AACGetLastFrameInfo iobufLeft=%ld readOff=%ld bytesLeftBefore=%lu bytesLeftAfter=%lu err=%ld outputSamps=%ld nChans=%ld sampRateOut=%ld\n",
+              (long)st->iobufLeft, (long)(st->iobufReadPtr - st->iobuf),
+              st->lastBytesBefore, st->lastBytesAfter,
+              (long)st->lastDecodeErr, (long)fi.outputSamps,
+              (long)fi.nChans, (long)fi.sampRateOut);
     if (fi.outputSamps <= 0 || (unsigned long)fi.outputSamps > AAC_OUT_CAP ||
         (fi.nChans != 1 && fi.nChans != 2) ||
         fi.sampRateOut < 8000 || fi.sampRateOut > 96000) {
@@ -574,6 +615,7 @@ static DecHandle AacOpen(DecoderReadCb readFn, DecoderSeekCb seekFn,
     }
 
     st->channels = fi.nChans;
+    st->sampleRateOut = fi.sampRateOut;
 
     infoOut->sampleRate    = (DecULong)fi.sampRateOut;
     infoOut->channels      = (unsigned short)fi.nChans;
@@ -591,9 +633,31 @@ static DecLong AacDecode(DecHandle handle, short *outBuf,
     DecULong     produced = 0; /* ABI return value: sample frames per channel */
     unsigned long ch;
 
+    AAC_DEBUG("aac-crash-trace: DecoderOps decode entry iobufLeft=%ld readOff=%ld bytesLeftBefore=%lu bytesLeftAfter=%lu err=%ld outputSamps=%lu nChans=%ld sampRateOut=%ld maxSamplesPerChan=%lu\n",
+              st ? (long)st->iobufLeft : -1L,
+              (st && st->iobufReadPtr && st->iobuf) ? (long)(st->iobufReadPtr - st->iobuf) : -1L,
+              st ? st->lastBytesBefore : 0UL, st ? st->lastBytesAfter : 0UL,
+              st ? (long)st->lastDecodeErr : 0L,
+              st ? st->lastSamplesProduced : 0UL,
+              st ? (long)st->channels : 0L, st ? (long)st->sampleRateOut : 0L, (unsigned long)maxSamplesPerChan);
+
     if (!st || !outBuf || maxSamplesPerChan == 0) return -1;
-    if (st->error) return -1;
-    if (st->done)  return 0;
+    if (st->error) {
+        AAC_DEBUG("aac-crash-trace: decode return value=-1 iobufLeft=%ld readOff=%ld bytesLeftBefore=%lu bytesLeftAfter=%lu err=%ld outputSamps=%lu nChans=%ld sampRateOut=%ld\n",
+                  (long)st->iobufLeft, (long)(st->iobufReadPtr - st->iobuf),
+                  st->lastBytesBefore, st->lastBytesAfter,
+                  (long)st->lastDecodeErr, st->lastSamplesProduced,
+                  (long)st->channels, (long)st->sampleRateOut);
+        return -1;
+    }
+    if (st->done) {
+        AAC_DEBUG("aac-crash-trace: decode return value=0 iobufLeft=%ld readOff=%ld bytesLeftBefore=%lu bytesLeftAfter=%lu err=%ld outputSamps=%lu nChans=%ld sampRateOut=%ld\n",
+                  (long)st->iobufLeft, (long)(st->iobufReadPtr - st->iobuf),
+                  st->lastBytesBefore, st->lastBytesAfter,
+                  (long)st->lastDecodeErr, st->lastSamplesProduced,
+                  (long)st->channels, (long)st->sampleRateOut);
+        return 0;
+    }
 
     ch = (unsigned long)st->channels;
 
@@ -619,18 +683,35 @@ static DecLong AacDecode(DecHandle handle, short *outBuf,
 
         /* Decode the next compressed frame */
         {
-            int rc = AacDecodeFrame(st);
+            int rc = AacDecodeFrame(st, 0);
             if (rc > 0) {
                 st->errCount = 0;
                 continue;
             }
             if (rc == 0) break; /* EOF */
             st->error = 1;
+            AAC_DEBUG("aac-crash-trace: decode return value=-1 iobufLeft=%ld readOff=%ld bytesLeftBefore=%lu bytesLeftAfter=%lu err=%ld outputSamps=%lu nChans=%ld sampRateOut=%ld\n",
+                      (long)st->iobufLeft, (long)(st->iobufReadPtr - st->iobuf),
+                      st->lastBytesBefore, st->lastBytesAfter,
+                      (long)st->lastDecodeErr, st->lastSamplesProduced,
+                      (long)st->channels, (long)st->sampleRateOut);
             return -1;
         }
     }
 
-    if (st->error) return -1;
+    if (st->error) {
+        AAC_DEBUG("aac-crash-trace: decode return value=-1 iobufLeft=%ld readOff=%ld bytesLeftBefore=%lu bytesLeftAfter=%lu err=%ld outputSamps=%lu nChans=%ld sampRateOut=%ld\n",
+                  (long)st->iobufLeft, (long)(st->iobufReadPtr - st->iobuf),
+                  st->lastBytesBefore, st->lastBytesAfter,
+                  (long)st->lastDecodeErr, st->lastSamplesProduced,
+                  (long)st->channels, (long)st->sampleRateOut);
+        return -1;
+    }
+    AAC_DEBUG("aac-crash-trace: decode return value=%ld iobufLeft=%ld readOff=%ld bytesLeftBefore=%lu bytesLeftAfter=%lu err=%ld outputSamps=%lu nChans=%ld sampRateOut=%ld\n",
+              (long)produced, (long)st->iobufLeft,
+              (long)(st->iobufReadPtr - st->iobuf), st->lastBytesBefore,
+              st->lastBytesAfter, (long)st->lastDecodeErr,
+              st->lastSamplesProduced, (long)st->channels, (long)st->sampleRateOut);
     return (DecLong)produced;
 }
 
