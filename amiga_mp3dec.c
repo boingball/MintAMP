@@ -7292,6 +7292,55 @@ static int GenericRateConvertFrame(RateState *rate, const short *in, short *out,
 }
 
 
+static const char *GenericDecoderName(const GenericDecodeStream *gs)
+{
+	if (gs && gs->ops && gs->ops->info && gs->ops->info->name)
+		return gs->ops->info->name;
+	return "unknown";
+}
+
+static void GenericMeasureS16(const short *pcm, long count,
+	short *minOut, short *maxOut)
+{
+	long i;
+	short minSample = 32767;
+	short maxSample = -32768;
+
+	if (!pcm || count <= 0) {
+		*minOut = 0;
+		*maxOut = 0;
+		return;
+	}
+	for (i = 0; i < count; i++) {
+		short sample = pcm[i];
+		if (sample < minSample) minSample = sample;
+		if (sample > maxSample) maxSample = sample;
+	}
+	*minOut = minSample;
+	*maxOut = maxSample;
+}
+
+static void GenericMeasureS8(const signed char *pcm, long count,
+	signed char *minOut, signed char *maxOut)
+{
+	long i;
+	signed char minSample = 127;
+	signed char maxSample = -128;
+
+	if (!pcm || count <= 0) {
+		*minOut = 0;
+		*maxOut = 0;
+		return;
+	}
+	for (i = 0; i < count; i++) {
+		signed char sample = pcm[i];
+		if (sample < minSample) minSample = sample;
+		if (sample > maxSample) maxSample = sample;
+	}
+	*minOut = minSample;
+	*maxOut = maxSample;
+}
+
 static void GenericPrintFirstDecodePcmDebug(const GenericDecodeStream *gs,
 	const DecodeOptions *opt, DecLong moduleFrames)
 {
@@ -7299,43 +7348,25 @@ static void GenericPrintFirstDecodePcmDebug(const GenericDecodeStream *gs,
 	long totalSamples;
 	long calculatedBytes;
 	long i;
-	short minSample = 32767;
-	short maxSample = -32768;
+	short minSample;
+	short maxSample;
 
-	if (!opt->debugDecoder || !gs || moduleFrames <= 0)
+	if ((!opt->debugDecoder && !opt->debugPlay) || !gs || moduleFrames <= 0)
 		return;
 
 	frames = (long)moduleFrames;
 	totalSamples = frames * (long)gs->channels;
 	calculatedBytes = totalSamples * (long)sizeof(short);
-	if (totalSamples <= 0) {
-		minSample = 0;
-		maxSample = 0;
-	} else {
-		for (i = 0; i < totalSamples; i++) {
-			short sample = gs->decodeBuf[i];
-			if (sample < minSample) minSample = sample;
-			if (sample > maxSample) maxSample = sample;
-		}
-	}
+	GenericMeasureS16(gs->decodeBuf, totalSamples, &minSample, &maxSample);
 
 	fprintf(stderr,
-		"generic-debug: first decoded PCM channels=%ld bitsPerSample=%ld moduleFrames=%ld moduleTotalSamples=%ld moduleBytes=%ld calculatedFrames=%ld calculatedBytes=%ld min16=%ld max16=%ld first16=",
-		(long)gs->channels, (long)gs->bitsPerSample, frames, totalSamples, calculatedBytes,
-		frames, calculatedBytes, (long)minSample, (long)maxSample);
+		"generic-debug: first decoded PCM decoder=%s sampleRate=%ld channels=%ld bitsPerSample=%ld moduleReturnFrames=%ld interleavedSamples=%ld pcmBytes=%ld min16=%ld max16=%ld first16=",
+		GenericDecoderName(gs), (long)gs->sampleRate, (long)gs->channels,
+		(long)gs->bitsPerSample, frames, totalSamples, calculatedBytes,
+		(long)minSample, (long)maxSample);
 	for (i = 0; i < 16 && i < totalSamples; i++)
 		fprintf(stderr, "%s%ld", i ? "," : "", (long)gs->decodeBuf[i]);
 	fprintf(stderr, "\n");
-
-	if (gs->ops && gs->ops->info && gs->ops->info->extensions &&
-		StrCaseCmp(gs->ops->info->extensions, "aac") == 0) {
-		fprintf(stderr,
-			"AAC decode: outputSamps=%ld channels=%ld frames=%ld pcmBytes=%ld hostConsumeBytes=%ld\n",
-			totalSamples, (long)gs->channels, frames, calculatedBytes, calculatedBytes);
-		fprintf(stderr,
-			"AAC test: decoded %ld total samples, %ld frames/ch, %ld bytes\n",
-			totalSamples, frames, calculatedBytes);
-	}
 }
 
 static int GenericDecodeStreamFillS8(GenericDecodeStream *gs,
@@ -7457,6 +7488,19 @@ static int GenericDecodeStreamFillS8(GenericDecodeStream *gs,
 			for (i = 0; i < spill; i++)
 				gs->spill.interleaved[i] =
 					Sample16ToS8(gs->writeBuf[direct + i]);
+		}
+		if ((opt->debugDecoder || opt->debugPlay) && !gs->firstFillDebugPrinted && direct > 0) {
+			signed char min8;
+			signed char max8;
+			int j;
+			GenericMeasureS8(dest + produced - direct, direct, &min8, &max8);
+			printf("generic-debug: first S8 output decoder=%s path=mono ioa_Volume=%u period=%u s8Min=%ld s8Max=%ld first16=",
+				GenericDecoderName(gs), (unsigned int)0,
+				(unsigned int)0, (long)min8, (long)max8);
+			for (j = 0; j < 16 && j < direct; j++)
+				printf("%s%ld", j ? "," : "", (long)dest[produced - direct + j]);
+			printf("\n");
+			gs->firstFillDebugPrinted = 1;
 		}
 		if (opt->debugDecoder)
 			printf("generic-debug: mono summary sourceRate=%ld outputRate=%ld sourceFramesDecoded=%ld outputFramesWritten=%ld bytesWrittenThisIteration=%ld totalBytesWritten=%ld ratio=%ld/%ld phase=%lu\n",
@@ -7696,9 +7740,11 @@ static unsigned long GenericDecodeStreamFillPlaybackBuffer(
 	signed char *buf, unsigned long maxBytes)
 {
 	const char *fillPath = opt->stereo ? "planar-s8-stereo" : "interleaved-s8-mono";
-	if (opt->debugDecoder) printf("generic-debug: fill entry bufBytes=%lu sourceChannels=%ld outputStereo=%d outputRate=%ld sourceRate=%ld path=%s\n",
-		maxBytes, (long)gs->channels, opt->stereo ? 1 : 0,
-		(long)opt->outputRate, (long)gs->sampleRate, fillPath);
+	if (opt->debugDecoder || opt->debugPlay) printf("generic-debug: fill entry decoder=%s bufBytes=%lu sourceChannels=%ld outputStereo=%d outputRate=%ld sourceRate=%ld path=%s ioa_Volume=%u period=%u\n",
+		GenericDecoderName(gs), maxBytes, (long)gs->channels, opt->stereo ? 1 : 0,
+		(long)opt->outputRate, (long)gs->sampleRate, fillPath,
+		player ? (unsigned int)player->requestVolume : 0,
+		player ? (unsigned int)player->period : 0);
 	if (gPlaybackInterrupted)
 		return 0;
 	if (opt->stereo) {
@@ -7714,7 +7760,7 @@ static unsigned long GenericDecodeStreamFillPlaybackBuffer(
 			(int)(maxBytes / 2UL));
 		if (gPlaybackInterrupted)
 			return 0;
-		if (opt->debugDecoder) printf("generic-debug: fill return combinedBytes=%lu perChannelBytes=%lu signedness=signed-8 center=0 matches-mp3-Sample16ToS8\n",
+		if (opt->debugDecoder || opt->debugPlay) printf("generic-debug: fill return combinedBytes=%lu perChannelBytes=%lu signedness=signed-8 center=0 matches-mp3-Sample16ToS8\n",
 			(unsigned long)frames * 2UL, (unsigned long)frames);
 		return (unsigned long)frames * 2UL;
 	}

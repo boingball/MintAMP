@@ -348,10 +348,11 @@ static DecHandle FlacOpen(DecoderReadCb readFn, DecoderSeekCb seekFn,
     }
 
     st->channels = (int)nch;
-    /* foxen-flac left-aligns every decoded sample to the int32_t MSB:
-     * stored_value = pcm_sample << (32 - sample_bits).
-     * Right-shift by 16 to recover a signed 16-bit PCM value. */
-    st->shift    = 16;
+    /* fx_flac_process() returns signed PCM sample values in int32_t slots.
+     * Preserve native 16-bit streams instead of shifting them down again; for
+     * wider streams, discard only the extra low-order bits needed to produce
+     * signed 16-bit PCM for the host DecoderOps ABI. */
+    st->shift    = (ss > 16) ? (int)(ss - 16) : 0;
 
     infoOut->sampleRate    = (DecULong)sr;
     infoOut->channels      = (unsigned short)st->channels;
@@ -402,10 +403,8 @@ static DecLong FlacDecode(DecHandle handle, short *outBuf, DecULong maxSamplesPe
             total = take * (unsigned long)ch;
 #if defined(AMIGA_M68K) && defined(__GNUC__)
             /*
-             * On big-endian m68k, int32 >> 16 is the high 16-bit word sitting
-             * at the first two bytes of each int32.  Copy it with a word move
-             * + dbf loop instead of loading the full longword and shifting.
-             * shift is always 16 for FLAC (set in FlacOpen).
+             * Fast path for streams where the selected scale is exactly a
+             * high-word extraction from the int32_t PCM slot.
              */
             if (__builtin_expect(st->shift == 16 && total > 0, 1)) {
                 const int32_t *s = src;
