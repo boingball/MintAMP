@@ -49,12 +49,17 @@ extern void AacModuleDebug(const char *fmt, ...);
 #define AAC_SYNC_SEARCH_GUARD  4
 
 /* White-noise / mis-decode burst detector thresholds (see AacPcmBurstCheck).
- * A garbage frame surfaces as broadband, near-full-scale noise that is several
- * times louder than the surrounding music; these constants keep genuine loud
- * passages and sharp transients from being discarded. */
-#define AAC_GLITCH_ABS_FLOOR   24000UL  /* frame peak must be near full scale  */
-#define AAC_GLITCH_REF_FLOOR    1024UL  /* need an established signal reference */
-#define AAC_GLITCH_RATIO           4UL  /* peak jump vs recent envelope        */
+ * A garbage frame surfaces as broadband, noise-like PCM that is several times
+ * louder than the surrounding music; these constants keep genuine loud passages
+ * and sharp transients from being discarded. */
+#define AAC_GLITCH_ABS_FLOOR   24000UL  /* loud burst: peak near full scale     */
+#define AAC_GLITCH_MOD_FLOOR    6000UL  /* moderate burst: peak floor           */
+#define AAC_GLITCH_REF_FLOOR    1024UL  /* need an established signal reference  */
+#define AAC_GLITCH_RATIO           4UL  /* peak jump vs recent envelope         */
+/* Spectral-flatness gate for moderate bursts, expressed as mean |x[n]-x[n-1]|
+ * over mean |x[n]|, scaled by 256.  White noise sits near 340 (~1.33); tonal
+ * and most percussive music stays well below 1.0, so 320 keeps real audio. */
+#define AAC_GLITCH_HF_RATIO      320UL
 
 #define AAC_ERR_INVALID_FRAME  (-1)
 
@@ -263,10 +268,14 @@ static int AacRefillBuf(AacState *st)
  */
 static int AacPcmBurstCheck(AacState *st, int outputSamps)
 {
-    int i, sample, absSample, peakMin, peakMax;
+    int i, sample, absSample, peakMin, peakMax, prev;
     unsigned long framePeak;
     unsigned long loudCount = 0;        /* samples above quarter scale */
     unsigned long fullScaleCount = 0;   /* samples pinned to the rails */
+    unsigned long sumAbs = 0;           /* Sigma|x[n]|   (frame energy)        */
+    unsigned long sumDiff = 0;          /* Sigma|x[n]-x[n-1]| (HF content)     */
+    unsigned long hfRatio;
+    unsigned long denom;
     unsigned long loudThreshold;
     unsigned long refPeak;
 
@@ -275,14 +284,28 @@ static int AacPcmBurstCheck(AacState *st, int outputSamps)
 
     peakMin = 32767;
     peakMax = -32768;
+    prev = 0;
     for (i = 0; i < outputSamps; i++) {
         sample = st->outbuf[i];
         if (sample < peakMin) peakMin = sample;
         if (sample > peakMax) peakMax = sample;
         absSample = sample < 0 ? -sample : sample;
+        sumAbs += (unsigned long)absSample;
+        if (i > 0) {
+            int d = sample - prev;
+            if (d < 0) d = -d;
+            sumDiff += (unsigned long)d;
+        }
+        prev = sample;
         if (absSample > 8192) loudCount++;
         if (sample <= -32760 || sample >= 32760) fullScaleCount++;
     }
+
+    /* Spectral-flatness proxy, scaled by 256.  Divide energy down first so the
+     * intermediate products cannot overflow a 32-bit unsigned long. */
+    denom = sumAbs >> 8;
+    if (denom == 0) denom = 1;
+    hfRatio = sumDiff / denom;
 
     framePeak = (unsigned long)(peakMax > 0 ? peakMax : 0);
     if (peakMin < 0 && (unsigned long)(-peakMin) > framePeak)
@@ -317,9 +340,25 @@ static int AacPcmBurstCheck(AacState *st, int outputSamps)
         framePeak >= AAC_GLITCH_ABS_FLOOR &&
         refPeak >= AAC_GLITCH_REF_FLOOR &&
         framePeak > refPeak * AAC_GLITCH_RATIO) {
-        AAC_DEBUG("aac-debug: dropped white-noise burst frameLen=%lu outputSamps=%ld framePeak=%lu recentPeak=%lu loud=%lu/%lu fullScale=%lu\n",
+        AAC_DEBUG("aac-debug: dropped loud burst frameLen=%lu outputSamps=%ld framePeak=%lu recentPeak=%lu loud=%lu/%lu fullScale=%lu\n",
                   st->lastFrameLen, (long)outputSamps, framePeak, refPeak,
                   loudCount, loudThreshold, fullScaleCount);
+        return 0;
+    }
+
+    /*
+     * Moderate glitch: a noise-like frame that jumps well above a quiet passage.
+     * These are the residual white-noise clicks that are inaudible under loud
+     * music but obvious in quiet sections.  The spectral-flatness gate keeps
+     * tonal and percussive transients (which are not noise-like) intact.
+     */
+    if (framePeak >= AAC_GLITCH_MOD_FLOOR &&
+        refPeak >= AAC_GLITCH_REF_FLOOR &&
+        framePeak > refPeak * AAC_GLITCH_RATIO &&
+        hfRatio >= AAC_GLITCH_HF_RATIO) {
+        AAC_DEBUG("aac-debug: dropped noise burst frameLen=%lu outputSamps=%ld framePeak=%lu recentPeak=%lu hfRatio=%lu\n",
+                  st->lastFrameLen, (long)outputSamps, framePeak, refPeak,
+                  hfRatio);
         return 0;
     }
 
