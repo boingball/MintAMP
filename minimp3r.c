@@ -1214,7 +1214,8 @@ static void PollPlaybackStatus(MrApp *app)
 	spareMs = gGuiPlaybackStatus.spareMs;
 	halfMs  = gGuiPlaybackStatus.halfBufferMs;
 
-	if (rate > 0 && frames > 0 && frames != app->lastFrames &&
+	if (!MrIsRadioInput(app->inputName) && rate > 0 && frames > 0 &&
+		frames != app->lastFrames &&
 		(app->lastTimeTick == 0 || tick - app->lastTimeTick >= MR_TIME_TICKS)) {
 		app->lastFrames = frames;
 		app->lastTimeTick = tick;
@@ -2427,11 +2428,7 @@ static void UpdateTimeDisplay(MrApp *app)
 {
 	char e[8], t[8], buf[24];
 	if (MrIsRadioInput(app->inputName)) {
-		if (app->elapsedSecs > 0) {
-			FormatTime(app->elapsedSecs, e);
-			sprintf(buf, "%s / Live", e);
-		} else
-			sprintf(buf, "Live / Live");
+		sprintf(buf, "Live");
 	} else {
 		FormatTime(app->elapsedSecs, e); FormatTime(app->totalSecs > 0 ? app->totalSecs : -1, t);
 		sprintf(buf, "%s / %s", e, t);
