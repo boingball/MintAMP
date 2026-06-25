@@ -16,7 +16,7 @@
 #include "aac_alloc.h"
 #include "aac/aacdec.h"
 
-#define AAC_MODULE_BUILD_ID "AAC MODULE BUILD MARKER 12345 rev 2 AAC MODULE CRASH TRACE SHELL 20260624"
+#define AAC_MODULE_BUILD_ID "AAC MODULE BUILD MARKER 12345 rev 3"
 
 /* Compressed input ring buffer.  Must hold at least two maximum ADTS frames
  * (AAC_MAINBUF_SIZE = 768*2 = 1536 bytes each) to guarantee AACDecode always
@@ -103,7 +103,9 @@ typedef struct AacState {
 
 static int AacRefillBuf(AacState *st);
 
-#define AAC_TRACE_MARKER "AAC MODULE CRASH TRACE SHELL 20260624"
+#ifdef AAC_MODULE_DEBUG
+#define AAC_TRACE_MARKER "AAC MODULE DEBUG TRACE"
+#endif
 
 #ifdef HAVE_AMIGA_AUDIO_DEVICE
 static void *gAacTraceExec;
@@ -229,52 +231,13 @@ static void AacTraceAppendFieldL(char *buf, unsigned long *pos, unsigned long ca
 static void AacTracePoint(AacState *st, const char *point, long err,
                           const AACFrameInfo *fi, long decodeReturn)
 {
-    char line[320];
-    unsigned long pos = 0;
-    unsigned long readOff = 0;
-    unsigned long bytesBefore = 0;
-    unsigned long bytesAfter = 0;
-    unsigned long outputSamps = 0;
-    long nChans = 0;
-    long sampRateOut = 0;
-
-    if (st && st->iobuf && st->iobufReadPtr)
-        readOff = (unsigned long)(st->iobufReadPtr - st->iobuf);
-    if (st) {
-        bytesBefore = st->lastBytesBefore;
-        bytesAfter = st->lastBytesAfter;
-    }
-    if (fi) {
-        outputSamps = (unsigned long)(fi->outputSamps < 0 ? 0 : fi->outputSamps);
-        nChans = fi->nChans;
-        sampRateOut = fi->sampRateOut;
-    }
-
-    AacTraceInit();
-    AacTraceAppendStr(line, &pos, sizeof(line), AAC_TRACE_MARKER);
-    AacTraceAppendChar(line, &pos, sizeof(line), ' ');
-    AacTraceAppendStr(line, &pos, sizeof(line), point);
-    AacTraceAppendFieldL(line, &pos, sizeof(line), "iobufLeft", st ? st->iobufLeft : -1);
-    AacTraceAppendFieldUL(line, &pos, sizeof(line), "readOff", readOff);
-    AacTraceAppendFieldUL(line, &pos, sizeof(line), "bytesBefore", bytesBefore);
-    AacTraceAppendFieldUL(line, &pos, sizeof(line), "bytesAfter", bytesAfter);
-    AacTraceAppendFieldL(line, &pos, sizeof(line), "aacErr", err);
-    AacTraceAppendFieldUL(line, &pos, sizeof(line), "outputSamps", outputSamps);
-    AacTraceAppendFieldL(line, &pos, sizeof(line), "nChans", nChans);
-    AacTraceAppendFieldL(line, &pos, sizeof(line), "sampRateOut", sampRateOut);
-    AacTraceAppendFieldUL(line, &pos, sizeof(line), "outbufFill", st ? st->outbufFill : 0);
-    AacTraceAppendFieldUL(line, &pos, sizeof(line), "outbufPos", st ? st->outbufPos : 0);
-    AacTraceAppendFieldUL(line, &pos, sizeof(line), "decodeErrors", st ? st->totalDecodeErrors : 0);
-    AacTraceAppendFieldUL(line, &pos, sizeof(line), "resyncs", st ? st->totalResyncs : 0);
-    AacTraceAppendFieldUL(line, &pos, sizeof(line), "invalidFrames", st ? st->totalInvalidFrames : 0);
-    AacTraceAppendFieldL(line, &pos, sizeof(line), "decodeRet", decodeReturn);
-    AacTraceAppendChar(line, &pos, sizeof(line), '\n');
-#ifdef HAVE_AMIGA_AUDIO_DEVICE
-    AacTraceWrite(AacTraceOutput(), line, pos);
-#else
-    (void)line; (void)pos;
-#endif
+    (void)st;
+    (void)point;
+    (void)err;
+    (void)fi;
+    (void)decodeReturn;
 }
+
 
 
 static int AacValidateAdtsHeader(const unsigned char *p, int n)

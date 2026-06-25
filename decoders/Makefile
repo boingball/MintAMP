@@ -120,6 +120,14 @@ AAC_SHIM_DIR := aac-arduino-shim
 
 AAC_CFLAGS := $(CFLAGS) -I. -I$(AAC_SHIM_DIR) -Iaac -DARDUINO
 
+ifeq ($(AACASM),1)
+AAC_CFLAGS += \
+  -DAMIGA_M68K_ASM_AAC_HUFFMAN \
+  -DAMIGA_M68K_ASM_AAC_DEQUANT \
+  -DAMIGA_M68K_ASM_AAC_STEREO \
+  -DAMIGA_M68K_ASM_AAC_IMDCT
+endif
+
 aac_entry.o aac_alloc.o aac_module.o: decoder_module.h
 aac_alloc.o aac_module.o: aac_alloc.h
 aac_module.o: aac/aacdec.h
