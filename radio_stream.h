@@ -5,6 +5,16 @@
 #define ENABLE_RADIO 0
 #endif
 
+#ifndef RADIO_DEBUG_STOP
+#define RADIO_DEBUG_STOP 0
+#endif
+#if RADIO_DEBUG_STOP
+#include <stdio.h>
+#define RADIO_STOP_DEBUG_PRINTF(x) do { printf x; } while (0)
+#else
+#define RADIO_STOP_DEBUG_PRINTF(x) do { } while (0)
+#endif
+
 typedef struct RadioStream RadioStream;
 
 typedef enum {
@@ -13,11 +23,14 @@ typedef enum {
     RADIO_STATUS_BUFFERING,
     RADIO_STATUS_PLAYING,
     RADIO_STATUS_RECONNECTING,
+    RADIO_STATUS_STOPPING,
+    RADIO_STATUS_CLOSED,
     RADIO_STATUS_ERROR
 } RadioStatus;
 
 #if ENABLE_RADIO
 RadioStream *Radio_Open(const char *url);
+void Radio_RequestStop(RadioStream *rs);
 void Radio_Close(RadioStream *rs);
 int Radio_Pump(RadioStream *rs);
 int Radio_ReadAudio(RadioStream *rs, unsigned char *buf, int maxBytes);
@@ -34,10 +47,11 @@ int Radio_GetBufferedBytes(RadioStream *rs);
 const char *Radio_StatusText(RadioStatus status);
 #else
 static RadioStream *Radio_Open(const char *url) { (void)url; return (RadioStream *)0; }
+static void Radio_RequestStop(RadioStream *rs) { (void)rs; }
 static void Radio_Close(RadioStream *rs) { (void)rs; }
 static int Radio_Pump(RadioStream *rs) { (void)rs; return -1; }
 static int Radio_ReadAudio(RadioStream *rs, unsigned char *buf, int maxBytes) { (void)rs; (void)buf; (void)maxBytes; return 0; }
-static RadioStatus Radio_GetStatus(RadioStream *rs) { (void)rs; return RADIO_STATUS_ERROR; }
+static RadioStatus Radio_GetStatus(RadioStream *rs) { (void)rs; return RADIO_STATUS_IDLE; }
 static const char *Radio_GetTitle(RadioStream *rs) { (void)rs; return ""; }
 static const char *Radio_GetStationName(RadioStream *rs) { (void)rs; return ""; }
 static const char *Radio_GetGenre(RadioStream *rs) { (void)rs; return ""; }
@@ -54,6 +68,8 @@ static const char *Radio_StatusText(RadioStatus status)
     case RADIO_STATUS_BUFFERING: return "Buffering";
     case RADIO_STATUS_PLAYING: return "Playing";
     case RADIO_STATUS_RECONNECTING: return "Reconnecting";
+    case RADIO_STATUS_STOPPING: return "Stopping";
+    case RADIO_STATUS_CLOSED: return "Closed";
     case RADIO_STATUS_ERROR: return "Error";
     default: return "Idle";
     }

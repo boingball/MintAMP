@@ -391,6 +391,7 @@ static void InputSourceInitAmigaDos(InputSource *input, BPTR amigaFile);
 #endif
 static int InputSourcePrepareMp3(InputSource *input);
 static void GuiPublishRadioMetadata(RadioStream *radio);
+static void GuiMarkRadioStopped(void);
 
 typedef struct DecodeStats {
 	unsigned long decodedFrames;
@@ -1558,13 +1559,20 @@ static void InputSourceInitAmigaDos(InputSource *input, BPTR amigaFile)
 
 static void InputSourceClose(InputSource *input)
 {
+	if (!input)
+		return;
+#if ENABLE_RADIO
+	RADIO_STOP_DEBUG_PRINTF(("radio-stop: InputSourceClose entered\n"));
+#endif
 	FreeFastInputMemory(input->memory, input->memorySize);
 	input->memory = NULL;
 	input->memorySize = 0;
 	input->memoryPos = 0;
 	if (input->radio) {
+		Radio_RequestStop(input->radio);
 		Radio_Close(input->radio);
 		input->radio = NULL;
+		GuiMarkRadioStopped();
 	}
 #ifdef HAVE_AMIGA_AUDIO_DEVICE
 	if (input->useAmigaDos && input->amigaFile) {
@@ -1572,6 +1580,9 @@ static void InputSourceClose(InputSource *input)
 		input->amigaFile = (BPTR)0;
 	}
 	input->useAmigaDos = 0;
+#endif
+#if ENABLE_RADIO
+	RADIO_STOP_DEBUG_PRINTF(("radio-stop: InputSourceClose exited\n"));
 #endif
 }
 
@@ -1587,10 +1598,23 @@ static void CloseInputFile(FILE **file, int debugCleanup)
 
 static size_t InputSourceRead(InputSource *input, void *dest, size_t bytes)
 {
-	if (input->radio) {
-		size_t got = (size_t)Radio_ReadAudio(input->radio, (unsigned char *)dest, (int)bytes);
-		GuiPublishRadioMetadata(input->radio);
-		return got;
+	if (input && input->radio) {
+		RadioStatus status;
+		if (gPlaybackInterrupted) {
+			Radio_RequestStop(input->radio);
+			GuiMarkRadioStopped();
+			return 0;
+		}
+		status = Radio_GetStatus(input->radio);
+		if (status == RADIO_STATUS_STOPPING || status == RADIO_STATUS_CLOSED)
+			return 0;
+		{
+			size_t got = (size_t)Radio_ReadAudio(input->radio, (unsigned char *)dest, (int)bytes);
+			status = Radio_GetStatus(input->radio);
+			if (status != RADIO_STATUS_STOPPING && status != RADIO_STATUS_CLOSED)
+				GuiPublishRadioMetadata(input->radio);
+			return got;
+		}
 	}
 	if (input->memory) {
 		unsigned long available;
@@ -5439,6 +5463,15 @@ static void GuiPublishRadioMetadata(RadioStream *radio)
 	GuiCopyVolatileString(gGuiPlaybackStatus.radioGenre, sizeof(gGuiPlaybackStatus.radioGenre), Radio_GetGenre(radio));
 	GuiCopyVolatileString(gGuiPlaybackStatus.radioStreamUrl, sizeof(gGuiPlaybackStatus.radioStreamUrl), Radio_GetStreamUrl(radio));
 	GuiCopyVolatileString(gGuiPlaybackStatus.radioContentType, sizeof(gGuiPlaybackStatus.radioContentType), Radio_GetContentType(radio));
+}
+
+static void GuiMarkRadioStopped(void)
+{
+	gGuiPlaybackStatus.radioActive = 0;
+	gGuiPlaybackStatus.radioStatus = (int)RADIO_STATUS_CLOSED;
+	gGuiPlaybackStatus.radioBufferedBytes = 0;
+	gGuiPlaybackStatus.radioMetaInt = 0;
+	/* Keep the copied metadata stable for the stopped GUI state; it is GUI-owned. */
 }
 
 #define GUIPLAY_PHASE_IDLE      0   /* not playing */

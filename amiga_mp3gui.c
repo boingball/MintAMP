@@ -3153,7 +3153,9 @@ static void HandleTimerSignal(HelixAmp3Gui *gui)
 		unsigned long halfBufferMs = gGuiPlaybackStatus.halfBufferMs;
 		int phaseChanged = (phase != gui->lastDisplayedPhase);
 
-		if (IsRadioInputName(gui->inputName) && gGuiPlaybackStatus.radioActive)
+		if (IsRadioInputName(gui->inputName) && gGuiPlaybackStatus.radioActive &&
+			gGuiPlaybackStatus.radioStatus != RADIO_STATUS_STOPPING &&
+			gGuiPlaybackStatus.radioStatus != RADIO_STATUS_CLOSED)
 			UpdateRadioTagDisplay(gui);
 
 		if (phaseChanged)
@@ -5330,6 +5332,12 @@ static void StopPlayback(HelixAmp3Gui *gui)
 	}
 	gGuiPlayer.stopRequested = 1;
 	gPlaybackInterrupted = 1;
+	if (IsRadioInputName(gui->inputName)) {
+		gGuiPlaybackStatus.radioStatus = (int)RADIO_STATUS_STOPPING;
+		gGuiPlaybackStatus.radioActive = 0;
+		gGuiPlaybackStatus.radioBufferedBytes = 0;
+		RADIO_STOP_DEBUG_PRINTF(("radio-stop: GUI radio pointer cleared\n"));
+	}
 	/* Wake the playback subprocess immediately so it does not sit in WaitIO
 	 * for the remainder of a multi-second audio buffer.
 	 * Use Forbid/FindTask/Signal/Permit to avoid AN_SignalError: if the child
