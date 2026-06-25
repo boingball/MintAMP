@@ -16,11 +16,18 @@
 
 #if defined(AMIGA_M68K)
 #include <exec/types.h>
+#include <exec/libraries.h>
 #include <proto/exec.h>
 #include <proto/bsdsocket.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netdb.h>
+
+/* Required by Amiga bsdsocket inline/proto stubs.
+ * Must be global, not static, and not inside a function.
+ */
+struct Library *SocketBase = NULL;
+
 #define RADIO_SOCKET long
 #define RADIO_INVALID_SOCKET (-1)
 #define radio_close_socket(s) CloseSocket(s)
@@ -31,6 +38,7 @@
 #include <netinet/in.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+
 #define RADIO_SOCKET int
 #define RADIO_INVALID_SOCKET (-1)
 #define radio_close_socket(s) close(s)
@@ -57,7 +65,7 @@ static int parse_url(RadioStream *rs,const char *url){ const char *p,*slash,*col
 static int connect_http(RadioStream *rs){
     struct hostent *he; struct sockaddr_in sa; char req[512]; int n;
 #if defined(AMIGA_M68K)
-    static struct Library *SocketBase; if(!SocketBase) SocketBase=OpenLibrary("bsdsocket.library",4); if(!SocketBase){ set_error(rs,"bsdsocket.library unavailable"); return -1; }
+    if(!SocketBase) SocketBase=OpenLibrary("bsdsocket.library",4); if(!SocketBase){ set_error(rs,"bsdsocket.library unavailable"); return -1; }
 #endif
     he=gethostbyname(rs->host); if(!he){ set_error(rs,"cannot resolve stream host"); return -1; }
     rs->sock=socket(AF_INET,SOCK_STREAM,0); if(rs->sock==RADIO_INVALID_SOCKET){ set_error(rs,"cannot create socket"); return -1; }
