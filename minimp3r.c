@@ -406,6 +406,7 @@ typedef struct MrApp {
 	char  shownFileInfo[128];
 	char  shownStatus[128];
 	int   albumHover;
+	int   albumScrollPos;
 } MrApp;
 
 static void UpdateTimeDisplay(MrApp *app);
@@ -610,6 +611,8 @@ static int PointInGadget(struct Gadget *gad, int x, int y)
 		x < gad->LeftEdge + gad->Width && y < gad->TopEdge + gad->Height;
 }
 
+#define MR_ALBUM_SCROLL_VISIBLE_CHARS 34
+
 static void UpdateAlbumHover(MrApp *app)
 {
 	int over;
@@ -619,6 +622,9 @@ static void UpdateAlbumHover(MrApp *app)
 	if (over == app->albumHover)
 		return;
 	app->albumHover = over;
+	app->albumScrollPos = 0;
+	SetGadgetAttrs((struct Gadget *)app->albumGad, app->win, NULL,
+		STRINGA_DispPos, 0, TAG_DONE);
 	if (over && app->shownAlbum[0] && strcmp(app->shownAlbum, "-")) {
 		char buf[128];
 		SafeCopy(buf, sizeof(buf), "Album: " );
@@ -626,6 +632,22 @@ static void UpdateAlbumHover(MrApp *app)
 		SetStatus(app, buf);
 	}
 }
+
+static void ScrollAlbumHover(MrApp *app)
+{
+	int maxPos;
+	if (!app || !app->win || !app->albumGad || !app->albumHover)
+		return;
+	if (strlen(app->shownAlbum) <= MR_ALBUM_SCROLL_VISIBLE_CHARS)
+		return;
+	maxPos = (int)strlen(app->shownAlbum) - MR_ALBUM_SCROLL_VISIBLE_CHARS;
+	app->albumScrollPos++;
+	if (app->albumScrollPos > maxPos)
+		app->albumScrollPos = 0;
+	SetGadgetAttrs((struct Gadget *)app->albumGad, app->win, NULL,
+		STRINGA_DispPos, (ULONG)app->albumScrollPos, TAG_DONE);
+}
+
 
 static int MrIsRadioInput(const char *name)
 {
@@ -661,7 +683,6 @@ static void MrSetRadioMetadata(MrApp *app)
 	MrCopyVolatileString(station, sizeof(station), gGuiPlaybackStatus.radioStationName);
 	MrCopyVolatileString(genre, sizeof(genre), gGuiPlaybackStatus.radioGenre);
 	MrCopyVolatileString(contentType, sizeof(contentType), gGuiPlaybackStatus.radioContentType);
-	if (app->fileGad && app->win) SetGadgetAttrs((struct Gadget *)app->fileGad, app->win, NULL, GETFILE_FullFile, (ULONG)app->inputName, TAG_DONE);
 	MrSplitStreamTitle(streamTitle, artist, sizeof(artist), title, sizeof(title));
 	if (gGuiPlaybackStatus.radioBitrateKbps > 0)
 		sprintf(fileInfo, "Internet Radio MP3, %d kbps, %s", gGuiPlaybackStatus.radioBitrateKbps, contentType[0] ? contentType : "audio/mpeg");
@@ -1056,7 +1077,7 @@ static void PollPlaybackStatus(MrApp *app)
 	if (!app->playbackActive)
 		return;
 
-	if (MrIsRadioInput(app->inputName) && gGuiPlaybackStatus.radioActive &&
+	if (MrIsRadioInput(app->inputName) &&
 		gGuiPlaybackStatus.radioStatus != RADIO_STATUS_STOPPING &&
 		gGuiPlaybackStatus.radioStatus != RADIO_STATUS_CLOSED)
 		MrSetRadioMetadata(app);
@@ -1242,6 +1263,7 @@ static Object *ReadonlyString(ULONG id, const char *text, ULONG max)
 {
 	return (Object *)NewObject(STRING_GetClass(), NULL,
 		GA_ID, id, GA_ReadOnly, TRUE, STRINGA_TextVal, (ULONG)text,
+		STRINGA_DispPos, 0,
 		STRINGA_MaxChars, max, TAG_DONE);
 }
 
@@ -3121,6 +3143,8 @@ int main(int argc, char **argv)
 				;
 			app.timerRunning = 0;
 			PollPlaybackStatus(&app);
+			UpdateAlbumHover(&app);
+			ScrollAlbumHover(&app);
 			ArmTimer(&app, MR_TICK_MICROS);
 		}
 
@@ -3184,9 +3208,9 @@ int main(int argc, char **argv)
 				if (done)
 					break;
 			}
-			/* Keep hover handling cheap: only the status line changes when the
-			 * pointer enters the Album field, and SetReadonlyString() ignores
-			 * identical text so mouse movement cannot trigger repaint storms. */
+			/* Mouse movement only updates the Album hover state.  The timer handles
+			 * the slow text scrolling so normal pointer motion cannot repaint the
+			 * metadata gadgets continuously. */
 			UpdateAlbumHover(&app);
 		}
 	}
