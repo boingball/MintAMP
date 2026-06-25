@@ -1569,10 +1569,11 @@ static void InputSourceClose(InputSource *input)
 	input->memorySize = 0;
 	input->memoryPos = 0;
 	if (input->radio) {
-		Radio_RequestStop(input->radio);
-		Radio_Close(input->radio);
+		RadioStream *radio = input->radio;
+		Radio_RequestStop(radio);
 		input->radio = NULL;
 		GuiMarkRadioStopped();
+		Radio_Close(radio);
 	}
 #ifdef HAVE_AMIGA_AUDIO_DEVICE
 	if (input->useAmigaDos && input->amigaFile) {
@@ -5470,8 +5471,13 @@ static void GuiMarkRadioStopped(void)
 	gGuiPlaybackStatus.radioActive = 0;
 	gGuiPlaybackStatus.radioStatus = (int)RADIO_STATUS_CLOSED;
 	gGuiPlaybackStatus.radioBufferedBytes = 0;
+	gGuiPlaybackStatus.radioBitrateKbps = 0;
 	gGuiPlaybackStatus.radioMetaInt = 0;
-	/* Keep the copied metadata stable for the stopped GUI state; it is GUI-owned. */
+	GuiCopyVolatileString(gGuiPlaybackStatus.radioTitle, sizeof(gGuiPlaybackStatus.radioTitle), "");
+	GuiCopyVolatileString(gGuiPlaybackStatus.radioStationName, sizeof(gGuiPlaybackStatus.radioStationName), "");
+	GuiCopyVolatileString(gGuiPlaybackStatus.radioGenre, sizeof(gGuiPlaybackStatus.radioGenre), "");
+	GuiCopyVolatileString(gGuiPlaybackStatus.radioStreamUrl, sizeof(gGuiPlaybackStatus.radioStreamUrl), "");
+	GuiCopyVolatileString(gGuiPlaybackStatus.radioContentType, sizeof(gGuiPlaybackStatus.radioContentType), "");
 }
 
 #define GUIPLAY_PHASE_IDLE      0   /* not playing */
@@ -5584,7 +5590,7 @@ static void GuiWriteDetailedStartupLog(int stage)
 		char line[320];
 		int len;
 
-		len = sprintf(line,
+		len = snprintf(line, sizeof(line),
 			"runId=%lu stage=%d name=%s requestedRate=%d effectiveRate=%d period=%u requestedBytes=%lu tryBytes=%lu openDeviceResult=%d interrupted=%d task=%p process=%p\n",
 			gGuiPlaybackStatus.runId, stage,
 			MINIAMP3_DEBUG_FMT_PTR(GuiStartupStageName(stage)),
@@ -5594,6 +5600,10 @@ static void GuiWriteDetailedStartupLog(int stage)
 			gPlaybackInterrupted,
 			MINIAMP3_DEBUG_FMT_PTR((void *)FindTask(NULL)),
 			MINIAMP3_DEBUG_FMT_PTR((void *)FindTask(NULL)));
+		if (len < 0)
+			return;
+		if (len >= (int)sizeof(line))
+			len = (int)sizeof(line) - 1;
 		log = Open((STRPTR)"T:MiniAMP3-startup.log", MODE_READWRITE);
 		if (log) {
 			Seek(log, 0, OFFSET_END);

@@ -51,7 +51,7 @@ static void Radio_RequestStop(RadioStream *rs) { (void)rs; }
 static void Radio_Close(RadioStream *rs) { (void)rs; }
 static int Radio_Pump(RadioStream *rs) { (void)rs; return -1; }
 static int Radio_ReadAudio(RadioStream *rs, unsigned char *buf, int maxBytes) { (void)rs; (void)buf; (void)maxBytes; return 0; }
-static RadioStatus Radio_GetStatus(RadioStream *rs) { (void)rs; return RADIO_STATUS_IDLE; }
+static RadioStatus Radio_GetStatus(RadioStream *rs) { (void)rs; return RADIO_STATUS_CLOSED; }
 static const char *Radio_GetTitle(RadioStream *rs) { (void)rs; return ""; }
 static const char *Radio_GetStationName(RadioStream *rs) { (void)rs; return ""; }
 static const char *Radio_GetGenre(RadioStream *rs) { (void)rs; return ""; }
