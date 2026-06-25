@@ -117,7 +117,6 @@
  * Keep the heartbeat responsive, but throttle expensive text redraws below. */
 #define MR_TICK_MICROS   250000UL
 #define MR_METADATA_TICKS 4
-#define MR_STATUS_TICKS   4
 #define MR_TIME_TICKS     2
 
 #ifdef REACTION_POLL_DEBUG
@@ -745,7 +744,6 @@ static int MrSetRadioMetadata(MrApp *app, int updateStatus)
 	char streamTitle[128], station[128], genre[64], contentType[64], artist[64], title[64], fileInfo[128], status[128];
 	int updates = 0;
 	int radioStatus;
-	long bufferedBytes;
 	int bitrateKbps;
 
 	MrCopyVolatileString(streamTitle, sizeof(streamTitle), gGuiPlaybackStatus.radioTitle);
@@ -753,7 +751,6 @@ static int MrSetRadioMetadata(MrApp *app, int updateStatus)
 	MrCopyVolatileString(genre, sizeof(genre), gGuiPlaybackStatus.radioGenre);
 	MrCopyVolatileString(contentType, sizeof(contentType), gGuiPlaybackStatus.radioContentType);
 	radioStatus = gGuiPlaybackStatus.radioStatus;
-	bufferedBytes = (long)gGuiPlaybackStatus.radioBufferedBytes;
 	bitrateKbps = gGuiPlaybackStatus.radioBitrateKbps;
 
 	MrSplitStreamTitle(streamTitle, artist, sizeof(artist), title, sizeof(title));
@@ -770,8 +767,12 @@ static int MrSetRadioMetadata(MrApp *app, int updateStatus)
 	if (updateStatus) {
 		if (radioStatus == RADIO_STATUS_ERROR)
 			sprintf(status, "Radio error");
+		else if (radioStatus == RADIO_STATUS_RECONNECTING)
+			sprintf(status, "Stream dropped - reconnecting");
+		else if (radioStatus == RADIO_STATUS_CONNECTING)
+			sprintf(status, "Connecting stream...");
 		else
-			sprintf(status, "%s... buffer %ld bytes", Radio_StatusText((RadioStatus)radioStatus), bufferedBytes);
+			sprintf(status, "Streaming");
 		updates += SetReadonlyString(app->statusGad, app->win, app->shownStatus,
 			sizeof(app->shownStatus), status);
 	}
@@ -1198,7 +1199,6 @@ static void PollPlaybackStatus(MrApp *app)
 			int updateMeta = (app->lastRadioMetaTick == 0) ||
 				(tick - app->lastRadioMetaTick >= MR_METADATA_TICKS);
 			int updateStatus = (app->lastRadioStatusTick == 0) ||
-				(tick - app->lastRadioStatusTick >= MR_STATUS_TICKS) ||
 				radioStatus != app->lastRadioStatusShown;
 			if (updateMeta || updateStatus) {
 				updates += MrSetRadioMetadata(app, updateStatus);
@@ -1233,13 +1233,14 @@ static void PollPlaybackStatus(MrApp *app)
 	(void)halfMs;
 
 	if (phase != app->lastPhaseShown) {
+		int isRadioInput = MrIsRadioInput(app->inputName);
 		app->lastPhaseShown = phase;
 		switch (phase) {
 		case GUIPLAY_PHASE_BUFFERING:
-			SetStatus(app, "Buffering..."); updates++;
+			if (!isRadioInput) { SetStatus(app, "Buffering..."); updates++; }
 			break;
 		case GUIPLAY_PHASE_PLAYING:
-			if (!MrIsRadioInput(app->inputName)) {
+			if (!isRadioInput) {
 				if (frames > 0 && rate > 0) {
 					sprintf(buf, "Playing - %lu frames @ %d Hz", frames, rate);
 					SetStatus(app, buf);
@@ -1249,7 +1250,7 @@ static void PollPlaybackStatus(MrApp *app)
 			}
 			break;
 		case GUIPLAY_PHASE_UNDERRUN:
-			SetStatus(app, "Playing (buffer low)..."); updates++;
+			if (!isRadioInput) { SetStatus(app, "Playing (buffer low)..."); updates++; }
 			break;
 		case GUIPLAY_PHASE_STOPPING:
 			SetStatus(app, "Stopping..."); updates++;

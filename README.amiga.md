@@ -186,9 +186,11 @@ the playback subprocess at normal priority so CPU-bound decoding does not starve
 the Workbench/GadTools event loop. Stop requests set the same interrupt flag
 used by Shell playback, signal the child,
 and the audio wait path can abort/reap outstanding writes so the GUI remains
-responsive. During playback the status bar keeps the change-only
-`Playing - underruns: N` text visible instead of redrawing generic `Playing` on
-each timer tick. The GUI file-info row reports the first MPEG frame channel mode
+responsive. During local-file playback the status bar keeps change-only
+playback text visible instead of redrawing generic `Playing` on each timer tick.
+For Internet radio streams, the ReAction GUI shows a stable `Streaming` status
+while audio is flowing and only changes it for connection, dropped-stream
+reconnect, stop, or error states. The GUI file-info row reports the first MPEG frame channel mode
 as `mono`, `stereo`, `joint-stereo`, or `M/S` when the Layer III joint-stereo
 mode-extension bit marks mid/side stereo. Artwork greyscale conversion uses a
 68030-friendly m68k inline path in fast builds that replaces the previous
