@@ -901,10 +901,15 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->outFormat = OUT_S8;
 			opt->mono = 1;
 		} else if (!strcmp(argv[i], "--radio-stream")) {
+#if ENABLE_RADIO
 			opt->radioStream = 1;
 			opt->play = 1;
 			opt->outFormat = OUT_S8;
 			opt->mono = 1;
+#else
+			fprintf(stderr, "--radio-stream requested, but radio support not built; rebuild with RADIO=1 or HAVE_BSDSOCKET=1\n");
+			return -1;
+#endif
 		} else if (!strcmp(argv[i], "--decode-then-play")) {
 			opt->play = 1;
 			opt->decodeThenPlay = 1;

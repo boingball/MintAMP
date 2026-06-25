@@ -1,3 +1,7 @@
+#ifndef ENABLE_RADIO
+#define ENABLE_RADIO 0
+#endif
+#if ENABLE_RADIO
 #include "radio_stream.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,10 +17,10 @@
 #if defined(AMIGA_M68K)
 #include <exec/types.h>
 #include <proto/exec.h>
-#include <proto/socket.h>
-#include <libraries/socket.h>
+#include <proto/bsdsocket.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netdb.h>
 #define RADIO_SOCKET long
 #define RADIO_INVALID_SOCKET (-1)
 #define radio_close_socket(s) CloseSocket(s)
@@ -82,3 +86,5 @@ const char *Radio_GetError(RadioStream *rs){ return rs?rs->error:""; }
 int Radio_GetBitrate(RadioStream *rs){ return rs?rs->bitrate:0; }
 int Radio_GetBufferedBytes(RadioStream *rs){ return rs?(int)rs->used:0; }
 const char *Radio_StatusText(RadioStatus s){ switch(s){case RADIO_STATUS_CONNECTING:return "Connecting";case RADIO_STATUS_BUFFERING:return "Buffering";case RADIO_STATUS_PLAYING:return "Playing";case RADIO_STATUS_RECONNECTING:return "Reconnecting";case RADIO_STATUS_ERROR:return "Error";default:return "Idle";} }
+
+#endif /* ENABLE_RADIO */
