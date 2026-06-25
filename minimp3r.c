@@ -614,18 +614,22 @@ static void MrSetRadioMetadata(MrApp *app)
 	MrCopyVolatileString(station, sizeof(station), gGuiPlaybackStatus.radioStationName);
 	MrCopyVolatileString(genre, sizeof(genre), gGuiPlaybackStatus.radioGenre);
 	MrCopyVolatileString(contentType, sizeof(contentType), gGuiPlaybackStatus.radioContentType);
-	if (app->fileGad && app->win) SetGadgetAttrs((struct Gadget *)app->fileGad, app->win, NULL, GETFILE_FullFile, (ULONG)"Internet Radio", TAG_DONE);
+	if (app->fileGad && app->win) SetGadgetAttrs((struct Gadget *)app->fileGad, app->win, NULL, GETFILE_FullFile, (ULONG)app->inputName, TAG_DONE);
 	MrSplitStreamTitle(streamTitle, artist, sizeof(artist), title, sizeof(title));
 	if (gGuiPlaybackStatus.radioBitrateKbps > 0)
-		sprintf(fileInfo, "%d kbps, MP3 / %s", gGuiPlaybackStatus.radioBitrateKbps, contentType[0] ? contentType : "audio/mpeg");
+		sprintf(fileInfo, "Internet Radio MP3, %d kbps, %s", gGuiPlaybackStatus.radioBitrateKbps, contentType[0] ? contentType : "audio/mpeg");
 	else
-		sprintf(fileInfo, "MP3 / %s", contentType[0] ? contentType : "audio/mpeg");
-	if (app->titleGad && app->win) SetGadgetAttrs((struct Gadget *)app->titleGad, app->win, NULL, STRINGA_TextVal, (ULONG)(streamTitle[0] ? streamTitle : "Internet Radio"), TAG_DONE);
+		sprintf(fileInfo, "Internet Radio MP3, %s", contentType[0] ? contentType : "audio/mpeg");
+	if (app->titleGad && app->win) SetGadgetAttrs((struct Gadget *)app->titleGad, app->win, NULL, STRINGA_TextVal, (ULONG)(title[0] ? title : "-"), TAG_DONE);
 	if (app->artistGad && app->win) SetGadgetAttrs((struct Gadget *)app->artistGad, app->win, NULL, STRINGA_TextVal, (ULONG)(artist[0] ? artist : "-"), TAG_DONE);
 	if (app->albumGad && app->win) SetGadgetAttrs((struct Gadget *)app->albumGad, app->win, NULL, STRINGA_TextVal, (ULONG)(station[0] ? station : "Internet Radio"), TAG_DONE);
+	if (app->trackGad && app->win) SetGadgetAttrs((struct Gadget *)app->trackGad, app->win, NULL, STRINGA_TextVal, (ULONG)"Live", TAG_DONE);
 	if (app->genreGad && app->win) SetGadgetAttrs((struct Gadget *)app->genreGad, app->win, NULL, STRINGA_TextVal, (ULONG)(genre[0] ? genre : "-"), TAG_DONE);
 	if (app->fileInfoGad && app->win) SetGadgetAttrs((struct Gadget *)app->fileInfoGad, app->win, NULL, STRINGA_TextVal, (ULONG)fileInfo, TAG_DONE);
-	sprintf(status, "%s - %ld bytes buffered", Radio_StatusText((RadioStatus)gGuiPlaybackStatus.radioStatus), (long)gGuiPlaybackStatus.radioBufferedBytes);
+	if (gGuiPlaybackStatus.radioStatus == RADIO_STATUS_ERROR)
+		sprintf(status, "Radio error");
+	else
+		sprintf(status, "%s... buffer %ld bytes", Radio_StatusText((RadioStatus)gGuiPlaybackStatus.radioStatus), (long)gGuiPlaybackStatus.radioBufferedBytes);
 	SetStatus(app, status);
 }
 
@@ -2241,9 +2245,9 @@ static void RefreshFileInfoAndTags(MrApp *app)
 		if (app->titleGad && app->win) SetGadgetAttrs((struct Gadget *)app->titleGad, app->win, NULL, STRINGA_TextVal, (ULONG)"Internet Radio", TAG_DONE);
 		if (app->artistGad && app->win) SetGadgetAttrs((struct Gadget *)app->artistGad, app->win, NULL, STRINGA_TextVal, (ULONG)"-", TAG_DONE);
 		if (app->albumGad && app->win) SetGadgetAttrs((struct Gadget *)app->albumGad, app->win, NULL, STRINGA_TextVal, (ULONG)"Internet Radio", TAG_DONE);
-		if (app->trackGad && app->win) SetGadgetAttrs((struct Gadget *)app->trackGad, app->win, NULL, STRINGA_TextVal, (ULONG)"-", TAG_DONE);
+		if (app->trackGad && app->win) SetGadgetAttrs((struct Gadget *)app->trackGad, app->win, NULL, STRINGA_TextVal, (ULONG)"Live", TAG_DONE);
 		if (app->genreGad && app->win) SetGadgetAttrs((struct Gadget *)app->genreGad, app->win, NULL, STRINGA_TextVal, (ULONG)"-", TAG_DONE);
-		if (app->fileInfoGad && app->win) SetGadgetAttrs((struct Gadget *)app->fileInfoGad, app->win, NULL, STRINGA_TextVal, (ULONG)"MP3 / audio/mpeg", TAG_DONE);
+		if (app->fileInfoGad && app->win) SetGadgetAttrs((struct Gadget *)app->fileInfoGad, app->win, NULL, STRINGA_TextVal, (ULONG)"Internet Radio MP3, audio/mpeg", TAG_DONE);
 		UpdateRatingDisplay(app); UpdateTimeDisplay(app); SetGauge(app, 0); SetStatus(app, "Internet Radio ready.");
 		return;
 	}

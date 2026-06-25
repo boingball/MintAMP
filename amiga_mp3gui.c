@@ -1633,25 +1633,29 @@ static void UpdateRadioTagDisplay(HelixAmp3Gui *gui)
 	CopyVolatileGuiString(station, sizeof(station), gGuiPlaybackStatus.radioStationName);
 	CopyVolatileGuiString(genre, sizeof(genre), gGuiPlaybackStatus.radioGenre);
 	CopyVolatileGuiString(contentType, sizeof(contentType), gGuiPlaybackStatus.radioContentType);
-	SetFileDisplay(gui, "Internet Radio");
+	SetFileDisplay(gui, gui->inputName);
 	SplitRadioStreamTitle(streamTitle, artist, sizeof(artist), title, sizeof(title));
-	SafeCopy(gui->tags.title, sizeof(gui->tags.title), streamTitle[0] ? streamTitle : "Internet Radio");
-	SafeCopy(gui->tags.artist, sizeof(gui->tags.artist), artist);
+	SafeCopy(gui->tags.title, sizeof(gui->tags.title), title[0] ? title : "-");
+	SafeCopy(gui->tags.artist, sizeof(gui->tags.artist), artist[0] ? artist : "-");
 	SafeCopy(gui->tags.album, sizeof(gui->tags.album), station[0] ? station : "Internet Radio");
-	SafeCopy(gui->tags.genre, sizeof(gui->tags.genre), genre);
+	SafeCopy(gui->tags.track, sizeof(gui->tags.track), "Live");
+	SafeCopy(gui->tags.genre, sizeof(gui->tags.genre), genre[0] ? genre : "-");
 	gui->tags.bitrateKbps = gGuiPlaybackStatus.radioBitrateKbps;
 	gui->tags.durationSecs = 0;
 	gui->totalSecs = 0;
 	if (gGuiPlaybackStatus.radioBitrateKbps > 0)
-		sprintf(info, "%d kbps, MP3 / %s", gGuiPlaybackStatus.radioBitrateKbps, contentType[0] ? contentType : "audio/mpeg");
+		sprintf(info, "Internet Radio MP3, %d kbps, %s", gGuiPlaybackStatus.radioBitrateKbps, contentType[0] ? contentType : "audio/mpeg");
 	else
-		sprintf(info, "MP3 / %s", contentType[0] ? contentType : "audio/mpeg");
+		sprintf(info, "Internet Radio MP3, %s", contentType[0] ? contentType : "audio/mpeg");
 	UpdateTagDisplay(gui);
 	SafeCopy(gui->fileInfoText, sizeof(gui->fileInfoText), info);
 	if (gui->gadFileInfo)
 		GT_SetGadgetAttrs(gui->gadFileInfo, gui->win, NULL,
 			GTTX_Text, (ULONG)gui->fileInfoText, TAG_DONE);
-	sprintf(status, "%s - %ld bytes buffered", Radio_StatusText((RadioStatus)gGuiPlaybackStatus.radioStatus), (long)gGuiPlaybackStatus.radioBufferedBytes);
+	if (gGuiPlaybackStatus.radioStatus == RADIO_STATUS_ERROR)
+		sprintf(status, "Radio error");
+	else
+		sprintf(status, "%s... buffer %ld bytes", Radio_StatusText((RadioStatus)gGuiPlaybackStatus.radioStatus), (long)gGuiPlaybackStatus.radioBufferedBytes);
 	SetStatus(gui, status);
 }
 

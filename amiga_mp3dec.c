@@ -9337,6 +9337,7 @@ int main(int argc, char **argv)
 				return 1;
 			}
 			InputSourceInitRadio(&input, radio);
+			GuiPublishRadioMetadata(radio);
 		} else {
 		GuiPublishStartupStage(GUISTART_INPUT_FOPEN_BEFORE);
 		infile = fopen(opt.inName, "rb");
