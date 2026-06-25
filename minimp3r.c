@@ -50,6 +50,7 @@
 #include <libraries/gadtools.h>
 #include <hardware/cia.h>
 #include "picojpeg.h"
+#include "radio_stream.h"
 
 #define MR_ENV_PREFIX "ENVARC:MiniAMP3"
 #define MR_SETTINGS_VERSION 1
@@ -641,6 +642,8 @@ static void BuildPlaybackArgs(MrApp *app, MrPlayArgs *args)
 	memset(args, 0, sizeof(*args));
 	AddArg(args, "minimp3r");
 	AddArg(args, "--play");
+	if (!strncmp(app->inputName, "http://", 7))
+		AddArg(args, "--radio-stream");
 	if (app->fastMem)
 		AddArg(args, "--fast-mem");
 	if (app->cd32Ultrafast) {

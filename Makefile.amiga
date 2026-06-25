@@ -16,13 +16,13 @@ GUIR_TARGET ?= minimp3r
 CPPFLAGS_COMMON := -Ipub -Ireal -DAMIGA_M68K
 CFLAGS_COMMON := $(CPU) $(STD) $(OPTFLAGS)
 DECODER_SOURCES := mp3dec.c mp3tabs.c $(wildcard real/*.c)
-SOURCES := amiga_mp3dec.c $(DECODER_SOURCES)
-GUI_SOURCES := amiga_mp3gui.c picojpeg.c
+SOURCES := amiga_mp3dec.c radio_stream.c $(DECODER_SOURCES)
+GUI_SOURCES := amiga_mp3gui.c picojpeg.c radio_stream.c
 # The GUI uses gadtools.library via proto/gadtools.h; no linker flag is needed.
 # minimp3r is the ReAction/ClassAct frontend; it pulls amiga_mp3dec.c in itself
 # (like amiga_mp3gui.c) so only the shared decoder modules are listed here.  The
 # ReAction classes are opened at runtime, so no extra linker flag is needed.
-GUIR_SOURCES := minimp3r.c picojpeg.c
+GUIR_SOURCES := minimp3r.c picojpeg.c radio_stream.c
 
 FAST030_CPPFLAGS := \
 	-DAMIGA_M68K_ASM \

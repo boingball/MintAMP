@@ -169,6 +169,7 @@ static char gSupportedExtPattern[512];
 #include <proto/timer.h>
 /* #include <graphics/colormap.h> */
 #include "picojpeg.h"
+#include "radio_stream.h"
 #ifndef OBP_FailIfBad
 #define OBP_FailIfBad (TAG_USER + 0x01L)
 #endif
@@ -4809,6 +4810,8 @@ static void BuildPlaybackArgs(HelixAmp3Gui *gui, HelixAmp3Args *args)
 	memset(args, 0, sizeof(*args));
 	AddArg(args, "amiga_mp3dec");
 	AddArg(args, "--play");
+	if (!strncmp(gui->inputName, "http://", 7))
+		AddArg(args, "--radio-stream");
 	if (gui->fastMem)
 		AddArg(args, "--fast-mem");
 	if (gui->cd32Ultrafast) {

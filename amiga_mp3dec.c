@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "radio_stream.h"
 #include <time.h>
 #include <stdarg.h>
 #ifndef AMIGA_M68K
@@ -357,6 +358,7 @@ typedef struct DecodeOptions {
 	int fastMem;
 	int info;
 	int noMonoMSSideSkip;
+	int radioStream;
 } DecodeOptions;
 
 typedef struct Mp3InputInfo {
@@ -380,6 +382,7 @@ typedef struct InputSource {
 	unsigned long memorySize;
 	unsigned long memoryPos;
 	Mp3InputInfo info;
+	RadioStream *radio;
 } InputSource;
 
 static void InputSourceInit(InputSource *input, FILE *file);
@@ -894,6 +897,11 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			i++;
 			opt->fakeStereoShift = atoi(argv[i]);
 		} else if (!strcmp(argv[i], "--play-fast-path")) {
+			opt->play = 1;
+			opt->outFormat = OUT_S8;
+			opt->mono = 1;
+		} else if (!strcmp(argv[i], "--radio-stream")) {
+			opt->radioStream = 1;
 			opt->play = 1;
 			opt->outFormat = OUT_S8;
 			opt->mono = 1;
@@ -1527,6 +1535,12 @@ static void InputSourceInit(InputSource *input, FILE *file)
 	input->file = file;
 }
 
+static void InputSourceInitRadio(InputSource *input, RadioStream *radio)
+{
+	memset(input, 0, sizeof(*input));
+	input->radio = radio;
+}
+
 #ifdef HAVE_AMIGA_AUDIO_DEVICE
 static void InputSourceInitAmigaDos(InputSource *input, BPTR amigaFile)
 {
@@ -1542,6 +1556,10 @@ static void InputSourceClose(InputSource *input)
 	input->memory = NULL;
 	input->memorySize = 0;
 	input->memoryPos = 0;
+	if (input->radio) {
+		Radio_Close(input->radio);
+		input->radio = NULL;
+	}
 #ifdef HAVE_AMIGA_AUDIO_DEVICE
 	if (input->useAmigaDos && input->amigaFile) {
 		Close(input->amigaFile);
@@ -1563,6 +1581,8 @@ static void CloseInputFile(FILE **file, int debugCleanup)
 
 static size_t InputSourceRead(InputSource *input, void *dest, size_t bytes)
 {
+	if (input->radio)
+		return (size_t)Radio_ReadAudio(input->radio, (unsigned char *)dest, (int)bytes);
 	if (input->memory) {
 		unsigned long available;
 
@@ -1592,6 +1612,8 @@ static size_t InputSourceRead(InputSource *input, void *dest, size_t bytes)
 
 static unsigned long InputSourceTell(const InputSource *input)
 {
+	if (input->radio)
+		return 0;
 	if (input->memory)
 		return input->memoryPos;
 #ifdef HAVE_AMIGA_AUDIO_DEVICE
@@ -1608,6 +1630,8 @@ static unsigned long InputSourceTell(const InputSource *input)
 
 static void InputSourceSeek(InputSource *input, unsigned long pos)
 {
+	if (input->radio)
+		return;
 	if (input->memory) {
 		input->memoryPos = pos <= input->memorySize ? pos : input->memorySize;
 	} else {
@@ -1739,6 +1763,8 @@ static int FindValidatedMpegSync(const unsigned char *buf, int nBytes)
 
 static int InputSourcePrepareMp3(InputSource *input)
 {
+	if (input->radio)
+		return 0;
 	unsigned char header[10];
 	unsigned char scan[READBUF_SIZE];
 	unsigned long scanBase;
@@ -9185,6 +9211,8 @@ int main(int argc, char **argv)
 	}
 
 	GuiPublishStartupStage(GUISTART_ARGS_READY);
+	if (opt.inName && !strncmp(opt.inName, "http://", 7))
+		opt.radioStream = 1;
 	if (opt.outName && OutputNameIsDirectory(opt.outName)) {
 		resolvedOutName = BuildDirectoryOutputName(opt.outName, opt.inName, &opt);
 		if (!resolvedOutName) {
@@ -9210,7 +9238,20 @@ int main(int argc, char **argv)
 	}
 	gGuiPlaybackStatus.requestedRate = opt.outputRate;
 #ifdef HAVE_AMIGA_AUDIO_DEVICE
-	if (opt.play) {
+	if (opt.play && opt.radioStream) {
+		RadioStream *radio;
+		GuiPublishStartupStage(GUISTART_INPUT_FOPEN_BEFORE);
+		radio = Radio_Open(opt.inName);
+		GuiPublishStartupStage(GUISTART_INPUT_FOPEN_AFTER);
+		if (!radio || Radio_GetStatus(radio) == RADIO_STATUS_ERROR) {
+			fprintf(stderr, "cannot open radio stream: %s\n", radio ? Radio_GetError(radio) : "out of memory");
+			if (radio) Radio_Close(radio);
+			free(resolvedOutName);
+			AmigaFreeNormalizedArgs(&normalized);
+			return 1;
+		}
+		InputSourceInitRadio(&input, radio);
+	} else if (opt.play) {
 		/* If the file extension is not .mp3, try a generic decoder module. */
 		{
 			const char *ext = GetFileExtension(opt.inName);
@@ -9235,6 +9276,20 @@ int main(int argc, char **argv)
 	} else
 #endif
 	{
+		if (opt.radioStream) {
+			RadioStream *radio;
+			GuiPublishStartupStage(GUISTART_INPUT_FOPEN_BEFORE);
+			radio = Radio_Open(opt.inName);
+			GuiPublishStartupStage(GUISTART_INPUT_FOPEN_AFTER);
+			if (!radio || Radio_GetStatus(radio) == RADIO_STATUS_ERROR) {
+				fprintf(stderr, "cannot open radio stream: %s\n", radio ? Radio_GetError(radio) : "out of memory");
+				if (radio) Radio_Close(radio);
+				free(resolvedOutName);
+				AmigaFreeNormalizedArgs(&normalized);
+				return 1;
+			}
+			InputSourceInitRadio(&input, radio);
+		} else {
 		GuiPublishStartupStage(GUISTART_INPUT_FOPEN_BEFORE);
 		infile = fopen(opt.inName, "rb");
 		GuiPublishStartupStage(GUISTART_INPUT_FOPEN_AFTER);
@@ -9245,6 +9300,7 @@ int main(int argc, char **argv)
 			return 1;
 		}
 		InputSourceInit(&input, infile);
+		}
 	}
 	if (opt.info && infile) {
 		PrintMp3Info(infile, opt.inName);
