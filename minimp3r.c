@@ -401,6 +401,7 @@ typedef struct MrApp {
 	char  shownTitle[128];
 	char  shownArtist[128];
 	char  shownAlbum[128];
+	char  fullAlbum[128];
 	char  shownTrack[32];
 	char  shownGenre[64];
 	char  shownFileInfo[128];
@@ -590,16 +591,20 @@ static void SetReadonlyString(Object *gad, struct Window *win, char *cache, size
 		return;
 	if (cache && cacheSize > 0)
 		SafeCopy(cache, cacheSize, text);
-	if (gad && win)
-		/* STRINGA_TextVal parks the cursor at the end of the new string, which
-		 * scrolls a long value (e.g. the album/station name) so its left edge
-		 * clips off.  Pin the cursor and the view back to the start so read-only
-		 * fields always render left-aligned. */
+	if (gad && win) {
 		SetGadgetAttrs((struct Gadget *)gad, win, NULL,
 			STRINGA_TextVal, (ULONG)text,
+			TAG_DONE);
+		/* STRINGA_TextVal parks the cursor/view at the END of the new string, so
+		 * a long value (e.g. the album/station name) renders with its left edge
+		 * clipped off.  Reset the view to the start in a SEPARATE SetGadgetAttrs
+		 * pass - doing it in the same tag list as STRINGA_TextVal gets overridden
+		 * when the gadget re-derives its display offset from the cursor. */
+		SetGadgetAttrs((struct Gadget *)gad, win, NULL,
 			STRINGA_BufferPos, 0,
 			STRINGA_DispPos, 0,
 			TAG_DONE);
+	}
 }
 
 static void SetStatus(MrApp *app, const char *text)
@@ -616,7 +621,51 @@ static int PointInGadget(struct Gadget *gad, int x, int y)
 		x < gad->LeftEdge + gad->Width && y < gad->TopEdge + gad->Height;
 }
 
-#define MR_ALBUM_SCROLL_VISIBLE_CHARS 34
+/* How many characters of the album/station name fit in the gadget at the
+ * current font.  A ReAction read-only string gadget that overflows renders its
+ * tail (clipping the left), so we truncate the text to fit and it then always
+ * shows the start, left-aligned.  The full name is still available on hover via
+ * the status line. */
+static int AlbumVisibleChars(MrApp *app)
+{
+	int txw, px, chars;
+	if (!app || !app->win || !app->albumGad)
+		return 0;
+	txw = app->win->RPort ? app->win->RPort->TxWidth : 8;
+	if (txw <= 0)
+		txw = 8;
+	/* Gadget Width includes the recessed border; leave a couple of chars of
+	 * slack so the last glyph never spills past the right edge. */
+	px = ((struct Gadget *)app->albumGad)->Width - 8;
+	if (px < txw)
+		return 1;
+	chars = px / txw - 1;
+	return chars > 0 ? chars : 1;
+}
+
+/* Set the album gadget to a left-aligned, fit-to-width copy, keeping the full
+ * string in app->fullAlbum for the hover status hint. */
+static void SetAlbumDisplay(MrApp *app, const char *full)
+{
+	char shown[128];
+	int fit;
+	if (!app)
+		return;
+	if (!full)
+		full = "";
+	SafeCopy(app->fullAlbum, sizeof(app->fullAlbum), full);
+	fit = AlbumVisibleChars(app);
+	if (fit > (int)sizeof(shown) - 1)
+		fit = (int)sizeof(shown) - 1;
+	if ((int)strlen(full) > fit) {
+		memcpy(shown, full, (size_t)fit);
+		shown[fit] = 0;
+	} else {
+		SafeCopy(shown, sizeof(shown), full);
+	}
+	SetReadonlyString(app->albumGad, app->win, app->shownAlbum,
+		sizeof(app->shownAlbum), shown);
+}
 
 static void UpdateAlbumHover(MrApp *app)
 {
@@ -627,31 +676,21 @@ static void UpdateAlbumHover(MrApp *app)
 	if (over == app->albumHover)
 		return;
 	app->albumHover = over;
-	app->albumScrollPos = 0;
-	SetGadgetAttrs((struct Gadget *)app->albumGad, app->win, NULL,
-		STRINGA_BufferPos, 0,
-		STRINGA_DispPos, 0, TAG_DONE);
-	if (over && app->shownAlbum[0] && strcmp(app->shownAlbum, "-")) {
-		char buf[128];
-		SafeCopy(buf, sizeof(buf), "Album: " );
-		strncat(buf, app->shownAlbum, sizeof(buf) - strlen(buf) - 1);
+	/* On hover show the full album/station name in the status line (the gadget
+	 * itself only has room for the left part). */
+	if (over && app->fullAlbum[0] && strcmp(app->fullAlbum, "-")) {
+		char buf[160];
+		SafeCopy(buf, sizeof(buf), "Album: ");
+		strncat(buf, app->fullAlbum, sizeof(buf) - strlen(buf) - 1);
 		SetStatus(app, buf);
 	}
 }
 
+/* The album text is truncated to fit, so there is nothing to scroll; kept as a
+ * no-op so the main loop call site stays simple. */
 static void ScrollAlbumHover(MrApp *app)
 {
-	int maxPos;
-	if (!app || !app->win || !app->albumGad || !app->albumHover)
-		return;
-	if (strlen(app->shownAlbum) <= MR_ALBUM_SCROLL_VISIBLE_CHARS)
-		return;
-	maxPos = (int)strlen(app->shownAlbum) - MR_ALBUM_SCROLL_VISIBLE_CHARS;
-	app->albumScrollPos++;
-	if (app->albumScrollPos > maxPos)
-		app->albumScrollPos = 0;
-	SetGadgetAttrs((struct Gadget *)app->albumGad, app->win, NULL,
-		STRINGA_DispPos, (ULONG)app->albumScrollPos, TAG_DONE);
+	(void)app;
 }
 
 
@@ -696,7 +735,7 @@ static void MrSetRadioMetadata(MrApp *app)
 		sprintf(fileInfo, "Internet Radio MP3, %s", contentType[0] ? contentType : "audio/mpeg");
 	SetReadonlyString(app->titleGad, app->win, app->shownTitle, sizeof(app->shownTitle), title[0] ? title : "-");
 	SetReadonlyString(app->artistGad, app->win, app->shownArtist, sizeof(app->shownArtist), artist[0] ? artist : "-");
-	SetReadonlyString(app->albumGad, app->win, app->shownAlbum, sizeof(app->shownAlbum), station[0] ? station : "Internet Radio");
+	SetAlbumDisplay(app, station[0] ? station : "Internet Radio");
 	SetReadonlyString(app->trackGad, app->win, app->shownTrack, sizeof(app->shownTrack), "Live");
 	SetReadonlyString(app->genreGad, app->win, app->shownGenre, sizeof(app->shownGenre), genre[0] ? genre : "-");
 	SetReadonlyString(app->fileInfoGad, app->win, app->shownFileInfo, sizeof(app->shownFileInfo), fileInfo);
@@ -2343,7 +2382,7 @@ static void RefreshFileInfoAndTags(MrApp *app)
 		app->rating = 0; app->totalSecs = 0; app->elapsedSecs = 0; app->lastFrames = 0;
 		SetReadonlyString(app->titleGad, app->win, app->shownTitle, sizeof(app->shownTitle), "Internet Radio");
 		SetReadonlyString(app->artistGad, app->win, app->shownArtist, sizeof(app->shownArtist), "-");
-		SetReadonlyString(app->albumGad, app->win, app->shownAlbum, sizeof(app->shownAlbum), "Internet Radio");
+		SetAlbumDisplay(app, "Internet Radio");
 		SetReadonlyString(app->trackGad, app->win, app->shownTrack, sizeof(app->shownTrack), "Live");
 		SetReadonlyString(app->genreGad, app->win, app->shownGenre, sizeof(app->shownGenre), "-");
 		SetReadonlyString(app->fileInfoGad, app->win, app->shownFileInfo, sizeof(app->shownFileInfo), "Internet Radio MP3, audio/mpeg");
@@ -2364,7 +2403,7 @@ static void RefreshFileInfoAndTags(MrApp *app)
 		SafeCopy(fileInfo, sizeof(fileInfo), "-");
 	SetReadonlyString(app->titleGad, app->win, app->shownTitle, sizeof(app->shownTitle), info.title[0] ? info.title : "-");
 	SetReadonlyString(app->artistGad, app->win, app->shownArtist, sizeof(app->shownArtist), info.artist[0] ? info.artist : "-");
-	SetReadonlyString(app->albumGad, app->win, app->shownAlbum, sizeof(app->shownAlbum), info.album[0] ? info.album : "-");
+	SetAlbumDisplay(app, info.album[0] ? info.album : "-");
 	SetReadonlyString(app->trackGad, app->win, app->shownTrack, sizeof(app->shownTrack), info.track[0] ? info.track : "-");
 	SetReadonlyString(app->genreGad, app->win, app->shownGenre, sizeof(app->shownGenre), info.genre[0] ? info.genre : "-");
 	SetReadonlyString(app->fileInfoGad, app->win, app->shownFileInfo, sizeof(app->shownFileInfo), fileInfo);

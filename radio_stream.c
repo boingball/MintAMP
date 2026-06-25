@@ -51,6 +51,7 @@ struct Library *SocketBase = NULL;
 #else
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <sys/types.h>
@@ -58,6 +59,26 @@ struct Library *SocketBase = NULL;
 #define RADIO_SOCKET int
 #define RADIO_INVALID_SOCKET (-1)
 #define radio_close_socket(s) close(s)
+#endif
+
+/* Non-blocking ioctl request and "no data yet" errno values.  Define local
+ * fallbacks rather than pulling in <sys/ioctl.h>/<sys/errno.h>, whose presence
+ * varies across the m68k netinclude (and to avoid the header churn that broke
+ * an earlier attempt).  0x8004667E is the standard BSD/bsdsocket FIONBIO. */
+#ifndef FIONBIO
+#define FIONBIO 0x8004667EUL
+#endif
+#ifndef EWOULDBLOCK
+#define EWOULDBLOCK 35
+#endif
+#ifndef EAGAIN
+#define EAGAIN 35
+#endif
+#ifndef EINPROGRESS
+#define EINPROGRESS 36
+#endif
+#ifndef EISCONN
+#define EISCONN 56
 #endif
 
 typedef enum {
@@ -84,6 +105,8 @@ struct RadioStream {
     int zeroBytePumps;
     int everPlayed;
     int stopping;
+    struct in_addr hostAddr;   /* cached DNS result so reconnects skip gethostbyname() */
+    int haveHostAddr;
 };
 
 static int radio_is_stopping(const RadioStream *rs) { return !rs || rs->stopping || rs->status == RADIO_STATUS_STOPPING || rs->status == RADIO_STATUS_CLOSED; }
@@ -101,6 +124,88 @@ static void radio_backoff_sleep(void)
     usleep(40000);
 #endif
 }
+
+/* Put the stream socket into non-blocking mode.  WinUAE's built-in
+ * bsdsocket.library runs a *blocking* socket call synchronously and freezes the
+ * whole emulation (mouse included) until it returns - so a blocking recv() that
+ * waits for the ring to refill freezes the machine for ~1s every time the
+ * stream re-buffers.  With a non-blocking socket recv() returns immediately and
+ * we yield with Delay() (a pure timer wait the emulator does not stall on). */
+static void radio_set_nonblocking(RADIO_SOCKET s)
+{
+#if defined(AMIGA_M68K)
+    long nb = 1;
+    IoctlSocket(s, FIONBIO, (char *)&nb);
+#else
+    int fl = fcntl(s, F_GETFL, 0);
+    if (fl >= 0)
+        fcntl(s, F_SETFL, fl | O_NONBLOCK);
+#endif
+}
+
+/* True when the last socket call failed only because no data is ready yet. */
+static int radio_would_block(void)
+{
+#if defined(AMIGA_M68K)
+    long e = Errno();
+    return e == EWOULDBLOCK || e == EAGAIN;
+#else
+    return errno == EWOULDBLOCK || errno == EAGAIN;
+#endif
+}
+
+static long radio_sock_errno(void)
+{
+#if defined(AMIGA_M68K)
+    return Errno();
+#else
+    return errno;
+#endif
+}
+
+/* Drive a non-blocking connect() to completion by re-issuing connect() and
+ * yielding with Delay() between tries, so the connect never blocks (and so
+ * never freezes WinUAE's emulation).  Returns 0 on success, -1 on failure or
+ * stop/timeout.  Success is connect()==0 or EISCONN; anything else is treated
+ * as "still connecting" until the timeout, which keeps us robust even if a
+ * particular stack reports a non-standard in-progress errno. */
+static int radio_wait_connected(RadioStream *rs, struct sockaddr_in *sa)
+{
+    int tries;
+    /* ~6s budget at 40ms/poll; generous for a slow stream server. */
+    for (tries = 0; tries < 150; tries++) {
+        long e;
+        if (radio_is_stopping(rs))
+            return -1;
+        radio_backoff_sleep();
+        if (radio_is_stopping(rs))
+            return -1;
+        if (connect(rs->sock, (struct sockaddr *)sa, sizeof(*sa)) == 0)
+            return 0;
+        e = radio_sock_errno();
+        if (e == EISCONN)
+            return 0;
+    }
+    return -1;
+}
+
+/* Send the whole request on the (now non-blocking) socket, yielding on a
+ * would-block partial send instead of failing. */
+static int radio_send_all(RadioStream *rs, const char *buf, int len)
+{
+    int sent = 0, tries = 0;
+    while (sent < len && tries < 150) {
+        int r;
+        if (radio_is_stopping(rs))
+            return -1;
+        r = (int)send(rs->sock, (char *)buf + sent, len - sent, 0);
+        if (r > 0) { sent += r; continue; }
+        if (r < 0 && radio_would_block()) { radio_backoff_sleep(); tries++; continue; }
+        return -1;
+    }
+    return sent == len ? 0 : -1;
+}
+
 static void set_status(RadioStream *rs, RadioStatus status) { if (rs && rs->status != RADIO_STATUS_ERROR && rs->status != RADIO_STATUS_CLOSED && rs->status != RADIO_STATUS_STOPPING) rs->status = status; }
 static void radio_copy_string(char *dst, size_t dstSize, const char *src)
 {
@@ -148,20 +253,30 @@ static void reset_parser(RadioStream *rs)
 }
 
 static int connect_http(RadioStream *rs){
-    struct hostent *he; struct sockaddr_in sa; char req[512]; int n;
+    struct sockaddr_in sa; char req[512]; int n; int cr;
 #if defined(AMIGA_M68K)
     if(!SocketBase) SocketBase=OpenLibrary("bsdsocket.library",4); if(!SocketBase){ set_error(rs,"bsdsocket.library unavailable"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: bsdsocket open failed\n")); return -1; }
 #endif
     if (radio_is_stopping(rs)) return -1;
-    he=gethostbyname(rs->host); if(!he){ set_error(rs,"cannot resolve stream host"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: DNS failed for %s\n", rs->host)); return -1; }
+    /* Resolve once and cache it; gethostbyname() is blocking and would freeze
+     * the emulator on every reconnect if we re-resolved each time. */
+    if(!rs->haveHostAddr){
+        struct hostent *he=gethostbyname(rs->host);
+        if(!he || !he->h_addr){ set_error(rs,"cannot resolve stream host"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: DNS failed for %s\n", rs->host)); return -1; }
+        memcpy(&rs->hostAddr, he->h_addr, sizeof(rs->hostAddr));
+        rs->haveHostAddr=1;
+    }
     if (radio_is_stopping(rs)) return -1;
     rs->sock=socket(AF_INET,SOCK_STREAM,0); if(rs->sock==RADIO_INVALID_SOCKET){ set_error(rs,"cannot create socket"); return -1; }
-    memset(&sa,0,sizeof(sa)); sa.sin_family=AF_INET; sa.sin_port=htons((unsigned short)rs->port); memcpy(&sa.sin_addr,he->h_addr,he->h_length);
+    /* Go non-blocking BEFORE connect so the connect never stalls the machine. */
+    radio_set_nonblocking(rs->sock);
+    memset(&sa,0,sizeof(sa)); sa.sin_family=AF_INET; sa.sin_port=htons((unsigned short)rs->port); sa.sin_addr=rs->hostAddr;
     if (radio_is_stopping(rs)) { close_current_socket(rs); return -1; }
-    if(connect(rs->sock,(struct sockaddr*)&sa,sizeof(sa))<0){ radio_close_socket(rs->sock); rs->sock=RADIO_INVALID_SOCKET; set_error(rs,"cannot connect to stream"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: connect failed to %s:%d\n", rs->host, rs->port)); return -1; }
+    cr=connect(rs->sock,(struct sockaddr*)&sa,sizeof(sa));
+    if(cr<0 && radio_wait_connected(rs,&sa)!=0){ close_current_socket(rs); set_error(rs,"cannot connect to stream"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: connect failed to %s:%d\n", rs->host, rs->port)); return -1; }
     if (radio_is_stopping(rs)) { close_current_socket(rs); return -1; }
     n=snprintf(req,sizeof(req),"GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: MiniAMP3/experimental\r\nIcy-MetaData: 1\r\nConnection: close\r\n\r\n",rs->path,rs->host);
-    if(send(rs->sock,req,n,0)!=n){ radio_close_socket(rs->sock); rs->sock=RADIO_INVALID_SOCKET; set_error(rs,"cannot send HTTP request"); return -1; }
+    if(radio_send_all(rs,req,n)!=0){ close_current_socket(rs); set_error(rs,"cannot send HTTP request"); return -1; }
     reset_parser(rs);
     return 0;
 }
@@ -239,7 +354,7 @@ static int process_bytes(RadioStream *rs, const unsigned char *b, int n)
 RadioStream *Radio_Open(const char *url){ RadioStream *rs=(RadioStream*)calloc(1,sizeof(*rs)); if(!rs) return NULL; rs->sock=RADIO_INVALID_SOCKET; rs->status=RADIO_STATUS_CONNECTING; rs->size=RADIO_RING_BYTES; rs->ring=(unsigned char*)malloc(rs->size); if(!rs->ring){ rs->size=0; set_error(rs,"not enough memory for radio buffer"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: Radio_Open returning error\n")); return rs; } if(parse_url(rs,url)){ set_error(rs,"only direct http:// stream URLs are supported"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: Radio_Open returning error\n")); return rs; } if(connect_http(rs)==0) rs->status=RADIO_STATUS_BUFFERING; else { close_current_socket(rs); if(rs->status!=RADIO_STATUS_ERROR) set_error(rs, rs->error[0] ? rs->error : "cannot open radio stream"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: Radio_Open returning error\n")); } return rs; }
 void Radio_RequestStop(RadioStream *rs){ if(!rs)return; RADIO_STOP_DEBUG_PRINTF(("radio-stop: stop requested\n")); rs->stopping=1; rs->reconnectAttempts=RADIO_RECONNECT_MAX; rs->reconnectDelay=0; rs->status=RADIO_STATUS_STOPPING; close_current_socket(rs); RADIO_STOP_DEBUG_PRINTF(("radio-stop: marked stopping\n")); }
 void Radio_Close(RadioStream *rs){ if(!rs)return; RADIO_STOP_DEBUG_PRINTF(("radio-stop: Radio_Close entered\n")); Radio_RequestStop(rs); rs->status=RADIO_STATUS_CLOSED; free(rs->ring); rs->ring=NULL; rs->size=rs->used=rs->rpos=rs->wpos=0; RADIO_STOP_DEBUG_PRINTF(("radio-stop: Radio_Close exited\n")); free(rs); }
-int Radio_Pump(RadioStream *rs){ unsigned char b[1024]; int n; if(!rs||rs->status==RADIO_STATUS_ERROR) return -1; if(radio_is_stopping(rs)) { close_current_socket(rs); rs->status=RADIO_STATUS_CLOSED; return 0; } if(rs->sock==RADIO_INVALID_SOCKET) { if(!rs->everPlayed){ set_error(rs,"radio stream closed before playback started"); return -1; } return reconnect_http(rs); } n=(int)recv(rs->sock,(char*)b,sizeof(b),0); if(radio_is_stopping(rs)) { close_current_socket(rs); rs->status=RADIO_STATUS_CLOSED; return 0; } if(n<=0){ close_current_socket(rs); if(!rs->headerDone){ set_error(rs,"HTTP header read failed"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: HTTP header failed\n")); return -1; } if(!rs->everPlayed){ set_error(rs,"radio stream ended before audio buffered"); return -1; } rs->reconnectDelay = RADIO_RECONNECT_BACKOFF_PUMPS; set_status(rs, RADIO_STATUS_RECONNECTING); return 0; } rs->zeroBytePumps=0; if(process_bytes(rs,b,n)<0) return -1; if(radio_is_stopping(rs)) { close_current_socket(rs); rs->status=RADIO_STATUS_CLOSED; return 0; } if(rs->headerDone && rs->used >= RADIO_START_THRESHOLD) { rs->reconnectAttempts = 0; rs->reconnectDelay = 0; rs->everPlayed = 1; rs->status=RADIO_STATUS_PLAYING; } else if(rs->headerDone && rs->status!=RADIO_STATUS_PLAYING) set_status(rs,RADIO_STATUS_BUFFERING); return n; }
+int Radio_Pump(RadioStream *rs){ unsigned char b[1024]; int n; if(!rs||rs->status==RADIO_STATUS_ERROR) return -1; if(radio_is_stopping(rs)) { close_current_socket(rs); rs->status=RADIO_STATUS_CLOSED; return 0; } if(rs->sock==RADIO_INVALID_SOCKET) { if(!rs->everPlayed){ set_error(rs,"radio stream closed before playback started"); return -1; } return reconnect_http(rs); } n=(int)recv(rs->sock,(char*)b,sizeof(b),0); if(radio_is_stopping(rs)) { close_current_socket(rs); rs->status=RADIO_STATUS_CLOSED; return 0; } if(n<0 && radio_would_block()){ radio_backoff_sleep(); return 0; } /* non-blocking socket: no data yet - yield instead of freezing the emulator */ if(n<=0){ close_current_socket(rs); if(!rs->headerDone){ set_error(rs,"HTTP header read failed"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: HTTP header failed\n")); return -1; } if(!rs->everPlayed){ set_error(rs,"radio stream ended before audio buffered"); return -1; } rs->reconnectDelay = RADIO_RECONNECT_BACKOFF_PUMPS; set_status(rs, RADIO_STATUS_RECONNECTING); return 0; } rs->zeroBytePumps=0; if(process_bytes(rs,b,n)<0) return -1; if(radio_is_stopping(rs)) { close_current_socket(rs); rs->status=RADIO_STATUS_CLOSED; return 0; } if(rs->headerDone && rs->used >= RADIO_START_THRESHOLD) { rs->reconnectAttempts = 0; rs->reconnectDelay = 0; rs->everPlayed = 1; rs->status=RADIO_STATUS_PLAYING; } else if(rs->headerDone && rs->status!=RADIO_STATUS_PLAYING) set_status(rs,RADIO_STATUS_BUFFERING); return n; }
 int Radio_ReadAudio(RadioStream *rs,unsigned char *buf,int maxBytes){ int got; if(!rs||!buf||maxBytes<=0)return 0; if(radio_is_stopping(rs)) return 0; while(!radio_is_stopping(rs) && rs->status!=RADIO_STATUS_PLAYING && rs->used<RADIO_START_THRESHOLD && rs->status!=RADIO_STATUS_ERROR) { if(Radio_Pump(rs)<=0 && !rs->everPlayed && ++rs->zeroBytePumps>=RADIO_ZERO_BYTE_PUMP_MAX) { set_error(rs,"radio stream did not buffer audio"); break; } } while(!radio_is_stopping(rs) && rs->used==0 && rs->status!=RADIO_STATUS_ERROR) { if(Radio_Pump(rs)<=0 && !rs->everPlayed && ++rs->zeroBytePumps>=RADIO_ZERO_BYTE_PUMP_MAX) { set_error(rs,"radio stream did not deliver audio"); break; } } if(radio_is_stopping(rs)) return 0; got=ring_read(rs,buf,maxBytes); if(rs->status==RADIO_STATUS_PLAYING && rs->used<RADIO_LOW_WATER_BYTES) rs->status=RADIO_STATUS_BUFFERING; if(rs->status==RADIO_STATUS_BUFFERING && rs->used>=RADIO_START_THRESHOLD) rs->status=RADIO_STATUS_PLAYING; return got; }
 RadioStatus Radio_GetStatus(RadioStream *rs){ return rs?rs->status:RADIO_STATUS_CLOSED; }
 const char *Radio_GetTitle(RadioStream *rs){ return rs?rs->title:""; }
