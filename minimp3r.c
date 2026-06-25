@@ -591,8 +591,13 @@ static void SetReadonlyString(Object *gad, struct Window *win, char *cache, size
 	if (cache && cacheSize > 0)
 		SafeCopy(cache, cacheSize, text);
 	if (gad && win)
+		/* STRINGA_TextVal parks the cursor at the end of the new string, which
+		 * scrolls a long value (e.g. the album/station name) so its left edge
+		 * clips off.  Pin the cursor and the view back to the start so read-only
+		 * fields always render left-aligned. */
 		SetGadgetAttrs((struct Gadget *)gad, win, NULL,
 			STRINGA_TextVal, (ULONG)text,
+			STRINGA_BufferPos, 0,
 			STRINGA_DispPos, 0,
 			TAG_DONE);
 }
@@ -624,6 +629,7 @@ static void UpdateAlbumHover(MrApp *app)
 	app->albumHover = over;
 	app->albumScrollPos = 0;
 	SetGadgetAttrs((struct Gadget *)app->albumGad, app->win, NULL,
+		STRINGA_BufferPos, 0,
 		STRINGA_DispPos, 0, TAG_DONE);
 	if (over && app->shownAlbum[0] && strcmp(app->shownAlbum, "-")) {
 		char buf[128];
@@ -1263,6 +1269,7 @@ static Object *ReadonlyString(ULONG id, const char *text, ULONG max)
 {
 	return (Object *)NewObject(STRING_GetClass(), NULL,
 		GA_ID, id, GA_ReadOnly, TRUE, STRINGA_TextVal, (ULONG)text,
+		STRINGA_BufferPos, 0,
 		STRINGA_DispPos, 0,
 		STRINGA_MaxChars, max, TAG_DONE);
 }

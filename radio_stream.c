@@ -31,6 +31,7 @@
 #include <exec/types.h>
 #include <exec/libraries.h>
 #include <proto/exec.h>
+#include <proto/dos.h>
 #include <proto/bsdsocket.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -76,6 +77,20 @@ struct RadioStream {
 };
 
 static int radio_is_stopping(const RadioStream *rs) { return !rs || rs->stopping || rs->status == RADIO_STATUS_STOPPING || rs->status == RADIO_STATUS_CLOSED; }
+
+/* Yield the CPU briefly during reconnect backoff.  reconnect_http() is the only
+ * pump path that does not block on the socket, so without this the player
+ * process spins at 100% CPU while the stream is down or re-buffering, starving
+ * Workbench and the GUI's window redraws (the "desktop/mouse locks up while the
+ * internet buffers" symptom). */
+static void radio_backoff_sleep(void)
+{
+#if defined(AMIGA_M68K)
+    Delay(2); /* ~40ms (2 ticks @ 50Hz) */
+#else
+    usleep(40000);
+#endif
+}
 static void set_status(RadioStream *rs, RadioStatus status) { if (rs && rs->status != RADIO_STATUS_ERROR && rs->status != RADIO_STATUS_CLOSED && rs->status != RADIO_STATUS_STOPPING) rs->status = status; }
 static void radio_copy_string(char *dst, size_t dstSize, const char *src)
 {
@@ -148,7 +163,7 @@ static int reconnect_http(RadioStream *rs)
     close_current_socket(rs);
     if (radio_is_stopping(rs)) { if (rs) rs->status = RADIO_STATUS_CLOSED; return -1; }
     if (rs->reconnectAttempts >= RADIO_RECONNECT_MAX) { set_error(rs,"radio reconnect attempts exhausted"); return -1; }
-    if (rs->reconnectDelay > 0) { rs->reconnectDelay--; set_status(rs, RADIO_STATUS_RECONNECTING); return 0; }
+    if (rs->reconnectDelay > 0) { rs->reconnectDelay--; set_status(rs, RADIO_STATUS_RECONNECTING); radio_backoff_sleep(); return 0; }
     rs->reconnectAttempts++;
     set_status(rs, rs->reconnectAttempts == 1 ? RADIO_STATUS_CONNECTING : RADIO_STATUS_RECONNECTING);
     if (connect_http(rs) == 0) { set_status(rs, RADIO_STATUS_BUFFERING); return 1; }
