@@ -113,8 +113,18 @@
 #define MR_QUALITY_MIN   0
 #define MR_QUALITY_MAX   3
 
-/* How often we poll the shared playback status block while a track plays. */
-#define MR_TICK_MICROS   500000UL
+/* How often we poll the shared playback status block while a track plays.
+ * Keep the heartbeat responsive, but throttle expensive text redraws below. */
+#define MR_TICK_MICROS   250000UL
+#define MR_METADATA_TICKS 4
+#define MR_STATUS_TICKS   4
+#define MR_TIME_TICKS     2
+
+#ifdef REACTION_POLL_DEBUG
+#define MR_POLL_DBG(args) do { printf args; } while (0)
+#else
+#define MR_POLL_DBG(args) do { } while (0)
+#endif
 
 /* Mirror the phase/startup constants the decoder publishes.  They are defined
  * inside amiga_mp3dec.c only for non-AMIGA builds, so re-declare the few we use
@@ -408,6 +418,14 @@ typedef struct MrApp {
 	char  shownStatus[128];
 	int   albumHover;
 	int   albumScrollPos;
+	unsigned long pollTick;
+	unsigned long lastRadioMetaTick;
+	unsigned long lastRadioStatusTick;
+	unsigned long lastTimeTick;
+	int   shownGaugeLevel;
+	int   shownChannelDisabled;
+	int   shownNextDisabled;
+	int   lastRadioStatusShown;
 } MrApp;
 
 static void UpdateTimeDisplay(MrApp *app);
@@ -583,12 +601,12 @@ static void SaveSettings(MrApp *app)
 	SaveEnvString("LastDrawer", app->lastDrawer);
 }
 
-static void SetReadonlyString(Object *gad, struct Window *win, char *cache, size_t cacheSize, const char *text)
+static int SetReadonlyString(Object *gad, struct Window *win, char *cache, size_t cacheSize, const char *text)
 {
 	if (!text)
 		text = "";
 	if (cache && cacheSize > 0 && !strcmp(cache, text))
-		return;
+		return 0;
 	if (cache && cacheSize > 0)
 		SafeCopy(cache, cacheSize, text);
 	if (gad && win) {
@@ -605,6 +623,7 @@ static void SetReadonlyString(Object *gad, struct Window *win, char *cache, size
 			STRINGA_DispPos, 0,
 			TAG_DONE);
 	}
+	return 1;
 }
 
 static void SetStatus(MrApp *app, const char *text)
@@ -645,12 +664,12 @@ static int AlbumVisibleChars(MrApp *app)
 
 /* Set the album gadget to a left-aligned, fit-to-width copy, keeping the full
  * string in app->fullAlbum for the hover status hint. */
-static void SetAlbumDisplay(MrApp *app, const char *full)
+static int SetAlbumDisplay(MrApp *app, const char *full)
 {
 	char shown[128];
 	int fit;
 	if (!app)
-		return;
+		return 0;
 	if (!full)
 		full = "";
 	SafeCopy(app->fullAlbum, sizeof(app->fullAlbum), full);
@@ -663,7 +682,7 @@ static void SetAlbumDisplay(MrApp *app, const char *full)
 	} else {
 		SafeCopy(shown, sizeof(shown), full);
 	}
-	SetReadonlyString(app->albumGad, app->win, app->shownAlbum,
+	return SetReadonlyString(app->albumGad, app->win, app->shownAlbum,
 		sizeof(app->shownAlbum), shown);
 }
 
@@ -721,29 +740,42 @@ static void MrSplitStreamTitle(const char *streamTitle, char *artist, unsigned l
 	if (sep) { ((char *)sep)[0] = 0; SafeCopy(artist, artistSize, tmp); SafeCopy(title, titleSize, sep + 3); }
 }
 
-static void MrSetRadioMetadata(MrApp *app)
+static int MrSetRadioMetadata(MrApp *app, int updateStatus)
 {
 	char streamTitle[128], station[128], genre[64], contentType[64], artist[64], title[64], fileInfo[128], status[128];
+	int updates = 0;
+	int radioStatus;
+	long bufferedBytes;
+	int bitrateKbps;
+
 	MrCopyVolatileString(streamTitle, sizeof(streamTitle), gGuiPlaybackStatus.radioTitle);
 	MrCopyVolatileString(station, sizeof(station), gGuiPlaybackStatus.radioStationName);
 	MrCopyVolatileString(genre, sizeof(genre), gGuiPlaybackStatus.radioGenre);
 	MrCopyVolatileString(contentType, sizeof(contentType), gGuiPlaybackStatus.radioContentType);
+	radioStatus = gGuiPlaybackStatus.radioStatus;
+	bufferedBytes = (long)gGuiPlaybackStatus.radioBufferedBytes;
+	bitrateKbps = gGuiPlaybackStatus.radioBitrateKbps;
+
 	MrSplitStreamTitle(streamTitle, artist, sizeof(artist), title, sizeof(title));
-	if (gGuiPlaybackStatus.radioBitrateKbps > 0)
-		sprintf(fileInfo, "Internet Radio MP3, %d kbps, %s", gGuiPlaybackStatus.radioBitrateKbps, contentType[0] ? contentType : "audio/mpeg");
+	if (bitrateKbps > 0)
+		sprintf(fileInfo, "Internet Radio MP3, %d kbps, %s", bitrateKbps, contentType[0] ? contentType : "audio/mpeg");
 	else
 		sprintf(fileInfo, "Internet Radio MP3, %s", contentType[0] ? contentType : "audio/mpeg");
-	SetReadonlyString(app->titleGad, app->win, app->shownTitle, sizeof(app->shownTitle), title[0] ? title : "-");
-	SetReadonlyString(app->artistGad, app->win, app->shownArtist, sizeof(app->shownArtist), artist[0] ? artist : "-");
-	SetAlbumDisplay(app, station[0] ? station : "Internet Radio");
-	SetReadonlyString(app->trackGad, app->win, app->shownTrack, sizeof(app->shownTrack), "Live");
-	SetReadonlyString(app->genreGad, app->win, app->shownGenre, sizeof(app->shownGenre), genre[0] ? genre : "-");
-	SetReadonlyString(app->fileInfoGad, app->win, app->shownFileInfo, sizeof(app->shownFileInfo), fileInfo);
-	if (gGuiPlaybackStatus.radioStatus == RADIO_STATUS_ERROR)
-		sprintf(status, "Radio error");
-	else
-		sprintf(status, "%s... buffer %ld bytes", Radio_StatusText((RadioStatus)gGuiPlaybackStatus.radioStatus), (long)gGuiPlaybackStatus.radioBufferedBytes);
-	SetStatus(app, status);
+	updates += SetReadonlyString(app->titleGad, app->win, app->shownTitle, sizeof(app->shownTitle), title[0] ? title : "-");
+	updates += SetReadonlyString(app->artistGad, app->win, app->shownArtist, sizeof(app->shownArtist), artist[0] ? artist : "-");
+	updates += SetAlbumDisplay(app, station[0] ? station : "Internet Radio");
+	updates += SetReadonlyString(app->trackGad, app->win, app->shownTrack, sizeof(app->shownTrack), "Live");
+	updates += SetReadonlyString(app->genreGad, app->win, app->shownGenre, sizeof(app->shownGenre), genre[0] ? genre : "-");
+	updates += SetReadonlyString(app->fileInfoGad, app->win, app->shownFileInfo, sizeof(app->shownFileInfo), fileInfo);
+	if (updateStatus) {
+		if (radioStatus == RADIO_STATUS_ERROR)
+			sprintf(status, "Radio error");
+		else
+			sprintf(status, "%s... buffer %ld bytes", Radio_StatusText((RadioStatus)radioStatus), bufferedBytes);
+		updates += SetReadonlyString(app->statusGad, app->win, app->shownStatus,
+			sizeof(app->shownStatus), status);
+	}
+	return updates;
 }
 
 static void SetGauge(MrApp *app, int level)
@@ -752,6 +784,9 @@ static void SetGauge(MrApp *app, int level)
 		level = 0;
 	if (level > 100)
 		level = 100;
+	if (level == app->shownGaugeLevel)
+		return;
+	app->shownGaugeLevel = level;
 	if (app->gaugeGad && app->win)
 		SetGadgetAttrs((struct Gadget *)app->gaugeGad, app->win, NULL,
 			FUELGAUGE_Level, (ULONG)level,
@@ -760,9 +795,13 @@ static void SetGauge(MrApp *app, int level)
 
 static void UpdateChannelGadgetState(MrApp *app)
 {
+	int disabled = app->fakeStereo ? TRUE : FALSE;
+	if (disabled == app->shownChannelDisabled)
+		return;
+	app->shownChannelDisabled = disabled;
 	if (app->win && app->channelGad)
 		SetGadgetAttrs((struct Gadget *)app->channelGad, app->win, NULL,
-			GA_Disabled, (ULONG)(app->fakeStereo ? TRUE : FALSE), TAG_DONE);
+			GA_Disabled, (ULONG)disabled, TAG_DONE);
 }
 
 static void UpdateNextButtonState(MrApp *app)
@@ -770,9 +809,13 @@ static void UpdateNextButtonState(MrApp *app)
 	int enabled = app->playlistCount > 0 && app->playlistCurrent >= 0 &&
 		app->playlistCurrent + 1 < app->playlistCount &&
 		!app->playbackDonePending && !gPlayer.stopRequested;
+	int disabled = enabled ? FALSE : TRUE;
+	if (disabled == app->shownNextDisabled)
+		return;
+	app->shownNextDisabled = disabled;
 	if (app->win && app->nextGad)
 		SetGadgetAttrs((struct Gadget *)app->nextGad, app->win, NULL,
-			GA_Disabled, (ULONG)(enabled ? FALSE : TRUE), TAG_DONE);
+			GA_Disabled, (ULONG)disabled, TAG_DONE);
 }
 
 static void EnablePlayStop(MrApp *app, int playing)
@@ -1009,6 +1052,10 @@ static void StartPlayback(MrApp *app)
 	app->lastPhaseShown = -1;
 	app->elapsedSecs = 0;
 	app->lastFrames = 0;
+	app->lastRadioMetaTick = 0;
+	app->lastRadioStatusTick = 0;
+	app->lastTimeTick = 0;
+	app->lastRadioStatusShown = -1;
 	UpdateTimeDisplay(app);
 	EnablePlayStop(app, 1);
 	SetStatus(app, "Starting playback...");
@@ -1112,25 +1159,52 @@ static void PollPlaybackStatus(MrApp *app)
 	unsigned long halfMs;
 	char buf[96];
 	long audioSecs;
+	int updates = 0;
+	int radioStatus;
+	int radioActive;
+	unsigned long tick;
+
+	if (!app)
+		return;
+	tick = ++app->pollTick;
+	MR_POLL_DBG(("minimp3r: poll %lu start\n", tick));
 
 	/* A late done where the child had already vanished before we drained the
-	 * port: finalize now. */
+	 * port: finalize now.  This is only a quick task lookup and never asks the
+	 * playback child to respond synchronously. */
 	if (app->playbackDonePending && !PlaybackProcessStillExists()) {
 		FinalizePlayback(app);
+		MR_POLL_DBG(("minimp3r: poll %lu finalized done, updates=%d\n", tick, updates));
 		return;
 	}
-	if (!app->playbackActive)
+	if (!app->playbackActive) {
+		MR_POLL_DBG(("minimp3r: poll %lu idle, updates=%d\n", tick, updates));
 		return;
+	}
 
+	radioStatus = gGuiPlaybackStatus.radioStatus;
+	radioActive = gGuiPlaybackStatus.radioActive;
 	if (MrIsRadioInput(app->inputName)) {
-		if (gGuiPlaybackStatus.radioStatus == RADIO_STATUS_ERROR) {
+		if (radioStatus == RADIO_STATUS_ERROR) {
 			gGuiPlaybackStatus.radioActive = 0;
 			gGuiPlaybackStatus.radioBufferedBytes = 0;
-			SetStatus(app, "Radio error");
-		} else if (gGuiPlaybackStatus.radioActive &&
-			gGuiPlaybackStatus.radioStatus != RADIO_STATUS_STOPPING &&
-			gGuiPlaybackStatus.radioStatus != RADIO_STATUS_CLOSED) {
-			MrSetRadioMetadata(app);
+			if (strcmp(app->shownStatus, "Radio error")) {
+				SetStatus(app, "Radio error");
+				updates++;
+			}
+		} else if (radioActive &&
+			radioStatus != RADIO_STATUS_STOPPING &&
+			radioStatus != RADIO_STATUS_CLOSED) {
+			int updateMeta = (app->lastRadioMetaTick == 0) ||
+				(tick - app->lastRadioMetaTick >= MR_METADATA_TICKS);
+			int updateStatus = (app->lastRadioStatusTick == 0) ||
+				(tick - app->lastRadioStatusTick >= MR_STATUS_TICKS) ||
+				radioStatus != app->lastRadioStatusShown;
+			if (updateMeta || updateStatus) {
+				updates += MrSetRadioMetadata(app, updateStatus);
+				if (updateMeta) app->lastRadioMetaTick = tick;
+				if (updateStatus) { app->lastRadioStatusTick = tick; app->lastRadioStatusShown = radioStatus; }
+			}
 		}
 	}
 
@@ -1140,46 +1214,55 @@ static void PollPlaybackStatus(MrApp *app)
 	spareMs = gGuiPlaybackStatus.spareMs;
 	halfMs  = gGuiPlaybackStatus.halfBufferMs;
 
-	if (rate > 0 && frames > 0 && frames != app->lastFrames) {
+	if (rate > 0 && frames > 0 && frames != app->lastFrames &&
+		(app->lastTimeTick == 0 || tick - app->lastTimeTick >= MR_TIME_TICKS)) {
 		app->lastFrames = frames;
+		app->lastTimeTick = tick;
 		audioSecs = (long)((frames * 1152UL) / (unsigned long)rate);
 		audioSecs -= halfMs ? (long)((halfMs + 999UL) / 1000UL) : app->bufferSeconds;
 		if (audioSecs < 0) audioSecs = 0;
 		if (app->totalSecs > 0 && audioSecs > app->totalSecs) audioSecs = app->totalSecs;
-		app->elapsedSecs = (int)audioSecs;
-		UpdateTimeDisplay(app);
+		if (app->elapsedSecs != (int)audioSecs) {
+			app->elapsedSecs = (int)audioSecs;
+			UpdateTimeDisplay(app);
+			updates++;
+		}
 		SetGauge(app, (app->progressEnabled && app->totalSecs > 0) ? (app->elapsedSecs * 100) / app->totalSecs : 0);
 	}
 	(void)spareMs;
 	(void)halfMs;
 
-	if (phase == app->lastPhaseShown)
-		return;
-	app->lastPhaseShown = phase;
-
-	switch (phase) {
-	case GUIPLAY_PHASE_BUFFERING:
-		SetStatus(app, "Buffering...");
-		break;
-	case GUIPLAY_PHASE_PLAYING:
-		if (frames > 0 && rate > 0) {
-			sprintf(buf, "Playing - %lu frames @ %d Hz", frames, rate);
-			SetStatus(app, buf);
-		} else
-			SetStatus(app, "Playing...");
-		break;
-	case GUIPLAY_PHASE_UNDERRUN:
-		SetStatus(app, "Playing (buffer low)...");
-		break;
-	case GUIPLAY_PHASE_STOPPING:
-		SetStatus(app, "Stopping...");
-		break;
-	case GUIPLAY_PHASE_ERROR:
-		SetStatus(app, "Playback error.");
-		break;
-	default:
-		break;
+	if (phase != app->lastPhaseShown) {
+		app->lastPhaseShown = phase;
+		switch (phase) {
+		case GUIPLAY_PHASE_BUFFERING:
+			SetStatus(app, "Buffering..."); updates++;
+			break;
+		case GUIPLAY_PHASE_PLAYING:
+			if (!MrIsRadioInput(app->inputName)) {
+				if (frames > 0 && rate > 0) {
+					sprintf(buf, "Playing - %lu frames @ %d Hz", frames, rate);
+					SetStatus(app, buf);
+				} else
+					SetStatus(app, "Playing...");
+				updates++;
+			}
+			break;
+		case GUIPLAY_PHASE_UNDERRUN:
+			SetStatus(app, "Playing (buffer low)..."); updates++;
+			break;
+		case GUIPLAY_PHASE_STOPPING:
+			SetStatus(app, "Stopping..."); updates++;
+			break;
+		case GUIPLAY_PHASE_ERROR:
+			SetStatus(app, "Playback error."); updates++;
+			break;
+		default:
+			break;
+		}
 	}
+	MR_POLL_DBG(("minimp3r: poll %lu end updates=%d phase=%d radio=%d/%d fullrefresh=0\n",
+		tick, updates, phase, radioActive, radioStatus));
 }
 
 /* ------------------------------------------------------------------------- */
@@ -3133,6 +3216,10 @@ int main(int argc, char **argv)
 	app.playlistCurrent = -1;
 	app.playlistSelected = -1;
 	app.lastPhaseShown = -1;
+	app.shownGaugeLevel = -1;
+	app.shownChannelDisabled = -1;
+	app.shownNextDisabled = -1;
+	app.lastRadioStatusShown = -1;
 
 	/* Let the playback child find any installed *.decoder modules, exactly as
 	 * the GadTools frontend does. */
