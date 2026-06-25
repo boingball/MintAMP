@@ -157,12 +157,13 @@ make -f Makefile.amiga minimp3r
 
 `miniamp3` opens the MiniAMP3 window with an ASL file requester whose pattern is
 expanded from built-in MP3 plus discovered decoder-module extensions such as
-FLAC and AAC.  The main window includes speed-mode, channel-mode, fake-stereo,
-fast-mem, sample-rate, quality, buffer, and volume controls; metadata/artwork
-fields; progress and time displays; transport buttons for Play, Next, Stop, the
-Paula hardware filter, and the playlist window; a status bar; and a file-info
-row.  The GUI uses `gadtools.library` through the AmigaOS m68k pragmas, so no
-`-lauto` linker flag is needed.
+FLAC and AAC.  Internet radio URLs can be entered from
+Project/Internet Stream.  The main window includes speed-mode, channel-mode,
+fake-stereo, fast-mem, sample-rate, quality, buffer, and volume controls;
+metadata/artwork fields; progress and time displays; transport buttons for Play,
+Next, Stop, the Paula hardware filter, and the playlist window; a status bar;
+and a file-info row.  The GUI uses `gadtools.library` through the AmigaOS m68k
+pragmas, so no `-lauto` linker flag is needed.
 
 The quality cycle maps directly to the same decoder quality levels used by
 `amiga_mp3dec`, and GUI playback always passes an explicit `--quality N` value:

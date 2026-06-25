@@ -264,7 +264,8 @@ static char gSupportedExtPattern[512];
 #define MENUNUM_PROJECT   0
 #define MENUNUM_PLAYBACK  1
 #define ITEMNUM_ABOUT     0
-#define ITEMNUM_QUIT      1
+#define ITEMNUM_STREAM    1
+#define ITEMNUM_QUIT      2
 #define ITEMNUM_DTP       0
 #define ITEMNUM_BENCH     1
 #define ITEMNUM_ARTWORK   2
@@ -307,7 +308,10 @@ enum {
 	GID_STAR3,
 	GID_STAR4,
 	GID_STAR5,
-	GID_COUNT
+	GID_COUNT,
+	GID_STREAM_URL,
+	GID_STREAM_OK,
+	GID_STREAM_CANCEL
 };
 
 /* Playlist window gadget IDs (separate range to avoid main window conflicts) */
@@ -635,6 +639,8 @@ static struct NewMenu myNewMenus[] = {
 	{ NM_TITLE, (STRPTR)"Project",          0, 0, 0, 0 },
 	{ NM_ITEM,  (STRPTR)"About MiniAMP3...",0, 0, 0,
 		(APTR)(MENUNUM_PROJECT * 100 + ITEMNUM_ABOUT) },
+	{ NM_ITEM,  (STRPTR)"Internet Stream...",0, 0, 0,
+		(APTR)(MENUNUM_PROJECT * 100 + ITEMNUM_STREAM) },
 	{ NM_ITEM,  (STRPTR)"Quit",             0, 0, 0,
 		(APTR)(MENUNUM_PROJECT * 100 + ITEMNUM_QUIT) },
 	{ NM_TITLE, (STRPTR)"Playback",         0, 0, 0, 0 },
@@ -4890,6 +4896,171 @@ static void ChooseMp3(HelixAmp3Gui *gui)
 	FreeAslRequest(req);
 }
 
+static void SelectInternetStream(HelixAmp3Gui *gui, const char *url)
+{
+	if (!url || !url[0])
+		return;
+	if (!IsRadioInputName(url)) {
+		SetStatus(gui, "Internet streams must start with http://");
+		return;
+	}
+	if (gui->playbackActive || gui->playbackDonePending) {
+		SafeCopy(gui->queuedInputName, sizeof(gui->queuedInputName), url);
+		SetStatus(gui, "Internet stream selected for next Play.");
+		return;
+	}
+	CancelArtDecode(gui);
+	SafeCopy(gui->inputName, sizeof(gui->inputName), url);
+	SetFileDisplay(gui, gui->inputName);
+	FreeTags(&gui->tags);
+	memset(&gui->tags, 0, sizeof(gui->tags));
+	gui->totalSecs = 0;
+	gui->elapsedSecs = 0;
+	gui->launchBufferSecs = 0;
+	UpdateTagDisplay(gui);
+	UpdateArtDisplay(gui);
+	DrawProgress(gui);
+	SetStatus(gui, "Internet stream ready.");
+}
+
+static void EnterInternetStream(HelixAmp3Gui *gui)
+{
+	struct NewWindow nw;
+	struct Window *win;
+	struct Gadget *gadgets;
+	struct Gadget *gadContext;
+	struct Gadget *gad;
+	struct Gadget *gadString;
+	struct NewGadget ng;
+	struct IntuiMessage *msg;
+	char *enteredUrl;
+	char url[HELIXAMP3_MAX_PATH];
+	int done;
+	int accepted;
+
+	if (!gui || !gui->win || !gui->visualInfo)
+		return;
+	SafeCopy(url, sizeof(url), IsRadioInputName(gui->inputName) ?
+		gui->inputName : "http://");
+
+	memset(&nw, 0, sizeof(nw));
+	nw.LeftEdge = gui->win->LeftEdge + 20;
+	nw.TopEdge = gui->win->TopEdge + 25;
+	nw.Width = 560;
+	nw.Height = 72;
+	nw.DetailPen = gui->win->DetailPen;
+	nw.BlockPen = gui->win->BlockPen;
+	nw.IDCMPFlags = IDCMP_GADGETUP | IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW;
+	nw.Flags = WFLG_DRAGBAR | WFLG_DEPTHGADGET | WFLG_CLOSEGADGET |
+		WFLG_ACTIVATE | WFLG_RMBTRAP;
+	nw.Title = (UBYTE *)"MiniAMP3 Internet Stream";
+	nw.Type = CUSTOMSCREEN;
+	nw.Screen = gui->win->WScreen;
+
+	win = OpenWindowTags(&nw, TAG_DONE);
+	if (!win) {
+		SetStatus(gui, "Cannot open Internet Stream requester.");
+		return;
+	}
+
+	gadgets = NULL;
+	gadContext = CreateContext(&gadgets);
+	if (!gadContext) {
+		CloseWindow(win);
+		SetStatus(gui, "Cannot create Internet Stream gadgets.");
+		return;
+	}
+	gad = gadContext;
+
+	memset(&ng, 0, sizeof(ng));
+	ng.ng_LeftEdge = 80;
+	ng.ng_TopEdge = 12;
+	ng.ng_Width = 455;
+	ng.ng_Height = 16;
+	ng.ng_GadgetText = (UBYTE *)"URL:";
+	ng.ng_GadgetID = GID_STREAM_URL;
+	ng.ng_Flags = PLACETEXT_LEFT;
+	ng.ng_VisualInfo = gui->visualInfo;
+	gadString = gad = CreateGadget(STRING_KIND, gad, &ng,
+		GTST_String, (ULONG)url,
+		GTST_MaxChars, sizeof(url),
+		GA_TabCycle, TRUE,
+		GA_RelVerify, TRUE,
+		TAG_DONE);
+
+	memset(&ng, 0, sizeof(ng));
+	ng.ng_LeftEdge = 175;
+	ng.ng_TopEdge = 40;
+	ng.ng_Width = 80;
+	ng.ng_Height = 16;
+	ng.ng_GadgetText = (UBYTE *)"OK";
+	ng.ng_GadgetID = GID_STREAM_OK;
+	ng.ng_Flags = PLACETEXT_IN;
+	ng.ng_VisualInfo = gui->visualInfo;
+	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE);
+
+	memset(&ng, 0, sizeof(ng));
+	ng.ng_LeftEdge = 305;
+	ng.ng_TopEdge = 40;
+	ng.ng_Width = 80;
+	ng.ng_Height = 16;
+	ng.ng_GadgetText = (UBYTE *)"Cancel";
+	ng.ng_GadgetID = GID_STREAM_CANCEL;
+	ng.ng_Flags = PLACETEXT_IN;
+	ng.ng_VisualInfo = gui->visualInfo;
+	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE);
+
+	if (!gadString || !gad) {
+		FreeGadgets(gadgets);
+		CloseWindow(win);
+		SetStatus(gui, "Cannot create Internet Stream gadgets.");
+		return;
+	}
+
+	AddGList(win, gadgets, (UWORD)-1, -1, NULL);
+	RefreshGList(gadgets, win, NULL, -1);
+	GT_RefreshWindow(win, NULL);
+	ActivateGadget(gadString, win, NULL);
+
+	done = 0;
+	accepted = 0;
+	while (!done) {
+		WaitPort(win->UserPort);
+		while ((msg = GT_GetIMsg(win->UserPort)) != NULL) {
+			ULONG classValue = msg->Class;
+			struct Gadget *which = (struct Gadget *)msg->IAddress;
+			GT_ReplyIMsg(msg);
+			if (classValue == IDCMP_CLOSEWINDOW) {
+				done = 1;
+			} else if (classValue == IDCMP_REFRESHWINDOW) {
+				GT_BeginRefresh(win);
+				GT_EndRefresh(win, TRUE);
+			} else if (classValue == IDCMP_GADGETUP && which) {
+				if (which->GadgetID == GID_STREAM_OK ||
+					which->GadgetID == GID_STREAM_URL) {
+					accepted = 1;
+					done = 1;
+				} else if (which->GadgetID == GID_STREAM_CANCEL) {
+					done = 1;
+				}
+			}
+		}
+	}
+
+	enteredUrl = NULL;
+	if (accepted) {
+		GT_GetGadgetAttrs(gadString, win, NULL,
+			GTST_String, (ULONG)&enteredUrl,
+			TAG_DONE);
+		if (enteredUrl)
+			SafeCopy(url, sizeof(url), enteredUrl);
+	}
+	FreeGadgets(gadgets);
+	CloseWindow(win);
+	if (accepted)
+		SelectInternetStream(gui, url);
+}
+
 static void AddArg(HelixAmp3Args *args, const char *text)
 {
 	if (args->argc >= HELIXAMP3_ARGC_MAX)
@@ -5725,6 +5896,8 @@ static void GuiPoll(HelixAmp3Gui *gui)
 						gui->closeRequested = 1;
 					else if (mn == MENUNUM_PROJECT && it == ITEMNUM_ABOUT)
 						ShowAbout(gui);
+					else if (mn == MENUNUM_PROJECT && it == ITEMNUM_STREAM)
+						EnterInternetStream(gui);
 					else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_DTP)
 						SetDecodeThenPlay(gui, !gui->decodeThenPlay);
 					else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_BENCH) {
