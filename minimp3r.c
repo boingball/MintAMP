@@ -1327,16 +1327,16 @@ static int MrOpenWindow(MrApp *app)
 	app->statusGad = (Object *)NewObject(STRING_GetClass(), NULL,
 	                GA_ReadOnly, TRUE,
 	                STRINGA_TextVal, (ULONG)"Ready.",
-	                STRINGA_MaxChars, 80,
+	                STRINGA_MaxChars, 128,
 	                TAG_DONE);
 
 	app->timeGad = ReadonlyString(GID_TIME, "00:00 / --:--", 32);
-	app->fileInfoGad = ReadonlyString(GID_FILEINFO, "No file info", 56);
-	app->titleGad = ReadonlyString(GID_TITLE, "-", 32);
-	app->artistGad = ReadonlyString(GID_ARTIST, "-", 28);
-	app->albumGad = ReadonlyString(GID_ALBUM, "-", 32);
-	app->trackGad = ReadonlyString(GID_TRACK, "-", 12);
-	app->genreGad = ReadonlyString(GID_GENRE, "-", 20);
+	app->fileInfoGad = ReadonlyString(GID_FILEINFO, "No file info", 128);
+	app->titleGad = ReadonlyString(GID_TITLE, "-", 96);
+	app->artistGad = ReadonlyString(GID_ARTIST, "-", 96);
+	app->albumGad = ReadonlyString(GID_ALBUM, "-", 128);
+	app->trackGad = ReadonlyString(GID_TRACK, "-", 32);
+	app->genreGad = ReadonlyString(GID_GENRE, "-", 64);
 	app->ratingGad = ReadonlyString(GID_RATING, "0/5", 16);
 	/* ReAction artwork render target: a fixed right-hand box.  The picojpeg
 	 * decode/dither path (shared with the GadTools frontend) renders the 64x64
@@ -1510,8 +1510,11 @@ static int MrOpenWindow(MrApp *app)
 		WA_IDCMP, IDCMP_GADGETUP | IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
 			IDCMP_IDCMPUPDATE | IDCMP_MENUPICK | IDCMP_NEWSIZE,
 		WA_NewLookMenus, TRUE,
-		WA_Width, 440,
-		WA_Height, 290,
+		/* Match the GadTools frontend's larger default footprint now that
+		 * ReAction window sizing is stable, so long metadata and file-info
+		 * strings get the same breathing room. */
+		WA_Width, 560,
+		WA_Height, 340,
 		WINDOW_Position, WPOS_CENTERSCREEN,
 		WINDOW_ParentGroup, (ULONG)root,
                 TAG_DONE);
