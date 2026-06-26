@@ -12,11 +12,13 @@
 # -----
 #   make -C decoders          # build FLAC and AAC modules
 #   make -C decoders flac     # build only the FLAC module
-#   make -C decoders aac      # build only the AAC module
+#   make -C decoders aac      # build only the AAC module (AAC asm on by default)
+#   make -C decoders aac AACASM=0  # build AAC without m68k asm helpers
 
 CC     := m68k-amigaos-gcc
 NM     := m68k-amigaos-nm
 CPU    := -m68020
+AACASM ?= 1
 CFLAGS := $(CPU) -O2 -fomit-frame-pointer -std=gnu89 -Wall -I. \
           -DHAVE_AMIGA_AUDIO_DEVICE -DAMIGA_M68K \
           -fno-builtin \

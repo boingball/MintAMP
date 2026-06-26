@@ -126,6 +126,10 @@ make -C decoders flac
 make -C decoders aac
 ```
 
+AAC m68k asm helpers are enabled by default for these builds.  Pass `AACASM=0`
+to either the top-level Amiga makefile or `make -C decoders aac` only when you
+need the plain C fallback.
+
 `make -f Makefile.amiga`, `fast030`, `gui`, and `guir` all depend on
 `decoder-modules`; the module makefile now builds both `flac.decoder` and `aac.decoder` by default.  The FLAC module is linked with `-nostartfiles`, keeps its allocation
 inside the module through an Exec `AllocMem`/`FreeMem` shim, and audits for
