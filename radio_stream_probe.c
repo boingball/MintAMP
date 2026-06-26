@@ -1,0 +1,481 @@
+/*
+ * Small fixed-buffer HTTP/ICY stream probe.
+ *
+ * Test harness build:
+ *   gcc -std=gnu89 -Wall -Wextra -DRB_STREAM_PROBE_TEST radio_stream_probe.c -o /tmp/rb_stream_probe_test
+ */
+
+#include "radio_stream_probe.h"
+
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <ctype.h>
+
+#if defined(AMIGA_M68K)
+#include <exec/types.h>
+#include <exec/libraries.h>
+#include <proto/exec.h>
+#include <proto/bsdsocket.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netdb.h>
+#ifndef RB_STREAM_PROBE_EXTERNAL_SOCKETBASE
+struct Library *SocketBase __attribute__((weak));
+#endif
+#define RB_PROBE_SOCKET long
+#define RB_PROBE_INVALID_SOCKET (-1)
+#define rb_probe_close_socket(s) CloseSocket(s)
+#else
+#include <unistd.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#define RB_PROBE_SOCKET int
+#define RB_PROBE_INVALID_SOCKET (-1)
+#define rb_probe_close_socket(s) close(s)
+#endif
+
+#define RB_PROBE_DEFAULT_PORT 80
+#define RB_PROBE_MAX_HOST 256
+#define RB_PROBE_MAX_PATH 512
+#define RB_PROBE_MAX_REQUEST 1024
+#define RB_PROBE_HEADER_BUF 4096
+#define RB_PROBE_READ_CHUNK 512
+
+typedef struct RbProbeUrl {
+    char host[RB_PROBE_MAX_HOST];
+    char path[RB_PROBE_MAX_PATH];
+    int port;
+} RbProbeUrl;
+
+typedef struct RbProbeTransport {
+    RB_PROBE_SOCKET sock;
+} RbProbeTransport;
+
+static int rb_probe_ascii_starts_nocase(const char *s, const char *prefix)
+{
+    unsigned char cs;
+    unsigned char cp;
+
+    if (!s || !prefix) return 0;
+    while (*prefix) {
+        if (!*s) return 0;
+        cs = (unsigned char)*s;
+        cp = (unsigned char)*prefix;
+        if (tolower(cs) != tolower(cp)) return 0;
+        s++;
+        prefix++;
+    }
+    return 1;
+}
+
+static void rb_probe_copy_trim(char *dst, int dst_size, const char *src, int len)
+{
+    int start;
+    int end;
+    int n;
+
+    if (!dst || dst_size <= 0) return;
+    dst[0] = '\0';
+    if (!src || len <= 0) return;
+    start = 0;
+    end = len;
+    while (start < end && (src[start] == ' ' || src[start] == '\t')) start++;
+    while (end > start && (src[end - 1] == ' ' || src[end - 1] == '\t' ||
+                           src[end - 1] == '\r' || src[end - 1] == '\n')) end--;
+    n = end - start;
+    if (n > dst_size - 1) n = dst_size - 1;
+    if (n > 0) memcpy(dst, src + start, (size_t)n);
+    dst[n] = '\0';
+}
+
+static void rb_probe_info_init(RbStreamInfo *info)
+{
+    if (!info) return;
+    memset(info, 0, sizeof(*info));
+    info->codec = RB_STREAM_CODEC_UNKNOWN;
+}
+
+static int rb_probe_parse_url(const char *url, RbProbeUrl *parsed)
+{
+    const char *p;
+    const char *slash;
+    const char *colon;
+    const char *host_start;
+    int host_len;
+    int path_len;
+    int port;
+
+    if (!url || !parsed) return RB_STREAM_PROBE_ERR_BAD_ARG;
+    memset(parsed, 0, sizeof(*parsed));
+    parsed->port = RB_PROBE_DEFAULT_PORT;
+
+    if (rb_probe_ascii_starts_nocase(url, "https://"))
+        return RB_STREAM_PROBE_ERR_UNSUPPORTED_TLS;
+    if (!rb_probe_ascii_starts_nocase(url, "http://"))
+        return RB_STREAM_PROBE_ERR_BAD_URL;
+
+    host_start = url + 7;
+    if (!*host_start) return RB_STREAM_PROBE_ERR_BAD_URL;
+    slash = strchr(host_start, '/');
+    if (!slash) slash = host_start + strlen(host_start);
+    if (slash == host_start) return RB_STREAM_PROBE_ERR_BAD_URL;
+
+    colon = NULL;
+    p = host_start;
+    while (p < slash) {
+        if (*p == ':') colon = p;
+        p++;
+    }
+
+    if (colon) {
+        host_len = (int)(colon - host_start);
+        if (host_len <= 0) return RB_STREAM_PROBE_ERR_BAD_URL;
+        port = 0;
+        p = colon + 1;
+        if (p >= slash) return RB_STREAM_PROBE_ERR_BAD_URL;
+        while (p < slash) {
+            if (!isdigit((unsigned char)*p)) return RB_STREAM_PROBE_ERR_BAD_URL;
+            port = port * 10 + (*p - '0');
+            if (port > 65535) return RB_STREAM_PROBE_ERR_BAD_URL;
+            p++;
+        }
+        if (port <= 0) return RB_STREAM_PROBE_ERR_BAD_URL;
+        parsed->port = port;
+    } else {
+        host_len = (int)(slash - host_start);
+    }
+
+    if (host_len >= RB_PROBE_MAX_HOST) return RB_STREAM_PROBE_ERR_BAD_URL;
+    memcpy(parsed->host, host_start, (size_t)host_len);
+    parsed->host[host_len] = '\0';
+
+    if (*slash) {
+        path_len = (int)strlen(slash);
+        if (path_len >= RB_PROBE_MAX_PATH) return RB_STREAM_PROBE_ERR_BAD_URL;
+        memcpy(parsed->path, slash, (size_t)path_len + 1);
+    } else {
+        strcpy(parsed->path, "/");
+    }
+    return RB_STREAM_PROBE_OK;
+}
+
+static int rb_probe_append(char *out, int out_size, int *pos, const char *text)
+{
+    if (!out || !pos || out_size <= 0 || !text) return RB_STREAM_PROBE_ERR_BAD_ARG;
+    while (*text) {
+        if (*pos >= out_size - 1) return RB_STREAM_PROBE_ERR_REQUEST_TOO_BIG;
+        out[*pos] = *text;
+        (*pos)++;
+        out[*pos] = '\0';
+        text++;
+    }
+    return RB_STREAM_PROBE_OK;
+}
+
+static int rb_probe_build_request(char *out, int out_size, const RbProbeUrl *url)
+{
+    int pos;
+    int rc;
+
+    if (!out || out_size <= 0 || !url) return RB_STREAM_PROBE_ERR_BAD_ARG;
+    out[0] = '\0';
+    pos = 0;
+    rc = rb_probe_append(out, out_size, &pos, "GET ");
+    if (rc < 0) return rc;
+    rc = rb_probe_append(out, out_size, &pos, url->path);
+    if (rc < 0) return rc;
+    rc = rb_probe_append(out, out_size, &pos, " HTTP/1.1\r\nHost: ");
+    if (rc < 0) return rc;
+    rc = rb_probe_append(out, out_size, &pos, url->host);
+    if (rc < 0) return rc;
+    return rb_probe_append(out, out_size, &pos,
+        "\r\nUser-Agent: BoingPlayer/0.1 AmigaOS\r\n"
+        "Icy-MetaData: 1\r\n"
+        "Connection: close\r\n\r\n");
+}
+
+static int rb_probe_transport_open(RbProbeTransport *transport, const char *host, int port)
+{
+    struct hostent *he;
+    struct sockaddr_in sa;
+
+    if (!transport || !host) return RB_STREAM_PROBE_ERR_BAD_ARG;
+    transport->sock = RB_PROBE_INVALID_SOCKET;
+#if defined(AMIGA_M68K) && !defined(RB_STREAM_PROBE_EXTERNAL_SOCKETBASE)
+    if (!SocketBase) {
+        SocketBase = OpenLibrary("bsdsocket.library", 4);
+        if (!SocketBase) return RB_STREAM_PROBE_ERR_CONNECT;
+    }
+#endif
+    he = gethostbyname(host);
+    if (!he || !he->h_addr_list || !he->h_addr_list[0]) return RB_STREAM_PROBE_ERR_DNS;
+    transport->sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (transport->sock == RB_PROBE_INVALID_SOCKET) return RB_STREAM_PROBE_ERR_CONNECT;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons((unsigned short)port);
+    memcpy(&sa.sin_addr, he->h_addr_list[0], (size_t)he->h_length);
+    if (connect(transport->sock, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+        rb_probe_close_socket(transport->sock);
+        transport->sock = RB_PROBE_INVALID_SOCKET;
+        return RB_STREAM_PROBE_ERR_CONNECT;
+    }
+    return RB_STREAM_PROBE_OK;
+}
+
+static void rb_probe_transport_close(RbProbeTransport *transport)
+{
+    if (transport && transport->sock != RB_PROBE_INVALID_SOCKET) {
+        rb_probe_close_socket(transport->sock);
+        transport->sock = RB_PROBE_INVALID_SOCKET;
+    }
+}
+
+static int rb_probe_send_all(RbProbeTransport *transport, const char *buf, int len)
+{
+    int sent;
+    int n;
+
+    if (!transport || transport->sock == RB_PROBE_INVALID_SOCKET || !buf || len < 0)
+        return RB_STREAM_PROBE_ERR_BAD_ARG;
+    sent = 0;
+    while (sent < len) {
+        n = (int)send(transport->sock, (char *)buf + sent, len - sent, 0);
+        if (n <= 0) return RB_STREAM_PROBE_ERR_SEND;
+        sent += n;
+    }
+    return RB_STREAM_PROBE_OK;
+}
+
+static int rb_probe_find_header_end(const unsigned char *buf, int len)
+{
+    int i;
+
+    for (i = 0; i + 3 < len; i++) {
+        if (buf[i] == '\r' && buf[i + 1] == '\n' && buf[i + 2] == '\r' && buf[i + 3] == '\n')
+            return i + 4;
+    }
+    return -1;
+}
+
+static int rb_probe_parse_int(const char *s)
+{
+    int value;
+
+    value = 0;
+    if (!s) return 0;
+    while (*s == ' ' || *s == '\t') s++;
+    while (*s >= '0' && *s <= '9') {
+        value = value * 10 + (*s - '0');
+        s++;
+    }
+    return value;
+}
+
+static void rb_probe_parse_headers(char *headers, int header_len, RbStreamInfo *info)
+{
+    char *line;
+    char *next;
+    char *colon;
+    char *value;
+    int name_len;
+
+    if (!headers || !info || header_len <= 0) return;
+    headers[header_len] = '\0';
+    line = headers;
+    next = strstr(line, "\r\n");
+    if (next) *next = '\0';
+    if (strncmp(line, "HTTP/", 5) == 0) {
+        sscanf(line, "%*s %d", &info->http_status);
+    } else if (strncmp(line, "ICY ", 4) == 0) {
+        sscanf(line, "ICY %d", &info->http_status);
+    }
+    line = next ? next + 2 : NULL;
+
+    while (line && *line) {
+        next = strstr(line, "\r\n");
+        if (next) *next = '\0';
+        colon = strchr(line, ':');
+        if (colon) {
+            name_len = (int)(colon - line);
+            value = colon + 1;
+            if (name_len == 12 && rb_probe_ascii_starts_nocase(line, "Content-Type"))
+                rb_probe_copy_trim(info->content_type, (int)sizeof(info->content_type), value, (int)strlen(value));
+            else if (name_len == 8 && rb_probe_ascii_starts_nocase(line, "icy-name"))
+                rb_probe_copy_trim(info->icy_name, (int)sizeof(info->icy_name), value, (int)strlen(value));
+            else if (name_len == 6 && rb_probe_ascii_starts_nocase(line, "icy-br"))
+                info->icy_br = rb_probe_parse_int(value);
+            else if (name_len == 11 && rb_probe_ascii_starts_nocase(line, "icy-metaint"))
+                info->icy_metaint = rb_probe_parse_int(value);
+            else if (name_len == 7 && rb_probe_ascii_starts_nocase(line, "icy-url"))
+                rb_probe_copy_trim(info->icy_url, (int)sizeof(info->icy_url), value, (int)strlen(value));
+        }
+        if (!next) break;
+        line = next + 2;
+    }
+}
+
+static int rb_probe_contains_nocase(const char *s, const char *needle)
+{
+    int needle_len;
+    int i;
+
+    if (!s || !needle) return 0;
+    needle_len = (int)strlen(needle);
+    if (needle_len <= 0) return 1;
+    for (i = 0; s[i]; i++) {
+        if (rb_probe_ascii_starts_nocase(s + i, needle)) return 1;
+    }
+    return 0;
+}
+
+static RbStreamCodec rb_probe_detect_codec(const RbProbeUrl *url, const RbStreamInfo *info,
+                                           const unsigned char *peek, int peek_len)
+{
+    if (info && info->content_type[0]) {
+        if (rb_probe_contains_nocase(info->content_type, "audio/mpeg") ||
+            rb_probe_contains_nocase(info->content_type, "audio/mp3")) return RB_STREAM_CODEC_MP3;
+        if (rb_probe_contains_nocase(info->content_type, "audio/aac") ||
+            rb_probe_contains_nocase(info->content_type, "audio/aacp") ||
+            rb_probe_contains_nocase(info->content_type, "audio/x-aac")) return RB_STREAM_CODEC_AAC;
+    }
+    if (url && (rb_probe_contains_nocase(url->path, ".aac") || rb_probe_contains_nocase(url->path, ".aacp")))
+        return RB_STREAM_CODEC_AAC;
+    if (peek && peek_len >= 3 && peek[0] == 'I' && peek[1] == 'D' && peek[2] == '3')
+        return RB_STREAM_CODEC_MP3;
+    if (peek && peek_len >= 2 && peek[0] == 0xff && (peek[1] & 0xe0) == 0xe0 &&
+        peek[1] != 0xf1 && peek[1] != 0xf9) return RB_STREAM_CODEC_MP3;
+    if (peek && peek_len >= 2 && peek[0] == 0xff && (peek[1] == 0xf1 || peek[1] == 0xf9))
+        return RB_STREAM_CODEC_AAC;
+    return RB_STREAM_CODEC_UNKNOWN;
+}
+
+int rb_probe_stream_url(const char *url, RbStreamInfo *info,
+                        unsigned char *peek_buf, int peek_buf_size, int *peek_len)
+{
+    RbProbeUrl parsed;
+    RbProbeTransport transport;
+    char request[RB_PROBE_MAX_REQUEST];
+    unsigned char header_buf[RB_PROBE_HEADER_BUF + 1];
+    char parse_buf[RB_PROBE_HEADER_BUF + 1];
+    int rc;
+    int request_len;
+    int total;
+    int header_end;
+    int done;
+
+    if (!url || !info || !peek_len || peek_buf_size < 0 || (peek_buf_size > 0 && !peek_buf))
+        return RB_STREAM_PROBE_ERR_BAD_ARG;
+    rb_probe_info_init(info);
+    *peek_len = 0;
+    rc = rb_probe_parse_url(url, &parsed);
+    if (rc < 0) return rc;
+    rc = rb_probe_build_request(request, (int)sizeof(request), &parsed);
+    if (rc < 0) return rc;
+    request_len = (int)strlen(request);
+    rc = rb_probe_transport_open(&transport, parsed.host, parsed.port);
+    if (rc < 0) return rc;
+    rc = rb_probe_send_all(&transport, request, request_len);
+    if (rc < 0) {
+        rb_probe_transport_close(&transport);
+        return rc;
+    }
+    total = 0;
+    header_end = -1;
+    done = 0;
+    while (!done) {
+        int want;
+        int n;
+        int body_avail;
+        int copy;
+
+        want = RB_PROBE_HEADER_BUF - total;
+        if (want > RB_PROBE_READ_CHUNK) want = RB_PROBE_READ_CHUNK;
+        if (want <= 0) {
+            rb_probe_transport_close(&transport);
+            return RB_STREAM_PROBE_ERR_HEADERS_TOO_BIG;
+        }
+        n = (int)recv(transport.sock, (char *)header_buf + total, want, 0);
+        if (n < 0) {
+            rb_probe_transport_close(&transport);
+            return RB_STREAM_PROBE_ERR_RECV;
+        }
+        if (n == 0) break;
+        total += n;
+        if (header_end < 0) header_end = rb_probe_find_header_end(header_buf, total);
+        if (header_end >= 0) {
+            body_avail = total - header_end;
+            copy = body_avail;
+            if (copy > peek_buf_size - *peek_len) copy = peek_buf_size - *peek_len;
+            if (copy > 0) {
+                memcpy(peek_buf + *peek_len, header_buf + header_end, (size_t)copy);
+                *peek_len += copy;
+            }
+            done = (*peek_len >= peek_buf_size);
+            break;
+        }
+    }
+    if (header_end < 0) {
+        rb_probe_transport_close(&transport);
+        return RB_STREAM_PROBE_ERR_HEADERS_TOO_BIG;
+    }
+    memcpy(parse_buf, header_buf, (size_t)header_end);
+    rb_probe_parse_headers(parse_buf, header_end, info);
+    while (*peek_len < peek_buf_size) {
+        int want2;
+        int n2;
+
+        want2 = peek_buf_size - *peek_len;
+        if (want2 > RB_PROBE_READ_CHUNK) want2 = RB_PROBE_READ_CHUNK;
+        n2 = (int)recv(transport.sock, (char *)peek_buf + *peek_len, want2, 0);
+        if (n2 < 0) {
+            rb_probe_transport_close(&transport);
+            return RB_STREAM_PROBE_ERR_RECV;
+        }
+        if (n2 == 0) break;
+        *peek_len += n2;
+    }
+    rb_probe_transport_close(&transport);
+    info->codec = rb_probe_detect_codec(&parsed, info, peek_buf, *peek_len);
+    return RB_STREAM_PROBE_OK;
+}
+
+#ifdef RB_STREAM_PROBE_TEST
+static const char *rb_probe_codec_name(RbStreamCodec codec)
+{
+    switch (codec) {
+    case RB_STREAM_CODEC_MP3: return "MP3";
+    case RB_STREAM_CODEC_AAC: return "AAC";
+    default: return "unknown";
+    }
+}
+
+int main(int argc, char **argv)
+{
+    RbStreamInfo info;
+    unsigned char peek[512];
+    int peek_len;
+    int rc;
+
+    if (argc < 2) {
+        fprintf(stderr, "usage: %s URL\n", argv[0]);
+        return 2;
+    }
+    rc = rb_probe_stream_url(argv[1], &info, peek, (int)sizeof(peek), &peek_len);
+    if (rc < 0) {
+        printf("probe error: %d\n", rc);
+        return 1;
+    }
+    printf("status: %d\n", info.http_status);
+    printf("content type: %s\n", info.content_type);
+    printf("icy name: %s\n", info.icy_name);
+    printf("icy bitrate: %d\n", info.icy_br);
+    printf("icy metaint: %d\n", info.icy_metaint);
+    printf("detected codec: %s\n", rb_probe_codec_name(info.codec));
+    printf("peek bytes: %d\n", peek_len);
+    return 0;
+}
+#endif
