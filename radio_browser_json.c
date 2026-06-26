@@ -1,3 +1,9 @@
+/*
+ * Test harness builds:
+ *   gcc -std=gnu89 -Wall -Wextra -DRB_JSON_TEST radio_browser_json.c -o /tmp/rb_json_test
+ *   gcc -std=gnu89 -Wall -Wextra -DRB_JSON_FILE_TEST radio_browser_json.c -o /tmp/rb_json_file_test
+ */
+
 #include "radio_browser_json.h"
 
 #include <ctype.h>
@@ -236,25 +242,94 @@ void rb_station_display_name(const RadioBrowserStation *station, char *out, int 
     out[len] = '\0';
 }
 
+#if defined(RB_JSON_TEST) || defined(RB_JSON_FILE_TEST)
+static void rb_print_station(int index, const RadioBrowserStation *station)
+{
+    char display[80];
+
+    rb_station_display_name(station, display, (int)sizeof(display));
+    printf("%d: name=\"%s\" codec=\"%s\" bitrate=%d countrycode=\"%s\" lastcheckok=%d hls=%d url=\"%s\" url_resolved=\"%s\" play_url=\"%s\"\n",
+           index + 1, display, station->codec, station->bitrate,
+           station->countrycode, station->lastcheckok, station->hls,
+           station->url, station->url_resolved, rb_station_play_url(station));
+}
+
+static void rb_print_stations(const RadioBrowserStation *stations, int count)
+{
+    int i;
+
+    printf("station count: %d\n", count);
+    for (i = 0; i < count; i++) rb_print_station(i, &stations[i]);
+}
+#endif
+
 #ifdef RB_JSON_TEST
 int main(void)
 {
     static const char sample[] =
         "[{\"stationuuid\":\"960cf833-0601-11e8-ae97-52543be04c81\",\"name\":\"SomaFM\\nGroove\\tSalad (128k MP3)\",\"url\":\"https://somafm.com/groovesalad.pls\",\"url_resolved\":\"https://ice5.somafm.com/groovesalad-128-mp3\",\"favicon\":\"https://somafm.com/img3/groovesalad-400.jpg\",\"tags\":\"ambient,chillout\",\"countrycode\":\"US\",\"codec\":\"MP3\",\"bitrate\":128,\"hls\":0,\"lastcheckok\":true},"
         "{\"stationuuid\":\"7e41d6c6-1842-4ecf-9c6e-2901fdca18ca\",\"name\":\"The Jazz Groove - East with a very long display name that keeps going and going so truncation can be tested safely by callers using small buffers\",\"url\":\"http://east-mp3-128.streamthejazzgroove.com/stream\",\"url_resolved\":\"http://east-mp3-128.streamthejazzgroove.com/stream\",\"favicon\":\"\",\"tags\":\"cool jazz,fusion,jazz\",\"countrycode\":\"US\",\"codec\":\"MP3\",\"bitrate\":128,\"hls\":false,\"lastcheckok\":1}]";
+    static const char malformed_edge[] =
+        "["
+        "{\"name\":\"Missing URL Station\",\"url_resolved\":\"\",\"countrycode\":\"GB\",\"codec\":\"AAC\",\"bitrate\":64,\"lastcheckok\":false,\"hls\":true},"
+        "{\"name\":\"Escaped URL Station\",\"url\":\"http:\\/\\/example.com\\/stream.mp3\",\"url_resolved\":\"\",\"countrycode\":\"DE\",\"codec\":\"MP3\",\"bitrate\":192,\"lastcheckok\":true,\"hls\":false},"
+        "{\"name\":\"Long Station Name 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 END\",\"url\":\"http://long.example/stream\",\"countrycode\":\"US\",\"codec\":\"OGG\",\"bitrate\":96,\"lastcheckok\":true,\"hls\":false}"
+        "]";
     RadioBrowserStation stations[RB_MAX_STATIONS];
     int count;
-    int i;
 
+    printf("static sample:\n");
     count = rb_parse_stations_json(sample, stations, RB_MAX_STATIONS);
-    printf("station count: %d\n", count);
-    for (i = 0; i < count; i++) {
-        char display[80];
-        rb_station_display_name(&stations[i], display, (int)sizeof(display));
-        printf("%d: %s | %s | %d | %s | %s\n", i + 1, display,
-               stations[i].codec, stations[i].bitrate, stations[i].countrycode,
-               rb_station_play_url(&stations[i]));
+    rb_print_stations(stations, count);
+
+    printf("empty array:\n");
+    count = rb_parse_stations_json("[]", stations, RB_MAX_STATIONS);
+    rb_print_stations(stations, count);
+
+    printf("malformed/edge sample:\n");
+    count = rb_parse_stations_json(malformed_edge, stations, RB_MAX_STATIONS);
+    rb_print_stations(stations, count);
+    return 0;
+}
+#endif
+
+#ifdef RB_JSON_FILE_TEST
+#define RB_JSON_FILE_BUFFER_SIZE 65536
+
+int main(int argc, char **argv)
+{
+    static char json[RB_JSON_FILE_BUFFER_SIZE];
+    RadioBrowserStation stations[RB_MAX_STATIONS];
+    FILE *fp;
+    size_t len;
+    int count;
+
+    if (argc < 2) {
+        fprintf(stderr, "usage: %s stations.json\n", argv[0]);
+        return 1;
     }
+    fp = fopen(argv[1], "rb");
+    if (!fp) {
+        perror(argv[1]);
+        return 1;
+    }
+    len = fread(json, 1, sizeof(json) - 1, fp);
+    if (ferror(fp)) {
+        perror(argv[1]);
+        fclose(fp);
+        return 1;
+    }
+    if (!feof(fp)) {
+        fprintf(stderr, "%s: file too large for %lu byte buffer\n", argv[1],
+                (unsigned long)sizeof(json));
+        fclose(fp);
+        return 1;
+    }
+    fclose(fp);
+    json[len] = '\0';
+
+    count = rb_parse_stations_json(json, stations, RB_MAX_STATIONS);
+    rb_print_stations(stations, count);
     return 0;
 }
 #endif
