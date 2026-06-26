@@ -12,6 +12,7 @@ OPTFLAGS ?= -O2 -fomit-frame-pointer
 TARGET ?= amiga_mp3dec
 GUI_TARGET ?= miniamp3
 GUIR_TARGET ?= minimp3r
+AACASM ?= 1
 
 CPPFLAGS_COMMON := -Ipub -Ireal -DAMIGA_M68K
 CFLAGS_COMMON := $(CPU) $(STD) $(OPTFLAGS)
@@ -136,6 +137,7 @@ decoder-modules:
 	$(MAKE) -C decoders \
 		CC="$(CC)" \
 		CPU="$(CPU)" \
+		AACASM="$(AACASM)" \
 		CFLAGS="$(CFLAGS_COMMON) $(CPPFLAGS_COMMON) -DHAVE_AMIGA_AUDIO_DEVICE"
 
 clean:
