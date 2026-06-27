@@ -5423,7 +5423,7 @@ static void StartPlayback(HelixAmp3Gui *gui)
 	 */
 	thisProc = (struct Process *)FindTask(NULL);
 	dirLock = DupLock(thisProc ? thisProc->pr_CurrentDir : (BPTR)0);
-#ifdef NDEBUG
+#ifndef MINIAMP3_DEBUG
 	nilOut = Open((STRPTR)"NIL:", MODE_NEWFILE);
 #else
 	nilOut = (BPTR)0;

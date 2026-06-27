@@ -1866,6 +1866,25 @@ static int InputSourcePrepareMp3(InputSource *input)
 	return 0;
 }
 
+
+static void InputSourceAlignDecodePointer(unsigned char *readBuf, unsigned char **readPtr, int *bytesLeft)
+{
+#if defined(AMIGA_M68K)
+	unsigned long addr;
+	if (!readBuf || !readPtr || !*readPtr || !bytesLeft || *bytesLeft <= 0)
+		return;
+	addr = (unsigned long)*readPtr;
+	if ((addr & 3UL) != 0 && *readPtr != readBuf) {
+		memmove(readBuf, *readPtr, (size_t)*bytesLeft);
+		*readPtr = readBuf;
+	}
+#else
+	(void)readBuf;
+	(void)readPtr;
+	(void)bytesLeft;
+#endif
+}
+
 static int FillReadBuffer(unsigned char *readBuf, unsigned char *readPtr, int bufSize,
 	int bytesLeft, InputSource *input)
 {
@@ -5108,6 +5127,8 @@ static int DecodeStreamFillS8(DecodeStream *stream, const DecodeOptions *opt,
 		}
 		stream->readPtr += offset;
 		stream->bytesLeft -= offset;
+		InputSourceAlignDecodePointer(stream->readBuf, &stream->readPtr,
+			&stream->bytesLeft);
 		frameStart = stream->readPtr;
 		frameBytes = stream->bytesLeft;
 
@@ -5321,6 +5342,8 @@ static int DecodeStreamFillPlanarS8(DecodeStream *stream, const DecodeOptions *o
 		}
 		stream->readPtr += offset;
 		stream->bytesLeft -= offset;
+		InputSourceAlignDecodePointer(stream->readBuf, &stream->readPtr,
+			&stream->bytesLeft);
 		frameStart = stream->readPtr;
 		frameBytes = stream->bytesLeft;
 
@@ -9972,6 +9995,7 @@ int main(int argc, char **argv)
 
 		readPtr += offset;
 		bytesLeft -= offset;
+		InputSourceAlignDecodePointer(readBuf, &readPtr, &bytesLeft);
 		frameStart = readPtr;
 		frameBytes = bytesLeft;
 
