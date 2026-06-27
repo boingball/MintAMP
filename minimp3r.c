@@ -368,6 +368,9 @@ typedef struct MrApp {
 	struct List     rbList;
 	struct Node     rbNodes[RB_CONTROLLER_MAX_STATIONS];
 	char            rbNames[RB_CONTROLLER_MAX_STATIONS][96];
+	int             rbVisibleToController[RB_CONTROLLER_MAX_STATIONS];
+	int             rbVisibleCount;
+	int             rbShowHttps;
 	APTR            rbVisualInfo;
 	RadioBrowserController rbController;
 
@@ -2692,6 +2695,7 @@ enum {
 	RB_GID_SEARCH,
 	RB_GID_PROBE,
 	RB_GID_CLOSE,
+	RB_GID_SHOW_HTTPS,
 	RB_GID_STATUS
 };
 
@@ -2723,9 +2727,26 @@ static void RadioSetStatus(MrApp *app, const char *text)
 			GTST_String, (ULONG)(text ? text : ""), TAG_DONE);
 }
 
+static int RadioIsHttpStation(const RadioBrowserStation *st)
+{
+	const char *url = rb_station_play_url(st);
+	return url && strncmp(url, "http://", 7) == 0;
+}
+
+static int RadioCountHttpStations(MrApp *app)
+{
+	int i, count = 0;
+	const RadioBrowserStation *st;
+	for (i = 0; i < app->rbController.station_count; i++) {
+		st = rb_controller_get_station(&app->rbController, i);
+		if (RadioIsHttpStation(st)) count++;
+	}
+	return count;
+}
+
 static void RadioRefreshResults(MrApp *app)
 {
-	int i;
+	int i, row;
 	char display[RB_MAX_NAME];
 	const RadioBrowserStation *st;
 	/* Detach the current labels before rebuilding the backing node array. */
@@ -2735,19 +2756,23 @@ static void RadioRefreshResults(MrApp *app)
 			GTLV_Selected, (ULONG)~0,
 			TAG_DONE);
 	NewList(&app->rbList);
+	app->rbVisibleCount = 0;
 	for (i = 0; i < app->rbController.station_count; i++) {
 		st = rb_controller_get_station(&app->rbController, i);
 		if (!st) continue;
+		if (!app->rbShowHttps && !RadioIsHttpStation(st)) continue;
+		row = app->rbVisibleCount++;
+		app->rbVisibleToController[row] = i;
 		rb_station_display_name(st, display, (int)sizeof(display));
-		sprintf(app->rbNames[i], "%.48s | %s | %d | %s",
+		sprintf(app->rbNames[row], "%.48s | %s | %d | %s",
 			display, st->codec, st->bitrate, st->countrycode);
-		memset(&app->rbNodes[i], 0, sizeof(app->rbNodes[i]));
-		app->rbNodes[i].ln_Name = app->rbNames[i];
-		app->rbNodes[i].ln_Type = NT_USER;
-		/* GadTools listview nodes have no separate user-data field; keep the
-		 * station index in ln_Pri for the small Radio Browser result limit. */
-		app->rbNodes[i].ln_Pri = (BYTE)i;
-		AddTail(&app->rbList, &app->rbNodes[i]);
+		memset(&app->rbNodes[row], 0, sizeof(app->rbNodes[row]));
+		app->rbNodes[row].ln_Name = app->rbNames[row];
+		app->rbNodes[row].ln_Type = NT_USER;
+		/* GadTools listview rows are filtered, so store the original controller
+		 * station index in ln_Pri and rbVisibleToController for selection. */
+		app->rbNodes[row].ln_Pri = (BYTE)i;
+		AddTail(&app->rbList, &app->rbNodes[row]);
 	}
 	app->rbController.selected_index = -1;
 	if (app->rbWin && app->rbGadList)
@@ -2792,8 +2817,9 @@ static void RadioDoSearch(MrApp *app)
 	if (rc < 0)
 		RadioSetStatus(app, app->rbController.last_error);
 	else {
-		char msg[64];
-		sprintf(msg, "Found %d station%s.", rc, rc == 1 ? "" : "s");
+		char msg[96];
+		sprintf(msg, "Found %d stations, showing %d playable HTTP stations",
+			rc, app->rbShowHttps ? RadioCountHttpStations(app) : app->rbVisibleCount);
 		RadioSetStatus(app, msg);
 	}
 }
@@ -2801,6 +2827,7 @@ static void RadioDoSearch(MrApp *app)
 static void RadioSelectResult(MrApp *app, ULONG eventSelected)
 {
 	ULONG selected = eventSelected;
+	ULONG row;
 	const RadioBrowserStation *st;
 	char display[RB_MAX_NAME];
 	char msg[RB_MAX_NAME + 16];
@@ -2810,18 +2837,20 @@ static void RadioSelectResult(MrApp *app, ULONG eventSelected)
 		GT_GetGadgetAttrs(app->rbGadList, app->rbWin, NULL,
 			GTLV_Selected, (ULONG)&selected, TAG_DONE);
 	printf("radio results selection event row/index: %ld\n", (long)selected);
-	if (selected == (ULONG)~0 || selected >= (ULONG)app->rbController.station_count) {
+	if (selected == (ULONG)~0 || selected >= (ULONG)app->rbVisibleCount) {
 		rb_controller_set_selected(&app->rbController, -1);
 		printf("radio results controller selected_index: %d\n", app->rbController.selected_index);
 		RadioSetStatus(app, "Select a station first.");
 		return;
 	}
+	row = selected;
+	selected = (ULONG)app->rbVisibleToController[row];
 	if (rb_controller_set_selected(&app->rbController, (int)selected) < 0) {
 		RadioSetStatus(app, app->rbController.last_error);
 		return;
 	}
 	GT_SetGadgetAttrs(app->rbGadList, app->rbWin, NULL,
-		GTLV_Selected, (ULONG)selected, TAG_DONE);
+		GTLV_Selected, (ULONG)row, TAG_DONE);
 	st = rb_controller_get_station(&app->rbController, app->rbController.selected_index);
 	if (!st) {
 		RadioSetStatus(app, "Select a station first.");
@@ -2911,6 +2940,8 @@ static void OpenRadioWindow(MrApp *app)
 	static STRPTR codecs[] = { (STRPTR)"All", (STRPTR)"MP3", (STRPTR)"AAC", (STRPTR)"AAC+", NULL };
 	if (app->rbWin || !app->win || !GadToolsBase) return;
 	rb_controller_init(&app->rbController);
+	app->rbShowHttps = FALSE;
+	app->rbVisibleCount = 0;
 	app->rbVisualInfo = GetVisualInfoA(app->win->WScreen, NULL);
 	if (!app->rbVisualInfo) return;
 	app->rbGadContext = CreateContext(&app->rbGadgets);
@@ -2930,6 +2961,8 @@ static void OpenRadioWindow(MrApp *app)
 	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)codecs, TAG_DONE); if (!gad) goto fail;
 	ng.ng_LeftEdge = 88; ng.ng_TopEdge = 52; ng.ng_Width = 220; ng.ng_GadgetText = (UBYTE *)"Country";
 	ng.ng_GadgetID = RB_GID_COUNTRY; gad = CreateGadget(STRING_KIND, gad, &ng, GTST_MaxChars, RB_MAX_COUNTRY, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 340; ng.ng_TopEdge = 52; ng.ng_Width = 140; ng.ng_GadgetText = (UBYTE *)"Show HTTPS stations"; ng.ng_GadgetID = RB_GID_SHOW_HTTPS; ng.ng_Flags = PLACETEXT_RIGHT;
+	gad = CreateGadget(CHECKBOX_KIND, gad, &ng, GTCB_Checked, FALSE, GA_RelVerify, TRUE, TAG_DONE); if (!gad) goto fail;
 	ng.ng_LeftEdge = 8; ng.ng_TopEdge = 82; ng.ng_Width = 472; ng.ng_Height = 116; ng.ng_GadgetText = NULL; ng.ng_GadgetID = RB_GID_RADIO_RESULTS; ng.ng_Flags = 0;
 	app->rbGadList = gad = CreateGadget(LISTVIEW_KIND, gad, &ng,
 		GTLV_Labels, (ULONG)&app->rbList,
@@ -2982,6 +3015,11 @@ static void HandleRadioWindow(MrApp *app)
 				RadioDoSearch(app);
 			else if (gid == RB_GID_PROBE)
 				RadioDoProbeAndPlay(app);
+			else if (gid == RB_GID_SHOW_HTTPS) {
+				app->rbShowHttps = app->rbShowHttps ? FALSE : TRUE;
+				GT_SetGadgetAttrs(gad, app->rbWin, NULL, GTCB_Checked, app->rbShowHttps, TAG_DONE);
+				RadioRefreshResults(app);
+			}
 			else if (gid == RB_GID_CLOSE) {
 				CloseRadioWindow(app);
 				return;
