@@ -25,7 +25,9 @@ RADIO_CPPFLAGS := -DENABLE_RADIO -DHAVE_BSDSOCKET
 endif
 
 SOURCES := amiga_mp3dec.c $(RADIO_SOURCES) $(DECODER_SOURCES)
-GUI_SOURCES := amiga_mp3gui.c picojpeg.c $(RADIO_SOURCES)
+GUI_SOURCES := amiga_mp3gui.c picojpeg.c $(RADIO_SOURCES) \
+	radio_browser_controller.c radio_browser.c radio_browser_url.c \
+	radio_browser_http.c radio_browser_json.c radio_stream_probe.c
 # The GUI uses gadtools.library via proto/gadtools.h; no linker flag is needed.
 # minimp3r is the ReAction/ClassAct frontend; it pulls amiga_mp3dec.c in itself
 # (like amiga_mp3gui.c) so only the shared decoder modules are listed here.  The

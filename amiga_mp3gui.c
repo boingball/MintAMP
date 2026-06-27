@@ -180,6 +180,7 @@ static char gSupportedExtPattern[512];
 /* #include <graphics/colormap.h> */
 #include "picojpeg.h"
 #include "radio_stream.h"
+#include "radio_browser_controller.h"
 #ifndef OBP_FailIfBad
 #define OBP_FailIfBad (TAG_USER + 0x01L)
 #endif
@@ -187,6 +188,7 @@ static char gSupportedExtPattern[512];
 #define HELIXAMP3_MAX_PATH 256
 #define HELIXAMP3_ARGC_MAX 28
 #define HELIXAMP3_SETTINGS_VERSION 2
+#define HELIXAMP3_RADIO_FAV_MAX 20
 #define HELIXAMP3_QUALITY_MIN 0
 #define HELIXAMP3_QUALITY_MAX 3
 #define HELIXAMP3_SIGMASK(gui) (1UL << (gui)->win->UserPort->mp_SigBit)
@@ -314,6 +316,20 @@ enum {
 	GID_STREAM_CANCEL
 };
 
+#define RB_GID_SEARCH_TEXT   300
+#define RB_GID_CODEC         301
+#define RB_GID_COUNTRY       302
+#define RB_GID_SHOW_HTTPS    303
+#define RB_GID_LIMIT         304
+#define RB_GID_BITRATE       305
+#define RB_GID_RADIO_RESULTS 306
+#define RB_GID_SEARCH        307
+#define RB_GID_PROBE         308
+#define RB_GID_ADD_FAV       309
+#define RB_GID_FAVOURITES    310
+#define RB_GID_CLOSE         311
+#define RB_GID_STATUS        312
+
 /* Playlist window gadget IDs (separate range to avoid main window conflicts) */
 #define PL_GID_LIST      200
 #define PL_GID_ADD       201
@@ -421,6 +437,23 @@ typedef struct HelixAmp3Gui {
 	struct Gadget  *plGadContext;
 	struct Gadget  *plGadList;
 	Playlist playlist;
+	struct Window  *rbWin;
+	struct Gadget  *rbGadgets;
+	struct Gadget  *rbGadContext;
+	struct Gadget  *rbGadList;
+	struct List     rbList;
+	struct Node     rbNodes[RB_CONTROLLER_MAX_STATIONS];
+	char            rbNames[RB_CONTROLLER_MAX_STATIONS][96];
+	int             rbVisibleToController[RB_CONTROLLER_MAX_STATIONS];
+	int             rbVisibleCount;
+	int             rbShowHttps;
+	int             rbShowingFavourites;
+	int             rbFavouriteCount;
+	int             rbSelectedFavourite;
+	char            rbFavouriteNames[HELIXAMP3_RADIO_FAV_MAX][RB_MAX_NAME];
+	char            rbFavouriteUrls[HELIXAMP3_RADIO_FAV_MAX][RB_MAX_URL];
+	struct VisualInfo *rbVisualInfo;
+	RadioBrowserController rbController;
 	struct Menu *menuStrip;
 	int artEnabled;
 	int artCacheEnabled;
@@ -505,6 +538,10 @@ typedef struct HelixAmp3Player {
 } HelixAmp3Player;
 
 static void UpdateTagDisplay(HelixAmp3Gui *gui);
+static void SelectInternetStream(HelixAmp3Gui *gui, const char *url);
+static void CloseRadioWindow(HelixAmp3Gui *gui);
+static void OpenRadioWindow(HelixAmp3Gui *gui);
+static void HandleRadioWindow(HelixAmp3Gui *gui);
 
 struct IntuitionBase *IntuitionBase;
 extern struct CIA ciaa;
@@ -640,7 +677,7 @@ static struct NewMenu myNewMenus[] = {
 	{ NM_TITLE, (STRPTR)"Project",          0, 0, 0, 0 },
 	{ NM_ITEM,  (STRPTR)"About MiniAMP3...",0, 0, 0,
 		(APTR)(MENUNUM_PROJECT * 100 + ITEMNUM_ABOUT) },
-	{ NM_ITEM,  (STRPTR)"Internet Stream...",0, 0, 0,
+	{ NM_ITEM,  (STRPTR)"Internet Radio...",0, 0, 0,
 		(APTR)(MENUNUM_PROJECT * 100 + ITEMNUM_STREAM) },
 	{ NM_ITEM,  (STRPTR)"Quit",             0, 0, 0,
 		(APTR)(MENUNUM_PROJECT * 100 + ITEMNUM_QUIT) },
@@ -762,6 +799,13 @@ static void SaveEnvString(const char *key, const char *value)
 	SetVar((STRPTR)name, (STRPTR)value, strlen(value), GVF_SAVE_VAR);
 }
 
+static int ClampInt(int value, int minValue, int maxValue)
+{
+	if (value < minValue) return minValue;
+	if (value > maxValue) return maxValue;
+	return value;
+}
+
 static void SaveEnvInt(const char *key, int value)
 {
 	char text[16];
@@ -794,6 +838,17 @@ static void SaveGuiSettings(HelixAmp3Gui *gui)
 	SaveEnvInt("ArtworkColour", gui->artColorEnabled);
 	SaveEnvInt("ProgressBar", gui->progressEnabled);
 	SaveEnvString("LastDrawer", gui->lastDrawer);
+	{
+		int i;
+		char key[32];
+		SaveEnvInt("RadioFavCount", ClampInt(gui->rbFavouriteCount, 0, HELIXAMP3_RADIO_FAV_MAX));
+		for (i = 0; i < HELIXAMP3_RADIO_FAV_MAX; i++) {
+			sprintf(key, "RadioFavName%d", i);
+			SaveEnvString(key, gui->rbFavouriteNames[i]);
+			sprintf(key, "RadioFavUrl%d", i);
+			SaveEnvString(key, gui->rbFavouriteUrls[i]);
+		}
+	}
 }
 
 static void FreeTags(Mp3Tags *tags)
@@ -4010,6 +4065,17 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	gui->artColorEnabled = LoadEnvInt("ArtworkColour", 0, 0, 1);
 	gui->progressEnabled = LoadEnvInt("ProgressBar", 0, 0, 1);
 	LoadEnvString("LastDrawer", gui->lastDrawer, sizeof(gui->lastDrawer));
+	{
+		int i;
+		char key[32];
+		gui->rbFavouriteCount = LoadEnvInt("RadioFavCount", gui->rbFavouriteCount, 0, HELIXAMP3_RADIO_FAV_MAX);
+		for (i = 0; i < HELIXAMP3_RADIO_FAV_MAX; i++) {
+			sprintf(key, "RadioFavName%d", i);
+			LoadEnvString(key, gui->rbFavouriteNames[i], sizeof(gui->rbFavouriteNames[i]));
+			sprintf(key, "RadioFavUrl%d", i);
+			LoadEnvString(key, gui->rbFavouriteUrls[i], sizeof(gui->rbFavouriteUrls[i]));
+		}
+	}
 	SafeCopy(gui->statusText, sizeof(gui->statusText), "Ready.");
 	gui->lastDisplayedPhase = GUIPLAY_PHASE_IDLE;
 	gui->lastDrawnElapsedSecs = -1;
@@ -4148,6 +4214,8 @@ static void GuiClose(HelixAmp3Gui *gui)
 	CancelArtDecode(gui);
 	if (gui->playbackActive)
 		WaitForPlaybackShutdown(gui);
+	if (gui->rbWin)
+		CloseRadioWindow(gui);
 	if (gui->win) {
 		/* Stop Intuition from queuing new IDCMP traffic, then reply anything
 		 * already pending before the window and GadTools objects disappear.
@@ -4310,6 +4378,477 @@ static void GuiDisableFastMemIfTooSmall(HelixAmp3Gui *gui)
 		SetStatus(gui, "Fast-mem disabled: not enough Fast RAM for this file.");
 	}
 }
+
+static const int kRadioSearchLimits[] = { 10, 25, 50 };
+static STRPTR kRadioSearchLimitLabels[] = { (STRPTR)"10", (STRPTR)"25", (STRPTR)"50", NULL };
+static const int kRadioBitrateMax[] = { -1, 56, 64, 96, 128 };
+static STRPTR kRadioBitrateLabels[] = { (STRPTR)"Any", (STRPTR)"<=56", (STRPTR)"<=64", (STRPTR)"<=96", (STRPTR)"<=128", NULL };
+
+static const char *RadioBitrateFilterLabel(int max_bitrate)
+{
+	static char label[16];
+
+	if (max_bitrate <= 0) return "Any";
+	sprintf(label, "<=%d", max_bitrate);
+	return label;
+}
+
+static const char *RadioCodecFromIndex(int idx)
+{
+	switch (idx) {
+	case 1: return "MP3";
+	case 2: return "AAC";
+	case 3: return "AAC+";
+	default: return "";
+	}
+}
+
+static const char *ProbeCodecName(RbStreamCodec codec)
+{
+	if (codec == RB_STREAM_CODEC_MP3) return "MP3";
+	if (codec == RB_STREAM_CODEC_AAC) return "AAC";
+	return "unknown";
+}
+
+static void RadioSetStatus(HelixAmp3Gui *app, const char *text)
+{
+	struct Gadget *gad;
+	if (!app->rbWin || !app->rbGadgets) return;
+	gad = app->rbGadgets;
+	while (gad && gad->GadgetID != RB_GID_STATUS) gad = gad->NextGadget;
+	if (gad)
+		GT_SetGadgetAttrs(gad, app->rbWin, NULL,
+			GTST_String, (ULONG)(text ? text : ""), TAG_DONE);
+}
+
+static int RadioIsHttpStation(const RadioBrowserStation *st)
+{
+	const char *url = rb_station_play_url(st);
+	return url && strncmp(url, "http://", 7) == 0;
+}
+
+static void RadioRefreshResults(HelixAmp3Gui *app)
+{
+	int i, row;
+	char display[RB_MAX_NAME];
+	const RadioBrowserStation *st;
+	const char *url;
+	const char *reason;
+	if (app->rbWin && app->rbGadList)
+		GT_SetGadgetAttrs(app->rbGadList, app->rbWin, NULL,
+			GTLV_Labels, (ULONG)~0,
+			GTLV_Selected, (ULONG)~0,
+			TAG_DONE);
+	NewList(&app->rbList);
+	app->rbVisibleCount = 0;
+	app->rbSelectedFavourite = -1;
+	if (app->rbShowingFavourites) {
+		for (i = 0; i < app->rbFavouriteCount && app->rbVisibleCount < RB_CONTROLLER_MAX_STATIONS; i++) {
+			if (!app->rbFavouriteNames[i][0] || !app->rbFavouriteUrls[i][0]) continue;
+			row = app->rbVisibleCount++;
+			app->rbVisibleToController[row] = i;
+			sprintf(app->rbNames[row], "%.48s | favourite", app->rbFavouriteNames[i]);
+			memset(&app->rbNodes[row], 0, sizeof(app->rbNodes[row]));
+			app->rbNodes[row].ln_Name = app->rbNames[row];
+			app->rbNodes[row].ln_Type = NT_USER;
+			app->rbNodes[row].ln_Pri = (BYTE)i;
+			AddTail(&app->rbList, &app->rbNodes[row]);
+		}
+	} else {
+		for (i = 0; i < app->rbController.station_count; i++) {
+			st = rb_controller_get_station(&app->rbController, i);
+			if (!st) continue;
+			url = rb_station_play_url(st);
+			reason = "show";
+			if (!app->rbShowHttps && !RadioIsHttpStation(st)) { reason = "hidden_https"; }
+			else if (app->rbController.max_bitrate > 0 && st->bitrate == 0) { reason = "hidden_bitrate_unknown"; }
+			else if (app->rbController.max_bitrate > 0 && st->bitrate > app->rbController.max_bitrate) { reason = "hidden_bitrate"; }
+#ifdef MINIAMP3_DEBUG
+			printf("Radio Browser filter: name=\"%s\" scheme=%s codec=%s bitrate=%d max=%d reason=%s\n",
+				st->name, url && strncmp(url, "https://", 8) == 0 ? "https" : (url && strncmp(url, "http://", 7) == 0 ? "http" : "other"),
+				st->codec, st->bitrate, app->rbController.max_bitrate, reason);
+#endif
+			if (reason[0] != 's') continue;
+			row = app->rbVisibleCount++;
+			app->rbVisibleToController[row] = i;
+			rb_station_display_name(st, display, (int)sizeof(display));
+			sprintf(app->rbNames[row], "%.48s | %s | %d | %s",
+				display, st->codec, st->bitrate, st->countrycode);
+			memset(&app->rbNodes[row], 0, sizeof(app->rbNodes[row]));
+			app->rbNodes[row].ln_Name = app->rbNames[row];
+			app->rbNodes[row].ln_Type = NT_USER;
+			app->rbNodes[row].ln_Pri = (BYTE)i;
+			AddTail(&app->rbList, &app->rbNodes[row]);
+		}
+	}
+	app->rbController.selected_index = -1;
+	if (app->rbWin && app->rbGadList)
+		GT_SetGadgetAttrs(app->rbGadList, app->rbWin, NULL,
+			GTLV_Labels, (ULONG)&app->rbList,
+			GTLV_Selected, (ULONG)~0,
+			TAG_DONE);
+}
+
+static struct Gadget *FindRadioGadget(HelixAmp3Gui *app, UWORD id)
+{
+	struct Gadget *gad = app->rbGadgets;
+	while (gad) {
+		if (gad->GadgetID == id) return gad;
+		gad = gad->NextGadget;
+	}
+	return NULL;
+}
+
+static void RadioDoSearch(HelixAmp3Gui *app)
+{
+	struct Gadget *nameGad = FindRadioGadget(app, RB_GID_SEARCH_TEXT);
+	struct Gadget *codecGad = FindRadioGadget(app, RB_GID_CODEC);
+	struct Gadget *countryGad = FindRadioGadget(app, RB_GID_COUNTRY);
+	struct Gadget *limitGad = FindRadioGadget(app, RB_GID_LIMIT);
+	struct Gadget *bitrateGad = FindRadioGadget(app, RB_GID_BITRATE);
+	STRPTR text;
+	ULONG v;
+	int rc;
+	char filterMsg[192];
+
+	RadioSetStatus(app, "Searching Radio Browser...");
+	text = NULL;
+	GT_GetGadgetAttrs(nameGad, app->rbWin, NULL, GTST_String, (ULONG)(void *)&text, TAG_DONE);
+	SafeCopy(app->rbController.name, sizeof(app->rbController.name), text ? (const char *)text : "");
+	v = 0;
+	GT_GetGadgetAttrs(codecGad, app->rbWin, NULL, GTCY_Active, (ULONG)&v, TAG_DONE);
+	SafeCopy(app->rbController.codec, sizeof(app->rbController.codec), RadioCodecFromIndex((int)v));
+	text = NULL;
+	GT_GetGadgetAttrs(countryGad, app->rbWin, NULL, GTST_String, (ULONG)(void *)&text, TAG_DONE);
+	SafeCopy(app->rbController.countrycode, sizeof(app->rbController.countrycode), text ? (const char *)text : "");
+	v = 1;
+	if (limitGad)
+		GT_GetGadgetAttrs(limitGad, app->rbWin, NULL, GTCY_Active, (ULONG)&v, TAG_DONE);
+	app->rbController.limit = kRadioSearchLimits[ClampInt((int)v, 0, 2)];
+	v = 0;
+	if (bitrateGad)
+		GT_GetGadgetAttrs(bitrateGad, app->rbWin, NULL, GTCY_Active, (ULONG)&v, TAG_DONE);
+	app->rbController.max_bitrate = kRadioBitrateMax[ClampInt((int)v, 0, 4)];
+	sprintf(filterMsg, "Search filters: name=\"%.40s\" codec=%s country=%s max bitrate=%s limit=%d",
+		app->rbController.name[0] ? app->rbController.name : "Any",
+		app->rbController.codec[0] ? app->rbController.codec : "Any",
+		app->rbController.countrycode[0] ? app->rbController.countrycode : "Any",
+		RadioBitrateFilterLabel(app->rbController.max_bitrate),
+		app->rbController.limit);
+	RadioSetStatus(app, filterMsg);
+#ifdef MINIAMP3_DEBUG
+	printf("%s\n", filterMsg);
+#endif
+	rc = rb_controller_search(&app->rbController);
+	app->rbShowingFavourites = FALSE;
+	RadioRefreshResults(app);
+	if (rc < 0)
+		RadioSetStatus(app, app->rbController.last_error);
+	else {
+		char msg[128];
+		int hidden = app->rbController.raw_station_count - app->rbVisibleCount;
+		if (app->rbVisibleCount == 0 && app->rbController.raw_station_count == 0)
+			sprintf(msg, "No stations found");
+		else
+			sprintf(msg, "Found %d stations, showing %d HTTP playable (%d hidden)",
+				app->rbController.raw_station_count, app->rbVisibleCount, hidden < 0 ? 0 : hidden);
+		RadioSetStatus(app, msg);
+	}
+}
+
+static void RadioSelectResult(HelixAmp3Gui *app, ULONG eventSelected)
+{
+	ULONG selected = eventSelected;
+	ULONG row;
+	const RadioBrowserStation *st;
+	char display[RB_MAX_NAME];
+	char msg[RB_MAX_NAME + 16];
+
+	if (!app->rbWin || !app->rbGadList) return;
+	if (selected == (ULONG)~0)
+		GT_GetGadgetAttrs(app->rbGadList, app->rbWin, NULL,
+			GTLV_Selected, (ULONG)&selected, TAG_DONE);
+#ifdef MINIAMP3_DEBUG
+	printf("radio results selection event row/index: %ld\n", (long)selected);
+#endif
+	if (selected == (ULONG)~0 || selected >= (ULONG)app->rbVisibleCount) {
+		app->rbSelectedFavourite = -1;
+		rb_controller_set_selected(&app->rbController, -1);
+#ifdef MINIAMP3_DEBUG
+		printf("radio results controller selected_index: %d\n", app->rbController.selected_index);
+#endif
+		RadioSetStatus(app, "Select a station first.");
+		return;
+	}
+	row = selected;
+	selected = (ULONG)app->rbVisibleToController[row];
+	if (app->rbShowingFavourites) {
+		app->rbSelectedFavourite = (int)selected;
+		GT_SetGadgetAttrs(app->rbGadList, app->rbWin, NULL, GTLV_Selected, (ULONG)row, TAG_DONE);
+		sprintf(msg, "Selected favourite: %.120s", app->rbFavouriteNames[app->rbSelectedFavourite]);
+		RadioSetStatus(app, msg);
+		return;
+	}
+	app->rbSelectedFavourite = -1;
+	if (rb_controller_set_selected(&app->rbController, (int)selected) < 0) {
+		RadioSetStatus(app, app->rbController.last_error);
+		return;
+	}
+	GT_SetGadgetAttrs(app->rbGadList, app->rbWin, NULL,
+		GTLV_Selected, (ULONG)row, TAG_DONE);
+	st = rb_controller_get_station(&app->rbController, app->rbController.selected_index);
+	if (!st) {
+		RadioSetStatus(app, "Select a station first.");
+		return;
+	}
+	rb_station_display_name(st, display, (int)sizeof(display));
+#ifdef MINIAMP3_DEBUG
+	printf("radio results controller selected_index: %d\n", app->rbController.selected_index);
+	printf("radio results station display name: %s\n", display);
+#endif
+	sprintf(msg, "Selected: %.120s", display);
+	RadioSetStatus(app, msg);
+}
+
+static void RadioAddFavourite(HelixAmp3Gui *app)
+{
+	const RadioBrowserStation *st;
+	const char *url;
+	char display[RB_MAX_NAME];
+	char msg[160];
+	int i;
+	if (app->rbController.selected_index < 0) {
+		RadioSetStatus(app, "Select a search result to favourite.");
+		return;
+	}
+	st = rb_controller_get_station(&app->rbController, app->rbController.selected_index);
+	if (!st) {
+		RadioSetStatus(app, "Select a search result to favourite.");
+		return;
+	}
+	url = rb_station_play_url(st);
+	if (!url || !url[0]) {
+		RadioSetStatus(app, "Selected station has no URL.");
+		return;
+	}
+	rb_station_display_name(st, display, (int)sizeof(display));
+	for (i = 0; i < app->rbFavouriteCount; i++) {
+		if (!strcmp(app->rbFavouriteUrls[i], url)) {
+			SafeCopy(app->rbFavouriteNames[i], sizeof(app->rbFavouriteNames[i]), display);
+			SaveGuiSettings(app);
+			RadioSetStatus(app, "Favourite updated.");
+			return;
+		}
+	}
+	if (app->rbFavouriteCount >= HELIXAMP3_RADIO_FAV_MAX) {
+		RadioSetStatus(app, "Radio favourites are full.");
+		return;
+	}
+	i = app->rbFavouriteCount++;
+	SafeCopy(app->rbFavouriteNames[i], sizeof(app->rbFavouriteNames[i]), display);
+	SafeCopy(app->rbFavouriteUrls[i], sizeof(app->rbFavouriteUrls[i]), url);
+	SaveGuiSettings(app);
+	sprintf(msg, "Added favourite: %.120s", display);
+	RadioSetStatus(app, msg);
+}
+
+static void RadioToggleFavourites(HelixAmp3Gui *app)
+{
+	app->rbShowingFavourites = app->rbShowingFavourites ? FALSE : TRUE;
+	RadioRefreshResults(app);
+	RadioSetStatus(app, app->rbShowingFavourites ? "Showing radio favourites." : "Showing search results.");
+}
+
+static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
+{
+	static unsigned char peek[512];
+	RbStreamInfo info;
+	int peekLen = 0;
+	int rc;
+	const RadioBrowserStation *st;
+	char msg[512];
+	if (app->rbShowingFavourites) {
+		if (app->rbSelectedFavourite < 0 || app->rbSelectedFavourite >= app->rbFavouriteCount) {
+			RadioSetStatus(app, "Select a favourite first.");
+			return;
+		}
+		SelectInternetStream(app, app->rbFavouriteUrls[app->rbSelectedFavourite]);
+		sprintf(msg, "Playing favourite: %.120s", app->rbFavouriteNames[app->rbSelectedFavourite]);
+		RadioSetStatus(app, msg);
+		StartPlayback(app);
+		return;
+	}
+	if (app->rbController.selected_index < 0) {
+		RadioSetStatus(app, "Select a station first.");
+		return;
+	}
+	st = rb_controller_get_station(&app->rbController, app->rbController.selected_index);
+	if (!st) {
+		RadioSetStatus(app, "Select a station first.");
+		return;
+	}
+	if (rb_station_play_url(st) && strncmp(rb_station_play_url(st), "https://", 8) == 0) {
+		RadioSetStatus(app, "HTTPS/TLS streams are not supported yet");
+		return;
+	}
+	memset(&info, 0, sizeof(info));
+	RadioSetStatus(app, "Probing selected stream...");
+	rc = rb_controller_probe_selected(&app->rbController, &info, peek, (int)sizeof(peek), &peekLen);
+	if (rc < 0) {
+		RadioSetStatus(app, app->rbController.last_error);
+		return;
+	}
+	if (info.codec != RB_STREAM_CODEC_MP3 && info.codec != RB_STREAM_CODEC_AAC) {
+		sprintf(msg, "Unsupported stream codec: %s (%.48s)", ProbeCodecName(info.codec), info.content_type);
+		RadioSetStatus(app, msg);
+		return;
+	}
+	if (!info.final_url[0]) {
+		RadioSetStatus(app, "Stream probe did not return a playable URL.");
+		return;
+	}
+	SelectInternetStream(app, info.final_url);
+	sprintf(msg, "Playing: %.120s | type: %.48s | icy-name: %.64s | icy-br: %d | redirects: %d",
+		info.final_url, info.content_type, info.icy_name, info.icy_br, info.redirect_count);
+	RadioSetStatus(app, msg);
+	StartPlayback(app);
+}
+
+static void CloseRadioWindow(HelixAmp3Gui *app)
+{
+	struct IntuiMessage *msg;
+	if (!app->rbWin) return;
+	ModifyIDCMP(app->rbWin, 0);
+	while ((msg = GT_GetIMsg(app->rbWin->UserPort)) != NULL)
+		GT_ReplyIMsg(msg);
+	if (app->rbGadgets)
+		RemoveGList(app->rbWin, app->rbGadgets, -1);
+	CloseWindow(app->rbWin);
+	app->rbWin = NULL;
+	if (app->rbGadgets) {
+		FreeGadgets(app->rbGadgets);
+		app->rbGadgets = NULL;
+		app->rbGadContext = NULL;
+		app->rbGadList = NULL;
+	}
+	if (app->rbVisualInfo) {
+		FreeVisualInfo(app->rbVisualInfo);
+		app->rbVisualInfo = NULL;
+	}
+}
+
+static void OpenRadioWindow(HelixAmp3Gui *app)
+{
+	struct NewWindow nw;
+	struct NewGadget ng;
+	struct Gadget *gad;
+	static STRPTR codecs[] = { (STRPTR)"All", (STRPTR)"MP3", (STRPTR)"AAC", (STRPTR)"AAC+", NULL };
+	if (app->rbWin || !app->win || !GadToolsBase) return;
+	rb_controller_init(&app->rbController);
+	app->rbShowHttps = FALSE;
+	app->rbShowingFavourites = FALSE;
+	app->rbSelectedFavourite = -1;
+	app->rbVisibleCount = 0;
+	app->rbVisualInfo = GetVisualInfoA(app->win->WScreen, NULL);
+	if (!app->rbVisualInfo) return;
+	app->rbGadContext = CreateContext(&app->rbGadgets);
+	if (!app->rbGadContext) goto fail;
+	NewList(&app->rbList);
+	gad = app->rbGadContext;
+	memset(&ng, 0, sizeof(ng));
+	ng.ng_VisualInfo = app->rbVisualInfo; ng.ng_Flags = PLACETEXT_LEFT;
+	/* Keep the radio dialog arranged as a clear vertical stack with generous
+	 * outer/inner spacing: search+codec row, country row, results, buttons,
+	 * and a bottom status line.  The larger top margin prevents the first row
+	 * from clipping into the draggable title bar on ReAction/ClassAct systems.
+	 */
+	ng.ng_LeftEdge = 88; ng.ng_TopEdge = 24; ng.ng_Width = 220; ng.ng_Height = 18; ng.ng_GadgetText = (UBYTE *)"Search";
+	ng.ng_GadgetID = RB_GID_SEARCH_TEXT; gad = CreateGadget(STRING_KIND, gad, &ng, GTST_MaxChars, RB_MAX_NAME, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 390; ng.ng_TopEdge = 24; ng.ng_Width = 90; ng.ng_GadgetText = (UBYTE *)"Codec"; ng.ng_GadgetID = RB_GID_CODEC;
+	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)codecs, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 88; ng.ng_TopEdge = 52; ng.ng_Width = 220; ng.ng_GadgetText = (UBYTE *)"Country";
+	ng.ng_GadgetID = RB_GID_COUNTRY; gad = CreateGadget(STRING_KIND, gad, &ng, GTST_MaxChars, RB_MAX_COUNTRY, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 340; ng.ng_TopEdge = 52; ng.ng_Width = 140; ng.ng_GadgetText = (UBYTE *)"Show HTTPS stations"; ng.ng_GadgetID = RB_GID_SHOW_HTTPS; ng.ng_Flags = PLACETEXT_RIGHT;
+	gad = CreateGadget(CHECKBOX_KIND, gad, &ng, GTCB_Checked, FALSE, GA_RelVerify, TRUE, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 88; ng.ng_TopEdge = 80; ng.ng_Width = 90; ng.ng_GadgetText = (UBYTE *)"Limit"; ng.ng_GadgetID = RB_GID_LIMIT; ng.ng_Flags = PLACETEXT_LEFT;
+	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)kRadioSearchLimitLabels, GTCY_Active, 1, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 288; ng.ng_TopEdge = 80; ng.ng_Width = 90; ng.ng_GadgetText = (UBYTE *)"Max kbps"; ng.ng_GadgetID = RB_GID_BITRATE; ng.ng_Flags = PLACETEXT_LEFT;
+	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)kRadioBitrateLabels, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 8; ng.ng_TopEdge = 110; ng.ng_Width = 472; ng.ng_Height = 116; ng.ng_GadgetText = NULL; ng.ng_GadgetID = RB_GID_RADIO_RESULTS; ng.ng_Flags = 0;
+	app->rbGadList = gad = CreateGadget(LISTVIEW_KIND, gad, &ng,
+		GTLV_Labels, (ULONG)&app->rbList,
+		GTLV_Selected, (ULONG)~0,
+		GA_RelVerify, TRUE, TAG_DONE); if (!gad) goto fail;
+	ng.ng_TopEdge = 236; ng.ng_Width = 86; ng.ng_Height = 18; ng.ng_Flags = PLACETEXT_IN;
+	ng.ng_LeftEdge = 8; ng.ng_GadgetText = (UBYTE *)"Search"; ng.ng_GadgetID = RB_GID_SEARCH; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 100; ng.ng_GadgetText = (UBYTE *)"Play"; ng.ng_GadgetID = RB_GID_PROBE; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 192; ng.ng_GadgetText = (UBYTE *)"Add Fav"; ng.ng_GadgetID = RB_GID_ADD_FAV; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 284; ng.ng_GadgetText = (UBYTE *)"Favourites"; ng.ng_GadgetID = RB_GID_FAVOURITES; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 376; ng.ng_GadgetText = (UBYTE *)"Close"; ng.ng_GadgetID = RB_GID_CLOSE; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 8; ng.ng_TopEdge = 264; ng.ng_Width = 472; ng.ng_GadgetText = NULL; ng.ng_GadgetID = RB_GID_STATUS; ng.ng_Flags = 0;
+	gad = CreateGadget(STRING_KIND, gad, &ng, GTST_String, (ULONG)"Ready.", GTST_MaxChars, 512, TAG_DONE); if (!gad) goto fail;
+	memset(&nw, 0, sizeof(nw));
+	nw.LeftEdge = app->win->LeftEdge + 30; nw.TopEdge = app->win->TopEdge + 30;
+	nw.Width = 496; nw.Height = 306;
+	nw.IDCMPFlags = IDCMP_GADGETUP | IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW | IDCMP_VANILLAKEY;
+	nw.Flags = WFLG_CLOSEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET | WFLG_SMART_REFRESH;
+	nw.Title = (UBYTE *)"Internet Radio";
+	nw.MinWidth = nw.MaxWidth = 496; nw.MinHeight = nw.MaxHeight = 306;
+	nw.Type = WBENCHSCREEN;
+	app->rbWin = OpenWindowTags(&nw, TAG_DONE);
+	if (!app->rbWin) goto fail;
+	AddGList(app->rbWin, app->rbGadgets, (UWORD)-1, -1, NULL);
+	RefreshGList(app->rbGadgets, app->rbWin, NULL, -1);
+	GT_RefreshWindow(app->rbWin, NULL);
+	return;
+fail:
+	CloseRadioWindow(app);
+}
+
+static void HandleRadioWindow(HelixAmp3Gui *app)
+{
+	struct IntuiMessage *msg;
+	if (!app->rbWin) return;
+	while ((msg = GT_GetIMsg(app->rbWin->UserPort)) != NULL) {
+		ULONG cls = msg->Class;
+		UWORD code = msg->Code;
+		struct Gadget *gad = (struct Gadget *)msg->IAddress;
+		UWORD gid = gad ? gad->GadgetID : 0;
+		GT_ReplyIMsg(msg);
+		if (cls == IDCMP_CLOSEWINDOW) { CloseRadioWindow(app); return; }
+		if (cls == IDCMP_REFRESHWINDOW) {
+			GT_BeginRefresh(app->rbWin);
+			GT_EndRefresh(app->rbWin, TRUE);
+			continue;
+		}
+		if (cls == IDCMP_VANILLAKEY && code == 13) {
+			RadioDoSearch(app);
+			continue;
+		}
+		if (cls == IDCMP_GADGETUP) {
+			if (gid == RB_GID_RADIO_RESULTS)
+				RadioSelectResult(app, (ULONG)code);
+			else if (gid == RB_GID_SEARCH)
+				RadioDoSearch(app);
+			else if (gid == RB_GID_PROBE)
+				RadioDoProbeAndPlay(app);
+			else if (gid == RB_GID_ADD_FAV)
+				RadioAddFavourite(app);
+			else if (gid == RB_GID_FAVOURITES)
+				RadioToggleFavourites(app);
+			else if (gid == RB_GID_SHOW_HTTPS) {
+				app->rbShowHttps = app->rbShowHttps ? FALSE : TRUE;
+				GT_SetGadgetAttrs(gad, app->rbWin, NULL, GTCB_Checked, app->rbShowHttps, TAG_DONE);
+				RadioRefreshResults(app);
+			}
+			else if (gid == RB_GID_CLOSE) {
+				CloseRadioWindow(app);
+				return;
+			}
+		}
+	}
+}
+
 
 /* --- Playlist implementation -------------------------------------------- */
 
@@ -5913,7 +6452,7 @@ static void GuiPoll(HelixAmp3Gui *gui)
 					else if (mn == MENUNUM_PROJECT && it == ITEMNUM_ABOUT)
 						ShowAbout(gui);
 					else if (mn == MENUNUM_PROJECT && it == ITEMNUM_STREAM)
-						EnterInternetStream(gui);
+						OpenRadioWindow(gui);
 					else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_DTP)
 						SetDecodeThenPlay(gui, !gui->decodeThenPlay);
 					else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_BENCH) {
@@ -6014,8 +6553,9 @@ int main(int argc, char **argv)
 		ULONG timerMask = gui.timerPort ? (1UL << gui.timerPort->mp_SigBit) : 0;
 		ULONG doneMask = gui.donePort ? (1UL << gui.donePort->mp_SigBit) : 0;
 		ULONG plMask = gui.plWin ? (1UL << gui.plWin->UserPort->mp_SigBit) : 0;
+		ULONG rbMask = gui.rbWin ? (1UL << gui.rbWin->UserPort->mp_SigBit) : 0;
 		ULONG sigs = Wait(HELIXAMP3_SIGMASK(&gui) | timerMask |
-			doneMask | plMask | SIGBREAKF_CTRL_C);
+			doneMask | plMask | rbMask | SIGBREAKF_CTRL_C);
 		if (sigs & SIGBREAKF_CTRL_C)
 			gui.closeRequested = 1;
 		if (doneMask && (sigs & doneMask))
@@ -6023,6 +6563,7 @@ int main(int argc, char **argv)
 		if (timerMask && (sigs & timerMask))
 			HandleTimerSignal(&gui);
 		HandlePlaylistPoll(&gui);
+		HandleRadioWindow(&gui);
 		GuiPoll(&gui);
 	}
 	if (gui.playbackActive)
