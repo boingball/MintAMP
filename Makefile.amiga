@@ -24,6 +24,14 @@ RADIO_SOURCES := radio_stream.c
 RADIO_CPPFLAGS := -DENABLE_RADIO -DHAVE_BSDSOCKET
 endif
 
+# AmiSSL support: make -f Makefile.amiga fast030 RADIO=1 SSL=1
+# Requires AmiSSL 4.x SDK headers in the cross-compiler sysroot.
+# AmiSSL uses inline stubs via proto/amissl.h so no -l flag is needed.
+SSL_CPPFLAGS :=
+ifneq ($(filter 1 yes true on,$(SSL) $(HAVE_AMISSL))$(findstring -DHAVE_AMISSL,$(EXTRA_CFLAGS)),)
+SSL_CPPFLAGS := -DHAVE_AMISSL
+endif
+
 SOURCES := amiga_mp3dec.c $(RADIO_SOURCES) $(DECODER_SOURCES)
 GUI_SOURCES := amiga_mp3gui.c picojpeg.c $(RADIO_SOURCES) \
 	radio_browser_controller.c radio_browser.c radio_browser_url.c \
@@ -63,18 +71,27 @@ HALFASM_TEST_CPPFLAGS := -DAMIGA_M68K_ASM_FDCT32
 FAST030_ASM_SOURCES := real/amiga_m68k_polyphase.S
 AMIGA_HUNK_FAST_PREFERRED := python3 tools/amiga_fast_preferred_hunks.py
 
-.PHONY: all fast030 radio030 prof030 gui guir fast030-halfasm-test gui-halfasm-test decoder-modules clean print-command print-fast030-command print-gui-command print-guir-command
+.PHONY: all fast030 radio030 sslradio030 prof030 gui guir sslgui sslguir fast030-halfasm-test gui-halfasm-test decoder-modules clean print-command print-fast030-command print-gui-command print-guir-command
 
 all: $(TARGET) decoder-modules
 
 $(TARGET): $(SOURCES)
-	$(CC) $(CFLAGS_COMMON) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(EXTRA_CFLAGS) -o $@ $(SOURCES)
+	$(CC) $(CFLAGS_COMMON) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(SSL_CPPFLAGS) $(EXTRA_CFLAGS) -o $@ $(SOURCES)
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
 
 fast030: $(FAST030_TARGET) decoder-modules
 
 radio030:
 	$(MAKE) -f Makefile.amiga fast030 RADIO=1
+
+sslradio030:
+	$(MAKE) -f Makefile.amiga fast030 RADIO=1 SSL=1
+
+sslgui:
+	$(MAKE) -f Makefile.amiga gui RADIO=1 SSL=1
+
+sslguir:
+	$(MAKE) -f Makefile.amiga guir RADIO=1 SSL=1
 
 prof030: $(PROF030_TARGET)
 
@@ -87,7 +104,7 @@ fast030-halfasm-test: $(FAST030_HALFASM_TEST_TARGET)
 gui-halfasm-test: $(GUI_HALFASM_TEST_TARGET)
 
 $(GUI_TARGET): $(GUI_SOURCES) amiga_mp3dec.c $(DECODER_SOURCES) $(FAST030_ASM_SOURCES)
-	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(EXTRA_CFLAGS) \
+	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(SSL_CPPFLAGS) $(EXTRA_CFLAGS) \
 		-o $@ $(GUI_SOURCES) $(DECODER_SOURCES) $(FAST030_ASM_SOURCES)
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
 
@@ -95,12 +112,12 @@ $(GUI_TARGET): $(GUI_SOURCES) amiga_mp3dec.c $(DECODER_SOURCES) $(FAST030_ASM_SO
 # as the GadTools GUI since it targets 030+/3.5/3.9 machines.  minimp3r.c
 # #includes amiga_mp3dec.c, so only the shared decoder modules are linked.
 $(GUIR_TARGET): $(GUIR_SOURCES) amiga_mp3dec.c $(DECODER_SOURCES) $(FAST030_ASM_SOURCES)
-	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(EXTRA_CFLAGS) \
+	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(SSL_CPPFLAGS) $(EXTRA_CFLAGS) \
 		-o $@ $(GUIR_SOURCES) $(DECODER_SOURCES) $(FAST030_ASM_SOURCES)
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
 
 $(FAST030_TARGET): $(SOURCES) $(FAST030_ASM_SOURCES)
-	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(EXTRA_CFLAGS) -o $@ $(SOURCES) $(FAST030_ASM_SOURCES)
+	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(SSL_CPPFLAGS) $(EXTRA_CFLAGS) -o $@ $(SOURCES) $(FAST030_ASM_SOURCES)
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
 
 # Same as fast030 but with AMIGA_PROFILE_DECODE, so --bench prints the per-bucket
@@ -108,7 +125,7 @@ $(FAST030_TARGET): $(SOURCES) $(FAST030_ASM_SOURCES)
 # The clock() calls add overhead, so use it for relative bucket sizing, not for
 # absolute realtime numbers.
 $(PROF030_TARGET): $(SOURCES) $(FAST030_ASM_SOURCES)
-	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(PROF030_CPPFLAGS) $(EXTRA_CFLAGS) -o $@ $(SOURCES) $(FAST030_ASM_SOURCES)
+	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(PROF030_CPPFLAGS) $(SSL_CPPFLAGS) $(EXTRA_CFLAGS) -o $@ $(SOURCES) $(FAST030_ASM_SOURCES)
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
 
 $(FAST030_HALFASM_TEST_TARGET): $(SOURCES) $(FAST030_ASM_SOURCES)

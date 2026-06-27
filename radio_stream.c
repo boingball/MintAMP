@@ -51,6 +51,16 @@ struct Library *SocketBase = NULL;
 #define RADIO_SOCKET long
 #define RADIO_INVALID_SOCKET (-1)
 #define radio_close_socket(s) CloseSocket(s)
+#if defined(HAVE_AMISSL)
+#include <libraries/amisslmaster.h>
+#include <proto/amisslmaster.h>
+#include <proto/amissl.h>
+#include <amissl/amissl.h>
+/* Strong definitions — probe and browser_http files use weak refs to these. */
+struct Library *AmiSSLMasterBase = NULL;
+struct Library *AmiSSLBase = NULL;
+static SSL_CTX *radio_ssl_ctx = NULL;
+#endif /* HAVE_AMISSL */
 #else
 #include <unistd.h>
 #include <errno.h>
@@ -111,6 +121,10 @@ struct RadioStream {
     int stopping;
     struct in_addr hostAddr;   /* cached DNS result so reconnects skip gethostbyname() */
     int haveHostAddr;
+    int isSSL;
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+    SSL *ssl;
+#endif
 };
 
 static int radio_is_stopping(const RadioStream *rs) { return !rs || rs->stopping || rs->status == RADIO_STATUS_STOPPING || rs->status == RADIO_STATUS_CLOSED; }
@@ -167,6 +181,79 @@ static long radio_sock_errno(void)
 #endif
 }
 
+/* Forward declaration so the SSL helpers can call set_error before it is
+ * defined later in this translation unit. */
+static void set_error(RadioStream *rs, const char *msg);
+
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+static int radio_ssl_global_init(RadioStream *rs)
+{
+    if (AmiSSLBase) return 0;
+    if (!AmiSSLMasterBase) {
+        AmiSSLMasterBase = OpenLibrary("amisslmaster.library", AMISSLMASTER_MIN_VERSION);
+        if (!AmiSSLMasterBase) { set_error(rs, "amisslmaster.library unavailable"); return -1; }
+        if (!InitAmiSSLMaster(AMISSL_CURRENT_VERSION, TRUE)) {
+            CloseLibrary(AmiSSLMasterBase); AmiSSLMasterBase = NULL;
+            set_error(rs, "AmiSSL version mismatch"); return -1;
+        }
+    }
+    AmiSSLBase = OpenAmiSSL();
+    if (!AmiSSLBase) {
+        CloseLibrary(AmiSSLMasterBase); AmiSSLMasterBase = NULL;
+        set_error(rs, "cannot open AmiSSL"); return -1;
+    }
+    radio_ssl_ctx = SSL_CTX_new(TLS_client_method());
+    if (!radio_ssl_ctx) {
+        CloseAmiSSL(); AmiSSLBase = NULL;
+        CloseLibrary(AmiSSLMasterBase); AmiSSLMasterBase = NULL;
+        set_error(rs, "SSL_CTX_new failed"); return -1;
+    }
+    /* No CA bundle on classic AmigaOS; skip cert verification for streams. */
+    SSL_CTX_set_verify(radio_ssl_ctx, SSL_VERIFY_NONE, NULL);
+    return 0;
+}
+
+/* Poll SSL_connect on the non-blocking socket — same budget as radio_wait_connected. */
+static int radio_ssl_do_handshake(RadioStream *rs)
+{
+    int tries;
+    for (tries = 0; tries < 150; tries++) {
+        int r, e;
+        if (radio_is_stopping(rs)) return -1;
+        r = SSL_connect(rs->ssl);
+        if (r == 1) return 0;
+        e = SSL_get_error(rs->ssl, r);
+        if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
+            radio_backoff_sleep(); continue;
+        }
+        return -1;
+    }
+    return -1;
+}
+
+static int radio_ssl_connect(RadioStream *rs)
+{
+    if (radio_ssl_global_init(rs) != 0) return -1;
+    rs->ssl = SSL_new(radio_ssl_ctx);
+    if (!rs->ssl) { set_error(rs, "SSL_new failed"); return -1; }
+    SSL_set_fd(rs->ssl, (int)rs->sock);
+    if (radio_ssl_do_handshake(rs) != 0) {
+        SSL_free(rs->ssl); rs->ssl = NULL;
+        set_error(rs, "SSL handshake failed"); return -1;
+    }
+    return 0;
+}
+
+static void radio_ssl_close_stream(RadioStream *rs)
+{
+    if (rs && rs->ssl) {
+        SSL_shutdown(rs->ssl);
+        SSL_free(rs->ssl);
+        rs->ssl = NULL;
+    }
+}
+#endif /* AMIGA_M68K && HAVE_AMISSL */
+
 /* Drive a non-blocking connect() to completion by re-issuing connect() and
  * yielding with Delay() between tries, so the connect never blocks (and so
  * never freezes WinUAE's emulation).  Returns 0 on success, -1 on failure or
@@ -202,6 +289,19 @@ static int radio_send_all(RadioStream *rs, const char *buf, int len)
         int r;
         if (radio_is_stopping(rs))
             return -1;
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+        if (rs->isSSL && rs->ssl) {
+            r = (int)SSL_write(rs->ssl, buf + sent, len - sent);
+            if (r > 0) { sent += r; continue; }
+            if (r < 0) {
+                int e = SSL_get_error(rs->ssl, r);
+                if (e == SSL_ERROR_WANT_WRITE || e == SSL_ERROR_WANT_READ) {
+                    radio_backoff_sleep(); tries++; continue;
+                }
+            }
+            return -1;
+        }
+#endif
         r = (int)send(rs->sock, (char *)buf + sent, len - sent, 0);
         if (r > 0) { sent += r; continue; }
         if (r < 0 && radio_would_block()) { radio_backoff_sleep(); tries++; continue; }
@@ -244,7 +344,35 @@ static int ci_equals(const char *a,const char *b){ while(*a&&*b){ if(tolower((un
 static char *trim(char *s){ char *e; while(*s&&isspace((unsigned char)*s))s++; e=s+strlen(s); while(e>s&&isspace((unsigned char)e[-1]))*--e=0; return s; }
 static void close_current_socket(RadioStream *rs);
 
-static int parse_url(RadioStream *rs,const char *url){ const char *p,*slash,*colon; int hl; if(!url||strncmp(url,"http://",7)) return -1; p=url+7; slash=strchr(p,'/'); if(!slash) slash=p+strlen(p); colon=memchr(p,':',(size_t)(slash-p)); hl=(int)((colon?colon:slash)-p); if(hl<=0||hl>=(int)sizeof(rs->host)) return -1; memcpy(rs->host,p,hl); rs->host[hl]=0; rs->port=colon?atoi(colon+1):80; if(rs->port<=0)rs->port=80; radio_copy_string(rs->path,sizeof(rs->path),*slash?slash:"/"); radio_copy_string(rs->url,sizeof(rs->url),url); return 0; }
+static int parse_url(RadioStream *rs, const char *url)
+{
+    const char *p, *slash, *colon;
+    int hl, default_port;
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+    if (!url) return -1;
+    if (strncmp(url, "https://", 8) == 0) {
+        rs->isSSL = 1; default_port = 443; p = url + 8;
+    } else if (strncmp(url, "http://", 7) == 0) {
+        rs->isSSL = 0; default_port = 80; p = url + 7;
+    } else {
+        return -1;
+    }
+#else
+    if (!url || strncmp(url, "http://", 7)) return -1;
+    default_port = 80; p = url + 7;
+#endif
+    slash = strchr(p, '/');
+    if (!slash) slash = p + strlen(p);
+    colon = (const char *)memchr(p, ':', (size_t)(slash - p));
+    hl = (int)((colon ? colon : slash) - p);
+    if (hl <= 0 || hl >= (int)sizeof(rs->host)) return -1;
+    memcpy(rs->host, p, (size_t)hl); rs->host[hl] = 0;
+    rs->port = colon ? atoi(colon + 1) : default_port;
+    if (rs->port <= 0) rs->port = default_port;
+    radio_copy_string(rs->path, sizeof(rs->path), *slash ? slash : "/");
+    radio_copy_string(rs->url, sizeof(rs->url), url);
+    return 0;
+}
 
 static void reset_parser(RadioStream *rs)
 {
@@ -282,13 +410,29 @@ static int connect_http(RadioStream *rs){
     cr=connect(rs->sock,(struct sockaddr*)&sa,sizeof(sa));
     if(cr<0 && radio_wait_connected(rs,&sa)!=0){ close_current_socket(rs); set_error(rs,"cannot connect to stream"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: connect failed to %s:%d\n", rs->host, rs->port)); return -1; }
     if (radio_is_stopping(rs)) { close_current_socket(rs); return -1; }
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+    if (rs->isSSL) {
+        if (radio_ssl_connect(rs) != 0) { close_current_socket(rs); return -1; }
+        if (radio_is_stopping(rs)) { close_current_socket(rs); return -1; }
+    }
+#endif
     n=snprintf(req,sizeof(req),"GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: MiniAMP3/experimental\r\nIcy-MetaData: 1\r\nConnection: close\r\n\r\n",rs->path,rs->host);
     if(radio_send_all(rs,req,n)!=0){ close_current_socket(rs); set_error(rs,"cannot send HTTP request"); return -1; }
     reset_parser(rs);
     return 0;
 }
 
-static void close_current_socket(RadioStream *rs){ if(rs && rs->sock!=RADIO_INVALID_SOCKET){ radio_close_socket(rs->sock); rs->sock=RADIO_INVALID_SOCKET; RADIO_STOP_DEBUG_PRINTF(("radio-stop: socket closed\n")); } }
+static void close_current_socket(RadioStream *rs)
+{
+    if (rs && rs->sock != RADIO_INVALID_SOCKET) {
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+        radio_ssl_close_stream(rs);
+#endif
+        radio_close_socket(rs->sock);
+        rs->sock = RADIO_INVALID_SOCKET;
+        RADIO_STOP_DEBUG_PRINTF(("radio-stop: socket closed\n"));
+    }
+}
 
 static int reconnect_http(RadioStream *rs)
 {
@@ -378,10 +522,92 @@ static int radio_note_start_wait(RadioStream *rs, const char *message)
     return 0;
 }
 
-RadioStream *Radio_Open(const char *url){ RadioStream *rs=(RadioStream*)calloc(1,sizeof(*rs)); if(!rs) return NULL; rs->sock=RADIO_INVALID_SOCKET; rs->status=RADIO_STATUS_CONNECTING; rs->size=RADIO_RING_BYTES; rs->ring=(unsigned char*)malloc(rs->size); if(!rs->ring){ rs->size=0; set_error(rs,"not enough memory for radio buffer"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: Radio_Open returning error\n")); return rs; } if(parse_url(rs,url)){ set_error(rs,"only direct http:// stream URLs are supported"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: Radio_Open returning error\n")); return rs; } if(connect_http(rs)==0) rs->status=RADIO_STATUS_BUFFERING; else { close_current_socket(rs); if(rs->status!=RADIO_STATUS_ERROR) set_error(rs, rs->error[0] ? rs->error : "cannot open radio stream"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: Radio_Open returning error\n")); } return rs; }
+RadioStream *Radio_Open(const char *url)
+{
+    RadioStream *rs = (RadioStream *)calloc(1, sizeof(*rs));
+    if (!rs) return NULL;
+    rs->sock = RADIO_INVALID_SOCKET;
+    rs->status = RADIO_STATUS_CONNECTING;
+    rs->size = RADIO_RING_BYTES;
+    rs->ring = (unsigned char *)malloc(rs->size);
+    if (!rs->ring) {
+        rs->size = 0;
+        set_error(rs, "not enough memory for radio buffer");
+        RADIO_OPEN_DEBUG_PRINTF(("radio-open: Radio_Open returning error\n"));
+        return rs;
+    }
+    if (parse_url(rs, url)) {
+        set_error(rs,
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+            "only direct http:// or https:// stream URLs are supported"
+#else
+            "only direct http:// stream URLs are supported"
+#endif
+        );
+        RADIO_OPEN_DEBUG_PRINTF(("radio-open: Radio_Open returning error\n"));
+        return rs;
+    }
+    if (connect_http(rs) == 0)
+        rs->status = RADIO_STATUS_BUFFERING;
+    else {
+        close_current_socket(rs);
+        if (rs->status != RADIO_STATUS_ERROR)
+            set_error(rs, rs->error[0] ? rs->error : "cannot open radio stream");
+        RADIO_OPEN_DEBUG_PRINTF(("radio-open: Radio_Open returning error\n"));
+    }
+    return rs;
+}
 void Radio_RequestStop(RadioStream *rs){ if(!rs)return; RADIO_STOP_DEBUG_PRINTF(("radio-stop: stop requested\n")); rs->stopping=1; rs->reconnectAttempts=RADIO_RECONNECT_MAX; rs->reconnectDelay=0; rs->status=RADIO_STATUS_STOPPING; close_current_socket(rs); RADIO_STOP_DEBUG_PRINTF(("radio-stop: marked stopping\n")); }
 void Radio_Close(RadioStream *rs){ if(!rs)return; RADIO_STOP_DEBUG_PRINTF(("radio-stop: Radio_Close entered\n")); Radio_RequestStop(rs); rs->status=RADIO_STATUS_CLOSED; free(rs->ring); rs->ring=NULL; rs->size=rs->used=rs->rpos=rs->wpos=0; RADIO_STOP_DEBUG_PRINTF(("radio-stop: Radio_Close exited\n")); free(rs); }
-int Radio_Pump(RadioStream *rs){ unsigned char b[1024]; int n; if(!rs||rs->status==RADIO_STATUS_ERROR) return -1; if(radio_is_stopping(rs)) { close_current_socket(rs); rs->status=RADIO_STATUS_CLOSED; return 0; } if(rs->sock==RADIO_INVALID_SOCKET) { if(!rs->everPlayed){ set_error(rs,"radio stream closed before playback started"); return -1; } return reconnect_http(rs); } n=(int)recv(rs->sock,(char*)b,sizeof(b),0); if(radio_is_stopping(rs)) { close_current_socket(rs); rs->status=RADIO_STATUS_CLOSED; return 0; } if(n<0 && radio_would_block()){ radio_backoff_sleep(); if(radio_note_start_wait(rs,"radio stream start timed out")<0) return -1; return 0; } /* non-blocking socket: no data yet - yield instead of freezing the emulator */ if(n<=0){ close_current_socket(rs); if(!rs->headerDone){ set_error(rs,"HTTP header read failed"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: HTTP header failed\n")); return -1; } if(!rs->everPlayed){ set_error(rs,"radio stream ended before audio buffered"); return -1; } rs->reconnectDelay = RADIO_RECONNECT_BACKOFF_PUMPS; set_status(rs, RADIO_STATUS_RECONNECTING); return 0; } rs->zeroBytePumps=0; if(!rs->everPlayed) rs->startPumps = 0; if(process_bytes(rs,b,n)<0) return -1; if(radio_is_stopping(rs)) { close_current_socket(rs); rs->status=RADIO_STATUS_CLOSED; return 0; } if(rs->headerDone && rs->used >= RADIO_START_THRESHOLD) { rs->reconnectAttempts = 0; rs->reconnectDelay = 0; rs->everPlayed = 1; rs->status=RADIO_STATUS_PLAYING; } else if(rs->headerDone && rs->status!=RADIO_STATUS_PLAYING) set_status(rs,RADIO_STATUS_BUFFERING); return n; }
+int Radio_Pump(RadioStream *rs)
+{
+    unsigned char b[1024];
+    int n, wb;
+    if (!rs || rs->status == RADIO_STATUS_ERROR) return -1;
+    if (radio_is_stopping(rs)) { close_current_socket(rs); rs->status = RADIO_STATUS_CLOSED; return 0; }
+    if (rs->sock == RADIO_INVALID_SOCKET) {
+        if (!rs->everPlayed) { set_error(rs, "radio stream closed before playback started"); return -1; }
+        return reconnect_http(rs);
+    }
+    wb = 0;
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+    if (rs->isSSL && rs->ssl) {
+        n = (int)SSL_read(rs->ssl, (char *)b, sizeof(b));
+        if (n < 0) {
+            int e = SSL_get_error(rs->ssl, n);
+            if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) wb = 1;
+        }
+    } else
+#endif
+    {
+        n = (int)recv(rs->sock, (char *)b, sizeof(b), 0);
+        if (n < 0 && radio_would_block()) wb = 1;
+    }
+    if (radio_is_stopping(rs)) { close_current_socket(rs); rs->status = RADIO_STATUS_CLOSED; return 0; }
+    /* non-blocking socket (or SSL WANT_READ): no data yet — yield */
+    if (n < 0 && wb) {
+        radio_backoff_sleep();
+        if (radio_note_start_wait(rs, "radio stream start timed out") < 0) return -1;
+        return 0;
+    }
+    if (n <= 0) {
+        close_current_socket(rs);
+        if (!rs->headerDone) { set_error(rs, "HTTP header read failed"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: HTTP header failed\n")); return -1; }
+        if (!rs->everPlayed) { set_error(rs, "radio stream ended before audio buffered"); return -1; }
+        rs->reconnectDelay = RADIO_RECONNECT_BACKOFF_PUMPS;
+        set_status(rs, RADIO_STATUS_RECONNECTING);
+        return 0;
+    }
+    rs->zeroBytePumps = 0;
+    if (!rs->everPlayed) rs->startPumps = 0;
+    if (process_bytes(rs, b, n) < 0) return -1;
+    if (radio_is_stopping(rs)) { close_current_socket(rs); rs->status = RADIO_STATUS_CLOSED; return 0; }
+    if (rs->headerDone && rs->used >= RADIO_START_THRESHOLD) {
+        rs->reconnectAttempts = 0; rs->reconnectDelay = 0; rs->everPlayed = 1; rs->status = RADIO_STATUS_PLAYING;
+    } else if (rs->headerDone && rs->status != RADIO_STATUS_PLAYING)
+        set_status(rs, RADIO_STATUS_BUFFERING);
+    return n;
+}
 int Radio_ReadAudio(RadioStream *rs,unsigned char *buf,int maxBytes){ int got; if(!rs||!buf||maxBytes<=0)return 0; if(radio_is_stopping(rs)) return 0; while(!radio_is_stopping(rs) && rs->status!=RADIO_STATUS_PLAYING && rs->used<RADIO_START_THRESHOLD && rs->status!=RADIO_STATUS_ERROR) { if(Radio_Pump(rs)<=0 && !rs->everPlayed && (++rs->zeroBytePumps>=RADIO_ZERO_BYTE_PUMP_MAX || radio_note_start_wait(rs,"radio stream did not buffer audio")<0)) { if(rs->status!=RADIO_STATUS_ERROR) set_error(rs,"radio stream did not buffer audio"); break; } } while(!radio_is_stopping(rs) && rs->used==0 && rs->status!=RADIO_STATUS_ERROR) { if(Radio_Pump(rs)<=0 && !rs->everPlayed && (++rs->zeroBytePumps>=RADIO_ZERO_BYTE_PUMP_MAX || radio_note_start_wait(rs,"radio stream did not deliver audio")<0)) { if(rs->status!=RADIO_STATUS_ERROR) set_error(rs,"radio stream did not deliver audio"); break; } } if(radio_is_stopping(rs)) return 0; got=ring_read(rs,buf,maxBytes); if(rs->status==RADIO_STATUS_PLAYING && rs->used<RADIO_LOW_WATER_BYTES) rs->status=RADIO_STATUS_BUFFERING; if(rs->status==RADIO_STATUS_BUFFERING && rs->used>=RADIO_START_THRESHOLD) rs->status=RADIO_STATUS_PLAYING; return got; }
 RadioStatus Radio_GetStatus(RadioStream *rs){ return rs?rs->status:RADIO_STATUS_CLOSED; }
 const char *Radio_GetTitle(RadioStream *rs){ return rs?rs->title:""; }

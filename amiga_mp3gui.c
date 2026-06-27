@@ -4424,7 +4424,12 @@ static void RadioSetStatus(HelixAmp3Gui *app, const char *text)
 static int RadioIsHttpStation(const RadioBrowserStation *st)
 {
 	const char *url = rb_station_play_url(st);
-	return url && strncmp(url, "http://", 7) == 0;
+	if (!url) return 0;
+	if (strncmp(url, "http://", 7) == 0) return 1;
+#if defined(HAVE_AMISSL)
+	if (strncmp(url, "https://", 8) == 0) return 1;
+#endif
+	return 0;
 }
 
 static void RadioRefreshResults(HelixAmp3Gui *app)
@@ -4687,10 +4692,12 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 		RadioSetStatus(app, "Select a station first.");
 		return;
 	}
+#if !defined(HAVE_AMISSL)
 	if (rb_station_play_url(st) && strncmp(rb_station_play_url(st), "https://", 8) == 0) {
 		RadioSetStatus(app, "HTTPS/TLS streams are not supported yet");
 		return;
 	}
+#endif
 	memset(&info, 0, sizeof(info));
 	RadioSetStatus(app, "Probing selected stream...");
 	rc = rb_controller_probe_selected(&app->rbController, &info, peek, (int)sizeof(peek), &peekLen);

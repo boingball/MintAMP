@@ -26,6 +26,16 @@ struct Library *SocketBase __attribute__((weak));
 #define RB_PROBE_SOCKET long
 #define RB_PROBE_INVALID_SOCKET (-1)
 #define rb_probe_close_socket(s) CloseSocket(s)
+#if defined(HAVE_AMISSL)
+#include <libraries/amisslmaster.h>
+#include <proto/amisslmaster.h>
+#include <proto/amissl.h>
+#include <amissl/amissl.h>
+/* Weak so this module can link standalone (test harness) or beside
+ * radio_stream.c which provides the strong definitions. */
+struct Library *AmiSSLMasterBase __attribute__((weak));
+struct Library *AmiSSLBase __attribute__((weak));
+#endif /* HAVE_AMISSL */
 #else
 #include <unistd.h>
 #include <netdb.h>
@@ -50,10 +60,16 @@ typedef struct RbProbeUrl {
     char host[RB_PROBE_MAX_HOST];
     char path[RB_PROBE_MAX_PATH];
     int port;
+    int isSSL;
 } RbProbeUrl;
 
 typedef struct RbProbeTransport {
     RB_PROBE_SOCKET sock;
+    int isSSL;
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+    SSL *ssl;
+    SSL_CTX *ctx;
+#endif
 } RbProbeTransport;
 
 static int rb_probe_ascii_starts_nocase(const char *s, const char *prefix)
@@ -139,12 +155,23 @@ static int rb_probe_parse_url(const char *url, RbProbeUrl *parsed)
     memset(parsed, 0, sizeof(*parsed));
     parsed->port = RB_PROBE_DEFAULT_PORT;
 
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+    if (rb_probe_ascii_starts_nocase(url, "https://")) {
+        parsed->isSSL = 1;
+        parsed->port = 443;
+        host_start = url + 8;
+    } else if (rb_probe_ascii_starts_nocase(url, "http://")) {
+        host_start = url + 7;
+    } else {
+        return RB_STREAM_PROBE_ERR_BAD_URL;
+    }
+#else
     if (rb_probe_ascii_starts_nocase(url, "https://"))
         return RB_STREAM_PROBE_ERR_UNSUPPORTED_TLS;
     if (!rb_probe_ascii_starts_nocase(url, "http://"))
         return RB_STREAM_PROBE_ERR_BAD_URL;
-
     host_start = url + 7;
+#endif
     if (!*host_start) return RB_STREAM_PROBE_ERR_BAD_URL;
     slash = strchr(host_start, '/');
     if (!slash) slash = host_start + strlen(host_start);
@@ -243,18 +270,32 @@ static int rb_probe_resolve_location(const RbProbeUrl *base, const char *locatio
     char port_buf[16];
 
     if (!base || !location || !out || out_size <= 0) return RB_STREAM_PROBE_ERR_BAD_ARG;
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+    if (rb_probe_ascii_starts_nocase(location, "https://") ||
+        rb_probe_ascii_starts_nocase(location, "http://"))
+        return rb_probe_copy_string(out, out_size, location);
+#else
     if (rb_probe_ascii_starts_nocase(location, "https://"))
         return RB_STREAM_PROBE_ERR_UNSUPPORTED_TLS;
     if (rb_probe_ascii_starts_nocase(location, "http://"))
         return rb_probe_copy_string(out, out_size, location);
+#endif
     if (location[0] == '/') {
         out[0] = '\0';
         pos = 0;
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+        rc = rb_probe_append_url(out, out_size, &pos, base->isSSL ? "https://" : "http://");
+#else
         rc = rb_probe_append_url(out, out_size, &pos, "http://");
+#endif
         if (rc < 0) return rc;
         rc = rb_probe_append_url(out, out_size, &pos, base->host);
         if (rc < 0) return rc;
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+        if (base->port != (base->isSSL ? 443 : RB_PROBE_DEFAULT_PORT)) {
+#else
         if (base->port != RB_PROBE_DEFAULT_PORT) {
+#endif
             sprintf(port_buf, ":%d", base->port);
             rc = rb_probe_append_url(out, out_size, &pos, port_buf);
             if (rc < 0) return rc;
@@ -265,11 +306,19 @@ static int rb_probe_resolve_location(const RbProbeUrl *base, const char *locatio
 
     out[0] = '\0';
     pos = 0;
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+    rc = rb_probe_append_url(out, out_size, &pos, base->isSSL ? "https://" : "http://");
+#else
     rc = rb_probe_append_url(out, out_size, &pos, "http://");
+#endif
     if (rc < 0) return rc;
     rc = rb_probe_append_url(out, out_size, &pos, base->host);
     if (rc < 0) return rc;
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+    if (base->port != (base->isSSL ? 443 : RB_PROBE_DEFAULT_PORT)) {
+#else
     if (base->port != RB_PROBE_DEFAULT_PORT) {
+#endif
         sprintf(port_buf, ":%d", base->port);
         rc = rb_probe_append_url(out, out_size, &pos, port_buf);
         if (rc < 0) return rc;
@@ -283,13 +332,35 @@ static int rb_probe_resolve_location(const RbProbeUrl *base, const char *locatio
     return rb_probe_append_url(out, out_size, &pos, location);
 }
 
-static int rb_probe_transport_open(RbProbeTransport *transport, const char *host, int port)
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+static int rb_probe_ensure_amissl(void)
+{
+    if (AmiSSLBase) return 0;
+    if (!AmiSSLMasterBase) {
+        AmiSSLMasterBase = OpenLibrary("amisslmaster.library", AMISSLMASTER_MIN_VERSION);
+        if (!AmiSSLMasterBase) return -1;
+        if (!InitAmiSSLMaster(AMISSL_CURRENT_VERSION, TRUE)) {
+            CloseLibrary(AmiSSLMasterBase); AmiSSLMasterBase = NULL; return -1;
+        }
+    }
+    AmiSSLBase = OpenAmiSSL();
+    return AmiSSLBase ? 0 : -1;
+}
+#endif
+
+static int rb_probe_transport_open(RbProbeTransport *transport, const char *host, int port, int use_ssl)
 {
     struct hostent *he;
     struct sockaddr_in sa;
 
     if (!transport || !host) return RB_STREAM_PROBE_ERR_BAD_ARG;
     transport->sock = RB_PROBE_INVALID_SOCKET;
+    transport->isSSL = 0;
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+    transport->ssl = NULL;
+    transport->ctx = NULL;
+#endif
+
 #if defined(AMIGA_M68K) && !defined(RB_STREAM_PROBE_EXTERNAL_SOCKETBASE)
     if (!SocketBase) {
         SocketBase = OpenLibrary("bsdsocket.library", 4);
@@ -309,12 +380,58 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *host
         transport->sock = RB_PROBE_INVALID_SOCKET;
         return RB_STREAM_PROBE_ERR_CONNECT;
     }
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+    if (use_ssl) {
+        if (rb_probe_ensure_amissl() != 0) {
+            rb_probe_close_socket(transport->sock);
+            transport->sock = RB_PROBE_INVALID_SOCKET;
+            return RB_STREAM_PROBE_ERR_CONNECT;
+        }
+        transport->ctx = SSL_CTX_new(TLS_client_method());
+        if (!transport->ctx) {
+            rb_probe_close_socket(transport->sock);
+            transport->sock = RB_PROBE_INVALID_SOCKET;
+            return RB_STREAM_PROBE_ERR_CONNECT;
+        }
+        /* No CA bundle on classic AmigaOS; skip cert verification for streams. */
+        SSL_CTX_set_verify(transport->ctx, SSL_VERIFY_NONE, NULL);
+        transport->ssl = SSL_new(transport->ctx);
+        if (!transport->ssl) {
+            SSL_CTX_free(transport->ctx); transport->ctx = NULL;
+            rb_probe_close_socket(transport->sock);
+            transport->sock = RB_PROBE_INVALID_SOCKET;
+            return RB_STREAM_PROBE_ERR_CONNECT;
+        }
+        SSL_set_fd(transport->ssl, (int)transport->sock);
+        if (SSL_connect(transport->ssl) != 1) {
+            SSL_free(transport->ssl); transport->ssl = NULL;
+            SSL_CTX_free(transport->ctx); transport->ctx = NULL;
+            rb_probe_close_socket(transport->sock);
+            transport->sock = RB_PROBE_INVALID_SOCKET;
+            return RB_STREAM_PROBE_ERR_CONNECT;
+        }
+        transport->isSSL = 1;
+    }
+#else
+    (void)use_ssl;
+#endif
     return RB_STREAM_PROBE_OK;
 }
 
 static void rb_probe_transport_close(RbProbeTransport *transport)
 {
     if (transport && transport->sock != RB_PROBE_INVALID_SOCKET) {
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+        if (transport->ssl) {
+            SSL_shutdown(transport->ssl);
+            SSL_free(transport->ssl);
+            transport->ssl = NULL;
+        }
+        if (transport->ctx) {
+            SSL_CTX_free(transport->ctx);
+            transport->ctx = NULL;
+        }
+#endif
         rb_probe_close_socket(transport->sock);
         transport->sock = RB_PROBE_INVALID_SOCKET;
     }
@@ -329,6 +446,11 @@ static int rb_probe_send_all(RbProbeTransport *transport, const char *buf, int l
         return RB_STREAM_PROBE_ERR_BAD_ARG;
     sent = 0;
     while (sent < len) {
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+        if (transport->isSSL && transport->ssl)
+            n = (int)SSL_write(transport->ssl, buf + sent, len - sent);
+        else
+#endif
         n = (int)send(transport->sock, (char *)buf + sent, len - sent, 0);
         if (n <= 0) return RB_STREAM_PROBE_ERR_SEND;
         sent += n;
@@ -486,7 +608,7 @@ int rb_probe_stream_url(const char *url, RbStreamInfo *info,
         rc = rb_probe_build_request(request, (int)sizeof(request), &parsed);
         if (rc < 0) return rc;
         request_len = (int)strlen(request);
-        rc = rb_probe_transport_open(&transport, parsed.host, parsed.port);
+        rc = rb_probe_transport_open(&transport, parsed.host, parsed.port, parsed.isSSL);
         if (rc < 0) return rc;
         rc = rb_probe_send_all(&transport, request, request_len);
         if (rc < 0) {
@@ -508,6 +630,11 @@ int rb_probe_stream_url(const char *url, RbStreamInfo *info,
                 rb_probe_transport_close(&transport);
                 return RB_STREAM_PROBE_ERR_HEADERS_TOO_BIG;
             }
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+            if (transport.isSSL && transport.ssl)
+                n = (int)SSL_read(transport.ssl, (char *)header_buf + total, want);
+            else
+#endif
             n = (int)recv(transport.sock, (char *)header_buf + total, want, 0);
             if (n < 0) {
                 rb_probe_transport_close(&transport);
@@ -551,6 +678,11 @@ int rb_probe_stream_url(const char *url, RbStreamInfo *info,
 
         want2 = peek_buf_size - *peek_len;
         if (want2 > RB_PROBE_READ_CHUNK) want2 = RB_PROBE_READ_CHUNK;
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+        if (transport.isSSL && transport.ssl)
+            n2 = (int)SSL_read(transport.ssl, (char *)peek_buf + *peek_len, want2);
+        else
+#endif
         n2 = (int)recv(transport.sock, (char *)peek_buf + *peek_len, want2, 0);
         if (n2 < 0) {
             rb_probe_transport_close(&transport);

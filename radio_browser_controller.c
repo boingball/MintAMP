@@ -159,10 +159,12 @@ int rb_controller_probe_selected(
         return RB_CONTROLLER_ERR_NO_SELECTION;
     }
 
+#if !defined(HAVE_AMISSL)
     if (rb_controller_starts_with(url, "https://")) {
         rb_controller_set_error(controller, "HTTPS streams are not supported yet");
         return RB_CONTROLLER_ERR_HTTPS_UNSUPPORTED;
     }
+#endif
 
     rc = rb_probe_stream_url(url, info, peek_buf, peek_buf_size, peek_len);
     if (rc < 0) rb_controller_set_error(controller, "Stream probe failed");

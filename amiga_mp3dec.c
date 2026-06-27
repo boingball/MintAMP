@@ -9555,6 +9555,10 @@ int main(int argc, char **argv)
 	GuiPublishStartupStage(GUISTART_ARGS_READY);
 	if (opt.inName && !strncmp(opt.inName, "http://", 7))
 		opt.radioStream = 1;
+#if defined(HAVE_AMISSL)
+	if (opt.inName && !strncmp(opt.inName, "https://", 8))
+		opt.radioStream = 1;
+#endif
 	if (opt.outName && OutputNameIsDirectory(opt.outName)) {
 		resolvedOutName = BuildDirectoryOutputName(opt.outName, opt.inName, &opt);
 		if (!resolvedOutName) {
