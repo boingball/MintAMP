@@ -295,7 +295,7 @@ static int connect_http(RadioStream *rs){
     if (radio_is_stopping(rs)) { close_current_socket(rs); return -1; }
 #if defined(AMIGA_M68K) && defined(ENABLE_AMISSL)
     if (rs->tls) {
-        InitAmiSSL(AmiSSL_SocketBase, SocketBase, TAG_DONE);
+        InitAmiSSL(AmiSSL_SocketBase, (ULONG)SocketBase, TAG_DONE);
         rs->sslCtx = SSL_CTX_new(SSLv23_client_method());
         if (!rs->sslCtx) { close_current_socket(rs); set_error(rs,"cannot create AmiSSL context"); return -1; }
         rs->ssl = SSL_new(rs->sslCtx);

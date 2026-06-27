@@ -17,6 +17,9 @@
 #include <exec/libraries.h>
 #include <proto/exec.h>
 #include <proto/bsdsocket.h>
+#if defined(ENABLE_AMISSL)
+#include <proto/amissl.h>
+#endif
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netdb.h>
@@ -336,7 +339,7 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *host
     }
 #if defined(AMIGA_M68K) && defined(ENABLE_AMISSL)
     if (tls) {
-        InitAmiSSL(AmiSSL_SocketBase, SocketBase, TAG_DONE);
+        InitAmiSSL(AmiSSL_SocketBase, (ULONG)SocketBase, TAG_DONE);
         transport->ctx = SSL_CTX_new(SSLv23_client_method());
         if (!transport->ctx) return RB_STREAM_PROBE_ERR_CONNECT;
         transport->ssl = SSL_new(transport->ctx);
