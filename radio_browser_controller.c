@@ -74,13 +74,13 @@ int rb_controller_search(RadioBrowserController *controller)
                                  rb_controller_optional_string(controller->tag),
                                  rb_controller_optional_string(controller->codec),
                                  rb_controller_optional_string(controller->countrycode),
-                                 -1, limit, controller->offset);
+                                 controller->max_bitrate, limit, controller->offset);
     count = rb_search_stations(RB_CONTROLLER_DEFAULT_HOST,
                                rb_controller_optional_string(controller->name),
                                rb_controller_optional_string(controller->tag),
                                rb_controller_optional_string(controller->codec),
                                rb_controller_optional_string(controller->countrycode),
-                               -1,
+                               controller->max_bitrate,
                                limit,
                                controller->offset,
                                controller->stations,
@@ -210,27 +210,28 @@ int rb_search_stations(const char *host, const char *name, const char *tag,
                        RadioBrowserStation *stations, int max_stations,
                        char *json_buffer, int json_buffer_size)
 {
+    int out = 0;
+
     (void)host; (void)tag; (void)codec; (void)countrycode;
-    (void)max_bitrate; (void)limit; (void)offset; (void)json_buffer;
+    (void)limit; (void)offset; (void)json_buffer;
     (void)json_buffer_size;
     if (!stations || max_stations < 4) return -1;
-    rb_test_copy(stations[0].name, RB_MAX_NAME, name && name[0] ? name : "BBC Radio 1");
-    rb_test_copy(stations[0].url, RB_MAX_URL, "http://example.com/128.mp3");
-    rb_test_copy(stations[0].codec, RB_MAX_CODEC, "MP3");
-    stations[0].bitrate = 128;
-    rb_test_copy(stations[1].name, RB_MAX_NAME, "BBC Low");
-    rb_test_copy(stations[1].url, RB_MAX_URL, "http://example.com/56.mp3");
-    rb_test_copy(stations[1].codec, RB_MAX_CODEC, "MP3");
-    stations[1].bitrate = 56;
-    rb_test_copy(stations[2].name, RB_MAX_NAME, "The Groove");
-    rb_test_copy(stations[2].url, RB_MAX_URL, "http://example.com/64.mp3");
-    rb_test_copy(stations[2].codec, RB_MAX_CODEC, "MP3");
-    stations[2].bitrate = 64;
-    rb_test_copy(stations[3].name, RB_MAX_NAME, "Groove Unknown");
-    rb_test_copy(stations[3].url, RB_MAX_URL, "http://example.com/unknown.mp3");
-    rb_test_copy(stations[3].codec, RB_MAX_CODEC, "MP3");
-    stations[3].bitrate = 0;
-    return 4;
+#define RB_TEST_ADD_STATION(st_name, st_url, st_bitrate) \
+    do { \
+        if (max_bitrate <= 0 || (st_bitrate) <= max_bitrate) { \
+            rb_test_copy(stations[out].name, RB_MAX_NAME, (st_name)); \
+            rb_test_copy(stations[out].url, RB_MAX_URL, (st_url)); \
+            rb_test_copy(stations[out].codec, RB_MAX_CODEC, "MP3"); \
+            stations[out].bitrate = (st_bitrate); \
+            out++; \
+        } \
+    } while (0)
+
+    RB_TEST_ADD_STATION(name && name[0] ? name : "BBC Radio 1", "http://example.com/128.mp3", 128);
+    RB_TEST_ADD_STATION("BBC Low", "http://example.com/56.mp3", 56);
+    RB_TEST_ADD_STATION("The Groove", "http://example.com/64.mp3", 64);
+    RB_TEST_ADD_STATION("Groove Unknown", "http://example.com/unknown.mp3", 0);
+    return out;
 }
 
 static int rb_controller_expect_count(const char *label, const char *name,
@@ -261,9 +262,9 @@ int main(void)
     int fails = 0;
 
     fails += rb_controller_expect_count("bbc + Any bitrate", "bbc", -1, 4);
-    fails += rb_controller_expect_count("bbc + <=56 raw", "bbc", 56, 4);
+    fails += rb_controller_expect_count("bbc + <=56 API-filtered", "bbc", 56, 2);
     fails += rb_controller_expect_count("groove + Any bitrate", "groove", -1, 4);
-    fails += rb_controller_expect_count("groove + <=64 raw", "groove", 64, 4);
+    fails += rb_controller_expect_count("groove + <=64 API-filtered", "groove", 64, 3);
     return fails ? 1 : 0;
 }
 #endif
