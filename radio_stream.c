@@ -105,6 +105,8 @@ struct RadioStream {
     RadioStatus status;
     char url[256], host[128], path[192];
     int port, bitrate, metaint, audioUntilMeta, headerDone;
+    int chunked, chunkRemaining, chunkLineLen, chunkSkipCrLf;
+    char chunkLine[24];
     char contentType[64], title[128], stationName[128], genre[64], streamUrl[128], error[128];
     unsigned char *ring;
     unsigned long rpos, wpos, used, size;
@@ -287,6 +289,7 @@ static void reset_parser(RadioStream *rs)
     rs->metaint = 0; rs->audioUntilMeta = 0;
     rs->metaLen = rs->metaGot = rs->metaLeft = 0;
     rs->contentType[0] = 0; rs->bitrate = 0;
+    rs->chunked = 0; rs->chunkRemaining = 0; rs->chunkLineLen = 0; rs->chunkSkipCrLf = 0; rs->chunkLine[0] = 0;
     rs->stationName[0] = 0; rs->genre[0] = 0; rs->streamUrl[0] = 0;
 }
 
@@ -356,7 +359,7 @@ static int reconnect_http(RadioStream *rs)
     return 0;
 }
 
-static void parse_headers(RadioStream *rs,char *h){ char *line=strtok(h,"\r\n"); int code=0; if(line && ci_starts(line,"ICY")) code=200; else if(line && ci_starts(line,"HTTP/")) sscanf(line,"HTTP/%*s %d",&code); else { set_error(rs,"invalid HTTP stream response"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: HTTP header failed\n")); return; } if(code<200||code>299){ set_error(rs,"HTTP stream returned non-success status"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: HTTP header failed status %d\n", code)); return; } while((line=strtok(NULL,"\r\n"))){ char *v=strchr(line,':'); if(!v) continue; *v++=0; line=trim(line); v=trim(v); if(ci_equals(line,"Content-Type")) radio_copy_string(rs->contentType,sizeof(rs->contentType),v); else if(ci_equals(line,"icy-metaint")){ rs->metaint=atoi(v); rs->audioUntilMeta=rs->metaint; } else if(ci_equals(line,"icy-br")) rs->bitrate=atoi(v); else if(ci_equals(line,"icy-name")) radio_copy_string(rs->stationName,sizeof(rs->stationName),v); else if(ci_equals(line,"icy-genre")) radio_copy_string(rs->genre,sizeof(rs->genre),v); else if(ci_equals(line,"icy-url")) radio_copy_string(rs->streamUrl,sizeof(rs->streamUrl),v); } if(rs->contentType[0] &&
+static void parse_headers(RadioStream *rs,char *h){ char *line=strtok(h,"\r\n"); int code=0; if(line && ci_starts(line,"ICY")) code=200; else if(line && ci_starts(line,"HTTP/")) sscanf(line,"HTTP/%*s %d",&code); else { set_error(rs,"invalid HTTP stream response"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: HTTP header failed\n")); return; } if(code<200||code>299){ set_error(rs,"HTTP stream returned non-success status"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: HTTP header failed status %d\n", code)); return; } while((line=strtok(NULL,"\r\n"))){ char *v=strchr(line,':'); if(!v) continue; *v++=0; line=trim(line); v=trim(v); if(ci_equals(line,"Content-Type")) radio_copy_string(rs->contentType,sizeof(rs->contentType),v); else if(ci_equals(line,"icy-metaint")){ rs->metaint=atoi(v); rs->audioUntilMeta=rs->metaint; } else if(ci_equals(line,"icy-br")) rs->bitrate=atoi(v); else if(ci_equals(line,"icy-name")) radio_copy_string(rs->stationName,sizeof(rs->stationName),v); else if(ci_equals(line,"icy-genre")) radio_copy_string(rs->genre,sizeof(rs->genre),v); else if(ci_equals(line,"icy-url")) radio_copy_string(rs->streamUrl,sizeof(rs->streamUrl),v); else if(ci_equals(line,"Transfer-Encoding") && ci_starts(v,"chunked")) rs->chunked=1; } if(rs->contentType[0] &&
     !ci_starts(rs->contentType,"audio/mpeg") &&
     !ci_starts(rs->contentType,"audio/aac") &&
     !ci_starts(rs->contentType,"audio/aacp") &&
@@ -385,6 +388,88 @@ static void parse_meta(RadioStream *rs,const unsigned char *m,int n)
     }
 }
 
+static int process_payload_byte(RadioStream *rs, unsigned char c)
+{
+    if (rs->metaint > 0 && rs->parseState == RADIO_PARSE_AUDIO && rs->audioUntilMeta == 0)
+        rs->parseState = RADIO_PARSE_META_LEN;
+    if (rs->parseState == RADIO_PARSE_META_LEN) {
+        rs->metaLen = c * 16; rs->metaGot = 0; rs->metaLeft = rs->metaLen;
+        rs->parseState = rs->metaLen ? RADIO_PARSE_META_PAYLOAD : RADIO_PARSE_AUDIO;
+        if (!rs->metaLen) rs->audioUntilMeta = rs->metaint;
+        return 0;
+    }
+    if (rs->parseState == RADIO_PARSE_META_PAYLOAD) {
+        if (rs->metaGot < RADIO_META_MAX) rs->meta[rs->metaGot++] = c;
+        rs->metaLeft--;
+        if (rs->metaLeft <= 0) {
+            if (rs->metaGot > 0) parse_meta(rs, rs->meta, rs->metaGot);
+            rs->audioUntilMeta = rs->metaint;
+            rs->parseState = RADIO_PARSE_AUDIO;
+        }
+        return 0;
+    }
+    if (rs->parseState == RADIO_PARSE_AUDIO) {
+        ring_write(rs, &c, 1);
+        if (rs->metaint > 0 && rs->audioUntilMeta > 0) rs->audioUntilMeta--;
+    }
+    return 0;
+}
+
+static int process_chunked_byte(RadioStream *rs, unsigned char c)
+{
+    char *endp;
+    long chunkSize;
+
+    if (rs->chunkSkipCrLf > 0) {
+        if (c == '\r' || c == '\n')
+            rs->chunkSkipCrLf--;
+        return 0;
+    }
+    if (rs->chunkRemaining <= 0) {
+        if (c == '\r')
+            return 0;
+        if (c != '\n') {
+            if (rs->chunkLineLen < (int)sizeof(rs->chunkLine) - 1) {
+                rs->chunkLine[rs->chunkLineLen++] = (char)c;
+                rs->chunkLine[rs->chunkLineLen] = 0;
+            } else {
+                set_error(rs, "HTTP chunk header too large");
+                return -1;
+            }
+            return 0;
+        }
+        if (rs->chunkLineLen == 0)
+            return 0;
+        chunkSize = strtol(rs->chunkLine, &endp, 16);
+        rs->chunkLineLen = 0;
+        rs->chunkLine[0] = 0;
+        if (endp == rs->chunkLine || chunkSize < 0) {
+            set_error(rs, "invalid HTTP chunked stream");
+            return -1;
+        }
+        if (chunkSize == 0) {
+            close_current_socket(rs);
+            if (!rs->everPlayed) {
+                set_error(rs, "radio stream ended before audio buffered");
+                return -1;
+            }
+            rs->reconnectDelay = RADIO_RECONNECT_BACKOFF_PUMPS;
+            set_status(rs, RADIO_STATUS_RECONNECTING);
+            return 0;
+        }
+        if (chunkSize > 0x7fff) chunkSize = 0x7fff;
+        rs->chunkRemaining = (int)chunkSize;
+        return 0;
+    }
+
+    if (process_payload_byte(rs, c) < 0)
+        return -1;
+    rs->chunkRemaining--;
+    if (rs->chunkRemaining == 0)
+        rs->chunkSkipCrLf = 2;
+    return 0;
+}
+
 static int process_bytes(RadioStream *rs, const unsigned char *b, int n)
 {
     int i;
@@ -397,22 +482,12 @@ static int process_bytes(RadioStream *rs, const unsigned char *b, int n)
             }
             continue;
         }
-        if (rs->metaint > 0 && rs->parseState == RADIO_PARSE_AUDIO && rs->audioUntilMeta == 0) rs->parseState = RADIO_PARSE_META_LEN;
-        if (rs->parseState == RADIO_PARSE_META_LEN) {
-            rs->metaLen = b[i] * 16; rs->metaGot = 0; rs->metaLeft = rs->metaLen;
-            rs->parseState = rs->metaLen ? RADIO_PARSE_META_PAYLOAD : RADIO_PARSE_AUDIO;
-            if (!rs->metaLen) rs->audioUntilMeta = rs->metaint;
-            continue;
-        }
-        if (rs->parseState == RADIO_PARSE_META_PAYLOAD) {
-            if (rs->metaGot < RADIO_META_MAX) rs->meta[rs->metaGot++] = b[i];
-            rs->metaLeft--;
-            if (rs->metaLeft <= 0) { if (rs->metaGot > 0) parse_meta(rs, rs->meta, rs->metaGot); rs->audioUntilMeta = rs->metaint; rs->parseState = RADIO_PARSE_AUDIO; }
-            continue;
-        }
-        if (rs->parseState == RADIO_PARSE_AUDIO) {
-            ring_write(rs, &b[i], 1);
-            if (rs->metaint > 0 && rs->audioUntilMeta > 0) rs->audioUntilMeta--;
+        if (rs->chunked) {
+            if (process_chunked_byte(rs, b[i]) < 0)
+                return -1;
+        } else {
+            if (process_payload_byte(rs, b[i]) < 0)
+                return -1;
         }
     }
     return 0;
