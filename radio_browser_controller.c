@@ -98,6 +98,19 @@ const RadioBrowserStation *rb_controller_get_station(
     return &controller->stations[index];
 }
 
+int rb_controller_set_selected(RadioBrowserController *controller, int index)
+{
+    if (!controller) return RB_CONTROLLER_ERR_BAD_ARG;
+    if (index < 0 || index >= controller->station_count) {
+        controller->selected_index = -1;
+        rb_controller_set_error(controller, "No station selected");
+        return RB_CONTROLLER_ERR_NO_SELECTION;
+    }
+    controller->selected_index = index;
+    rb_controller_set_error(controller, (const char *)0);
+    return RB_CONTROLLER_OK;
+}
+
 int rb_controller_probe_selected(
     RadioBrowserController *controller,
     RbStreamInfo *info,

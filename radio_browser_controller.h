@@ -40,6 +40,10 @@ const RadioBrowserStation *rb_controller_get_station(
     const RadioBrowserController *controller,
     int index
 );
+int rb_controller_set_selected(
+    RadioBrowserController *controller,
+    int index
+);
 int rb_controller_probe_selected(
     RadioBrowserController *controller,
     RbStreamInfo *info,
