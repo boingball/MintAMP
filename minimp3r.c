@@ -51,6 +51,7 @@
 #include <hardware/cia.h>
 #include "picojpeg.h"
 #include "radio_stream.h"
+#include "radio_browser_controller.h"
 
 #define MR_ENV_PREFIX "ENVARC:MiniAMP3"
 #define MR_SETTINGS_VERSION 1
@@ -159,6 +160,7 @@ enum {
 	GID_STOP,
 	GID_FILTER,
 	GID_PLAYLIST,
+	GID_RADIO,
 	GID_TIME,
 	GID_FILEINFO,
 	GID_TITLE,
@@ -235,7 +237,8 @@ static const int kFakeStereoDelays[] = { 48, 64, 96, 128, 192 };
 #define MENUNUM_PROJECT   0
 #define MENUNUM_PLAYBACK  1
 #define ITEMNUM_ABOUT     0
-#define ITEMNUM_QUIT      1
+#define ITEMNUM_RADIO     1
+#define ITEMNUM_QUIT      2
 #define ITEMNUM_DTP       0
 #define ITEMNUM_BENCH     1
 #define ITEMNUM_ARTWORK   2
@@ -249,6 +252,7 @@ static const int kFakeStereoDelays[] = { 48, 64, 96, 128, 192 };
 static struct NewMenu kMenus[] = {
 	{ NM_TITLE, (STRPTR)"Project", 0, 0, 0, 0 },
 	{ NM_ITEM, (STRPTR)"About MiniAMP3...", 0, 0, 0, (APTR)(MENUNUM_PROJECT * 100 + ITEMNUM_ABOUT) },
+	{ NM_ITEM, (STRPTR)"Internet Radio", 0, 0, 0, (APTR)(MENUNUM_PROJECT * 100 + ITEMNUM_RADIO) },
 	{ NM_ITEM, (STRPTR)"Quit", 0, 0, 0, (APTR)(MENUNUM_PROJECT * 100 + ITEMNUM_QUIT) },
 	{ NM_TITLE, (STRPTR)"Playback", 0, 0, 0, 0 },
 	{ NM_ITEM, (STRPTR)"Decode-then-play", 0, CHECKIT | MENUTOGGLE, 0, (APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_DTP) },
@@ -334,6 +338,7 @@ typedef struct MrApp {
 	Object         *stopGad;
 	Object         *filterGad;
 	Object         *playlistGad;
+	Object         *radioGad;
 	Object         *timeGad;
 	Object         *fileInfoGad;
 	Object         *titleGad;
@@ -355,6 +360,16 @@ typedef struct MrApp {
 	struct Node     plNodes[MR_PLAYLIST_MAX];
 	char            plNames[MR_PLAYLIST_MAX][80];
 	APTR            plVisualInfo;
+
+	struct Window  *rbWin;
+	struct Gadget  *rbGadgets;
+	struct Gadget  *rbGadContext;
+	struct Gadget  *rbGadList;
+	struct List     rbList;
+	struct Node     rbNodes[RB_CONTROLLER_MAX_STATIONS];
+	char            rbNames[RB_CONTROLLER_MAX_STATIONS][96];
+	APTR            rbVisualInfo;
+	RadioBrowserController rbController;
 
 	struct MsgPort   *timerPort;
 	struct timerequest *timerReq;
@@ -438,6 +453,9 @@ static void SaveSettings(MrApp *app);
 static void RefreshPlaylistView(MrApp *app);
 static void ClosePlaylistWindow(MrApp *app);
 static void OpenPlaylistWindow(MrApp *app);
+static void CloseRadioWindow(MrApp *app);
+static void OpenRadioWindow(MrApp *app);
+static void HandleRadioWindow(MrApp *app);
 
 static void SyncMenuChecks(MrApp *app);
 
@@ -1522,6 +1540,8 @@ static int MrOpenWindow(MrApp *app)
 	                GA_ID, GID_FILTER, GA_RelVerify, TRUE, GA_Text, (ULONG)"FLT", TAG_DONE);
 	app->playlistGad = (Object *)NewObject(BUTTON_GetClass(), NULL,
 	                GA_ID, GID_PLAYLIST, GA_RelVerify, TRUE, GA_Text, (ULONG)"Playlist", TAG_DONE);
+	app->radioGad = (Object *)NewObject(BUTTON_GetClass(), NULL,
+	                GA_ID, GID_RADIO, GA_RelVerify, TRUE, GA_Text, (ULONG)"Internet Radio", TAG_DONE);
 
 	app->gaugeGad = (Object *)NewObject(FUELGAUGE_GetClass(), NULL,
 	                FUELGAUGE_Min, 0,
@@ -1564,6 +1584,7 @@ static int MrOpenWindow(MrApp *app)
 		!CheckGadget(app->delayGad, "delay") || !CheckGadget(app->playGad, "play") ||
 		!CheckGadget(app->nextGad, "next") || !CheckGadget(app->stopGad, "stop") ||
 		!CheckGadget(app->filterGad, "filter") || !CheckGadget(app->playlistGad, "playlist") ||
+		!CheckGadget(app->radioGad, "internet radio") ||
 		!CheckGadget(app->gaugeGad, "progress") || !CheckGadget(app->statusGad, "status") ||
 		!CheckGadget(app->timeGad, "time") || !CheckGadget(app->fileInfoGad, "file info") ||
 		!CheckGadget(app->titleGad, "title") || !CheckGadget(app->artistGad, "artist") ||
@@ -1697,6 +1718,7 @@ static int MrOpenWindow(MrApp *app)
 			LAYOUT_AddChild, (ULONG)app->stopGad,
 			LAYOUT_AddChild, (ULONG)app->filterGad,
 			LAYOUT_AddChild, (ULONG)app->playlistGad,
+			LAYOUT_AddChild, (ULONG)app->radioGad,
 			TAG_DONE),
 		CHILD_WeightedHeight, 0,
 		TAG_DONE);
@@ -1761,6 +1783,7 @@ static int MrOpenWindow(MrApp *app)
 
 static void MrCloseWindow(MrApp *app)
 {
+	CloseRadioWindow(app);
 	ClosePlaylistWindow(app);
 	if (app->win && app->menuStrip) {
 		ClearMenuStrip(app->win);
@@ -2661,6 +2684,239 @@ enum {
 	PL_GID_CLOSE
 };
 
+enum {
+	RB_GID_SEARCH_TEXT = 300,
+	RB_GID_CODEC,
+	RB_GID_COUNTRY,
+	RB_GID_LIST,
+	RB_GID_SEARCH,
+	RB_GID_PROBE,
+	RB_GID_CLOSE,
+	RB_GID_STATUS
+};
+
+static const char *RadioCodecFromIndex(int idx)
+{
+	switch (idx) {
+	case 1: return "MP3";
+	case 2: return "AAC";
+	case 3: return "AAC+";
+	default: return "";
+	}
+}
+
+static const char *ProbeCodecName(RbStreamCodec codec)
+{
+	if (codec == RB_STREAM_CODEC_MP3) return "MP3";
+	if (codec == RB_STREAM_CODEC_AAC) return "AAC";
+	return "unknown";
+}
+
+static void RadioSetStatus(MrApp *app, const char *text)
+{
+	struct Gadget *gad;
+	if (!app->rbWin || !app->rbGadgets) return;
+	gad = app->rbGadgets;
+	while (gad && gad->GadgetID != RB_GID_STATUS) gad = gad->NextGadget;
+	if (gad)
+		GT_SetGadgetAttrs(gad, app->rbWin, NULL,
+			GTST_String, (ULONG)(text ? text : ""), TAG_DONE);
+}
+
+static void RadioRefreshResults(MrApp *app)
+{
+	int i;
+	char display[RB_MAX_NAME];
+	const RadioBrowserStation *st;
+	NewList(&app->rbList);
+	for (i = 0; i < app->rbController.station_count; i++) {
+		st = rb_controller_get_station(&app->rbController, i);
+		if (!st) continue;
+		rb_station_display_name(st, display, (int)sizeof(display));
+		sprintf(app->rbNames[i], "%.48s | %s | %d | %s",
+			display, st->codec, st->bitrate, st->countrycode);
+		app->rbNodes[i].ln_Name = app->rbNames[i];
+		app->rbNodes[i].ln_Type = NT_USER;
+		app->rbNodes[i].ln_Pri = 0;
+		AddTail(&app->rbList, &app->rbNodes[i]);
+	}
+	if (app->rbWin && app->rbGadList)
+		GT_SetGadgetAttrs(app->rbGadList, app->rbWin, NULL,
+			GTLV_Labels, (ULONG)&app->rbList,
+			GTLV_Selected, app->rbController.selected_index >= 0 ?
+				(ULONG)app->rbController.selected_index : (ULONG)~0,
+			TAG_DONE);
+}
+
+static struct Gadget *FindRadioGadget(MrApp *app, UWORD id)
+{
+	struct Gadget *gad = app->rbGadgets;
+	while (gad) {
+		if (gad->GadgetID == id) return gad;
+		gad = gad->NextGadget;
+	}
+	return NULL;
+}
+
+static void RadioDoSearch(MrApp *app)
+{
+	struct Gadget *nameGad = FindRadioGadget(app, RB_GID_SEARCH_TEXT);
+	struct Gadget *codecGad = FindRadioGadget(app, RB_GID_CODEC);
+	struct Gadget *countryGad = FindRadioGadget(app, RB_GID_COUNTRY);
+	STRPTR text;
+	ULONG v;
+	int rc;
+
+	RadioSetStatus(app, "Searching Radio Browser...");
+	text = NULL;
+	GT_GetGadgetAttrs(nameGad, app->rbWin, NULL, GTST_String, (ULONG)(void *)&text, TAG_DONE);
+	SafeCopy(app->rbController.name, sizeof(app->rbController.name), text ? (const char *)text : "");
+	v = 0;
+	GT_GetGadgetAttrs(codecGad, app->rbWin, NULL, GTCY_Active, (ULONG)&v, TAG_DONE);
+	SafeCopy(app->rbController.codec, sizeof(app->rbController.codec), RadioCodecFromIndex((int)v));
+	text = NULL;
+	GT_GetGadgetAttrs(countryGad, app->rbWin, NULL, GTST_String, (ULONG)(void *)&text, TAG_DONE);
+	SafeCopy(app->rbController.countrycode, sizeof(app->rbController.countrycode), text ? (const char *)text : "");
+	app->rbController.limit = 10;
+	rc = rb_controller_search(&app->rbController);
+	RadioRefreshResults(app);
+	if (rc < 0)
+		RadioSetStatus(app, app->rbController.last_error);
+	else {
+		char msg[64];
+		sprintf(msg, "Found %d station%s.", rc, rc == 1 ? "" : "s");
+		RadioSetStatus(app, msg);
+	}
+}
+
+static void RadioDoProbe(MrApp *app)
+{
+	static unsigned char peek[512];
+	RbStreamInfo info;
+	int peekLen = 0;
+	int rc;
+	const RadioBrowserStation *st;
+	char msg[512];
+	st = rb_controller_get_station(&app->rbController, app->rbController.selected_index);
+	if (st && rb_station_play_url(st) && strncmp(rb_station_play_url(st), "https://", 8) == 0) {
+		RadioSetStatus(app, "HTTPS/TLS streams are not supported yet");
+		return;
+	}
+	memset(&info, 0, sizeof(info));
+	RadioSetStatus(app, "Probing selected stream...");
+	rc = rb_controller_probe_selected(&app->rbController, &info, peek, (int)sizeof(peek), &peekLen);
+	if (rc < 0) {
+		RadioSetStatus(app, app->rbController.last_error);
+		return;
+	}
+	sprintf(msg, "URL: %.120s | codec: %s | type: %.48s | icy-name: %.64s | icy-br: %d | icy-metaint: %d | redirects: %d",
+		info.final_url, ProbeCodecName(info.codec), info.content_type,
+		info.icy_name, info.icy_br, info.icy_metaint, info.redirect_count);
+	RadioSetStatus(app, msg);
+}
+
+static void CloseRadioWindow(MrApp *app)
+{
+	struct IntuiMessage *msg;
+	if (!app->rbWin) return;
+	ModifyIDCMP(app->rbWin, 0);
+	while ((msg = GT_GetIMsg(app->rbWin->UserPort)) != NULL)
+		GT_ReplyIMsg(msg);
+	if (app->rbGadgets)
+		RemoveGList(app->rbWin, app->rbGadgets, -1);
+	CloseWindow(app->rbWin);
+	app->rbWin = NULL;
+	if (app->rbGadgets) {
+		FreeGadgets(app->rbGadgets);
+		app->rbGadgets = NULL;
+		app->rbGadContext = NULL;
+		app->rbGadList = NULL;
+	}
+	if (app->rbVisualInfo) {
+		FreeVisualInfo(app->rbVisualInfo);
+		app->rbVisualInfo = NULL;
+	}
+}
+
+static void OpenRadioWindow(MrApp *app)
+{
+	struct NewWindow nw;
+	struct NewGadget ng;
+	struct Gadget *gad;
+	static STRPTR codecs[] = { (STRPTR)"All", (STRPTR)"MP3", (STRPTR)"AAC", (STRPTR)"AAC+", NULL };
+	if (app->rbWin || !app->win || !GadToolsBase) return;
+	rb_controller_init(&app->rbController);
+	app->rbVisualInfo = GetVisualInfoA(app->win->WScreen, NULL);
+	if (!app->rbVisualInfo) return;
+	app->rbGadContext = CreateContext(&app->rbGadgets);
+	if (!app->rbGadContext) goto fail;
+	NewList(&app->rbList);
+	gad = app->rbGadContext;
+	memset(&ng, 0, sizeof(ng));
+	ng.ng_VisualInfo = app->rbVisualInfo; ng.ng_Flags = PLACETEXT_LEFT;
+	ng.ng_LeftEdge = 88; ng.ng_TopEdge = 10; ng.ng_Width = 220; ng.ng_Height = 18; ng.ng_GadgetText = (UBYTE *)"Search";
+	ng.ng_GadgetID = RB_GID_SEARCH_TEXT; gad = CreateGadget(STRING_KIND, gad, &ng, GTST_MaxChars, RB_MAX_NAME, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 390; ng.ng_Width = 90; ng.ng_GadgetText = (UBYTE *)"Codec"; ng.ng_GadgetID = RB_GID_CODEC;
+	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)codecs, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 88; ng.ng_TopEdge = 34; ng.ng_Width = 60; ng.ng_GadgetText = (UBYTE *)"Country";
+	ng.ng_GadgetID = RB_GID_COUNTRY; gad = CreateGadget(STRING_KIND, gad, &ng, GTST_MaxChars, RB_MAX_COUNTRY, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 8; ng.ng_TopEdge = 60; ng.ng_Width = 472; ng.ng_Height = 116; ng.ng_GadgetText = NULL; ng.ng_GadgetID = RB_GID_LIST; ng.ng_Flags = 0;
+	app->rbGadList = gad = CreateGadget(LISTVIEW_KIND, gad, &ng, GTLV_Labels, (ULONG)&app->rbList, GA_RelVerify, TRUE, TAG_DONE); if (!gad) goto fail;
+	ng.ng_TopEdge = 184; ng.ng_Width = 86; ng.ng_Height = 18; ng.ng_Flags = PLACETEXT_IN;
+	ng.ng_LeftEdge = 8; ng.ng_GadgetText = (UBYTE *)"Search"; ng.ng_GadgetID = RB_GID_SEARCH; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 100; ng.ng_GadgetText = (UBYTE *)"Probe"; ng.ng_GadgetID = RB_GID_PROBE; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 192; ng.ng_GadgetText = (UBYTE *)"Close"; ng.ng_GadgetID = RB_GID_CLOSE; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 8; ng.ng_TopEdge = 210; ng.ng_Width = 472; ng.ng_GadgetText = NULL; ng.ng_GadgetID = RB_GID_STATUS; ng.ng_Flags = 0;
+	gad = CreateGadget(STRING_KIND, gad, &ng, GTST_String, (ULONG)"Ready.", GTST_MaxChars, 512, TAG_DONE); if (!gad) goto fail;
+	memset(&nw, 0, sizeof(nw));
+	nw.LeftEdge = app->win->LeftEdge + 30; nw.TopEdge = app->win->TopEdge + 30;
+	nw.Width = 496; nw.Height = 252;
+	nw.IDCMPFlags = IDCMP_GADGETUP | IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW;
+	nw.Flags = WFLG_CLOSEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET | WFLG_SMART_REFRESH;
+	nw.Title = (UBYTE *)"Internet Radio";
+	nw.MinWidth = nw.MaxWidth = 496; nw.MinHeight = nw.MaxHeight = 252;
+	nw.Type = WBENCHSCREEN;
+	app->rbWin = OpenWindowTags(&nw, TAG_DONE);
+	if (!app->rbWin) goto fail;
+	AddGList(app->rbWin, app->rbGadgets, (UWORD)-1, -1, NULL);
+	RefreshGList(app->rbGadgets, app->rbWin, NULL, -1);
+	GT_RefreshWindow(app->rbWin, NULL);
+	return;
+fail:
+	CloseRadioWindow(app);
+}
+
+static void HandleRadioWindow(MrApp *app)
+{
+	struct IntuiMessage *msg;
+	if (!app->rbWin) return;
+	while ((msg = GT_GetIMsg(app->rbWin->UserPort)) != NULL) {
+		ULONG cls = msg->Class;
+		struct Gadget *gad = (struct Gadget *)msg->IAddress;
+		UWORD gid = gad ? gad->GadgetID : 0;
+		UWORD code = msg->Code;
+		GT_ReplyIMsg(msg);
+		if (cls == IDCMP_CLOSEWINDOW) { CloseRadioWindow(app); return; }
+		if (cls == IDCMP_REFRESHWINDOW) {
+			GT_BeginRefresh(app->rbWin);
+			GT_EndRefresh(app->rbWin, TRUE);
+			continue;
+		}
+		if (cls == IDCMP_GADGETUP) {
+			if (gid == RB_GID_LIST)
+				rb_controller_set_selected(&app->rbController, (int)code);
+			else if (gid == RB_GID_SEARCH)
+				RadioDoSearch(app);
+			else if (gid == RB_GID_PROBE)
+				RadioDoProbe(app);
+			else if (gid == RB_GID_CLOSE) {
+				CloseRadioWindow(app);
+				return;
+			}
+		}
+	}
+}
+
 static const char *PlaylistBaseName(const char *path)
 {
 	const char *p = path;
@@ -3082,6 +3338,8 @@ static void HandleMenu(MrApp *app, UWORD code, int *done)
 				es.es_GadgetFormat = (UBYTE *)"OK";
 				EasyRequest(app->win, &es, NULL, TAG_DONE);
 			}
+			else if (mn == MENUNUM_PROJECT && it == ITEMNUM_RADIO)
+				OpenRadioWindow(app);
 			else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_DTP)
 				SetDecodeThenPlay(app, !app->decodeThenPlay);
 			else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_BENCH) {
@@ -3267,7 +3525,8 @@ int main(int argc, char **argv)
 
 	while (!done) {
 		ULONG plSig = (app.plWin && app.plWin->UserPort) ? (1UL << app.plWin->UserPort->mp_SigBit) : 0;
-		ULONG sigs = Wait(winSig | timerSig | doneSig | plSig | SIGBREAKF_CTRL_C);
+		ULONG rbSig = (app.rbWin && app.rbWin->UserPort) ? (1UL << app.rbWin->UserPort->mp_SigBit) : 0;
+		ULONG sigs = Wait(winSig | timerSig | doneSig | plSig | rbSig | SIGBREAKF_CTRL_C);
 
 		if (sigs & SIGBREAKF_CTRL_C)
 			done = 1;
@@ -3288,6 +3547,8 @@ int main(int argc, char **argv)
 
 		if (plSig && (sigs & plSig))
 			HandlePlaylistWindow(&app);
+		if (rbSig && (sigs & rbSig))
+			HandleRadioWindow(&app);
 
 		if (sigs & winSig) {
 			ULONG result;
@@ -3328,6 +3589,9 @@ int main(int argc, char **argv)
 							ClosePlaylistWindow(&app);
 						else
 							OpenPlaylistWindow(&app);
+						break;
+					case GID_RADIO:
+						OpenRadioWindow(&app);
 						break;
 					case GID_STAR1: case GID_STAR2: case GID_STAR3: case GID_STAR4: case GID_STAR5:
 						app.rating = (int)(result & WMHI_GADGETMASK) - GID_STAR1 + 1;
