@@ -89,6 +89,9 @@ sslradio030:
 
 amissl-get-test: amissl_https_get
 
+# Standalone AmiSSL smoke test: deliberately links only this file and no
+# libamisslauto so manual OpenLibrary/InitAmiSSLMaster/OpenAmiSSL remains
+# unambiguous while debugging library vector crashes.
 amissl_https_get: amissl_https_get.c
 	$(CC) $(CFLAGS_COMMON) $(CPPFLAGS_COMMON) -DHAVE_AMISSL $(SSL_CPPFLAGS) $(EXTRA_CFLAGS) -o $@ amissl_https_get.c
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
