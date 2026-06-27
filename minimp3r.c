@@ -763,7 +763,8 @@ static void ScrollAlbumHover(MrApp *app)
 
 static int MrIsRadioInput(const char *name)
 {
-	return name && !strncmp(name, "http://", 7);
+	return name && (!strncmp(name, "http://", 7) ||
+		!strncmp(name, "https://", 8));
 }
 
 static void MrCopyVolatileString(char *dst, unsigned long dstSize, volatile const char *src)
