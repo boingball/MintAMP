@@ -625,6 +625,17 @@ static int rb_probe_is_hls(const RbProbeUrl *url, const RbStreamInfo *info)
     return 0;
 }
 
+int rb_probe_url_looks_hls(const char *url)
+{
+    RbProbeUrl parsed;
+
+    if (!url) return 0;
+    if (rb_probe_parse_url(url, &parsed) == RB_STREAM_PROBE_OK &&
+        rb_probe_contains_nocase(parsed.path, ".m3u8"))
+        return 1;
+    return rb_probe_contains_nocase(url, ".m3u8");
+}
+
 const char *rb_probe_error_text(int rc)
 {
     switch (rc) {
@@ -669,6 +680,7 @@ int rb_probe_stream_url(const char *url, RbStreamInfo *info,
         return RB_STREAM_PROBE_ERR_BAD_ARG;
     rb_probe_info_init(info);
     *peek_len = 0;
+    if (rb_probe_url_looks_hls(url)) return RB_STREAM_PROBE_ERR_HLS_UNSUPPORTED;
     rc = rb_probe_copy_string(current_url, (int)sizeof(current_url), url);
     if (rc < 0) return rc;
     redirects = 0;

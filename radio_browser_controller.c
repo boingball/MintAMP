@@ -153,10 +153,19 @@ int rb_controller_probe_selected(
         return RB_CONTROLLER_ERR_NO_SELECTION;
     }
 
+    if (station->hls) {
+        rb_controller_set_error(controller, "HLS stream not supported");
+        return RB_STREAM_PROBE_ERR_HLS_UNSUPPORTED;
+    }
+
     url = rb_station_play_url(station);
     if (!url || !url[0]) {
         rb_controller_set_error(controller, "Selected station has no stream URL");
         return RB_CONTROLLER_ERR_NO_SELECTION;
+    }
+    if (rb_probe_url_looks_hls(url)) {
+        rb_controller_set_error(controller, "HLS stream not supported");
+        return RB_STREAM_PROBE_ERR_HLS_UNSUPPORTED;
     }
 
 #if !defined(HAVE_AMISSL)
@@ -210,6 +219,11 @@ const char *rb_probe_error_text(int rc)
 {
     (void)rc;
     return "Stream probe failed";
+}
+
+int rb_probe_url_looks_hls(const char *url)
+{
+    return url && strstr(url, ".m3u8") != (char *)0;
 }
 
 int rb_search_stations(const char *host, const char *name, const char *tag,

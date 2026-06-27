@@ -36,7 +36,8 @@
 #else
 #define RADIO_OPEN_DEBUG_PRINTF(x) ((void)0)
 #endif
-#ifdef RADIO_DEBUG_STOP
+#undef RADIO_STOP_DEBUG_PRINTF
+#if RADIO_DEBUG_STOP
 #define RADIO_STOP_DEBUG_PRINTF(x) printf x
 #define RADIO_CLEANUP_DEBUG_PRINTF(x) printf x
 #else
@@ -132,6 +133,9 @@ struct RadioStream {
     struct in_addr hostAddr;   /* cached DNS result so reconnects skip gethostbyname() */
     int haveHostAddr;
     int isSSL;
+    unsigned long session_id;
+    unsigned int cleanup_count, stop_request_count, task_exit_count;
+    unsigned int ssl_free_count, socket_close_count, decoder_free_count;
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     SSL *ssl;
     SSL_CTX *ctx;
@@ -139,7 +143,47 @@ struct RadioStream {
 #endif
 };
 
+static unsigned long radio_next_session_id = 1;
 static int radio_is_stopping(const RadioStream *rs) { return !rs || rs->stopping || rs->status == RADIO_STATUS_STOPPING || rs->status == RADIO_STATUS_CLOSED; }
+static int radio_contains_nocase(const char *s, const char *needle)
+{
+    int n, i;
+    if (!s || !needle) return 0;
+    n = (int)strlen(needle);
+    if (n <= 0) return 1;
+    for (i = 0; s[i]; i++) {
+        int j;
+        for (j = 0; j < n && s[i + j] && tolower((unsigned char)s[i + j]) == tolower((unsigned char)needle[j]); j++) ;
+        if (j == n) return 1;
+    }
+    return 0;
+}
+static int radio_url_looks_hls(const char *url) { return radio_contains_nocase(url, ".m3u8"); }
+static void radio_duplicate_cleanup_warning(RadioStream *rs, const char *what, unsigned int count)
+{
+    if (rs && count > 1)
+        printf("radio-cleanup warning: session=%lu duplicate %s count=%u; skipping duplicate operation\n", rs->session_id, what, count);
+}
+static void radio_reset_session_state(RadioStream *rs)
+{
+    if (!rs) return;
+    rs->sock = RADIO_INVALID_SOCKET;
+    rs->isSSL = 0;
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+    rs->ssl = NULL;
+    rs->ctx = NULL;
+    rs->sslHandshakeDone = 0;
+#endif
+    rs->bitrate = rs->metaint = rs->audioUntilMeta = rs->headerDone = 0;
+    rs->contentType[0] = rs->title[0] = rs->stationName[0] = rs->genre[0] = rs->streamUrl[0] = rs->error[0] = 0;
+    rs->rpos = rs->wpos = rs->used = 0;
+    rs->headerLen = 0; rs->header[0] = 0;
+    rs->parseState = RADIO_PARSE_HEADER;
+    rs->metaLen = rs->metaGot = rs->metaLeft = 0;
+    rs->reconnectAttempts = rs->reconnectDelay = rs->zeroBytePumps = rs->startPumps = 0;
+    rs->everPlayed = rs->firstDataLogged = rs->haveHostAddr = 0;
+}
+
 
 /* Yield the CPU briefly during reconnect backoff.  reconnect_http() is the only
  * pump path that does not block on the socket, so without this the player
@@ -316,7 +360,9 @@ static void radio_ssl_close_stream(RadioStream *rs)
     }
     if (rs->ssl) {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_free start ssl=%p\n", (void *)rs->ssl));
-        SSL_free(rs->ssl);
+        rs->ssl_free_count++;
+        if (rs->ssl_free_count > 1) { radio_duplicate_cleanup_warning(rs, "SSL_free", rs->ssl_free_count); }
+        else SSL_free(rs->ssl);
         rs->ssl = NULL;
         rs->sslHandshakeDone = 0;
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_free done\n"));
@@ -512,7 +558,9 @@ static void close_current_socket(RadioStream *rs)
 #endif
     if (rs->sock != RADIO_INVALID_SOCKET) {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: CloseSocket start fd=%ld\n", (long)rs->sock));
-        radio_close_socket(rs->sock);
+        rs->socket_close_count++;
+        if (rs->socket_close_count > 1) { radio_duplicate_cleanup_warning(rs, "CloseSocket", rs->socket_close_count); }
+        else radio_close_socket(rs->sock);
         rs->sock = RADIO_INVALID_SOCKET;
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: CloseSocket done\n"));
         RADIO_STOP_DEBUG_PRINTF(("radio-stop: socket closed\n"));
@@ -525,7 +573,9 @@ static void abort_current_socket(RadioStream *rs)
 {
     if (!rs || rs->sock == RADIO_INVALID_SOCKET) return;
     RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: CloseSocket abort start fd=%ld\n", (long)rs->sock));
-    radio_close_socket(rs->sock);
+    rs->socket_close_count++;
+    if (rs->socket_close_count > 1) { radio_duplicate_cleanup_warning(rs, "CloseSocket", rs->socket_close_count); }
+    else radio_close_socket(rs->sock);
     rs->sock = RADIO_INVALID_SOCKET;
     RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: CloseSocket abort done\n"));
 }
@@ -544,7 +594,7 @@ static int reconnect_http(RadioStream *rs)
     return 0;
 }
 
-static void parse_headers(RadioStream *rs,char *h){ char *line=strtok(h,"\r\n"); int code=0; if(line && ci_starts(line,"ICY")) code=200; else if(line && ci_starts(line,"HTTP/")) sscanf(line,"HTTP/%*s %d",&code); else { set_error(rs,"invalid HTTP stream response"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: HTTP header failed\n")); return; } if(code<200||code>299){ set_error(rs,"HTTP stream returned non-success status"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: HTTP header failed status %d\n", code)); return; } while((line=strtok(NULL,"\r\n"))){ char *v=strchr(line,':'); if(!v) continue; *v++=0; line=trim(line); v=trim(v); if(ci_equals(line,"Content-Type")) radio_copy_string(rs->contentType,sizeof(rs->contentType),v); else if(ci_equals(line,"icy-metaint")){ rs->metaint=atoi(v); rs->audioUntilMeta=rs->metaint; } else if(ci_equals(line,"icy-br")) rs->bitrate=atoi(v); else if(ci_equals(line,"icy-name")) radio_copy_string(rs->stationName,sizeof(rs->stationName),v); else if(ci_equals(line,"icy-genre")) radio_copy_string(rs->genre,sizeof(rs->genre),v); else if(ci_equals(line,"icy-url")) radio_copy_string(rs->streamUrl,sizeof(rs->streamUrl),v); } if(rs->contentType[0] &&
+static void parse_headers(RadioStream *rs,char *h){ char *line=strtok(h,"\r\n"); int code=0; if(line && ci_starts(line,"ICY")) code=200; else if(line && ci_starts(line,"HTTP/")) sscanf(line,"HTTP/%*s %d",&code); else { set_error(rs,"invalid HTTP stream response"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: HTTP header failed\n")); return; } if(code<200||code>299){ set_error(rs,"HTTP stream returned non-success status"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: HTTP header failed status %d\n", code)); return; } while((line=strtok(NULL,"\r\n"))){ char *v=strchr(line,':'); if(!v) continue; *v++=0; line=trim(line); v=trim(v); if(ci_equals(line,"Content-Type")) radio_copy_string(rs->contentType,sizeof(rs->contentType),v); else if(ci_equals(line,"icy-metaint")){ rs->metaint=atoi(v); rs->audioUntilMeta=rs->metaint; } else if(ci_equals(line,"icy-br")) rs->bitrate=atoi(v); else if(ci_equals(line,"icy-name")) radio_copy_string(rs->stationName,sizeof(rs->stationName),v); else if(ci_equals(line,"icy-genre")) radio_copy_string(rs->genre,sizeof(rs->genre),v); else if(ci_equals(line,"icy-url")) radio_copy_string(rs->streamUrl,sizeof(rs->streamUrl),v); } if(rs->contentType[0] && (ci_starts(rs->contentType,"application/vnd.apple.mpegurl") || ci_starts(rs->contentType,"application/x-mpegurl"))) { set_error(rs,"HLS stream not supported"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: HLS content type unsupported: %s\n", rs->contentType)); return; } if(rs->contentType[0] &&
     !ci_starts(rs->contentType,"audio/mpeg") &&
     !ci_starts(rs->contentType,"audio/aac") &&
     !ci_starts(rs->contentType,"audio/aacp") &&
@@ -622,7 +672,8 @@ RadioStream *Radio_Open(const char *url)
 {
     RadioStream *rs = (RadioStream *)calloc(1, sizeof(*rs));
     if (!rs) return NULL;
-    rs->sock = RADIO_INVALID_SOCKET;
+    radio_reset_session_state(rs);
+    rs->session_id = radio_next_session_id++;
     rs->status = RADIO_STATUS_CONNECTING;
     rs->size = RADIO_RING_BYTES;
     rs->ring = (unsigned char *)malloc(rs->size);
@@ -630,6 +681,11 @@ RadioStream *Radio_Open(const char *url)
         rs->size = 0;
         set_error(rs, "not enough memory for radio buffer");
         RADIO_OPEN_DEBUG_PRINTF(("radio-open: Radio_Open returning error\n"));
+        return rs;
+    }
+    if (radio_url_looks_hls(url)) {
+        set_error(rs, "HLS stream not supported");
+        RADIO_OPEN_DEBUG_PRINTF(("radio-open: HLS URL rejected before direct playback\n"));
         return rs;
     }
     if (parse_url(rs, url)) {
@@ -653,18 +709,23 @@ RadioStream *Radio_Open(const char *url)
     }
     return rs;
 }
-void Radio_RequestStop(RadioStream *rs){ if(!rs)return; RADIO_STOP_DEBUG_PRINTF(("radio-stop: stop requested status=%d fd=%ld\n", (int)rs->status, (long)rs->sock)); rs->stopping=1; rs->reconnectAttempts=RADIO_RECONNECT_MAX; rs->reconnectDelay=0; rs->status=RADIO_STATUS_STOPPING; abort_current_socket(rs); RADIO_STOP_DEBUG_PRINTF(("radio-stop: marked stopping\n")); }
+void Radio_RequestStop(RadioStream *rs){ if(!rs)return; rs->stop_request_count++; RADIO_STOP_DEBUG_PRINTF(("radio-stop: session=%lu stop requested count=%u status=%d fd=%ld\n", rs->session_id, rs->stop_request_count, (int)rs->status, (long)rs->sock)); if(rs->status==RADIO_STATUS_CLOSED)return; rs->stopping=1; rs->reconnectAttempts=RADIO_RECONNECT_MAX; rs->reconnectDelay=0; rs->status=RADIO_STATUS_STOPPING; abort_current_socket(rs); RADIO_STOP_DEBUG_PRINTF(("radio-stop: marked stopping\n")); }
 void Radio_Close(RadioStream *rs)
 {
     if (!rs) return;
-    RADIO_STOP_DEBUG_PRINTF(("radio-stop: Radio_Close entered\n"));
+    RADIO_STOP_DEBUG_PRINTF(("radio-stop: Radio_Close entered session=%lu\n", rs->session_id));
+    rs->cleanup_count++;
+    if (rs->cleanup_count > 1) radio_duplicate_cleanup_warning(rs, "session cleanup", rs->cleanup_count);
     Radio_RequestStop(rs);
     close_current_socket(rs);
     rs->status = RADIO_STATUS_CLOSED;
-    free(rs->ring);
+    rs->decoder_free_count++;
+    if (rs->decoder_free_count > 1) radio_duplicate_cleanup_warning(rs, "decoder/audio buffer free", rs->decoder_free_count);
+    else free(rs->ring);
     rs->ring = NULL;
     rs->size = rs->used = rs->rpos = rs->wpos = 0;
-    RADIO_STOP_DEBUG_PRINTF(("radio-stop: stream task exiting / Radio_Close exited\n"));
+    rs->task_exit_count++;
+    RADIO_STOP_DEBUG_PRINTF(("radio-stop: stream task exiting / Radio_Close exited session=%lu task_exit_count=%u cleanup_count=%u stop_request_count=%u ssl_free_count=%u socket_close_count=%u decoder_free_count=%u\n", rs->session_id, rs->task_exit_count, rs->cleanup_count, rs->stop_request_count, rs->ssl_free_count, rs->socket_close_count, rs->decoder_free_count));
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     radio_ssl_global_cleanup();
 #endif

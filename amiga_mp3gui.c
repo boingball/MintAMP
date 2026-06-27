@@ -4762,6 +4762,17 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 			RadioSetStatus(app, "Select a favourite first.");
 			return;
 		}
+		if (rb_probe_url_looks_hls(app->rbFavouriteUrls[app->rbSelectedFavourite])) {
+			RadioSetStatus(app, "HLS stream not supported");
+			return;
+		}
+		if (app->playbackActive || app->playbackDonePending) {
+			SafeCopy(app->queuedInputName, sizeof(app->queuedInputName), app->rbFavouriteUrls[app->rbSelectedFavourite]);
+			app->queuedPlayPending = 1;
+			StopPlayback(app);
+			RadioSetStatus(app, "Stopping current stream before playing favourite...");
+			return;
+		}
 		SelectInternetStream(app, app->rbFavouriteUrls[app->rbSelectedFavourite]);
 		sprintf(msg, "Playing favourite: %.120s", app->rbFavouriteNames[app->rbSelectedFavourite]);
 		RadioSetStatus(app, msg);
@@ -4797,6 +4808,13 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 	}
 	if (!info.final_url[0]) {
 		RadioSetStatus(app, "Stream probe did not return a playable URL.");
+		return;
+	}
+	if (app->playbackActive || app->playbackDonePending) {
+		SafeCopy(app->queuedInputName, sizeof(app->queuedInputName), info.final_url);
+		app->queuedPlayPending = 1;
+		StopPlayback(app);
+		RadioSetStatus(app, "Stopping current stream before playing selection...");
 		return;
 	}
 	SelectInternetStream(app, info.final_url);
