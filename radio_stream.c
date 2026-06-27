@@ -36,6 +36,13 @@
 #else
 #define RADIO_OPEN_DEBUG_PRINTF(x) ((void)0)
 #endif
+#ifdef RADIO_DEBUG_STOP
+#define RADIO_STOP_DEBUG_PRINTF(x) printf x
+#define RADIO_CLEANUP_DEBUG_PRINTF(x) printf x
+#else
+#define RADIO_STOP_DEBUG_PRINTF(x) ((void)0)
+#define RADIO_CLEANUP_DEBUG_PRINTF(x) ((void)0)
+#endif
 
 
 #if defined(AMIGA_M68K)
@@ -127,6 +134,7 @@ struct RadioStream {
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     SSL *ssl;
     SSL_CTX *ctx;
+    int sslHandshakeDone;
 #endif
 };
 
@@ -225,19 +233,33 @@ static int radio_ssl_global_init(RadioStream *rs)
 
 static void radio_ssl_global_cleanup(void)
 {
+    RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: AmiSSL global cleanup start initialized=%d base=%p master=%p\n", radio_amissl_initialized, (void *)AmiSSLBase, (void *)AmiSSLMasterBase));
     if (radio_amissl_initialized) {
+        RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: CleanupAmiSSL start\n"));
         CleanupAmiSSL(TAG_DONE);
         radio_amissl_initialized = 0;
+        RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: CleanupAmiSSL done\n"));
+    } else {
+        RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: CleanupAmiSSL skipped\n"));
     }
     if (AmiSSLBase) {
+        RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: CloseAmiSSL start base=%p\n", (void *)AmiSSLBase));
         CloseAmiSSL();
         AmiSSLBase = NULL;
         AmiSSLExtBase = NULL;
+        RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: CloseAmiSSL done\n"));
+    } else {
+        RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: CloseAmiSSL skipped\n"));
     }
     if (AmiSSLMasterBase) {
+        RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: CloseLibrary(amisslmaster) start master=%p\n", (void *)AmiSSLMasterBase));
         CloseLibrary(AmiSSLMasterBase);
         AmiSSLMasterBase = NULL;
+        RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: CloseLibrary(amisslmaster) done\n"));
+    } else {
+        RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: CloseLibrary(amisslmaster) skipped\n"));
     }
+    RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: AmiSSL global cleanup complete\n"));
 }
 
 /* Poll SSL_connect on the non-blocking socket — same budget as radio_wait_connected. */
@@ -273,22 +295,42 @@ static int radio_ssl_connect(RadioStream *rs)
     if (radio_ssl_do_handshake(rs) != 0) {
         SSL_free(rs->ssl); rs->ssl = NULL;
         if (rs->ctx) { SSL_CTX_free(rs->ctx); rs->ctx = NULL; }
+        rs->sslHandshakeDone = 0;
         set_error(rs, "TLS handshake failed"); return -1;
     }
+    rs->sslHandshakeDone = 1;
     return 0;
 }
 
 static void radio_ssl_close_stream(RadioStream *rs)
 {
-    if (rs && rs->ssl) {
+    if (!rs) return;
+    RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: HTTPS cleanup start ssl=%p ctx=%p fd=%ld handshake=%d\n", (void *)rs->ssl, (void *)rs->ctx, (long)rs->sock, rs->sslHandshakeDone));
+    if (rs->ssl && rs->sslHandshakeDone && rs->sock != RADIO_INVALID_SOCKET) {
+        RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_shutdown start ssl=%p\n", (void *)rs->ssl));
         SSL_shutdown(rs->ssl);
+        RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_shutdown done\n"));
+    } else {
+        RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_shutdown skipped ssl=%p fd=%ld handshake=%d\n", (void *)rs->ssl, (long)rs->sock, rs->sslHandshakeDone));
+    }
+    if (rs->ssl) {
+        RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_free start ssl=%p\n", (void *)rs->ssl));
         SSL_free(rs->ssl);
         rs->ssl = NULL;
+        rs->sslHandshakeDone = 0;
+        RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_free done\n"));
+    } else {
+        RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_free skipped\n"));
     }
-    if (rs && rs->ctx) {
+    if (rs->ctx) {
+        RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_CTX_free start ctx=%p\n", (void *)rs->ctx));
         SSL_CTX_free(rs->ctx);
         rs->ctx = NULL;
+        RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_CTX_free done\n"));
+    } else {
+        RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_CTX_free skipped\n"));
     }
+    RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: HTTPS cleanup complete\n"));
 }
 #endif /* AMIGA_M68K && HAVE_AMISSL */
 
@@ -462,14 +504,28 @@ static int connect_http(RadioStream *rs){
 
 static void close_current_socket(RadioStream *rs)
 {
-    if (rs && rs->sock != RADIO_INVALID_SOCKET) {
+    if (!rs) return;
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-        radio_ssl_close_stream(rs);
+    radio_ssl_close_stream(rs);
 #endif
+    if (rs->sock != RADIO_INVALID_SOCKET) {
+        RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: CloseSocket start fd=%ld\n", (long)rs->sock));
         radio_close_socket(rs->sock);
         rs->sock = RADIO_INVALID_SOCKET;
+        RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: CloseSocket done\n"));
         RADIO_STOP_DEBUG_PRINTF(("radio-stop: socket closed\n"));
+    } else {
+        RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: CloseSocket skipped fd=-1\n"));
     }
+}
+
+static void abort_current_socket(RadioStream *rs)
+{
+    if (!rs || rs->sock == RADIO_INVALID_SOCKET) return;
+    RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: CloseSocket abort start fd=%ld\n", (long)rs->sock));
+    radio_close_socket(rs->sock);
+    rs->sock = RADIO_INVALID_SOCKET;
+    RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: CloseSocket abort done\n"));
 }
 
 static int reconnect_http(RadioStream *rs)
@@ -595,17 +651,18 @@ RadioStream *Radio_Open(const char *url)
     }
     return rs;
 }
-void Radio_RequestStop(RadioStream *rs){ if(!rs)return; RADIO_STOP_DEBUG_PRINTF(("radio-stop: stop requested\n")); rs->stopping=1; rs->reconnectAttempts=RADIO_RECONNECT_MAX; rs->reconnectDelay=0; rs->status=RADIO_STATUS_STOPPING; close_current_socket(rs); RADIO_STOP_DEBUG_PRINTF(("radio-stop: marked stopping\n")); }
+void Radio_RequestStop(RadioStream *rs){ if(!rs)return; RADIO_STOP_DEBUG_PRINTF(("radio-stop: stop requested status=%d fd=%ld\n", (int)rs->status, (long)rs->sock)); rs->stopping=1; rs->reconnectAttempts=RADIO_RECONNECT_MAX; rs->reconnectDelay=0; rs->status=RADIO_STATUS_STOPPING; abort_current_socket(rs); RADIO_STOP_DEBUG_PRINTF(("radio-stop: marked stopping\n")); }
 void Radio_Close(RadioStream *rs)
 {
     if (!rs) return;
     RADIO_STOP_DEBUG_PRINTF(("radio-stop: Radio_Close entered\n"));
     Radio_RequestStop(rs);
+    close_current_socket(rs);
     rs->status = RADIO_STATUS_CLOSED;
     free(rs->ring);
     rs->ring = NULL;
     rs->size = rs->used = rs->rpos = rs->wpos = 0;
-    RADIO_STOP_DEBUG_PRINTF(("radio-stop: Radio_Close exited\n"));
+    RADIO_STOP_DEBUG_PRINTF(("radio-stop: stream task exiting / Radio_Close exited\n"));
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     radio_ssl_global_cleanup();
 #endif

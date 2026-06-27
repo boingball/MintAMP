@@ -719,6 +719,44 @@ static int is_url_path(const char *path)
 	return path && (!strncmp(path, "http://", 7) || !strncmp(path, "https://", 8));
 }
 
+
+static void GuiLogPathOp(const char *func, const char *path)
+{
+#ifdef MINIAMP3_DEBUG
+	Printf("gui-path: %s path='%s' is_url=%ld\n",
+		func ? func : "(null)", path ? path : "(null)",
+		is_url_path(path) ? 1L : 0L);
+#else
+	(void)func;
+	(void)path;
+#endif
+}
+
+static BPTR SafeOpenPath(const char *func, const char *path, LONG mode)
+{
+	GuiLogPathOp(func, path);
+	if (is_url_path(path))
+		return (BPTR)0;
+	return Open((STRPTR)path, mode);
+}
+
+static BPTR SafeLockPath(const char *func, const char *path, LONG mode)
+{
+	GuiLogPathOp(func, path);
+	if (is_url_path(path))
+		return (BPTR)0;
+	return Lock((STRPTR)path, mode);
+}
+
+static BOOL SafeAddPartPath(const char *func, char *path, const char *part, ULONG size)
+{
+	GuiLogPathOp(func, path);
+	GuiLogPathOp("AddPart(part)", part);
+	if (is_url_path(path) || is_url_path(part))
+		return FALSE;
+	return AddPart((STRPTR)path, (STRPTR)part, size);
+}
+
 static void CopyDrawerFromPath(char *drawer, size_t drawerSize, const char *path)
 {
 	char *q;
@@ -1546,6 +1584,7 @@ static void TryFolderArt(const char *inputName, Mp3Tags *tags)
 		SafeCopy(artPath, sizeof(artPath), dirPath);
 		strncat(artPath, kCoverNames[i],
 			sizeof(artPath) - strlen(artPath) - 1);
+		GuiLogPathOp("TryFolderArt/fopen", artPath);
 		af = fopen(artPath, "rb");
 		if (af) {
 			long sz;
@@ -1585,6 +1624,7 @@ static void ReadMp3Tags(const char *path, Mp3Tags *tags, int loadArt)
 	memset(tags, 0, sizeof(*tags));
 	if (is_url_path(path))
 		return;
+	GuiLogPathOp("ReadMp3Tags/fopen", path);
 	f = fopen(path, "rb");
 	if (!f)
 		return;
@@ -2512,6 +2552,7 @@ static int LoadArtworkCache(HelixAmp3Gui *gui)
 		is_url_path(gui->inputName))
 		return 0;
 	ArtworkCacheName(gui, path, sizeof(path));
+	GuiLogPathOp("LoadArtworkCache/fopen", path);
 	f = fopen(path, "rb");
 	if (!f)
 		return 0;
@@ -2571,7 +2612,7 @@ static void CleanArtworkCache(HelixAmp3Gui *gui)
 	int removed = 0;
 
 	EnvName(dir, sizeof(dir), "ArtCache");
-	lock = Lock((STRPTR)dir, ACCESS_READ);
+	lock = SafeLockPath("CleanArtworkCache/Lock", dir, ACCESS_READ);
 	if (!lock) {
 		SetStatus(gui, "Artwork cache is empty.");
 		return;
@@ -3081,7 +3122,7 @@ static int GuiAmigaDosInputOpenReadClose(const char *path)
 
 	if (!path || !path[0])
 		return -1;
-	handle = Open((STRPTR)path, MODE_OLDFILE);
+	handle = SafeOpenPath("GuiOpenRead/Open", path, MODE_OLDFILE);
 	if (!handle)
 		return -1;
 	nRead = Read(handle, bytes, sizeof(bytes));
@@ -3963,7 +4004,7 @@ static void ScanDecoderModules(void)
 	strncpy(extList, "mp3|aac", sizeof(extList) - 1);
 	extLen = 7;
 
-	lock = Lock((STRPTR)gDecoderModulesPath, ACCESS_READ);
+	lock = SafeLockPath("DecoderModules/Lock", gDecoderModulesPath, ACCESS_READ);
 	if (lock) {
 		fib = (struct FileInfoBlock *)AllocMem(sizeof(*fib), MEMF_CLEAR);
 		if (fib && Examine(lock, fib)) {
@@ -4345,7 +4386,7 @@ static unsigned long GuiInputFileSize(const char *path)
 	BPTR fh;
 	LONG size;
 
-	fh = Open((STRPTR)path, MODE_OLDFILE);
+	fh = SafeOpenPath("GuiOpenRead/Open", path, MODE_OLDFILE);
 	if (!fh)
 		return 0;
 	if (Seek(fh, 0, OFFSET_END) < 0) {
@@ -4359,6 +4400,7 @@ static unsigned long GuiInputFileSize(const char *path)
 	FILE *f;
 	long size;
 
+	GuiLogPathOp("GuiInputFileSize/fopen", path);
 	f = fopen(path, "rb");
 	if (!f)
 		return 0;
@@ -5101,11 +5143,14 @@ static void PlaylistLoadAndShow(HelixAmp3Gui *gui, int index)
 	SafeCopy(gui->inputName, sizeof(gui->inputName),
 		gui->playlist.paths[index]);
 	SetFileDisplay(gui, gui->inputName);
-	ReadMp3Tags(gui->inputName, &gui->tags, gui->artEnabled);
-	if (is_url_path(gui->inputName))
+	if (is_url_path(gui->inputName)) {
+		FreeTags(&gui->tags);
+		memset(&gui->tags, 0, sizeof(gui->tags));
 		SetInternetStreamMetadata(gui);
-	else
+	} else {
+		ReadMp3Tags(gui->inputName, &gui->tags, gui->artEnabled);
 		gui->totalSecs = gui->tags.durationSecs;
+	}
 	gui->elapsedSecs = 0;
 	gui->launchBufferSecs = 0;
 	UpdateTagDisplay(gui);
@@ -5156,7 +5201,7 @@ static void PlaylistLoadM3U(HelixAmp3Gui *gui)
 		SafeCopy(gui->lastDrawer, sizeof(gui->lastDrawer), req->fr_Drawer);
 		SafeCopy(drawer, sizeof(drawer), req->fr_Drawer);
 		SafeCopy(m3uPath, sizeof(m3uPath), req->fr_Drawer);
-		AddPart(m3uPath, req->fr_File, sizeof(m3uPath));
+		SafeAddPartPath("PlaylistM3U/AddPart", m3uPath, req->fr_File, sizeof(m3uPath));
 	} else if (req->fr_File && req->fr_File[0]) {
 		SafeCopy(m3uPath, sizeof(m3uPath), req->fr_File);
 	}
@@ -5164,7 +5209,7 @@ static void PlaylistLoadM3U(HelixAmp3Gui *gui)
 	if (!m3uPath[0])
 		return;
 
-	fh = Open((STRPTR)m3uPath, MODE_OLDFILE);
+	fh = SafeOpenPath("PlaylistLoadM3U/Open", m3uPath, MODE_OLDFILE);
 	if (!fh) {
 		SetStatus(gui, "Cannot open M3U file.");
 		return;
@@ -5189,7 +5234,7 @@ static void PlaylistLoadM3U(HelixAmp3Gui *gui)
 						SafeCopy(fullPath, sizeof(fullPath), lineBuf);
 					} else {
 						SafeCopy(fullPath, sizeof(fullPath), drawer);
-						AddPart(fullPath, lineBuf, sizeof(fullPath));
+						SafeAddPartPath("PlaylistLoadM3U/AddPartItem", fullPath, lineBuf, sizeof(fullPath));
 					}
 					n = gui->playlist.count;
 					SafeCopy(gui->playlist.paths[n], HELIXAMP3_MAX_PATH, fullPath);
@@ -5219,7 +5264,7 @@ static void PlaylistLoadM3U(HelixAmp3Gui *gui)
 				SafeCopy(fullPath, sizeof(fullPath), lineBuf);
 			} else {
 				SafeCopy(fullPath, sizeof(fullPath), drawer);
-				AddPart(fullPath, lineBuf, sizeof(fullPath));
+				SafeAddPartPath("PlaylistLoadM3U/AddPartItem", fullPath, lineBuf, sizeof(fullPath));
 			}
 			n = gui->playlist.count;
 			SafeCopy(gui->playlist.paths[n], HELIXAMP3_MAX_PATH, fullPath);
@@ -5269,7 +5314,7 @@ static void PlaylistSaveM3U(HelixAmp3Gui *gui)
 	m3uPath[0] = '\0';
 	if (req->fr_Drawer && req->fr_Drawer[0]) {
 		SafeCopy(m3uPath, sizeof(m3uPath), req->fr_Drawer);
-		AddPart(m3uPath, req->fr_File, sizeof(m3uPath));
+		SafeAddPartPath("PlaylistM3U/AddPart", m3uPath, req->fr_File, sizeof(m3uPath));
 	} else if (req->fr_File && req->fr_File[0]) {
 		SafeCopy(m3uPath, sizeof(m3uPath), req->fr_File);
 	}
@@ -5277,7 +5322,7 @@ static void PlaylistSaveM3U(HelixAmp3Gui *gui)
 	if (!m3uPath[0])
 		return;
 
-	fh = Open((STRPTR)m3uPath, MODE_NEWFILE);
+	fh = SafeOpenPath("PlaylistSaveM3U/Open", m3uPath, MODE_NEWFILE);
 	if (!fh) {
 		SetStatus(gui, "Cannot create M3U file.");
 		return;
@@ -5356,7 +5401,7 @@ static void HandlePlaylistPoll(HelixAmp3Gui *gui)
 						path[0] = '\0';
 						if (req->fr_Drawer && req->fr_Drawer[0]) {
 							SafeCopy(path, sizeof(path), req->fr_Drawer);
-							AddPart(path, req->fr_ArgList[i].wa_Name, sizeof(path));
+							SafeAddPartPath("PlaylistAdd/AddPartMulti", path, req->fr_ArgList[i].wa_Name, sizeof(path));
 						} else {
 							SafeCopy(path, sizeof(path), req->fr_ArgList[i].wa_Name);
 						}
@@ -5373,7 +5418,7 @@ static void HandlePlaylistPoll(HelixAmp3Gui *gui)
 					path[0] = '\0';
 					if (req->fr_Drawer && req->fr_Drawer[0]) {
 						SafeCopy(path, sizeof(path), req->fr_Drawer);
-						AddPart(path, req->fr_File, sizeof(path));
+						SafeAddPartPath("ChooseMp3/AddPart", path, req->fr_File, sizeof(path));
 					} else {
 						SafeCopy(path, sizeof(path), req->fr_File);
 					}
@@ -5464,7 +5509,7 @@ static void ChooseMp3(HelixAmp3Gui *gui)
 			SafeCopy(gui->lastDrawer, sizeof(gui->lastDrawer),
 				req->fr_Drawer);
 			SafeCopy(path, sizeof(path), req->fr_Drawer);
-			AddPart(path, req->fr_File, sizeof(path));
+			SafeAddPartPath("ChooseMp3/AddPart", path, req->fr_File, sizeof(path));
 		} else {
 			SafeCopy(path, sizeof(path), req->fr_File);
 		}
@@ -6027,7 +6072,7 @@ static void StartPlayback(HelixAmp3Gui *gui)
 	thisProc = (struct Process *)FindTask(NULL);
 	dirLock = DupLock(thisProc ? thisProc->pr_CurrentDir : (BPTR)0);
 #ifndef MINIAMP3_DEBUG
-	nilOut = Open((STRPTR)"NIL:", MODE_NEWFILE);
+	nilOut = SafeOpenPath("StartPlayback/OpenNIL", "NIL:", MODE_NEWFILE);
 #else
 	nilOut = (BPTR)0;
 #endif
