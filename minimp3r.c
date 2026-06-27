@@ -2854,27 +2854,32 @@ static void OpenRadioWindow(MrApp *app)
 	gad = app->rbGadContext;
 	memset(&ng, 0, sizeof(ng));
 	ng.ng_VisualInfo = app->rbVisualInfo; ng.ng_Flags = PLACETEXT_LEFT;
-	ng.ng_LeftEdge = 88; ng.ng_TopEdge = 10; ng.ng_Width = 220; ng.ng_Height = 18; ng.ng_GadgetText = (UBYTE *)"Search";
+	/* Keep the radio dialog arranged as a clear vertical stack with generous
+	 * outer/inner spacing: search+codec row, country row, results, buttons,
+	 * and a bottom status line.  The larger top margin prevents the first row
+	 * from clipping into the draggable title bar on ReAction/ClassAct systems.
+	 */
+	ng.ng_LeftEdge = 88; ng.ng_TopEdge = 24; ng.ng_Width = 220; ng.ng_Height = 18; ng.ng_GadgetText = (UBYTE *)"Search";
 	ng.ng_GadgetID = RB_GID_SEARCH_TEXT; gad = CreateGadget(STRING_KIND, gad, &ng, GTST_MaxChars, RB_MAX_NAME, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 390; ng.ng_Width = 90; ng.ng_GadgetText = (UBYTE *)"Codec"; ng.ng_GadgetID = RB_GID_CODEC;
+	ng.ng_LeftEdge = 390; ng.ng_TopEdge = 24; ng.ng_Width = 90; ng.ng_GadgetText = (UBYTE *)"Codec"; ng.ng_GadgetID = RB_GID_CODEC;
 	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)codecs, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 88; ng.ng_TopEdge = 34; ng.ng_Width = 60; ng.ng_GadgetText = (UBYTE *)"Country";
+	ng.ng_LeftEdge = 88; ng.ng_TopEdge = 52; ng.ng_Width = 220; ng.ng_GadgetText = (UBYTE *)"Country";
 	ng.ng_GadgetID = RB_GID_COUNTRY; gad = CreateGadget(STRING_KIND, gad, &ng, GTST_MaxChars, RB_MAX_COUNTRY, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 8; ng.ng_TopEdge = 60; ng.ng_Width = 472; ng.ng_Height = 116; ng.ng_GadgetText = NULL; ng.ng_GadgetID = RB_GID_LIST; ng.ng_Flags = 0;
+	ng.ng_LeftEdge = 8; ng.ng_TopEdge = 82; ng.ng_Width = 472; ng.ng_Height = 116; ng.ng_GadgetText = NULL; ng.ng_GadgetID = RB_GID_LIST; ng.ng_Flags = 0;
 	app->rbGadList = gad = CreateGadget(LISTVIEW_KIND, gad, &ng, GTLV_Labels, (ULONG)&app->rbList, GA_RelVerify, TRUE, TAG_DONE); if (!gad) goto fail;
-	ng.ng_TopEdge = 184; ng.ng_Width = 86; ng.ng_Height = 18; ng.ng_Flags = PLACETEXT_IN;
+	ng.ng_TopEdge = 208; ng.ng_Width = 86; ng.ng_Height = 18; ng.ng_Flags = PLACETEXT_IN;
 	ng.ng_LeftEdge = 8; ng.ng_GadgetText = (UBYTE *)"Search"; ng.ng_GadgetID = RB_GID_SEARCH; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
 	ng.ng_LeftEdge = 100; ng.ng_GadgetText = (UBYTE *)"Probe"; ng.ng_GadgetID = RB_GID_PROBE; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
 	ng.ng_LeftEdge = 192; ng.ng_GadgetText = (UBYTE *)"Close"; ng.ng_GadgetID = RB_GID_CLOSE; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 8; ng.ng_TopEdge = 210; ng.ng_Width = 472; ng.ng_GadgetText = NULL; ng.ng_GadgetID = RB_GID_STATUS; ng.ng_Flags = 0;
+	ng.ng_LeftEdge = 8; ng.ng_TopEdge = 236; ng.ng_Width = 472; ng.ng_GadgetText = NULL; ng.ng_GadgetID = RB_GID_STATUS; ng.ng_Flags = 0;
 	gad = CreateGadget(STRING_KIND, gad, &ng, GTST_String, (ULONG)"Ready.", GTST_MaxChars, 512, TAG_DONE); if (!gad) goto fail;
 	memset(&nw, 0, sizeof(nw));
 	nw.LeftEdge = app->win->LeftEdge + 30; nw.TopEdge = app->win->TopEdge + 30;
-	nw.Width = 496; nw.Height = 252;
+	nw.Width = 496; nw.Height = 278;
 	nw.IDCMPFlags = IDCMP_GADGETUP | IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW;
 	nw.Flags = WFLG_CLOSEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET | WFLG_SMART_REFRESH;
 	nw.Title = (UBYTE *)"Internet Radio";
-	nw.MinWidth = nw.MaxWidth = 496; nw.MinHeight = nw.MaxHeight = 252;
+	nw.MinWidth = nw.MaxWidth = 496; nw.MinHeight = nw.MaxHeight = 278;
 	nw.Type = WBENCHSCREEN;
 	app->rbWin = OpenWindowTags(&nw, TAG_DONE);
 	if (!app->rbWin) goto fail;
