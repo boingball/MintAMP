@@ -2836,10 +2836,14 @@ static void RadioSelectResult(MrApp *app, ULONG eventSelected)
 	if (selected == (ULONG)~0)
 		GT_GetGadgetAttrs(app->rbGadList, app->rbWin, NULL,
 			GTLV_Selected, (ULONG)&selected, TAG_DONE);
+#ifdef MINIAMP3_DEBUG
 	printf("radio results selection event row/index: %ld\n", (long)selected);
+#endif
 	if (selected == (ULONG)~0 || selected >= (ULONG)app->rbVisibleCount) {
 		rb_controller_set_selected(&app->rbController, -1);
+#ifdef MINIAMP3_DEBUG
 		printf("radio results controller selected_index: %d\n", app->rbController.selected_index);
+#endif
 		RadioSetStatus(app, "Select a station first.");
 		return;
 	}
@@ -2857,8 +2861,10 @@ static void RadioSelectResult(MrApp *app, ULONG eventSelected)
 		return;
 	}
 	rb_station_display_name(st, display, (int)sizeof(display));
+#ifdef MINIAMP3_DEBUG
 	printf("radio results controller selected_index: %d\n", app->rbController.selected_index);
 	printf("radio results station display name: %s\n", display);
+#endif
 	sprintf(msg, "Selected: %.120s", display);
 	RadioSetStatus(app, msg);
 }
