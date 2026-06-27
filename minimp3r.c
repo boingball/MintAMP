@@ -2688,7 +2688,7 @@ enum {
 	RB_GID_SEARCH_TEXT = 300,
 	RB_GID_CODEC,
 	RB_GID_COUNTRY,
-	RB_GID_LIST,
+	RB_GID_RADIO_RESULTS,
 	RB_GID_SEARCH,
 	RB_GID_PROBE,
 	RB_GID_CLOSE,
@@ -2728,6 +2728,12 @@ static void RadioRefreshResults(MrApp *app)
 	int i;
 	char display[RB_MAX_NAME];
 	const RadioBrowserStation *st;
+	/* Detach the current labels before rebuilding the backing node array. */
+	if (app->rbWin && app->rbGadList)
+		GT_SetGadgetAttrs(app->rbGadList, app->rbWin, NULL,
+			GTLV_Labels, (ULONG)~0,
+			GTLV_Selected, (ULONG)~0,
+			TAG_DONE);
 	NewList(&app->rbList);
 	for (i = 0; i < app->rbController.station_count; i++) {
 		st = rb_controller_get_station(&app->rbController, i);
@@ -2735,16 +2741,19 @@ static void RadioRefreshResults(MrApp *app)
 		rb_station_display_name(st, display, (int)sizeof(display));
 		sprintf(app->rbNames[i], "%.48s | %s | %d | %s",
 			display, st->codec, st->bitrate, st->countrycode);
+		memset(&app->rbNodes[i], 0, sizeof(app->rbNodes[i]));
 		app->rbNodes[i].ln_Name = app->rbNames[i];
 		app->rbNodes[i].ln_Type = NT_USER;
-		app->rbNodes[i].ln_Pri = 0;
+		/* GadTools listview nodes have no separate user-data field; keep the
+		 * station index in ln_Pri for the small Radio Browser result limit. */
+		app->rbNodes[i].ln_Pri = (BYTE)i;
 		AddTail(&app->rbList, &app->rbNodes[i]);
 	}
+	app->rbController.selected_index = -1;
 	if (app->rbWin && app->rbGadList)
 		GT_SetGadgetAttrs(app->rbGadList, app->rbWin, NULL,
 			GTLV_Labels, (ULONG)&app->rbList,
-			GTLV_Selected, app->rbController.selected_index >= 0 ?
-				(ULONG)app->rbController.selected_index : (ULONG)~0,
+			GTLV_Selected, (ULONG)~0,
 			TAG_DONE);
 }
 
@@ -2779,7 +2788,6 @@ static void RadioDoSearch(MrApp *app)
 	SafeCopy(app->rbController.countrycode, sizeof(app->rbController.countrycode), text ? (const char *)text : "");
 	app->rbController.limit = 10;
 	rc = rb_controller_search(&app->rbController);
-	app->rbController.selected_index = -1;
 	RadioRefreshResults(app);
 	if (rc < 0)
 		RadioSetStatus(app, app->rbController.last_error);
@@ -2790,18 +2798,21 @@ static void RadioDoSearch(MrApp *app)
 	}
 }
 
-static void RadioSelectResult(MrApp *app)
+static void RadioSelectResult(MrApp *app, ULONG eventSelected)
 {
-	ULONG selected = (ULONG)~0;
+	ULONG selected = eventSelected;
 	const RadioBrowserStation *st;
 	char display[RB_MAX_NAME];
 	char msg[RB_MAX_NAME + 16];
 
 	if (!app->rbWin || !app->rbGadList) return;
-	GT_GetGadgetAttrs(app->rbGadList, app->rbWin, NULL,
-		GTLV_Selected, (ULONG)&selected, TAG_DONE);
+	if (selected == (ULONG)~0)
+		GT_GetGadgetAttrs(app->rbGadList, app->rbWin, NULL,
+			GTLV_Selected, (ULONG)&selected, TAG_DONE);
+	printf("radio results selection event row/index: %ld\n", (long)selected);
 	if (selected == (ULONG)~0 || selected >= (ULONG)app->rbController.station_count) {
-		app->rbController.selected_index = -1;
+		rb_controller_set_selected(&app->rbController, -1);
+		printf("radio results controller selected_index: %d\n", app->rbController.selected_index);
 		RadioSetStatus(app, "Select a station first.");
 		return;
 	}
@@ -2815,6 +2826,8 @@ static void RadioSelectResult(MrApp *app)
 		return;
 	}
 	rb_station_display_name(st, display, (int)sizeof(display));
+	printf("radio results controller selected_index: %d\n", app->rbController.selected_index);
+	printf("radio results station display name: %s\n", display);
 	sprintf(msg, "Selected: %.120s", display);
 	RadioSetStatus(app, msg);
 }
@@ -2903,7 +2916,7 @@ static void OpenRadioWindow(MrApp *app)
 	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)codecs, TAG_DONE); if (!gad) goto fail;
 	ng.ng_LeftEdge = 88; ng.ng_TopEdge = 52; ng.ng_Width = 220; ng.ng_GadgetText = (UBYTE *)"Country";
 	ng.ng_GadgetID = RB_GID_COUNTRY; gad = CreateGadget(STRING_KIND, gad, &ng, GTST_MaxChars, RB_MAX_COUNTRY, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 8; ng.ng_TopEdge = 82; ng.ng_Width = 472; ng.ng_Height = 116; ng.ng_GadgetText = NULL; ng.ng_GadgetID = RB_GID_LIST; ng.ng_Flags = 0;
+	ng.ng_LeftEdge = 8; ng.ng_TopEdge = 82; ng.ng_Width = 472; ng.ng_Height = 116; ng.ng_GadgetText = NULL; ng.ng_GadgetID = RB_GID_RADIO_RESULTS; ng.ng_Flags = 0;
 	app->rbGadList = gad = CreateGadget(LISTVIEW_KIND, gad, &ng,
 		GTLV_Labels, (ULONG)&app->rbList,
 		GTLV_Selected, (ULONG)~0,
@@ -2938,6 +2951,7 @@ static void HandleRadioWindow(MrApp *app)
 	if (!app->rbWin) return;
 	while ((msg = GT_GetIMsg(app->rbWin->UserPort)) != NULL) {
 		ULONG cls = msg->Class;
+		UWORD code = msg->Code;
 		struct Gadget *gad = (struct Gadget *)msg->IAddress;
 		UWORD gid = gad ? gad->GadgetID : 0;
 		GT_ReplyIMsg(msg);
@@ -2948,8 +2962,8 @@ static void HandleRadioWindow(MrApp *app)
 			continue;
 		}
 		if (cls == IDCMP_GADGETUP) {
-			if (gid == RB_GID_LIST)
-				RadioSelectResult(app);
+			if (gid == RB_GID_RADIO_RESULTS)
+				RadioSelectResult(app, (ULONG)code);
 			else if (gid == RB_GID_SEARCH)
 				RadioDoSearch(app);
 			else if (gid == RB_GID_PROBE)
