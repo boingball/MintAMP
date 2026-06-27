@@ -9,6 +9,7 @@ int rb_search_stations(
     const char *tag,
     const char *codec,
     const char *countrycode,
+    int max_bitrate,
     int limit,
     int offset,
     RadioBrowserStation *stations,

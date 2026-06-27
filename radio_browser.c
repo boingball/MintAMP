@@ -17,6 +17,7 @@ int rb_search_stations(
     const char *tag,
     const char *codec,
     const char *countrycode,
+    int max_bitrate,
     int limit,
     int offset,
     RadioBrowserStation *stations,
@@ -29,7 +30,7 @@ int rb_search_stations(
     int rc;
 
     rc = rb_build_station_search_path(path, (int)sizeof(path), name, tag, codec,
-                                      countrycode, limit, offset);
+                                      countrycode, max_bitrate, limit, offset);
     if (rc < 0) return rc;
 
     rc = rb_http_get_json(host, path, json_buffer, json_buffer_size);
@@ -57,6 +58,7 @@ int main(void)
                                (const char *)0,
                                "MP3",
                                (const char *)0,
+                               -1,
                                10,
                                0,
                                stations,

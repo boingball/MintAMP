@@ -8,6 +8,7 @@ int rb_build_station_search_path(
     const char *tag,
     const char *codec,
     const char *countrycode,
+    int max_bitrate,
     int limit,
     int offset
 );

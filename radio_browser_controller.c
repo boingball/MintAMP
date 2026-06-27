@@ -48,7 +48,7 @@ void rb_controller_init(RadioBrowserController *controller)
     memset(controller, 0, sizeof(*controller));
     controller->selected_index = -1;
     controller->limit = 25;
-    controller->max_bitrate = 0;
+    controller->max_bitrate = -1;
     controller->offset = 0;
 }
 
@@ -74,6 +74,7 @@ int rb_controller_search(RadioBrowserController *controller)
                                rb_controller_optional_string(controller->tag),
                                rb_controller_optional_string(controller->codec),
                                rb_controller_optional_string(controller->countrycode),
+                               controller->max_bitrate,
                                limit,
                                controller->offset,
                                controller->stations,
@@ -88,7 +89,7 @@ int rb_controller_search(RadioBrowserController *controller)
     if (controller->max_bitrate > 0) {
         kept = 0;
         for (i = 0; i < count; i++) {
-            if (controller->stations[i].bitrate <= 0 ||
+            if (controller->stations[i].bitrate > 0 &&
                 controller->stations[i].bitrate <= controller->max_bitrate) {
                 if (kept != i)
                     controller->stations[kept] = controller->stations[i];
@@ -164,67 +165,101 @@ int rb_controller_probe_selected(
     return rc;
 }
 
+
+#ifdef RB_CONTROLLER_TEST
+static void rb_test_copy(char *dst, int dst_size, const char *src)
+{
+    int len;
+
+    if (!dst || dst_size <= 0) return;
+    dst[0] = '\0';
+    if (!src) return;
+    len = (int)strlen(src);
+    if (len >= dst_size) len = dst_size - 1;
+    if (len > 0) memcpy(dst, src, (size_t)len);
+    dst[len] = '\0';
+}
+
+const char *rb_station_play_url(const RadioBrowserStation *station)
+{
+    if (!station) return "";
+    if (station->url_resolved[0]) return station->url_resolved;
+    return station->url;
+}
+
+void rb_station_display_name(const RadioBrowserStation *station, char *out, int out_size)
+{
+    rb_test_copy(out, out_size, station ? station->name : "");
+}
+
+int rb_probe_stream_url(const char *url, RbStreamInfo *info, unsigned char *peek_buf,
+                        int peek_buf_size, int *peek_len)
+{
+    (void)url; (void)info; (void)peek_buf; (void)peek_buf_size;
+    if (peek_len) *peek_len = 0;
+    return RB_STREAM_PROBE_OK;
+}
+
+int rb_search_stations(const char *host, const char *name, const char *tag,
+                       const char *codec, const char *countrycode,
+                       int max_bitrate, int limit, int offset,
+                       RadioBrowserStation *stations, int max_stations,
+                       char *json_buffer, int json_buffer_size)
+{
+    (void)host; (void)tag; (void)codec; (void)countrycode;
+    (void)max_bitrate; (void)limit; (void)offset; (void)json_buffer;
+    (void)json_buffer_size;
+    if (!stations || max_stations < 4) return -1;
+    rb_test_copy(stations[0].name, RB_MAX_NAME, name && name[0] ? name : "BBC Radio 1");
+    rb_test_copy(stations[0].url, RB_MAX_URL, "http://example.com/128.mp3");
+    rb_test_copy(stations[0].codec, RB_MAX_CODEC, "MP3");
+    stations[0].bitrate = 128;
+    rb_test_copy(stations[1].name, RB_MAX_NAME, "BBC Low");
+    rb_test_copy(stations[1].url, RB_MAX_URL, "http://example.com/56.mp3");
+    rb_test_copy(stations[1].codec, RB_MAX_CODEC, "MP3");
+    stations[1].bitrate = 56;
+    rb_test_copy(stations[2].name, RB_MAX_NAME, "The Groove");
+    rb_test_copy(stations[2].url, RB_MAX_URL, "http://example.com/64.mp3");
+    rb_test_copy(stations[2].codec, RB_MAX_CODEC, "MP3");
+    stations[2].bitrate = 64;
+    rb_test_copy(stations[3].name, RB_MAX_NAME, "Groove Unknown");
+    rb_test_copy(stations[3].url, RB_MAX_URL, "http://example.com/unknown.mp3");
+    rb_test_copy(stations[3].codec, RB_MAX_CODEC, "MP3");
+    stations[3].bitrate = 0;
+    return 4;
+}
+
+static int rb_controller_expect_count(const char *label, const char *name,
+                                      int max_bitrate, int expected)
+{
+    RadioBrowserController controller;
+    int rc;
+
+    rb_controller_init(&controller);
+    rb_test_copy(controller.name, (int)sizeof(controller.name), name);
+    rb_test_copy(controller.codec, (int)sizeof(controller.codec), "MP3");
+    controller.limit = 25;
+    controller.max_bitrate = max_bitrate;
+    rc = rb_controller_search(&controller);
+    printf("%s: rc=%d station_count=%d max_bitrate=%d\n", label, rc,
+           controller.station_count, controller.max_bitrate);
+    if (rc != expected || controller.station_count != expected) {
+        printf("FAIL: expected %d\n", expected);
+        return 1;
+    }
+    return 0;
+}
+#endif
+
 #ifdef RB_CONTROLLER_TEST
 int main(void)
 {
-    static RadioBrowserController controller;
-    static unsigned char peek_buf[512];
-    RbStreamInfo info;
-    char display[RB_MAX_NAME];
-    int peek_len;
-    int rc;
-    int i;
+    int fails = 0;
 
-    rb_controller_init(&controller);
-    strcpy(controller.name, "groove");
-    strcpy(controller.codec, "MP3");
-    controller.limit = 25;
-    controller.max_bitrate = 64;
-
-    rc = rb_controller_search(&controller);
-    if (rc < 0) {
-        printf("search error: %d (%s)\n", rc, controller.last_error);
-        return 1;
-    }
-
-    printf("station count: %d\n", controller.station_count);
-    controller.selected_index = -1;
-    for (i = 0; i < controller.station_count; i++) {
-        rb_station_display_name(&controller.stations[i], display, (int)sizeof(display));
-        printf("%d: %s | codec=%s | bitrate=%d | country=%s | url=%s\n",
-               i + 1,
-               display,
-               controller.stations[i].codec,
-               controller.stations[i].bitrate,
-               controller.stations[i].countrycode,
-               rb_station_play_url(&controller.stations[i]));
-        if (controller.selected_index < 0 &&
-            rb_controller_starts_with(rb_station_play_url(&controller.stations[i]), "http://")) {
-            controller.selected_index = i;
-        }
-    }
-
-    if (controller.selected_index < 0) {
-        printf("no HTTP station available to probe\n");
-        return 0;
-    }
-
-    peek_len = 0;
-    rc = rb_controller_probe_selected(&controller, &info, peek_buf,
-                                      (int)sizeof(peek_buf), &peek_len);
-    printf("probe station: %d\n", controller.selected_index + 1);
-    printf("probe result: %d (%s)\n", rc, controller.last_error);
-    if (rc == RB_STREAM_PROBE_OK) {
-        printf("http=%d redirects=%d codec=%d content-type=%s icy-name=%s peek=%d final-url=%s\n",
-               info.http_status,
-               info.redirect_count,
-               info.codec,
-               info.content_type,
-               info.icy_name,
-               peek_len,
-               info.final_url);
-    }
-
-    return rc < 0 ? 1 : 0;
+    fails += rb_controller_expect_count("bbc + Any bitrate", "bbc", -1, 4);
+    fails += rb_controller_expect_count("bbc + <=56", "bbc", 56, 1);
+    fails += rb_controller_expect_count("groove + Any bitrate", "groove", -1, 4);
+    fails += rb_controller_expect_count("groove + <=64", "groove", 64, 2);
+    return fails ? 1 : 0;
 }
 #endif

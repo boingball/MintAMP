@@ -6,6 +6,7 @@
 #include "radio_browser_url.h"
 
 #include <stdio.h>
+#include <string.h>
 
 #define RB_STATION_SEARCH_PATH "/json/stations/search"
 
@@ -134,6 +135,7 @@ int rb_build_station_search_path(
     const char *tag,
     const char *codec,
     const char *countrycode,
+    int max_bitrate,
     int limit,
     int offset
 )
@@ -158,6 +160,10 @@ int rb_build_station_search_path(
     if (rc < 0) return rc;
     rc = rb_append_param_str(out, out_size, &pos, &count, "countrycode", countrycode);
     if (rc < 0) return rc;
+    if (max_bitrate > 0) {
+        rc = rb_append_param_int(out, out_size, &pos, &count, "bitrateMax", max_bitrate);
+        if (rc < 0) return rc;
+    }
     rc = rb_append_param_int(out, out_size, &pos, &count, "limit", limit);
     if (rc < 0) return rc;
     rc = rb_append_param_int(out, out_size, &pos, &count, "offset", offset);
@@ -171,24 +177,53 @@ int rb_build_station_search_path(
 }
 
 #ifdef RB_URL_TEST
-static void rb_url_test_case(const char *label, const char *name, const char *tag,
-                             const char *codec, const char *countrycode)
+static int rb_url_contains(const char *s, const char *needle)
+{
+    int n;
+
+    if (!s || !needle || !*needle) return 0;
+    n = (int)strlen(needle);
+    while (*s) {
+        if (strncmp(s, needle, (size_t)n) == 0) return 1;
+        s++;
+    }
+    return 0;
+}
+
+static int rb_url_test_case(const char *label, const char *name, const char *tag,
+                            const char *codec, const char *countrycode,
+                            int max_bitrate, const char *must_have,
+                            const char *must_not_have)
 {
     char path[512];
     int rc;
 
     rc = rb_build_station_search_path(path, (int)sizeof(path), name, tag, codec,
-                                      countrycode, 25, 0);
+                                      countrycode, max_bitrate, 25, 0);
     printf("%s: rc=%d %s\n", label, rc, path);
+    if (rc < 0) return 1;
+    if (must_have && !rb_url_contains(path, must_have)) {
+        printf("FAIL: missing %s\n", must_have);
+        return 1;
+    }
+    if (must_not_have && rb_url_contains(path, must_not_have)) {
+        printf("FAIL: unexpectedly found %s\n", must_not_have);
+        return 1;
+    }
+    return 0;
 }
 
 int main(void)
 {
-    rb_url_test_case("name=groove codec=MP3", "groove", 0, "MP3", 0);
-    rb_url_test_case("name=chill codec=AAC+", "chill", 0, "AAC+", 0);
-    rb_url_test_case("tag=deep house", 0, "deep house", 0, 0);
-    rb_url_test_case("countrycode=GB codec=AAC", 0, 0, "AAC", "GB");
-    rb_url_test_case("symbols", "rock & roll + dance", 0, 0, 0);
-    return 0;
+    int fails = 0;
+
+    fails += rb_url_test_case("name=groove codec=MP3", "groove", 0, "MP3", 0, -1, 0, "bitrateMax");
+    fails += rb_url_test_case("name=chill codec=AAC+", "chill", 0, "AAC+", 0, -1, 0, "bitrateMax");
+    fails += rb_url_test_case("tag=deep house", 0, "deep house", 0, 0, -1, 0, "bitrateMax");
+    fails += rb_url_test_case("countrycode=GB codec=AAC", 0, 0, "AAC", "GB", -1, 0, "bitrateMax");
+    fails += rb_url_test_case("symbols", "rock & roll + dance", 0, 0, 0, -1, 0, "bitrateMax");
+    fails += rb_url_test_case("name=bbc max=Any", "bbc", 0, "MP3", 0, -1, 0, "bitrateMax=0");
+    fails += rb_url_test_case("name=bbc max=56", "bbc", 0, "MP3", 0, 56, "bitrateMax=56", 0);
+    return fails ? 1 : 0;
 }
 #endif

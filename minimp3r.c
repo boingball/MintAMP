@@ -2730,8 +2730,17 @@ enum {
 
 static const int kRadioSearchLimits[] = { 10, 25, 50 };
 static STRPTR kRadioSearchLimitLabels[] = { (STRPTR)"10", (STRPTR)"25", (STRPTR)"50", NULL };
-static const int kRadioBitrateMax[] = { 0, 56, 64, 96, 128 };
+static const int kRadioBitrateMax[] = { -1, 56, 64, 96, 128 };
 static STRPTR kRadioBitrateLabels[] = { (STRPTR)"Any", (STRPTR)"<=56", (STRPTR)"<=64", (STRPTR)"<=96", (STRPTR)"<=128", NULL };
+
+static const char *RadioBitrateFilterLabel(int max_bitrate)
+{
+	static char label[16];
+
+	if (max_bitrate <= 0) return "Any";
+	sprintf(label, "<=%d", max_bitrate);
+	return label;
+}
 
 static const char *RadioCodecFromIndex(int idx)
 {
@@ -2836,6 +2845,7 @@ static void RadioDoSearch(MrApp *app)
 	STRPTR text;
 	ULONG v;
 	int rc;
+	char filterMsg[192];
 
 	RadioSetStatus(app, "Searching Radio Browser...");
 	text = NULL;
@@ -2855,6 +2865,14 @@ static void RadioDoSearch(MrApp *app)
 	if (bitrateGad)
 		GT_GetGadgetAttrs(bitrateGad, app->rbWin, NULL, GTCY_Active, (ULONG)&v, TAG_DONE);
 	app->rbController.max_bitrate = kRadioBitrateMax[ClampInt((int)v, 0, 4)];
+	sprintf(filterMsg, "Search filters: name=\"%.40s\" codec=%s country=%s max bitrate=%s limit=%d",
+		app->rbController.name[0] ? app->rbController.name : "Any",
+		app->rbController.codec[0] ? app->rbController.codec : "Any",
+		app->rbController.countrycode[0] ? app->rbController.countrycode : "Any",
+		RadioBitrateFilterLabel(app->rbController.max_bitrate),
+		app->rbController.limit);
+	RadioSetStatus(app, filterMsg);
+	printf("%s\n", filterMsg);
 	rc = rb_controller_search(&app->rbController);
 	RadioRefreshResults(app);
 	if (rc < 0)

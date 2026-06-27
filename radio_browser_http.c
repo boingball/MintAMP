@@ -261,7 +261,7 @@ int main(void)
     int count;
     int i;
 
-    rc = rb_build_station_search_path(path, (int)sizeof(path), 0, 0, "MP3", 0, 10, 0);
+    rc = rb_build_station_search_path(path, (int)sizeof(path), 0, 0, "MP3", 0, -1, 10, 0);
     if (rc < 0) {
         printf("build path failed: %d\n", rc);
         return 1;
@@ -356,7 +356,7 @@ int main(void)
     int i;
     int peek_len;
 
-    rc = rb_build_station_search_path(path, (int)sizeof(path), "groove", 0, "MP3", 0, 10, 0);
+    rc = rb_build_station_search_path(path, (int)sizeof(path), "groove", 0, "MP3", 0, -1, 10, 0);
     if (rc < 0) {
         printf("build search path failed: %d\n", rc);
         return 1;
