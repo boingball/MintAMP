@@ -4,8 +4,8 @@
 #define RB_MAX_STATIONS   50
 #define RB_UUID_LEN       37
 #define RB_MAX_NAME       256
-#define RB_MAX_URL        384
-#define RB_MAX_FAVICON    384
+#define RB_MAX_URL        512
+#define RB_MAX_FAVICON    512
 #define RB_MAX_TAGS       256
 #define RB_MAX_CODEC      16
 #define RB_MAX_COUNTRY    4

@@ -3,6 +3,7 @@
  *
  * Test harness build:
  *   gcc -std=gnu89 -Wall -Wextra -DRB_HTTP_TEST radio_browser_http.c radio_browser_url.c radio_browser_json.c -o /tmp/rb_http_test
+ *   gcc -std=gnu89 -Wall -Wextra -DRB_RADIO_E2E_TEST radio_browser_url.c radio_browser_http.c radio_browser_json.c radio_stream_probe.c -o /tmp/rb_radio_e2e_test
  */
 
 #include "radio_browser_http.h"
@@ -278,5 +279,114 @@ int main(void)
         printf("%d: %s\n", i + 1, rb_station_play_url(&stations[i]));
     }
     return 0;
+}
+#endif
+
+#ifdef RB_RADIO_E2E_TEST
+#include "radio_browser_url.h"
+#include "radio_browser_json.h"
+#include "radio_stream_probe.h"
+
+#define RB_RADIO_E2E_HOST "de1.api.radio-browser.info"
+#define RB_RADIO_E2E_BODY_SIZE 131072
+#define RB_RADIO_E2E_PEEK_SIZE 512
+
+static const char *rb_radio_e2e_codec_name(RbStreamCodec codec)
+{
+    switch (codec) {
+    case RB_STREAM_CODEC_MP3: return "MP3";
+    case RB_STREAM_CODEC_AAC: return "AAC";
+    default: return "unknown";
+    }
+}
+
+static int rb_radio_e2e_is_http_url(const char *url)
+{
+    return url && strncmp(url, "http://", 7) == 0;
+}
+
+static int rb_radio_e2e_is_https_url(const char *url)
+{
+    return url && strncmp(url, "https://", 8) == 0;
+}
+
+int main(void)
+{
+    static char path[512];
+    static char body[RB_RADIO_E2E_BODY_SIZE];
+    static RadioBrowserStation stations[RB_MAX_STATIONS];
+    unsigned char peek[RB_RADIO_E2E_PEEK_SIZE];
+    RbStreamInfo info;
+    char display[RB_MAX_NAME];
+    const char *play_url;
+    int rc;
+    int count;
+    int i;
+    int peek_len;
+
+    rc = rb_build_station_search_path(path, (int)sizeof(path), 0, 0, 0, 0, RB_MAX_STATIONS, 0);
+    if (rc < 0) {
+        printf("build search path failed: %d\n", rc);
+        return 1;
+    }
+    printf("search path: %s\n", path);
+
+    rc = rb_http_get_json(RB_RADIO_E2E_HOST, path, body, (int)sizeof(body));
+    if (rc < 0) {
+        printf("http get json failed: %d\n", rc);
+        return 1;
+    }
+
+    count = rb_parse_stations_json(body, stations, RB_MAX_STATIONS);
+    printf("station count: %d\n", count);
+
+    for (i = 0; i < count; i++) {
+        play_url = rb_station_play_url(&stations[i]);
+        if (!play_url[0]) continue;
+        if (rb_radio_e2e_is_https_url(play_url)) {
+            printf("skip https station %d: %s\n", i + 1, play_url);
+            continue;
+        }
+        if (!rb_radio_e2e_is_http_url(play_url)) {
+            printf("skip non-http station %d: %s\n", i + 1, play_url);
+            continue;
+        }
+
+        peek_len = 0;
+        rc = rb_probe_stream_url(play_url, &info, peek, (int)sizeof(peek), &peek_len);
+        if (rc == RB_STREAM_PROBE_ERR_UNSUPPORTED_TLS) {
+            printf("skip station %d: redirect to unsupported TLS\n", i + 1);
+            continue;
+        }
+        if (rc < 0) {
+            printf("skip station %d: probe error %d\n", i + 1, rc);
+            continue;
+        }
+        if (info.codec != RB_STREAM_CODEC_MP3 && info.codec != RB_STREAM_CODEC_AAC) {
+            printf("skip station %d: unsupported/unknown codec %s\n",
+                   i + 1, rb_radio_e2e_codec_name(info.codec));
+            continue;
+        }
+
+        rb_station_display_name(&stations[i], display, (int)sizeof(display));
+        printf("selected station display name: %s\n", display);
+        printf("radio browser codec: %s\n", stations[i].codec);
+        printf("radio browser bitrate: %d\n", stations[i].bitrate);
+        printf("radio browser country: %s\n", stations[i].countrycode);
+        printf("original play URL: %s\n", play_url);
+        printf("final URL: %s\n", info.final_url);
+        printf("redirect count: %d\n", info.redirect_count);
+        printf("HTTP status: %d\n", info.http_status);
+        printf("content type: %s\n", info.content_type);
+        printf("icy-name: %s\n", info.icy_name);
+        printf("icy-br: %d\n", info.icy_br);
+        printf("icy-metaint: %d\n", info.icy_metaint);
+        printf("detected codec: %s\n", rb_radio_e2e_codec_name(info.codec));
+        printf("peek byte count: %d\n", peek_len);
+        return 0;
+    }
+
+    printf("no MP3 or AAC station probed successfully\n");
+    return 1;
 }
 #endif
