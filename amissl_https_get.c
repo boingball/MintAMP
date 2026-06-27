@@ -16,6 +16,7 @@ int main(void)
 
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
 
 #include <exec/types.h>
 #include <exec/libraries.h>
@@ -25,14 +26,16 @@ int main(void)
 #include <netinet/in.h>
 #include <netdb.h>
 
-#include <libraries/amisslmaster.h>
 #include <proto/amisslmaster.h>
 #include <proto/amissl.h>
+#include <libraries/amisslmaster.h>
+#include <libraries/amissl.h>
 #include <amissl/amissl.h>
 
 struct Library *SocketBase = NULL;
 struct Library *AmiSSLMasterBase = NULL;
 struct Library *AmiSSLBase = NULL;
+struct Library *AmiSSLExtBase = NULL;
 
 #define TEST_HOST "ice1.somafm.com"
 #define TEST_PATH "/groovesalad-128-mp3"
@@ -55,6 +58,7 @@ static long test_socket = -1;
 static SSL_CTX *test_ctx = NULL;
 static SSL *test_ssl = NULL;
 static int test_tls_connected = 0;
+static int test_amissl_initialized = 0;
 
 static void cleanup(void)
 {
@@ -83,10 +87,17 @@ static void cleanup(void)
         test_socket = -1;
         progress("21. cleanup: CloseSocket done");
     }
+    if (test_amissl_initialized) {
+        progress("21. cleanup: CleanupAmiSSL start");
+        CleanupAmiSSL();
+        test_amissl_initialized = 0;
+        progress("21. cleanup: CleanupAmiSSL done");
+    }
     if (AmiSSLBase) {
         progress("21. cleanup: CloseAmiSSL start");
         CloseAmiSSL();
         AmiSSLBase = NULL;
+        AmiSSLExtBase = NULL;
         progress("21. cleanup: CloseAmiSSL done");
     }
     if (AmiSSLMasterBase) {
@@ -165,17 +176,28 @@ static int open_libraries(void)
     if (!AmiSSLMasterBase) { progress("failed: OpenLibrary(amisslmaster.library)"); return 1; }
     progress("5. amisslmaster opened OK");
 
-    progress("6. InitAmiSSLMaster start");
-    if (!InitAmiSSLMaster(AMISSL_CURRENT_VERSION, TRUE)) {
-        progress("failed: InitAmiSSLMaster version/init mismatch");
+    progress("6. OpenAmiSSLTags start");
+    if (OpenAmiSSLTags(AMISSL_CURRENT_VERSION,
+                       AmiSSL_UsesOpenSSLStructs, TRUE,
+                       AmiSSL_GetAmiSSLBase, &AmiSSLBase,
+                       AmiSSL_GetAmiSSLExtBase, &AmiSSLExtBase,
+                       AmiSSL_SocketBase, SocketBase,
+                       AmiSSL_ErrNoPtr, &errno,
+                       TAG_DONE) != 0) {
+        progress("failed: OpenAmiSSLTags");
         return 1;
     }
-    progress("7. InitAmiSSLMaster OK");
+    progress("7. OpenAmiSSLTags OK");
 
-    progress("8. opening AmiSSL");
-    AmiSSLBase = OpenAmiSSL();
-    if (!AmiSSLBase) { progress("failed: OpenAmiSSL"); return 1; }
-    progress("9. AmiSSL opened OK");
+    progress("8. InitAmiSSL start");
+    if (InitAmiSSL(AmiSSL_SocketBase, SocketBase,
+                   AmiSSL_ErrNoPtr, &errno,
+                   TAG_DONE) != 0) {
+        progress("failed: InitAmiSSL");
+        return 1;
+    }
+    test_amissl_initialized = 1;
+    progress("9. InitAmiSSL OK");
     return 0;
 }
 
@@ -210,10 +232,17 @@ static int tcp_connect(void)
 
 static int tls_connect(void)
 {
-    progress("16. TLS context/session start: SSL_CTX_new");
-    test_ctx = SSL_CTX_new(TLS_client_method());
+    const SSL_METHOD *method;
+
+    progress("16. TLS method start: SSLv23_client_method");
+    method = SSLv23_client_method();
+    if (!method) { progress("failed: SSLv23_client_method"); return 1; }
+    progress("16. TLS method OK");
+
+    progress("16. SSL_CTX_new start");
+    test_ctx = SSL_CTX_new(method);
     if (!test_ctx) { progress("failed: SSL_CTX_new"); return 1; }
-    progress("16. TLS context/session OK: SSL_CTX_new");
+    progress("16. SSL_CTX_new OK");
 
     progress("16. TLS context/session start: SSL_CTX_set_verify");
     SSL_CTX_set_verify(test_ctx, SSL_VERIFY_NONE, NULL);
