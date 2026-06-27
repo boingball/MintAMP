@@ -4848,6 +4848,50 @@ static int StrCaseCmp(const char *a, const char *b)
 	return (int)ca - (int)cb;
 }
 
+static int StrCaseStarts(const char *s, const char *prefix)
+{
+	unsigned char ca, cb;
+
+	if (!s || !prefix)
+		return 0;
+	while (*prefix) {
+		ca = (unsigned char)*s++;
+		cb = (unsigned char)*prefix++;
+		if (ca >= 'A' && ca <= 'Z') ca += 32;
+		if (cb >= 'A' && cb <= 'Z') cb += 32;
+		if (ca != cb)
+			return 0;
+	}
+	return 1;
+}
+
+static const char *RadioDecoderExtFromContentType(const char *contentType)
+{
+	if (!contentType || !contentType[0])
+		return NULL;
+	if (StrCaseStarts(contentType, "audio/aac") ||
+		StrCaseStarts(contentType, "audio/aacp"))
+		return "aac";
+	if (StrCaseStarts(contentType, "audio/flac") ||
+		StrCaseStarts(contentType, "audio/x-flac"))
+		return "flac";
+	if (StrCaseStarts(contentType, "audio/mpeg") ||
+		StrCaseStarts(contentType, "audio/mp3"))
+		return "mp3";
+	return NULL;
+}
+
+static const char *RadioDecoderExtFromUrlOrType(const char *url, const char *contentType)
+{
+	const char *ext = GetFileExtension(url);
+	if (ext && (StrCaseCmp(ext, "aac") == 0 ||
+		StrCaseCmp(ext, "flac") == 0 ||
+		StrCaseCmp(ext, "fla") == 0 ||
+		StrCaseCmp(ext, "mp3") == 0))
+		return ext;
+	return RadioDecoderExtFromContentType(contentType);
+}
+
 typedef struct FakeStereo {
 	short hist[FAKE_STEREO_MAX_DELAY];
 	int pos;
@@ -8092,6 +8136,8 @@ static DecLong DecModSeekCb(void *userData, DecLong offset, int whence)
 	} else {
 		return -1;                  /* SEEK_END not supported */
 	}
+	if (src->radio)
+		return -1;
 	InputSourceSeek(src, pos);
 	return 0;
 }
@@ -8171,6 +8217,8 @@ static DecLong DecModPrefetchSeekCb(void *userData, DecLong offset, int whence)
 		return -1;
 	}
 
+	if (src->radio)
+		return -1;
 	InputSourceSeek(src, pos);
 	ps->fill = 0;
 	ps->pos  = 0;
@@ -8590,11 +8638,9 @@ cleanup:
  * probes the stream, runs AmigaPlayStreamingGeneric(), then cleans up.
  * Called from HelixAmp3CliMain() when the input extension is not ".mp3".
  */
-static int AmigaGenericFormatPlay(const char *filename, const char *ext,
-	const DecodeOptions *opt, DecodeStats *stats)
+static int AmigaGenericInputPlay(const char *sourceName, InputSource *input, const char *ext,
+	const DecodeOptions *opt, DecodeStats *stats, int closeInput)
 {
-	BPTR                  amigaFile = (BPTR)0;
-	InputSource           input;
 	LoadedDecoderModule   mod;
 	struct DecoderStreamInfo sinfo;
 	DecHandle             handle = NULL;
@@ -8606,37 +8652,22 @@ static int AmigaGenericFormatPlay(const char *filename, const char *ext,
 	memset(&sinfo,   0, sizeof(sinfo));
 	memset(&prefetch, 0, sizeof(prefetch));
 
-	GuiPublishStartupStage(GUISTART_INPUT_OPEN);
-	if (AmigaPlaybackStopRequested(opt, "before generic input open"))
+	if (!input)
 		return 1;
-
-	GuiPublishStartupStage(GUISTART_INPUT_FOPEN_BEFORE);
-	amigaFile = Open((STRPTR)filename, MODE_OLDFILE);
-	GuiPublishStartupStage(GUISTART_INPUT_FOPEN_AFTER);
-	if (!amigaFile) {
-		fprintf(stderr, "cannot open input: %s\n", filename);
-		return 1;
-	}
-	InputSourceInitAmigaDos(&input, amigaFile);
-	amigaFile = (BPTR)0;
-
-	if (AmigaPlaybackStopRequested(opt, "after generic input open"))
-		goto done_input;
 
 	if (opt->debugDecoder)
-		fprintf(stderr, "generic-debug: selected file extension=.%s decoder type=%s\n",
+		fprintf(stderr, "generic-debug: selected source extension=.%s decoder type=%s\n",
 			ext ? ext : "(null)", (ext && StrCaseCmp(ext, "mp3") == 0) ? "internal-mp3" : "external-module");
 	if (opt->debugDecoder && ext && StrCaseCmp(ext, "aac") == 0)
 		fprintf(stderr, "AAC: selected\n");
-	if (ext && StrCaseCmp(ext, "aac") == 0 && !ValidateAacAdtsInput(&input, opt->debugDecoder)) {
+	if (!input->radio && ext && StrCaseCmp(ext, "aac") == 0 && !ValidateAacAdtsInput(input, opt->debugDecoder)) {
 		gGuiPlaybackStatus.phase = GUIPLAY_PHASE_ERROR;
 		gGuiPlaybackStatus.startupStage = GUISTART_FAILED;
 		goto done_input;
 	}
 
-	/* Find and load the decoder module */
 	if (!LoadDecoderModuleForExt(ext, &mod, opt->debugDecoder)) {
-		fprintf(stderr, "no decoder module found for .%s files\n", ext);
+		fprintf(stderr, "no decoder module found for .%s streams/files\n", ext ? ext : "(unknown)");
 		goto done_input;
 	}
 
@@ -8648,15 +8679,11 @@ static int AmigaGenericFormatPlay(const char *filename, const char *ext,
 			(mod.ops && mod.ops->info && mod.ops->info->name) ? mod.ops->info->name : "(null)",
 			(void *)mod.ops);
 
-	/* Query I/O hints before open so we can wrap readFn with a prefetch
-	 * buffer.  Hints are retrieved via a temporary probe open on a dummy
-	 * handle — or, simpler, from a NULL handle if the module supports it.
-	 * Most modules return hints statically so NULL handle is fine. */
-	if (mod.ops->get_io_hints) {
+	if (!input->radio && mod.ops->get_io_hints) {
 		struct DecoderIoHints hints;
 		memset(&hints, 0, sizeof(hints));
 		if (mod.ops->get_io_hints(NULL, &hints) == 0) {
-			hasPrefetch = DecModPrefetchInit(&prefetch, &input, &hints);
+			hasPrefetch = DecModPrefetchInit(&prefetch, input, &hints);
 			if (opt->debugDecoder)
 				fprintf(stderr, "generic-debug: prefetch %s preferred=%lu prefetch=%lu\n",
 					hasPrefetch ? "active" : "unavailable (alloc failed)",
@@ -8665,23 +8692,22 @@ static int AmigaGenericFormatPlay(const char *filename, const char *ext,
 		}
 	}
 
-	/* Open the stream — module probes headers and reports format */
 	GuiPublishStartupStage(GUISTART_INPUT_PREPARE);
 	if (opt->debugDecoder)
-		fprintf(stderr, "generic-debug: AAC/open init entering inputPos=%lu\n", InputSourceTell(&input));
+		fprintf(stderr, "generic-debug: decoder open init entering inputPos=%lu\n", InputSourceTell(input));
 	if (opt->debugDecoder && ext && StrCaseCmp(ext, "aac") == 0)
 		fprintf(stderr, "AAC: before open\n");
 	if (hasPrefetch)
 		handle = mod.ops->open(DecModPrefetchReadCb, DecModPrefetchSeekCb, &prefetch, &sinfo);
 	else
-		handle = mod.ops->open(DecModReadCb, DecModSeekCb, &input, &sinfo);
+		handle = mod.ops->open(DecModReadCb, DecModSeekCb, input, &sinfo);
 	if (opt->debugDecoder && ext && StrCaseCmp(ext, "aac") == 0)
 		fprintf(stderr, "AAC: after open handle=%p\n", (void *)handle);
 	if (opt->debugDecoder)
-		fprintf(stderr, "generic-debug: AAC/open init result handle=%p sampleRate=%lu channels=%u bits=%u\n",
+		fprintf(stderr, "generic-debug: decoder open result handle=%p sampleRate=%lu channels=%u bits=%u\n",
 			(void *)handle, sinfo.sampleRate, sinfo.channels, sinfo.bitsPerSample);
 	if (!handle) {
-		fprintf(stderr, "decoder module failed to open: %s\n", filename);
+		fprintf(stderr, "decoder module failed to open: %s\n", sourceName ? sourceName : "(unknown)");
 		gGuiPlaybackStatus.phase = GUIPLAY_PHASE_ERROR;
 		gGuiPlaybackStatus.startupStage = GUISTART_FAILED;
 		goto done_module;
@@ -8698,7 +8724,7 @@ static int AmigaGenericFormatPlay(const char *filename, const char *ext,
 	gMiniAmp3RequestedVolume = (unsigned short)opt->volumePercent;
 	gMiniAmp3VolumeSequence++;
 
-	ret = AmigaPlayStreamingGeneric(&input, mod.ops, handle, &sinfo,
+	ret = AmigaPlayStreamingGeneric(input, mod.ops, handle, &sinfo,
 		opt, stats, NULL);
 
 done_handle:
@@ -8708,8 +8734,37 @@ done_module:
 	if (hasPrefetch)
 		DecModPrefetchFree(&prefetch);
 done_input:
-	InputSourceClose(&input);
+	if (closeInput)
+		InputSourceClose(input);
 	return ret ? 1 : 0;
+}
+
+static int AmigaGenericFormatPlay(const char *filename, const char *ext,
+	const DecodeOptions *opt, DecodeStats *stats)
+{
+	BPTR        amigaFile = (BPTR)0;
+	InputSource input;
+
+	GuiPublishStartupStage(GUISTART_INPUT_OPEN);
+	if (AmigaPlaybackStopRequested(opt, "before generic input open"))
+		return 1;
+
+	GuiPublishStartupStage(GUISTART_INPUT_FOPEN_BEFORE);
+	amigaFile = Open((STRPTR)filename, MODE_OLDFILE);
+	GuiPublishStartupStage(GUISTART_INPUT_FOPEN_AFTER);
+	if (!amigaFile) {
+		fprintf(stderr, "cannot open input: %s\n", filename);
+		return 1;
+	}
+	InputSourceInitAmigaDos(&input, amigaFile);
+	amigaFile = (BPTR)0;
+
+	if (AmigaPlaybackStopRequested(opt, "after generic input open")) {
+		InputSourceClose(&input);
+		return 1;
+	}
+
+	return AmigaGenericInputPlay(filename, &input, ext, opt, stats, 1);
 }
 
 static int AmigaAacSmokeTest(const char *filename, const DecodeOptions *opt)
@@ -9515,7 +9570,22 @@ int main(int argc, char **argv)
 			return 1;
 		}
 		InputSourceInitRadio(&input, radio);
+		{
+			int probePump;
+			for (probePump = 0; probePump < 200 && !Radio_GetContentType(radio)[0] &&
+				Radio_GetStatus(radio) != RADIO_STATUS_ERROR; probePump++)
+				Radio_Pump(radio);
+		}
 		GuiPublishRadioMetadata(radio);
+		{
+			const char *radioExt = RadioDecoderExtFromUrlOrType(opt.inName, Radio_GetContentType(radio));
+			if (radioExt && StrCaseCmp(radioExt, "mp3") != 0) {
+				int gret = AmigaGenericInputPlay(opt.inName, &input, radioExt, &opt, &stats, 1);
+				free(resolvedOutName);
+				AmigaFreeNormalizedArgs(&normalized);
+				return gret;
+			}
+		}
 	} else if (opt.play) {
 		/* If the file extension is not .mp3, try a generic decoder module. */
 		{
