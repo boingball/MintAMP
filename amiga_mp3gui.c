@@ -5344,6 +5344,10 @@ static void StartPlayback(HelixAmp3Gui *gui)
 		SetStatus(gui, "Browse to an audio file first.");
 		return;
 	}
+	if (!strncmp(gui->inputName, "https://", 8)) {
+		SetStatus(gui, "HTTPS/TLS playback is not supported yet");
+		return;
+	}
 	if (gui->playbackActive || gui->playbackDonePending) {
 		SetStatus(gui, gui->playbackDonePending ?
 			"Previous playback process is still exiting." :

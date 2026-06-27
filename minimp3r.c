@@ -2867,38 +2867,17 @@ static void RadioDoProbeAndPlay(MrApp *app)
 	}
 	{
 		const char *stUrl = rb_station_play_url(st);
-		int isHttps = stUrl && strncmp(stUrl, "https://", 8) == 0;
-#if !defined(ENABLE_AMISSL)
-		if (isHttps) {
-			RadioSetStatus(app, "HTTPS/TLS streams require building guir with SSL=1");
+
+		if (stUrl && strncmp(stUrl, "https://", 8) == 0) {
+			RadioSetStatus(app, "HTTPS/TLS playback is not supported yet");
 			return;
 		}
-#endif
 		memset(&info, 0, sizeof(info));
-#if defined(ENABLE_AMISSL)
-		if (isHttps) {
-			/* Skip the probe for HTTPS: SSL_connect inside the probe crashes on
-			 * Amiga (bsdsocket/AmiSSL incompatibility).  Use station metadata
-			 * from Radio Browser directly and let the streaming layer handle TLS. */
-			SafeCopy(info.final_url, sizeof(info.final_url), stUrl);
-			SafeCopy(info.icy_name, sizeof(info.icy_name), st->name[0] ? st->name : stUrl);
-			info.icy_br = st->bitrate;
-			if (tolower((unsigned char)st->codec[0]) == 'a' &&
-			    tolower((unsigned char)st->codec[1]) == 'a' &&
-			    tolower((unsigned char)st->codec[2]) == 'c')
-				info.codec = RB_STREAM_CODEC_AAC;
-			else
-				info.codec = RB_STREAM_CODEC_MP3;
-			rc = RB_STREAM_PROBE_OK;
-		} else
-#endif
-		{
-			RadioSetStatus(app, "Probing selected stream...");
-			rc = rb_controller_probe_selected(app->rbController, &info, peek, (int)sizeof(peek), &peekLen);
-			if (rc < 0) {
-				RadioSetStatus(app, app->rbController->last_error);
-				return;
-			}
+		RadioSetStatus(app, "Probing selected stream...");
+		rc = rb_controller_probe_selected(app->rbController, &info, peek, (int)sizeof(peek), &peekLen);
+		if (rc < 0) {
+			RadioSetStatus(app, app->rbController->last_error);
+			return;
 		}
 	}
 	if (info.codec != RB_STREAM_CODEC_MP3 && info.codec != RB_STREAM_CODEC_AAC) {
