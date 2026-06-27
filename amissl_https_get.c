@@ -89,7 +89,7 @@ static void cleanup(void)
     }
     if (test_amissl_initialized) {
         progress("21. cleanup: CleanupAmiSSL start");
-        CleanupAmiSSL();
+        CleanupAmiSSL(TAG_DONE);
         test_amissl_initialized = 0;
         progress("21. cleanup: CleanupAmiSSL done");
     }
@@ -179,10 +179,10 @@ static int open_libraries(void)
     progress("6. OpenAmiSSLTags start");
     if (OpenAmiSSLTags(AMISSL_CURRENT_VERSION,
                        AmiSSL_UsesOpenSSLStructs, TRUE,
-                       AmiSSL_GetAmiSSLBase, &AmiSSLBase,
-                       AmiSSL_GetAmiSSLExtBase, &AmiSSLExtBase,
-                       AmiSSL_SocketBase, SocketBase,
-                       AmiSSL_ErrNoPtr, &errno,
+                       AmiSSL_GetAmiSSLBase, (ULONG)&AmiSSLBase,
+                       AmiSSL_GetAmiSSLExtBase, (ULONG)&AmiSSLExtBase,
+                       AmiSSL_SocketBase, (ULONG)SocketBase,
+                       AmiSSL_ErrNoPtr, (ULONG)&errno,
                        TAG_DONE) != 0) {
         progress("failed: OpenAmiSSLTags");
         return 1;
@@ -190,8 +190,8 @@ static int open_libraries(void)
     progress("7. OpenAmiSSLTags OK");
 
     progress("8. InitAmiSSL start");
-    if (InitAmiSSL(AmiSSL_SocketBase, SocketBase,
-                   AmiSSL_ErrNoPtr, &errno,
+    if (InitAmiSSL(AmiSSL_SocketBase, (ULONG)SocketBase,
+                   AmiSSL_ErrNoPtr, (ULONG)&errno,
                    TAG_DONE) != 0) {
         progress("failed: InitAmiSSL");
         return 1;
