@@ -49,6 +49,7 @@
 #if defined(AMIGA_M68K)
 #include <exec/types.h>
 #include <exec/libraries.h>
+#include <exec/memory.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
 #include <proto/bsdsocket.h>
@@ -135,7 +136,8 @@ struct RadioStream {
     int isSSL;
     unsigned long session_id;
     unsigned int cleanup_count, stop_request_count, task_exit_count;
-    unsigned int ssl_free_count, socket_close_count, decoder_free_count;
+    unsigned int ssl_free_count, ssl_ctx_free_count, socket_close_count, decoder_free_count;
+    unsigned int stream_buffer_free_count, audio_buffer_free_count, amissl_cleanup_count;
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     SSL *ssl;
     SSL_CTX *ctx;
@@ -144,6 +146,44 @@ struct RadioStream {
 };
 
 static unsigned long radio_next_session_id = 1;
+static long radio_active_stream_sessions = 0;
+static long radio_active_stream_tasks = 0;
+static long radio_open_socket_count = 0;
+static long radio_active_ssl_count = 0;
+static long radio_active_ssl_ctx_count = 0;
+static long radio_active_decoder_count = 0;
+static long radio_active_audio_buffer_count = 0;
+static long radio_active_stream_buffer_count = 0;
+static long radio_amissl_init_count = 0;
+static int radio_atexit_registered = 0;
+
+static void radio_debug_mem_report(unsigned long session_id, const char *where)
+{
+#if defined(AMIGA_M68K)
+    printf("radio-mem: session=%lu %s AvailMem(any)=%lu fast=%lu chip=%lu\n",
+        session_id, where ? where : "", (unsigned long)AvailMem(MEMF_ANY),
+        (unsigned long)AvailMem(MEMF_FAST), (unsigned long)AvailMem(MEMF_CHIP));
+#else
+    printf("radio-mem: session=%lu %s AvailMem(any)=n/a fast=n/a chip=n/a\n",
+        session_id, where ? where : "");
+#endif
+}
+
+static void radio_resource_summary(const RadioStream *rs, const char *where)
+{
+    printf("radio-summary: session=%lu %s active_stream_sessions=%ld active_stream_tasks=%ld open_socket_count=%ld active_ssl_count=%ld active_ssl_ctx_count=%ld active_decoder_count=%ld active_audio_buffer_count=%ld active_stream_buffer_count=%ld amissl_init_count=%ld cleanup_count=%u\n",
+        rs ? rs->session_id : 0, where ? where : "", radio_active_stream_sessions,
+        radio_active_stream_tasks, radio_open_socket_count, radio_active_ssl_count,
+        radio_active_ssl_ctx_count, radio_active_decoder_count,
+        radio_active_audio_buffer_count, radio_active_stream_buffer_count,
+        radio_amissl_init_count, rs ? rs->cleanup_count : 0);
+}
+static void radio_app_exit_report(void)
+{
+    radio_debug_mem_report(0, "before app exit");
+    radio_resource_summary(NULL, "before app exit");
+}
+
 static int radio_is_stopping(const RadioStream *rs) { return !rs || rs->stopping || rs->status == RADIO_STATUS_STOPPING || rs->status == RADIO_STATUS_CLOSED; }
 static int radio_contains_nocase(const char *s, const char *needle)
 {
@@ -273,6 +313,8 @@ static int radio_ssl_global_init(RadioStream *rs)
         set_error(rs, "AmiSSL init failed"); return -1;
     }
     radio_amissl_initialized = 1;
+    radio_amissl_init_count++;
+    printf("radio-resource: session=%lu AmiSSL init count=%ld\n", rs ? rs->session_id : 0, radio_amissl_init_count);
     return 0;
 }
 
@@ -282,6 +324,7 @@ static void radio_ssl_global_cleanup(void)
     if (radio_amissl_initialized) {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: CleanupAmiSSL start\n"));
         CleanupAmiSSL(TAG_DONE);
+        if (radio_amissl_init_count > 0) radio_amissl_init_count--;
         radio_amissl_initialized = 0;
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: CleanupAmiSSL done\n"));
     } else {
@@ -332,14 +375,16 @@ static int radio_ssl_connect(RadioStream *rs)
     method = SSLv23_client_method();
     if (!method) { set_error(rs, "AmiSSL init failed"); return -1; }
     rs->ctx = SSL_CTX_new(method);
+    if (rs->ctx) { radio_active_ssl_ctx_count++; printf("radio-resource: session=%lu SSL_CTX allocated active_ssl_ctx_count=%ld\n", rs->session_id, radio_active_ssl_ctx_count); }
     if (!rs->ctx) { set_error(rs, "AmiSSL init failed"); return -1; }
     SSL_CTX_set_verify(rs->ctx, SSL_VERIFY_NONE, NULL);
     rs->ssl = SSL_new(rs->ctx);
-    if (!rs->ssl) { SSL_CTX_free(rs->ctx); rs->ctx = NULL; set_error(rs, "AmiSSL init failed"); return -1; }
+    if (rs->ssl) { radio_active_ssl_count++; printf("radio-resource: session=%lu SSL allocated active_ssl_count=%ld\n", rs->session_id, radio_active_ssl_count); }
+    if (!rs->ssl) { SSL_CTX_free(rs->ctx); rs->ctx = NULL; if (radio_active_ssl_ctx_count > 0) radio_active_ssl_ctx_count--; set_error(rs, "AmiSSL init failed"); return -1; }
     SSL_set_fd(rs->ssl, (int)rs->sock);
     if (radio_ssl_do_handshake(rs) != 0) {
-        SSL_free(rs->ssl); rs->ssl = NULL;
-        if (rs->ctx) { SSL_CTX_free(rs->ctx); rs->ctx = NULL; }
+        SSL_free(rs->ssl); rs->ssl = NULL; if (radio_active_ssl_count > 0) radio_active_ssl_count--;
+        if (rs->ctx) { SSL_CTX_free(rs->ctx); rs->ctx = NULL; if (radio_active_ssl_ctx_count > 0) radio_active_ssl_ctx_count--; }
         rs->sslHandshakeDone = 0;
         set_error(rs, "TLS handshake failed"); return -1;
     }
@@ -361,8 +406,8 @@ static void radio_ssl_close_stream(RadioStream *rs)
     if (rs->ssl) {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_free start ssl=%p\n", (void *)rs->ssl));
         rs->ssl_free_count++;
-        if (rs->ssl_free_count > 1) { radio_duplicate_cleanup_warning(rs, "SSL_free", rs->ssl_free_count); }
-        else SSL_free(rs->ssl);
+        SSL_free(rs->ssl);
+        if (radio_active_ssl_count > 0) radio_active_ssl_count--;
         rs->ssl = NULL;
         rs->sslHandshakeDone = 0;
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_free done\n"));
@@ -371,7 +416,9 @@ static void radio_ssl_close_stream(RadioStream *rs)
     }
     if (rs->ctx) {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_CTX_free start ctx=%p\n", (void *)rs->ctx));
+        rs->ssl_ctx_free_count++;
         SSL_CTX_free(rs->ctx);
+        if (radio_active_ssl_ctx_count > 0) radio_active_ssl_ctx_count--;
         rs->ctx = NULL;
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_CTX_free done\n"));
     } else {
@@ -530,7 +577,7 @@ static int connect_http(RadioStream *rs){
         rs->haveHostAddr=1;
     }
     if (radio_is_stopping(rs)) return -1;
-    rs->sock=socket(AF_INET,SOCK_STREAM,0); if(rs->sock==RADIO_INVALID_SOCKET){ set_error(rs,"cannot create socket"); return -1; }
+    rs->sock=socket(AF_INET,SOCK_STREAM,0); if(rs->sock!=RADIO_INVALID_SOCKET){ radio_open_socket_count++; printf("radio-resource: session=%lu socket opened fd=%ld open_socket_count=%ld\n", rs->session_id, (long)rs->sock, radio_open_socket_count); } if(rs->sock==RADIO_INVALID_SOCKET){ set_error(rs,"cannot create socket"); return -1; }
     /* Go non-blocking BEFORE connect so the connect never stalls the machine. */
     radio_set_nonblocking(rs->sock);
     memset(&sa,0,sizeof(sa)); sa.sin_family=AF_INET; sa.sin_port=htons((unsigned short)rs->port); sa.sin_addr=rs->hostAddr;
@@ -559,25 +606,14 @@ static void close_current_socket(RadioStream *rs)
     if (rs->sock != RADIO_INVALID_SOCKET) {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: CloseSocket start fd=%ld\n", (long)rs->sock));
         rs->socket_close_count++;
-        if (rs->socket_close_count > 1) { radio_duplicate_cleanup_warning(rs, "CloseSocket", rs->socket_close_count); }
-        else radio_close_socket(rs->sock);
+        radio_close_socket(rs->sock);
+        if (radio_open_socket_count > 0) radio_open_socket_count--;
         rs->sock = RADIO_INVALID_SOCKET;
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: CloseSocket done\n"));
         RADIO_STOP_DEBUG_PRINTF(("radio-stop: socket closed\n"));
     } else {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: CloseSocket skipped fd=-1\n"));
     }
-}
-
-static void abort_current_socket(RadioStream *rs)
-{
-    if (!rs || rs->sock == RADIO_INVALID_SOCKET) return;
-    RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: CloseSocket abort start fd=%ld\n", (long)rs->sock));
-    rs->socket_close_count++;
-    if (rs->socket_close_count > 1) { radio_duplicate_cleanup_warning(rs, "CloseSocket", rs->socket_close_count); }
-    else radio_close_socket(rs->sock);
-    rs->sock = RADIO_INVALID_SOCKET;
-    RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: CloseSocket abort done\n"));
 }
 
 static int reconnect_http(RadioStream *rs)
@@ -672,11 +708,18 @@ RadioStream *Radio_Open(const char *url)
 {
     RadioStream *rs = (RadioStream *)calloc(1, sizeof(*rs));
     if (!rs) return NULL;
+    if (!radio_atexit_registered) { atexit(radio_app_exit_report); radio_atexit_registered = 1; }
     radio_reset_session_state(rs);
     rs->session_id = radio_next_session_id++;
+    radio_active_stream_sessions++;
+    radio_active_stream_tasks++;
+    radio_active_decoder_count++;
+    printf("radio-resource: session=%lu stream session/task/decoder allocated active_stream_sessions=%ld active_stream_tasks=%ld active_decoder_count=%ld\n", rs->session_id, radio_active_stream_sessions, radio_active_stream_tasks, radio_active_decoder_count);
+    radio_debug_mem_report(rs->session_id, "before starting stream");
     rs->status = RADIO_STATUS_CONNECTING;
     rs->size = RADIO_RING_BYTES;
     rs->ring = (unsigned char *)malloc(rs->size);
+    if (rs->ring) { radio_active_stream_buffer_count++; radio_active_audio_buffer_count++; printf("radio-resource: session=%lu stream/audio buffer allocated active_stream_buffer_count=%ld active_audio_buffer_count=%ld\n", rs->session_id, radio_active_stream_buffer_count, radio_active_audio_buffer_count); }
     if (!rs->ring) {
         rs->size = 0;
         set_error(rs, "not enough memory for radio buffer");
@@ -699,8 +742,10 @@ RadioStream *Radio_Open(const char *url)
         RADIO_OPEN_DEBUG_PRINTF(("radio-open: Radio_Open returning error\n"));
         return rs;
     }
-    if (connect_http(rs) == 0)
+    if (connect_http(rs) == 0) {
         rs->status = RADIO_STATUS_BUFFERING;
+        radio_debug_mem_report(rs->session_id, "after stream started");
+    }
     else {
         close_current_socket(rs);
         if (rs->status != RADIO_STATUS_ERROR)
@@ -709,7 +754,7 @@ RadioStream *Radio_Open(const char *url)
     }
     return rs;
 }
-void Radio_RequestStop(RadioStream *rs){ if(!rs)return; rs->stop_request_count++; RADIO_STOP_DEBUG_PRINTF(("radio-stop: session=%lu stop requested count=%u status=%d fd=%ld\n", rs->session_id, rs->stop_request_count, (int)rs->status, (long)rs->sock)); if(rs->status==RADIO_STATUS_CLOSED)return; rs->stopping=1; rs->reconnectAttempts=RADIO_RECONNECT_MAX; rs->reconnectDelay=0; rs->status=RADIO_STATUS_STOPPING; abort_current_socket(rs); RADIO_STOP_DEBUG_PRINTF(("radio-stop: marked stopping\n")); }
+void Radio_RequestStop(RadioStream *rs){ if(!rs)return; rs->stop_request_count++; RADIO_STOP_DEBUG_PRINTF(("radio-stop: session=%lu stop requested count=%u status=%d fd=%ld\n", rs->session_id, rs->stop_request_count, (int)rs->status, (long)rs->sock)); if(rs->status==RADIO_STATUS_CLOSED)return; rs->stopping=1; rs->reconnectAttempts=RADIO_RECONNECT_MAX; rs->reconnectDelay=0; rs->status=RADIO_STATUS_STOPPING; close_current_socket(rs); RADIO_STOP_DEBUG_PRINTF(("radio-stop: marked stopping\n")); }
 void Radio_Close(RadioStream *rs)
 {
     if (!rs) return;
@@ -719,16 +764,27 @@ void Radio_Close(RadioStream *rs)
     Radio_RequestStop(rs);
     close_current_socket(rs);
     rs->status = RADIO_STATUS_CLOSED;
+    rs->stream_buffer_free_count++;
+    rs->audio_buffer_free_count++;
+    if (rs->stream_buffer_free_count > 1) radio_duplicate_cleanup_warning(rs, "stream buffer free", rs->stream_buffer_free_count);
+    else { if (rs->ring) { free(rs->ring); if (radio_active_stream_buffer_count > 0) radio_active_stream_buffer_count--; } }
+    if (rs->audio_buffer_free_count > 1) radio_duplicate_cleanup_warning(rs, "audio buffer free", rs->audio_buffer_free_count);
+    else { if (radio_active_audio_buffer_count > 0) radio_active_audio_buffer_count--; }
     rs->decoder_free_count++;
-    if (rs->decoder_free_count > 1) radio_duplicate_cleanup_warning(rs, "decoder/audio buffer free", rs->decoder_free_count);
-    else free(rs->ring);
+    if (rs->decoder_free_count > 1) radio_duplicate_cleanup_warning(rs, "decoder free", rs->decoder_free_count);
+    else { if (radio_active_decoder_count > 0) radio_active_decoder_count--; }
     rs->ring = NULL;
     rs->size = rs->used = rs->rpos = rs->wpos = 0;
     rs->task_exit_count++;
-    RADIO_STOP_DEBUG_PRINTF(("radio-stop: stream task exiting / Radio_Close exited session=%lu task_exit_count=%u cleanup_count=%u stop_request_count=%u ssl_free_count=%u socket_close_count=%u decoder_free_count=%u\n", rs->session_id, rs->task_exit_count, rs->cleanup_count, rs->stop_request_count, rs->ssl_free_count, rs->socket_close_count, rs->decoder_free_count));
+    if (radio_active_stream_tasks > 0) radio_active_stream_tasks--;
+    if (radio_active_stream_sessions > 0) radio_active_stream_sessions--;
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+    rs->amissl_cleanup_count++;
     radio_ssl_global_cleanup();
 #endif
+    radio_debug_mem_report(rs->session_id, "after stop cleanup");
+    radio_resource_summary(rs, "after stop cleanup");
+    RADIO_STOP_DEBUG_PRINTF(("radio-stop: stream task exiting / Radio_Close exited session=%lu task_exit_count=%u cleanup_count=%u stop_request_count=%u ssl_free_count=%u socket_close_count=%u decoder_free_count=%u\n", rs->session_id, rs->task_exit_count, rs->cleanup_count, rs->stop_request_count, rs->ssl_free_count, rs->socket_close_count, rs->decoder_free_count));
     free(rs);
 }
 int Radio_Pump(RadioStream *rs)
