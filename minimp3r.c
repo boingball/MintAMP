@@ -495,7 +495,6 @@ static void CloseRadioWindow(MrApp *app);
 static void OpenRadioWindow(MrApp *app);
 static void HandleRadioWindow(MrApp *app);
 static void HandleDoneSignal(MrApp *app);
-static void RadioSetStatus(MrApp *app, const char *text);
 static void RadioDoProbeAndPlay(MrApp *app);
 
 static void SyncMenuChecks(MrApp *app);
