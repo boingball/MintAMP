@@ -411,6 +411,7 @@ typedef struct MrApp {
 	int             rbSearchInProgress;
 	char            rbFavouriteNames[MR_RADIO_FAV_MAX][RB_MAX_NAME];
 	char            rbFavouriteUrls[MR_RADIO_FAV_MAX][RB_MAX_URL];
+	char            currentRadioStationName[RB_MAX_NAME];
 	APTR            rbVisualInfo;
 	RadioBrowserController rbController;
 
@@ -977,9 +978,10 @@ static void MrFormatRadioStreamingStatus(MrApp *app, const char *station, char *
 		return;
 	if (!name || !name[0]) {
 		MrCopyVolatileString(streamUrl, sizeof(streamUrl), gGuiPlaybackStatus.radioStreamUrl);
-		name = streamUrl[0] ? streamUrl : (app && app->inputName[0] ? app->inputName : "Internet Radio");
+		name = (app && app->currentRadioStationName[0]) ? app->currentRadioStationName :
+			(streamUrl[0] ? streamUrl : (app && app->inputName[0] ? app->inputName : "Internet Radio"));
 	}
-	sprintf(status, "Streaming ... %.100s", name);
+	sprintf(status, "Streaming %.100s", name);
 }
 
 static int MrSetRadioMetadata(MrApp *app, int updateStatus)
@@ -1021,8 +1023,11 @@ static int MrSetRadioMetadata(MrApp *app, int updateStatus)
 			sprintf(status, "Stream dropped - reconnecting");
 		else if (radioStatus == RADIO_STATUS_CONNECTING)
 			sprintf(status, "Connecting stream...");
-		else if (radioStatus == RADIO_STATUS_BUFFERING || radioStatus == RADIO_STATUS_PLAYING) {
-			if (radioStatus == RADIO_STATUS_PLAYING && gGuiPlaybackStatus.decodedFrames > 0)
+		else if (radioStatus == RADIO_STATUS_BUFFERING)
+			sprintf(status, "Buffering - %.100s", station[0] ? station :
+				(app->currentRadioStationName[0] ? app->currentRadioStationName : "Internet Radio"));
+		else if (radioStatus == RADIO_STATUS_PLAYING) {
+			if (gGuiPlaybackStatus.decodedFrames > 0)
 				RADIO_DBG(printf("radio-ui: UI state set to PLAYING after first audio frame\n");)
 			MrFormatRadioStreamingStatus(app, station, status, sizeof(status));
 		}
@@ -1396,10 +1401,12 @@ static void StartPlayback(MrApp *app)
 	app->lastRadioStatusShown = -1;
 	UpdateTimeDisplay(app);
 	EnablePlayStop(app, 1);
-	if (MrIsRadioInput(app->inputName) &&
-		(app->cd32Ultrafast || (app->ultrafast && app->mono && app->rateIndex == 3)))
-		SetStatus(app, "Internet Radio: using safe decoder settings");
-	else
+	if (MrIsRadioInput(app->inputName)) {
+		char status[160];
+		sprintf(status, "Buffering - %.140s", app->currentRadioStationName[0] ? app->currentRadioStationName : "Internet Radio");
+		SetStatus(app, status);
+		RadioSetStatus(app, status);
+	} else
 		SetStatus(app, "Starting playback...");
 	SetGauge(app, 0);
 }
@@ -3568,7 +3575,8 @@ static void RadioDoProbeAndPlay(MrApp *app)
 		app->radioHostAddrBe = 0;
 		UpdateFileGadget(app);
 		RefreshFileInfoAndTags(app);
-		sprintf(msg, "Starting favourite: %.120s", app->rbFavouriteNames[app->rbSelectedFavourite]);
+		SafeCopy(app->currentRadioStationName, sizeof(app->currentRadioStationName), app->rbFavouriteNames[app->rbSelectedFavourite]);
+		sprintf(msg, "Buffering - %.120s", app->rbFavouriteNames[app->rbSelectedFavourite]);
 		RadioSetStatus(app, msg);
 		StartPlayback(app);
 		return;
@@ -3620,8 +3628,9 @@ static void RadioDoProbeAndPlay(MrApp *app)
 	app->radioHostAddrBe = info.host_addr_be;
 	UpdateFileGadget(app);
 	RefreshFileInfoAndTags(app);
-	sprintf(msg, "Buffering: %.120s | type: %.48s | icy-name: %.64s | icy-br: %d | redirects: %d",
-		info.final_url, info.content_type, info.icy_name, info.icy_br, info.redirect_count);
+	rb_station_display_name(st, msg, (int)sizeof(msg));
+	SafeCopy(app->currentRadioStationName, sizeof(app->currentRadioStationName), msg);
+	sprintf(msg, "Buffering - %.140s", app->currentRadioStationName[0] ? app->currentRadioStationName : "Internet Radio");
 	RadioSetStatus(app, msg);
 	RADIO_DBG(printf("radio-ui: new stream start url=\"%s\"\n", info.final_url);)
 	StartPlayback(app);
