@@ -404,6 +404,7 @@ typedef struct MrApp {
 	int             rbVisibleToController[RB_CONTROLLER_MAX_STATIONS];
 	int             rbVisibleCount;
 	int             rbShowHttps;
+	int             rbSchemeMode;
 	int             rbShowingFavourites;
 	int             rbFavouriteCount;
 	int             rbSelectedFavourite;
@@ -463,6 +464,7 @@ typedef struct MrApp {
 	MrStreamState streamState;
 	char  currentStreamUrl[MR_MAX_PATH];
 	char  queuedStreamUrl[MR_MAX_PATH];
+	int   lastCompletedWasHttps;
 	char  currentStreamCodec[16];
 	unsigned long activeChildCount;
 	unsigned long activeStreamSessions;
@@ -978,12 +980,14 @@ static int MrSetRadioMetadata(MrApp *app, int updateStatus)
 			sprintf(status, "Stream dropped - reconnecting");
 		else if (radioStatus == RADIO_STATUS_CONNECTING)
 			sprintf(status, "Connecting stream...");
-		else if (radioStatus == RADIO_STATUS_PLAYING) {
-			RADIO_DBG(printf("radio-ui: UI state set to PLAYING\n");)
+		else if (radioStatus == RADIO_STATUS_PLAYING && gGuiPlaybackStatus.decodedFrames > 0) {
+			RADIO_DBG(printf("radio-ui: UI state set to PLAYING after first audio frame\n");)
 			sprintf(status, "Streaming");
 		}
+		else if (radioStatus == RADIO_STATUS_BUFFERING || radioStatus == RADIO_STATUS_PLAYING)
+			sprintf(status, "Buffering stream...");
 		else
-			sprintf(status, "Streaming");
+			sprintf(status, "Connecting stream...");
 		updates += SetReadonlyString(app->statusGad, app->win, app->shownStatus,
 			sizeof(app->shownStatus), status);
 	}
@@ -1460,14 +1464,18 @@ static void FinalizePlayback(MrApp *app)
 		return;
 	RADIO_DBG(printf("radio-guard: before FinalizePlayback\n");)
 	MrCopyVolatileString(radioError, sizeof(radioError), gGuiPlaybackStatus.radioError);
-	failedStart = (!stoppedByUser && gGuiPlaybackStatus.radioStatus == RADIO_STATUS_ERROR &&
-		gGuiPlaybackStatus.decodedFrames == 0);
+	failedStart = (!stoppedByUser && MrIsRadioInput(gPlayer.url) && gGuiPlaybackStatus.decodedFrames == 0 &&
+		(gGuiPlaybackStatus.radioStatus == RADIO_STATUS_ERROR ||
+		 gGuiPlaybackStatus.radioStatus == RADIO_STATUS_CONNECTING ||
+		 gGuiPlaybackStatus.radioStatus == RADIO_STATUS_BUFFERING ||
+		 gGuiPlaybackStatus.radioStatus == RADIO_STATUS_CLOSED));
 	SafeCopy(app->lastChildExitReason, sizeof(app->lastChildExitReason),
 		stoppedByUser ? "stop" : (failedStart ? "error" : "normal"));
 	SafeCopy(app->lastChildError, sizeof(app->lastChildError),
 		failedStart ? (radioError[0] ? radioError : "radio stream failed") : "");
 	app->lastChildEverPlayed = gGuiPlaybackStatus.decodedFrames > 0 ? 1 : 0;
 	app->lastChildFirstData = gGuiPlaybackStatus.radioBufferedBytes > 0 ? 1 : 0;
+	app->lastCompletedWasHttps = (gPlayer.url[0] && strncmp(gPlayer.url, "https://", 8) == 0);
 	app->playbackActive = 0;
 	app->playbackDonePending = 0;
 	app->stoppedByUser = 0;
@@ -1506,10 +1514,6 @@ static void FinalizePlayback(MrApp *app)
 	if (app->queuedStreamUrl[0]) {
 		app->queuedStreamUrl[0] = '\0';
 		RadioSetStatus(app, "Starting queued stream...");
-#if defined(AMIGA_M68K)
-		RADIO_DBG(printf("radio-done: Delay before queued stream start after parent done received\n");)
-		Delay(3);
-#endif
 		RadioDoProbeAndPlay(app);
 		return;
 	}
@@ -3093,7 +3097,7 @@ enum {
 	RB_GID_ADD_FAV,
 	RB_GID_FAVOURITES,
 	RB_GID_CLOSE,
-	RB_GID_SHOW_HTTPS,
+	RB_GID_SCHEME,
 	RB_GID_LIMIT,
 	RB_GID_BITRATE,
 	RB_GID_STATUS
@@ -3104,6 +3108,7 @@ static const int kRadioSearchLimits[] = { 10, 25, 50 };
 static STRPTR kRadioSearchLimitLabels[] = { (STRPTR)"10", (STRPTR)"25", (STRPTR)"50", NULL };
 static const int kRadioBitrateMax[] = { -1, 56, 64, 96, 128 };
 static STRPTR kRadioBitrateLabels[] = { (STRPTR)"Any", (STRPTR)"<=56", (STRPTR)"<=64", (STRPTR)"<=96", (STRPTR)"<=128", NULL };
+static STRPTR kRadioSchemeLabels[] = { (STRPTR)"HTTP", (STRPTR)"HTTPS", (STRPTR)"All", NULL };
 
 static const char *RadioBitrateFilterLabel(int max_bitrate)
 {
@@ -3144,15 +3149,28 @@ static void RadioSetStatus(MrApp *app, const char *text)
 	}
 }
 
-static int RadioIsHttpStation(const RadioBrowserStation *st)
+static int RadioStationMatchesScheme(MrApp *app, const RadioBrowserStation *st)
 {
 	const char *url = rb_station_play_url(st);
+	int isHttp, isHttps;
 	if (!url) return 0;
-	if (strncmp(url, "http://", 7) == 0) return 1;
+	isHttp = strncmp(url, "http://", 7) == 0;
+	isHttps = strncmp(url, "https://", 8) == 0;
+	if (app && app->rbSchemeMode == 1) {
 #if defined(HAVE_AMISSL)
-	if (strncmp(url, "https://", 8) == 0) return 1;
+		return isHttps;
+#else
+		return 0;
 #endif
-	return 0;
+	}
+	if (app && app->rbSchemeMode == 2) {
+#if defined(HAVE_AMISSL)
+		return isHttp || isHttps;
+#else
+		return isHttp;
+#endif
+	}
+	return isHttp;
 }
 
 static void RadioRefreshResults(MrApp *app)
@@ -3188,7 +3206,7 @@ static void RadioRefreshResults(MrApp *app)
 			if (!st) continue;
 			url = rb_station_play_url(st);
 			reason = "show";
-			if (!app->rbShowHttps && !RadioIsHttpStation(st)) { reason = "hidden_https"; }
+			if (!RadioStationMatchesScheme(app, st)) { reason = "hidden_scheme"; }
 			else if (app->rbController.max_bitrate > 0 && st->bitrate == 0) { reason = "hidden_bitrate_unknown"; }
 			else if (app->rbController.max_bitrate > 0 && st->bitrate > app->rbController.max_bitrate) { reason = "hidden_bitrate"; }
 #ifdef MINIAMP3_DEBUG
@@ -3278,7 +3296,7 @@ static void RadioDoSearch(MrApp *app)
 		if (app->rbVisibleCount == 0 && app->rbController.raw_station_count == 0)
 			sprintf(msg, "No stations found");
 		else
-			sprintf(msg, "Found %d stations, showing %d HTTP playable (%d hidden)",
+			sprintf(msg, "Found %d stations, showing %d playable (%d hidden)",
 				app->rbController.raw_station_count, app->rbVisibleCount, hidden < 0 ? 0 : hidden);
 		RadioSetStatus(app, msg);
 	}
@@ -3460,7 +3478,7 @@ static void RadioDoProbeAndPlay(MrApp *app)
 	}
 #endif
 	memset(&info, 0, sizeof(info));
-	RadioSetStatus(app, "Probing selected stream...");
+	RadioSetStatus(app, "Connecting...");
 	RADIO_DBG(printf("radio-ui: new stream probe start url=\"%s\"\n", rb_station_play_url(st));)
 	rc = rb_controller_probe_selected(&app->rbController, &info, peek, (int)sizeof(peek), &peekLen);
 	RADIO_DBG(printf("radio-ui: new stream probe result rc=%d final=\"%s\" content=\"%s\" codec=%d redirects=%d\n",
@@ -3478,12 +3496,20 @@ static void RadioDoProbeAndPlay(MrApp *app)
 		RadioSetStatus(app, "Stream probe did not return a playable URL.");
 		return;
 	}
+#if defined(AMIGA_M68K)
+	if (app->lastCompletedWasHttps && strncmp(info.final_url, "https://", 8) == 0 &&
+		!app->playbackActive && !app->playbackDonePending && !PlaybackProcessStillExists()) {
+		RADIO_DBG(printf("radio-done: Delay(4) between fully completed HTTPS sessions before starting next HTTPS URL\n");)
+		RadioSetStatus(app, "Waiting briefly before next HTTPS stream...");
+		Delay(4);
+	}
+#endif
 	SafeCopy(app->inputName, sizeof(app->inputName), info.final_url);
 	app->haveRadioHostAddr = info.have_host_addr;
 	app->radioHostAddrBe = info.host_addr_be;
 	UpdateFileGadget(app);
 	RefreshFileInfoAndTags(app);
-	sprintf(msg, "Starting: %.120s | type: %.48s | icy-name: %.64s | icy-br: %d | redirects: %d",
+	sprintf(msg, "Buffering: %.120s | type: %.48s | icy-name: %.64s | icy-br: %d | redirects: %d",
 		info.final_url, info.content_type, info.icy_name, info.icy_br, info.redirect_count);
 	RadioSetStatus(app, msg);
 	RADIO_DBG(printf("radio-ui: new stream start url=\"%s\"\n", info.final_url);)
@@ -3525,11 +3551,8 @@ static void OpenRadioWindow(MrApp *app)
 	static STRPTR codecs[] = { (STRPTR)"All", (STRPTR)"MP3", (STRPTR)"AAC", (STRPTR)"AAC+", NULL };
 	if (app->rbWin || !app->win || !GadToolsBase) return;
 	rb_controller_init(&app->rbController);
-	#if defined(HAVE_AMISSL)
-	app->rbShowHttps = TRUE;
-#else
 	app->rbShowHttps = FALSE;
-#endif
+	app->rbSchemeMode = 0; /* Default to HTTP; HTTPS remains optional/heavier on real hardware. */
 	app->rbShowingFavourites = FALSE;
 	app->rbSelectedFavourite = -1;
 	app->rbVisibleCount = 0;
@@ -3552,8 +3575,8 @@ static void OpenRadioWindow(MrApp *app)
 	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)codecs, TAG_DONE); if (!gad) goto fail;
 	ng.ng_LeftEdge = 88; ng.ng_TopEdge = 52; ng.ng_Width = 220; ng.ng_GadgetText = (UBYTE *)"Country";
 	ng.ng_GadgetID = RB_GID_COUNTRY; gad = CreateGadget(STRING_KIND, gad, &ng, GTST_MaxChars, RB_MAX_COUNTRY, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 340; ng.ng_TopEdge = 52; ng.ng_Width = 140; ng.ng_GadgetText = (UBYTE *)"Show HTTPS stations"; ng.ng_GadgetID = RB_GID_SHOW_HTTPS; ng.ng_Flags = PLACETEXT_RIGHT;
-	gad = CreateGadget(CHECKBOX_KIND, gad, &ng, GTCB_Checked, FALSE, GA_RelVerify, TRUE, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 340; ng.ng_TopEdge = 52; ng.ng_Width = 140; ng.ng_GadgetText = (UBYTE *)"Scheme"; ng.ng_GadgetID = RB_GID_SCHEME; ng.ng_Flags = PLACETEXT_LEFT;
+	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)kRadioSchemeLabels, GTCY_Active, 0, GA_RelVerify, TRUE, TAG_DONE); if (!gad) goto fail;
 	ng.ng_LeftEdge = 88; ng.ng_TopEdge = 80; ng.ng_Width = 90; ng.ng_GadgetText = (UBYTE *)"Limit"; ng.ng_GadgetID = RB_GID_LIMIT; ng.ng_Flags = PLACETEXT_LEFT;
 	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)kRadioSearchLimitLabels, GTCY_Active, 1, TAG_DONE); if (!gad) goto fail;
 	ng.ng_LeftEdge = 288; ng.ng_TopEdge = 80; ng.ng_Width = 90; ng.ng_GadgetText = (UBYTE *)"Max kbps"; ng.ng_GadgetID = RB_GID_BITRATE; ng.ng_Flags = PLACETEXT_LEFT;
@@ -3620,9 +3643,11 @@ static void HandleRadioWindow(MrApp *app)
 				RadioAddFavourite(app);
 			else if (gid == RB_GID_FAVOURITES)
 				RadioToggleFavourites(app);
-			else if (gid == RB_GID_SHOW_HTTPS) {
-				app->rbShowHttps = app->rbShowHttps ? FALSE : TRUE;
-				GT_SetGadgetAttrs(gad, app->rbWin, NULL, GTCB_Checked, app->rbShowHttps, TAG_DONE);
+			else if (gid == RB_GID_SCHEME) {
+				ULONG active = 0;
+				GT_GetGadgetAttrs(gad, app->rbWin, NULL, GTCY_Active, (ULONG)&active, TAG_DONE);
+				app->rbSchemeMode = ClampInt((int)active, 0, 2);
+				app->rbShowHttps = (app->rbSchemeMode != 0);
 				RadioRefreshResults(app);
 			}
 			else if (gid == RB_GID_CLOSE) {

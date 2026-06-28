@@ -159,6 +159,7 @@ struct RadioStream {
     unsigned int cleanup_count, stop_request_count, task_exit_count;
     unsigned int ssl_free_count, ssl_ctx_free_count, socket_close_count, decoder_free_count;
     unsigned int stream_buffer_free_count, audio_buffer_free_count, amissl_cleanup_count;
+    unsigned int sslFreed, ctxFreed, socketClosed, cleanupDone;
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     SSL *ssl;
     SSL_CTX *ctx;
@@ -267,6 +268,7 @@ static void radio_reset_session_state(RadioStream *rs)
     rs->metaLen = rs->metaGot = rs->metaLeft = 0;
     rs->reconnectAttempts = rs->reconnectDelay = rs->zeroBytePumps = rs->startPumps = 0;
     rs->everPlayed = rs->firstDataLogged = rs->haveHostAddr = 0;
+    rs->sslFreed = rs->ctxFreed = rs->socketClosed = rs->cleanupDone = 0;
 }
 
 
@@ -450,11 +452,11 @@ static int radio_ssl_connect(RadioStream *rs)
     method = SSLv23_client_method();
     if (!method) { set_error(rs, "AmiSSL init failed"); return -1; }
     rs->ctx = SSL_CTX_new(method);
-    if (rs->ctx) { radio_active_ssl_ctx_count++; RADIO_DBG(printf("radio-resource: session=%lu SSL_CTX allocated active_ssl_ctx_count=%ld\n", rs->session_id, radio_active_ssl_ctx_count)); }
+    if (rs->ctx) { rs->ctxFreed = 0; radio_active_ssl_ctx_count++; RADIO_DBG(printf("radio-resource: session=%lu SSL_CTX allocated active_ssl_ctx_count=%ld\n", rs->session_id, radio_active_ssl_ctx_count)); }
     if (!rs->ctx) { set_error(rs, "AmiSSL init failed"); return -1; }
     SSL_CTX_set_verify(rs->ctx, SSL_VERIFY_NONE, NULL);
     rs->ssl = SSL_new(rs->ctx);
-    if (rs->ssl) { radio_active_ssl_count++; RADIO_DBG(printf("radio-resource: session=%lu SSL allocated active_ssl_count=%ld\n", rs->session_id, radio_active_ssl_count)); }
+    if (rs->ssl) { rs->sslFreed = 0; radio_active_ssl_count++; RADIO_DBG(printf("radio-resource: session=%lu SSL allocated active_ssl_count=%ld\n", rs->session_id, radio_active_ssl_count)); }
     if (!rs->ssl) { radio_ssl_close_stream(rs); set_error(rs, "AmiSSL init failed"); return -1; }
     set_fd_ok = SSL_set_fd(rs->ssl, (int)rs->sock);
     if (!set_fd_ok) { RADIO_DBG(printf("radio-tls: SSL_set_fd failed session=%lu fd=%ld ssl=%p ctx=%p\n", rs->session_id, (long)rs->sock, (void *)rs->ssl, (void *)rs->ctx);); radio_ssl_close_stream(rs); set_error(rs, "TLS handshake failed"); return -1; }
@@ -478,10 +480,11 @@ static void radio_ssl_close_stream(RadioStream *rs)
     } else {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_shutdown skipped ssl=%p fd=%ld handshake=%d\n", (void *)rs->ssl, (long)rs->sock, rs->sslHandshakeDone));
     }
-    if (rs->ssl) {
-        RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_free start ssl=%p\n", (void *)rs->ssl));
+    if (rs->ssl && !rs->sslFreed) {
+        RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_free start session=%lu ssl=%p ctx=%p fd=%ld\n", rs->session_id, (void *)rs->ssl, (void *)rs->ctx, (long)rs->sock));
         rs->ssl_free_count++;
         SSL_free(rs->ssl);
+        rs->sslFreed = 1;
         if (radio_active_ssl_count > 0) radio_active_ssl_count--;
         rs->ssl = NULL;
         rs->sslHandshakeDone = 0;
@@ -489,10 +492,11 @@ static void radio_ssl_close_stream(RadioStream *rs)
     } else {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_free skipped\n"));
     }
-    if (rs->ctx) {
-        RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_CTX_free start ctx=%p\n", (void *)rs->ctx));
+    if (rs->ctx && !rs->ctxFreed) {
+        RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_CTX_free start session=%lu ctx=%p fd=%ld\n", rs->session_id, (void *)rs->ctx, (long)rs->sock));
         rs->ssl_ctx_free_count++;
         SSL_CTX_free(rs->ctx);
+        rs->ctxFreed = 1;
         if (radio_active_ssl_ctx_count > 0) radio_active_ssl_ctx_count--;
         rs->ctx = NULL;
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_CTX_free done\n"));
@@ -698,7 +702,7 @@ static int connect_http(RadioStream *rs){
         rs->haveHostAddr=1;
     }
     if (radio_is_stopping(rs)) return -1;
-    rs->sock=socket(AF_INET,SOCK_STREAM,0); if(rs->sock!=RADIO_INVALID_SOCKET){ radio_open_socket_count++; radio_playback_open_socket_count++; RADIO_DBG(printf("radio-socket: playback socket opened session=%lu host=%s fd=%ld open_socket_count=%ld playback_open_socket_count=%ld\n", rs->session_id, rs->host, (long)rs->sock, radio_open_socket_count, radio_playback_open_socket_count);) } if(rs->sock==RADIO_INVALID_SOCKET){ radio_log_socket_failure(rs, "playback", "socket"); set_error(rs,"Cannot create socket - TCP stack may still be releasing previous stream"); return -1; }
+    rs->sock=socket(AF_INET,SOCK_STREAM,0); if(rs->sock!=RADIO_INVALID_SOCKET){ rs->socketClosed = 0; radio_open_socket_count++; radio_playback_open_socket_count++; RADIO_DBG(printf("radio-socket: playback socket opened session=%lu host=%s fd=%ld open_socket_count=%ld playback_open_socket_count=%ld\n", rs->session_id, rs->host, (long)rs->sock, radio_open_socket_count, radio_playback_open_socket_count);) } if(rs->sock==RADIO_INVALID_SOCKET){ radio_log_socket_failure(rs, "playback", "socket"); set_error(rs,"Cannot create socket - TCP stack may still be releasing previous stream"); return -1; }
     /* Go non-blocking BEFORE connect so the connect never stalls the machine. */
     radio_set_nonblocking(rs->sock);
     memset(&sa,0,sizeof(sa)); sa.sin_family=AF_INET; sa.sin_port=htons((unsigned short)rs->port); sa.sin_addr=rs->hostAddr;
@@ -725,7 +729,7 @@ static void close_current_socket(RadioStream *rs)
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     radio_ssl_close_stream(rs);
 #endif
-    if (rs->sock != RADIO_INVALID_SOCKET) {
+    if (rs->sock != RADIO_INVALID_SOCKET && !rs->socketClosed) {
         long closing_fd = (long)rs->sock;
         long before_all = radio_open_socket_count;
         long before_playback = radio_playback_open_socket_count;
@@ -733,6 +737,7 @@ static void close_current_socket(RadioStream *rs)
         rs->socket_close_count++;
         radio_close_socket(rs->sock);
         rs->sock = RADIO_INVALID_SOCKET;
+        rs->socketClosed = 1;
         if (radio_open_socket_count > 0) radio_open_socket_count--;
         if (radio_playback_open_socket_count > 0) radio_playback_open_socket_count--;
         RADIO_DBG(printf("radio-socket: playback socket close session=%lu fd=%ld open_socket_count %ld->%ld playback_open_socket_count %ld->%ld\n", rs->session_id, closing_fd, before_all, radio_open_socket_count, before_playback, radio_playback_open_socket_count););
@@ -912,6 +917,7 @@ void Radio_Close(RadioStream *rs)
         rs->contentType, rs->host, rs->path, rs->error));
     RADIO_STOP_DEBUG_PRINTF(("radio-stop: Radio_Close entered session=%lu\n", rs->session_id));
     rs->cleanup_count++;
+    rs->cleanupDone = 1;
     if (rs->cleanup_count > 1) radio_duplicate_cleanup_warning(rs, "session cleanup", rs->cleanup_count);
     Radio_RequestStop(rs);
     close_current_socket(rs);
@@ -1010,9 +1016,13 @@ int Radio_Pump(RadioStream *rs)
     wb = 0;
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     if (rs->isSSL && rs->ssl) {
-        n = (int)SSL_read(rs->ssl, (char *)b, sizeof(b));
-        if (n < 0) {
+        int requested = (int)sizeof(b);
+        n = (int)SSL_read(rs->ssl, (char *)b, requested);
+        RADIO_DBG(printf("radio-ssl-read: session=%lu ssl=%p ctx=%p fd=%ld dst=%p dst_cap=%d requested=%d returned=%d fill=%lu ring_free=%lu\n",
+            rs->session_id, (void *)rs->ssl, (void *)rs->ctx, (long)rs->sock, (void *)b, (int)sizeof(b), requested, n, rs->used, rs->size > rs->used ? rs->size - rs->used : 0));
+        if (n <= 0) {
             int e = SSL_get_error(rs->ssl, n);
+            RADIO_DBG(printf("radio-ssl-read: session=%lu SSL_get_error=%d ret=%d fd=%ld\n", rs->session_id, e, n, (long)rs->sock));
             if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) wb = 1;
         }
     } else

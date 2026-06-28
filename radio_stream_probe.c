@@ -871,9 +871,17 @@ static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
                 return RB_STREAM_PROBE_ERR_HEADERS_TOO_BIG;
             }
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-            if (transport.isSSL && transport.ssl)
+            if (transport.isSSL && transport.ssl) {
+                int capacity = RB_PROBE_HEADER_BUF - total;
+                if (want > capacity) want = capacity;
                 n = (int)SSL_read(transport.ssl, (char *)header_buf + total, want);
-            else
+                RADIO_DBG(printf("rb-probe-ssl-read: session=%lu ssl=%p ctx=%p fd=%ld dst=%p dst_cap=%d requested=%d returned=%d fill=%d ring_free=0\n",
+                    transport.session_id, (void *)transport.ssl, (void *)transport.ctx, (long)transport.sock, (void *)(header_buf + total), capacity, want, n, total));
+                if (n <= 0) {
+                    int ssl_err = SSL_get_error(transport.ssl, n);
+                    RADIO_DBG(printf("rb-probe-ssl-read: session=%lu SSL_get_error=%d ret=%d fd=%ld\n", transport.session_id, ssl_err, n, (long)transport.sock));
+                }
+            } else
 #endif
             n = (int)recv(transport.sock, (char *)header_buf + total, want, 0);
             if (n < 0) {
@@ -936,9 +944,17 @@ static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
         want2 = peek_buf_size - *peek_len;
         if (want2 > RB_PROBE_READ_CHUNK) want2 = RB_PROBE_READ_CHUNK;
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-        if (transport.isSSL && transport.ssl)
+        if (transport.isSSL && transport.ssl) {
+            int capacity2 = peek_buf_size - *peek_len;
+            if (want2 > capacity2) want2 = capacity2;
             n2 = (int)SSL_read(transport.ssl, (char *)peek_buf + *peek_len, want2);
-        else
+            RADIO_DBG(printf("rb-probe-ssl-read: session=%lu ssl=%p ctx=%p fd=%ld dst=%p dst_cap=%d requested=%d returned=%d fill=%d ring_free=0\n",
+                transport.session_id, (void *)transport.ssl, (void *)transport.ctx, (long)transport.sock, (void *)(peek_buf + *peek_len), capacity2, want2, n2, *peek_len));
+            if (n2 <= 0) {
+                int ssl_err2 = SSL_get_error(transport.ssl, n2);
+                RADIO_DBG(printf("rb-probe-ssl-read: session=%lu SSL_get_error=%d ret=%d fd=%ld\n", transport.session_id, ssl_err2, n2, (long)transport.sock));
+            }
+        } else
 #endif
         n2 = (int)recv(transport.sock, (char *)peek_buf + *peek_len, want2, 0);
         if (n2 < 0) {
