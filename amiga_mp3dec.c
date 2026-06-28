@@ -8926,14 +8926,18 @@ static int AmigaGenericInputPlay(const char *sourceName, InputSource *input, con
 		opt, stats, NULL);
 
 done_handle:
+	if (input && input->radio) printf("radio-teardown: closing decoder handle=%p\n", (void *)handle);
 	mod.ops->close(handle);
 done_module:
+	if (input && input->radio) printf("radio-teardown: unloading decoder module\n");
 	UnloadDecoderModule(&mod);
 	if (hasPrefetch)
 		DecModPrefetchFree(&prefetch);
 done_input:
+	if (input && input->radio) printf("radio-teardown: InputSourceClose (radio close) start\n");
 	if (closeInput)
 		InputSourceClose(input);
+	if (input && input->radio) printf("radio-teardown: AmigaGenericInputPlay finished ret=%d\n", ret);
 	return ret ? 1 : 0;
 }
 
@@ -9783,8 +9787,11 @@ int main(int argc, char **argv)
 			const char *radioExt = RadioDecoderExtFromUrlOrType(opt.inName, Radio_GetContentType(radio));
 			if (radioExt && StrCaseCmp(radioExt, "mp3") != 0) {
 				int gret = AmigaGenericInputPlay(opt.inName, &input, radioExt, &opt, &stats, 1);
+				printf("radio-teardown: generic(AAC/FLAC) play returned, freeing resolvedOutName=%p\n", (void *)resolvedOutName);
 				free(resolvedOutName);
+				printf("radio-teardown: resolvedOutName freed, freeing normalized args\n");
 				AmigaFreeNormalizedArgs(&normalized);
+				printf("radio-teardown: normalized args freed, returning gret=%d from main\n", gret);
 				return gret;
 			}
 		}
@@ -10121,13 +10128,18 @@ int main(int argc, char **argv)
 #ifndef AMIGA_M68K
 		signal(SIGINT, SIG_DFL);
 #endif
+		printf("radio-teardown: MP3 path MP3FreeDecoder start\n");
 		MP3FreeDecoder(decoder);
+		printf("radio-teardown: MP3 path InputSourceClose start\n");
 		InputSourceClose(&input);
 		CloseInputFile(&infile, opt.debugCleanup);
 		gTiming = NULL;
 		MP3SetDecodeCoreProfileEnabled(0);
+		printf("radio-teardown: MP3 path freeing resolvedOutName=%p\n", (void *)resolvedOutName);
 		free(resolvedOutName);
+		printf("radio-teardown: MP3 path freeing normalized args\n");
 		AmigaFreeNormalizedArgs(&normalized);
+		printf("radio-teardown: MP3 path returning from main playErr=%d\n", playErr);
 		return playErr == 0 ? 0 : 1;
 	}
 

@@ -1042,7 +1042,9 @@ static void PlaybackEntry(void)
 	if (!earlyStop && !gPlayer.stopRequested && !gPlaybackInterrupted) {
 		ranDecoder = 1;
 		gMiniAmp3EmbeddedPlayback = 1;
+		printf("radio-teardown: child entering HelixAmp3CliMain\n");
 		HelixAmp3CliMain(gPlayer.argc, gPlayer.argv);
+		printf("radio-teardown: child returned from HelixAmp3CliMain\n");
 		gMiniAmp3EmbeddedPlayback = 0;
 	}
 
@@ -1054,8 +1056,10 @@ static void PlaybackEntry(void)
 	donePort = gDonePort;
 	if (donePort) {
 		gDoneMsg.mn_Node.ln_Type = NT_MESSAGE;
+		printf("radio-teardown: child posting done message\n");
 		PutMsg(donePort, &gDoneMsg);
 	}
+	printf("radio-teardown: child PlaybackEntry exiting (task will terminate)\n");
 }
 
 static void StartPlayback(MrApp *app)

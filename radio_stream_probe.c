@@ -730,7 +730,27 @@ const char *rb_probe_error_text(int rc)
     }
 }
 
+static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
+                        unsigned char *peek_buf, int peek_buf_size, int *peek_len);
+
+/* Public entry point.  Wraps the implementation so the probe's per-task AmiSSL
+ * and socket state is always torn down, no matter which exit path the impl took.
+ * The many error returns inside the impl (server closed mid-handshake, recv
+ * error, non-2xx status, redirect failures, HLS, ...) used to skip cleanup,
+ * leaving the main/GUI task's AmiSSL session half-open after a flaky stream.
+ * The next probe then short-circuited on that stale session and could wedge the
+ * whole machine ("play stuck" right after a probe that returned an error). */
 int rb_probe_stream_url(const char *url, RbStreamInfo *info,
+                        unsigned char *peek_buf, int peek_buf_size, int *peek_len)
+{
+    int rc = rb_probe_stream_url_impl(url, info, peek_buf, peek_buf_size, peek_len);
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+    rb_probe_cleanup_amissl();
+#endif
+    return rc;
+}
+
+static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
                         unsigned char *peek_buf, int peek_buf_size, int *peek_len)
 {
     RbProbeUrl parsed;
