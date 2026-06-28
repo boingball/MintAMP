@@ -11,6 +11,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
 
 #if defined(AMIGA_M68K)
 #include <exec/types.h>
@@ -20,6 +21,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netdb.h>
+#include <sys/ioctl.h>
 #ifndef RB_HTTP_EXTERNAL_SOCKETBASE
 /* Weak so this module can link either standalone or beside radio_stream.c,
  * which also provides SocketBase for bsdsocket.library builds. */
@@ -34,6 +36,8 @@ struct Library *SocketBase __attribute__((weak));
 #include <netinet/in.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/select.h>
+#include <fcntl.h>
 #define RB_HTTP_SOCKET int
 #define RB_HTTP_INVALID_SOCKET (-1)
 #define rb_http_close_socket(s) close(s)
@@ -42,6 +46,8 @@ struct Library *SocketBase __attribute__((weak));
 #define RB_HTTP_PORT 80
 #define RB_HTTP_READ_CHUNK 512
 #define RB_HTTP_MAX_REQUEST 512
+#define RB_HTTP_CONNECT_TIMEOUT_SEC 8
+#define RB_HTTP_IO_TIMEOUT_SEC 8
 
 typedef struct RbHttpTransport {
     RB_HTTP_SOCKET sock;
@@ -57,6 +63,40 @@ static void rb_http_release_socketbase(void)
     }
 }
 #endif
+
+
+static int rb_http_set_nonblocking(RB_HTTP_SOCKET sock, int enabled)
+{
+#if defined(AMIGA_M68K)
+    long mode = enabled ? 1 : 0;
+    return IoctlSocket(sock, FIONBIO, (char *)&mode);
+#else
+    int flags = fcntl(sock, F_GETFL, 0);
+    if (flags < 0) return -1;
+    if (enabled) flags |= O_NONBLOCK;
+    else flags &= ~O_NONBLOCK;
+    return fcntl(sock, F_SETFL, flags);
+#endif
+}
+
+static int rb_http_wait_socket(RB_HTTP_SOCKET sock, int for_write, int timeout_sec)
+{
+    fd_set rfds;
+    fd_set wfds;
+    struct timeval tv;
+    int rc;
+
+    FD_ZERO(&rfds);
+    FD_ZERO(&wfds);
+    if (for_write) FD_SET(sock, &wfds);
+    else FD_SET(sock, &rfds);
+    tv.tv_sec = timeout_sec;
+    tv.tv_usec = 0;
+    rc = select((int)sock + 1, for_write ? NULL : &rfds, for_write ? &wfds : NULL, NULL, &tv);
+    if (rc == 0) return RB_HTTP_ERR_TIMEOUT;
+    if (rc < 0) return for_write ? RB_HTTP_ERR_CONNECT : RB_HTTP_ERR_READ;
+    return 0;
+}
 
 static int rb_http_append(char *out, int out_size, int *pos, const char *text)
 {
@@ -99,6 +139,7 @@ static int rb_http_transport_open(RbHttpTransport *transport, const char *host, 
 {
     struct hostent *he;
     struct sockaddr_in sa;
+    int rc;
 
     if (!transport || !host) return RB_HTTP_ERR_BAD_ARG;
     transport->sock = RB_HTTP_INVALID_SOCKET;
@@ -131,13 +172,17 @@ static int rb_http_transport_open(RbHttpTransport *transport, const char *host, 
     sa.sin_port = htons((unsigned short)port);
     memcpy(&sa.sin_addr, he->h_addr_list[0], (size_t)he->h_length);
 
+    rb_http_set_nonblocking(transport->sock, 1);
     if (connect(transport->sock, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
-        rb_http_close_socket(transport->sock);
-        transport->sock = RB_HTTP_INVALID_SOCKET;
+        rc = rb_http_wait_socket(transport->sock, 1, RB_HTTP_CONNECT_TIMEOUT_SEC);
+        if (rc < 0) {
+            rb_http_close_socket(transport->sock);
+            transport->sock = RB_HTTP_INVALID_SOCKET;
 #if defined(AMIGA_M68K) && !defined(RB_HTTP_EXTERNAL_SOCKETBASE)
-        rb_http_release_socketbase();
+            rb_http_release_socketbase();
 #endif
-        return RB_HTTP_ERR_CONNECT;
+            return rc;
+        }
     }
     return 0;
 }
@@ -163,6 +208,10 @@ static int rb_http_transport_send_all(RbHttpTransport *transport,
     sent = 0;
     while (sent < len) {
         int n;
+        {
+            int wrc = rb_http_wait_socket(transport->sock, 1, RB_HTTP_IO_TIMEOUT_SEC);
+            if (wrc < 0) return wrc;
+        }
         n = (int)send(transport->sock, (char *)buf + sent, len - sent, 0);
         if (n <= 0) return RB_HTTP_ERR_SEND;
         sent += n;
@@ -226,6 +275,12 @@ int rb_http_get_json(const char *host, const char *path,
 
         want = out_body_size - 1 - len;
         if (want > RB_HTTP_READ_CHUNK) want = RB_HTTP_READ_CHUNK;
+        rc = rb_http_wait_socket(transport.sock, 0, RB_HTTP_IO_TIMEOUT_SEC);
+        if (rc < 0) {
+            rb_http_transport_close(&transport);
+            out_body[0] = '\0';
+            return rc;
+        }
         n = (int)recv(transport.sock, out_body + len, want, 0);
         if (n < 0) {
             rb_http_transport_close(&transport);

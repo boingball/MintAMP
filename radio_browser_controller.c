@@ -7,6 +7,7 @@
 
 #include "radio_browser_controller.h"
 #include "radio_browser_url.h"
+#include "radio_browser_http.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -96,7 +97,14 @@ int rb_controller_search(RadioBrowserController *controller)
             rb_controller_set_error(controller, "Parse failed");
             return RB_CONTROLLER_ERR_PARSE_FAILED;
         }
-        rb_controller_set_error(controller, "Search failed");
+        if (count == RB_HTTP_ERR_TIMEOUT) {
+            rb_controller_set_error(controller, "Search failed: connection timed out");
+        } else if (count == RB_HTTP_ERR_DNS || count == RB_HTTP_ERR_CONNECT ||
+                   count == RB_HTTP_ERR_SEND || count == RB_HTTP_ERR_READ) {
+            rb_controller_set_error(controller, "Search failed: network unavailable");
+        } else {
+            rb_controller_set_error(controller, "Search failed");
+        }
         return RB_CONTROLLER_ERR_SEARCH_FAILED;
     }
 

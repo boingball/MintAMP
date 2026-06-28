@@ -453,6 +453,7 @@ typedef struct HelixAmp3Gui {
 	int             rbSelectedFavourite;
 	char            rbFavouriteNames[HELIXAMP3_RADIO_FAV_MAX][RB_MAX_NAME];
 	char            rbFavouriteUrls[HELIXAMP3_RADIO_FAV_MAX][RB_MAX_URL];
+	char            rbStatusText[128];
 	struct VisualInfo *rbVisualInfo;
 	RadioBrowserController rbController;
 	struct Menu *menuStrip;
@@ -544,6 +545,7 @@ typedef struct HelixAmp3Player {
 
 static void UpdateTagDisplay(HelixAmp3Gui *gui);
 static void SelectInternetStream(HelixAmp3Gui *gui, const char *url);
+static void RadioSetStatus(HelixAmp3Gui *app, const char *text);
 static void CloseRadioWindow(HelixAmp3Gui *gui);
 static void OpenRadioWindow(HelixAmp3Gui *gui);
 static void HandleRadioWindow(HelixAmp3Gui *gui);
@@ -1766,11 +1768,12 @@ static void SetRadioFailureStatus(HelixAmp3Gui *gui, const char *fallback)
 	CopyVolatileGuiString(radioError, sizeof(radioError), gGuiPlaybackStatus.radioError);
 	sprintf(status, "Stream failed: %s", radioError[0] ? radioError : fallback);
 	SetStatus(gui, status);
+	RadioSetStatus(gui, status);
 }
 
 static void UpdateRadioTagDisplay(HelixAmp3Gui *gui)
 {
-	char streamTitle[128], station[128], genre[64], contentType[64], artist[64], title[64], info[128], status[128];
+	char streamTitle[128], station[128], genre[64], contentType[64], artist[64], title[64], info[128], status[160];
 	CopyVolatileGuiString(streamTitle, sizeof(streamTitle), gGuiPlaybackStatus.radioTitle);
 	CopyVolatileGuiString(station, sizeof(station), gGuiPlaybackStatus.radioStationName);
 	CopyVolatileGuiString(genre, sizeof(genre), gGuiPlaybackStatus.radioGenre);
@@ -1798,8 +1801,16 @@ static void UpdateRadioTagDisplay(HelixAmp3Gui *gui)
 		SetRadioFailureStatus(gui, "radio error");
 		return;
 	}
-	sprintf(status, "%s... buffer %ld bytes", Radio_StatusText((RadioStatus)gGuiPlaybackStatus.radioStatus), (long)gGuiPlaybackStatus.radioBufferedBytes);
-	SetStatus(gui, status);
+	if (gGuiPlaybackStatus.phase == GUIPLAY_PHASE_PLAYING ||
+		gGuiPlaybackStatus.radioStatus == RADIO_STATUS_PLAYING) {
+		char streamUrl[128];
+		CopyVolatileGuiString(streamUrl, sizeof(streamUrl), gGuiPlaybackStatus.radioStreamUrl);
+		sprintf(status, "Stream: %.140s", station[0] ? station : (streamUrl[0] ? streamUrl : gui->inputName));
+		SetStatus(gui, "Streaming");
+		RadioSetStatus(gui, status);
+	} else if (gGuiPlaybackStatus.radioStatus == RADIO_STATUS_BUFFERING) {
+		SetStatus(gui, "Buffering stream...");
+	}
 }
 
 
@@ -3429,7 +3440,8 @@ static void HandleTimerSignal(HelixAmp3Gui *gui)
 				SetRadioFailureStatus(gui, "radio error");
 			} else if (gGuiPlaybackStatus.radioActive &&
 				gGuiPlaybackStatus.radioStatus != RADIO_STATUS_STOPPING &&
-				gGuiPlaybackStatus.radioStatus != RADIO_STATUS_CLOSED)
+				gGuiPlaybackStatus.radioStatus != RADIO_STATUS_CLOSED &&
+				(phaseChanged || gGuiPlaybackStatus.radioStatus == RADIO_STATUS_PLAYING))
 				UpdateRadioTagDisplay(gui);
 		}
 
@@ -3558,12 +3570,8 @@ static void HandleTimerSignal(HelixAmp3Gui *gui)
 #else
 			if (phaseChanged) {
 				gui->lastDisplayedSpareMs = spareMs;
-				{
-					char buf[64];
-					sprintf(buf, "Playing - underruns: %lu", underruns);
-					gui->lastUnderrunCount = underruns;
-					SetStatus(gui, buf);
-				}
+				gui->lastUnderrunCount = underruns;
+				SetStatus(gui, IsRadioInputName(gui->inputName) ? "Streaming" : "Playing");
 			}
 #endif
 			break;
@@ -4637,12 +4645,17 @@ static const char *ProbeCodecName(RbStreamCodec codec)
 static void RadioSetStatus(HelixAmp3Gui *app, const char *text)
 {
 	struct Gadget *gad;
+	if (!app) return;
+	if (!text) text = "";
+	if (strcmp(app->rbStatusText, text) == 0)
+		return;
+	SafeCopy(app->rbStatusText, sizeof(app->rbStatusText), text);
 	if (!app->rbWin || !app->rbGadgets) return;
 	gad = app->rbGadgets;
 	while (gad && gad->GadgetID != RB_GID_STATUS) gad = gad->NextGadget;
 	if (gad)
 		GT_SetGadgetAttrs(gad, app->rbWin, NULL,
-			GTST_String, (ULONG)(text ? text : ""), TAG_DONE);
+			GTST_String, (ULONG)app->rbStatusText, TAG_DONE);
 }
 
 static int RadioIsHttpStation(const RadioBrowserStation *st)
@@ -4938,7 +4951,7 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 	}
 #endif
 	memset(&info, 0, sizeof(info));
-	RadioSetStatus(app, "Probing selected stream...");
+	RadioSetStatus(app, "Checking stream...");
 	rc = rb_controller_probe_selected(&app->rbController, &info, peek, (int)sizeof(peek), &peekLen);
 	if (rc < 0) {
 		radio_reset_playback_state_after_stop(app, "probe-failed");
@@ -4968,9 +4981,10 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 	SelectInternetStream(app, info.final_url);
 	app->haveRadioHostAddr = info.have_host_addr;
 	app->radioHostAddrBe = info.host_addr_be;
-	sprintf(msg, "Playing: %.120s | type: %.48s | icy-name: %.64s | icy-br: %d | redirects: %d",
-		info.final_url, info.content_type, info.icy_name, info.icy_br, info.redirect_count);
-	RadioSetStatus(app, msg);
+	if (strncmp(info.final_url, "https://", 8) == 0)
+		RadioSetStatus(app, "HTTPS stream - connecting...");
+	else
+		RadioSetStatus(app, "HTTP stream - connecting...");
 	StartPlayback(app);
 }
 
@@ -6289,9 +6303,8 @@ static void StartPlayback(HelixAmp3Gui *gui)
 	gui->playbackDonePending = 0;
 	gui->playbackStoppedByUser = 0;
 	gui->playbackActive = 1;
-	SetStatus(gui, gui->decodeThenPlay ?
-		"Buffering..." :
-		"Starting playback...");
+	SetStatus(gui, IsRadioInputName(gui->inputName) ? "Buffering stream..." :
+		(gui->decodeThenPlay ? "Buffering..." : "Starting playback..."));
 }
 
 static void StopPlayback(HelixAmp3Gui *gui)

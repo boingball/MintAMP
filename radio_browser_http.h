@@ -9,6 +9,7 @@
 #define RB_HTTP_ERR_BODY_TOO_BIG (-6)
 #define RB_HTTP_ERR_STATUS       (-7)
 #define RB_HTTP_ERR_BAD_ARG      (-8)
+#define RB_HTTP_ERR_TIMEOUT      (-9)
 
 int rb_http_get_json(
     const char *host,
