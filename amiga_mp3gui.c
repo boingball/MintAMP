@@ -3145,19 +3145,111 @@ static void GuiRunAmigaDosInputRegression(HelixAmp3Gui *gui, int afterInterrupte
 }
 #endif
 
+
+static const char *RadioStreamStateName(int phase)
+{
+	switch (phase) {
+	case GUIPLAY_PHASE_IDLE: return "IDLE";
+	case GUIPLAY_PHASE_BUFFERING: return "BUFFERING";
+	case GUIPLAY_PHASE_PLAYING: return "PLAYING";
+	case GUIPLAY_PHASE_UNDERRUN: return "UNDERRUN";
+	case GUIPLAY_PHASE_STOPPING: return "STOPPING";
+	case GUIPLAY_PHASE_DONE: return "DONE";
+	case GUIPLAY_PHASE_ERROR: return "ERROR";
+	default: return "UNKNOWN";
+	}
+}
+
+static void radio_debug_state_summary(HelixAmp3Gui *gui, const char *reason)
+{
+	printf("radio-state: reason=%s active=%d pending=%d stopping=%d stopRequested=%d donePending=%d uiState=%s streamState=%s codec=%s session=%lu\n",
+		reason ? reason : "state",
+		gui ? gui->playbackActive : 0,
+		(gGuiPlayer.process != NULL),
+		(gui && (gui->playbackDonePending || gGuiPlayer.stopRequested)) ? 1 : 0,
+		gGuiPlayer.stopRequested,
+		gui ? gui->playbackDonePending : 0,
+		gui ? gui->statusText : "",
+		RadioStreamStateName(gGuiPlaybackStatus.phase),
+		gGuiPlaybackStatus.radioContentType,
+		gui ? gui->playbackRunId : gGuiPlaybackStatus.runId);
+}
+
+static void radio_reset_playback_state_after_stop(HelixAmp3Gui *gui, const char *reason)
+{
+	if (gui) {
+		gui->playbackActive = 0;
+		gui->playbackDonePending = 0;
+		gui->playbackStoppedByUser = 0;
+		gui->queuedPlayPending = 0;
+		gui->queuedInputName[0] = '\0';
+		gui->playlistNextPending = 0;
+		gui->lastCleanupStage = GUIPLAY_CLEANUP_NONE;
+		gui->lastStartupStage = GUISTART_NONE;
+		gui->startupStageStableTicks = 0;
+		gui->startupStallShown = 0;
+		gui->lastDisplayedPhase = GUIPLAY_PHASE_IDLE;
+	}
+	gGuiPlayer.process = NULL;
+	gGuiPlayer.stopRequested = 0;
+	gPlaybackInterrupted = 0;
+	gDonePort = NULL;
+	gDoneRunId = 0;
+	gGuiPlaybackStatus.phase = GUIPLAY_PHASE_IDLE;
+	gGuiPlaybackStatus.radioStatus = RADIO_STATUS_CLOSED;
+	gGuiPlaybackStatus.radioActive = 0;
+	gGuiPlaybackStatus.radioBufferedBytes = 0;
+	gGuiPlaybackStatus.radioContentType[0] = '\0';
+	gGuiPlaybackStatus.cleanupStage = GUIPLAY_CLEANUP_COMPLETE;
+	gGuiPlaybackStatus.cleanupComplete = 1;
+	radio_debug_state_summary(gui, reason);
+}
+
+static int radio_validate_ready_to_play(HelixAmp3Gui *gui)
+{
+	if (PlaybackProcessStillExists()) {
+		printf("Cannot start: previous stream still stopping\n");
+		return 0;
+	}
+	if (gGuiPlayer.process) {
+		printf("Cannot start: stale active session\n");
+		return 0;
+	}
+	if (gGuiPlayer.stopRequested) {
+		printf("Cannot start: previous stream still stopping\n");
+		return 0;
+	}
+	if (gui && gui->playbackDonePending) {
+		printf("Cannot start: donePending still set\n");
+		return 0;
+	}
+	if (gui && gui->playbackActive) {
+		printf("Cannot start: stale active session\n");
+		return 0;
+	}
+	if (gGuiPlaybackStatus.phase != GUIPLAY_PHASE_IDLE &&
+		gGuiPlaybackStatus.phase != GUIPLAY_PHASE_DONE &&
+		gGuiPlaybackStatus.phase != GUIPLAY_PHASE_ERROR) {
+		printf("Cannot start: previous stream still stopping\n");
+		return 0;
+	}
+	return 1;
+}
+
 static void FinalizePlayback(HelixAmp3Gui *gui)
 {
 	int stoppedByUser = gui->playbackStoppedByUser;
 	int nextPending = gui->playlistNextPending;
 	int queuedPlayPending = gui->queuedPlayPending;
+	char queuedInputName[HELIXAMP3_MAX_PATH];
 
+	SafeCopy(queuedInputName, sizeof(queuedInputName), gui->queuedInputName);
 	gui->playbackDonePending = 0;
 	gui->playbackStoppedByUser = 0;
 	gui->playbackActive = 0;
 	gui->playlistNextPending = 0;
 	gui->queuedPlayPending = 0;
-	gGuiPlayer.process = NULL;
-	gDonePort = NULL;
+	radio_reset_playback_state_after_stop(gui, stoppedByUser ? "stop-cleanup" : "playback-cleanup");
 	if (gui->totalSecs > 0 && !stoppedByUser)
 		gui->elapsedSecs = gui->totalSecs + gui->launchBufferSecs;
 	DrawProgress(gui);
@@ -3185,12 +3277,9 @@ static void FinalizePlayback(HelixAmp3Gui *gui)
 #endif
 	if (gui->closeRequested) {
 		gui->queuedInputName[0] = '\0';
-	} else if (gui->queuedInputName[0]) {
-		char queued[HELIXAMP3_MAX_PATH];
-		SafeCopy(queued, sizeof(queued), gui->queuedInputName);
-		gui->queuedInputName[0] = '\0';
+	} else if (queuedInputName[0]) {
 		CancelArtDecode(gui);
-		SafeCopy(gui->inputName, sizeof(gui->inputName), queued);
+		SafeCopy(gui->inputName, sizeof(gui->inputName), queuedInputName);
 		SetFileDisplay(gui, gui->inputName);
 		ReadMp3Tags(gui->inputName, &gui->tags, gui->artEnabled);
 		if (is_url_path(gui->inputName))
@@ -4798,15 +4887,18 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 	RadioSetStatus(app, "Probing selected stream...");
 	rc = rb_controller_probe_selected(&app->rbController, &info, peek, (int)sizeof(peek), &peekLen);
 	if (rc < 0) {
+		radio_reset_playback_state_after_stop(app, "probe-failed");
 		RadioSetStatus(app, app->rbController.last_error);
 		return;
 	}
 	if (info.codec != RB_STREAM_CODEC_MP3 && info.codec != RB_STREAM_CODEC_AAC) {
 		sprintf(msg, "Unsupported stream codec: %s (%.48s)", ProbeCodecName(info.codec), info.content_type);
+		radio_reset_playback_state_after_stop(app, "probe-unsupported-codec");
 		RadioSetStatus(app, msg);
 		return;
 	}
 	if (!info.final_url[0]) {
+		radio_reset_playback_state_after_stop(app, "probe-no-url");
 		RadioSetStatus(app, "Stream probe did not return a playable URL.");
 		return;
 	}
@@ -6010,10 +6102,9 @@ static void StartPlayback(HelixAmp3Gui *gui)
 		SetStatus(gui, "Browse to an audio file first.");
 		return;
 	}
-	if (gui->playbackActive || gui->playbackDonePending) {
-		SetStatus(gui, gui->playbackDonePending ?
-			"Previous playback process is still exiting." :
-			"Already playing; press Stop first.");
+	if (!radio_validate_ready_to_play(gui)) {
+		SetStatus(gui, "Cannot start: previous stream still stopping");
+		radio_debug_state_summary(gui, "start-blocked");
 		return;
 	}
 	/* A stopped playback task can still be unwinding audio.device buffers for a
@@ -6123,7 +6214,7 @@ static void StartPlayback(HelixAmp3Gui *gui)
 			Close(nilOut);
 		if (dirLock)
 			UnLock(dirLock);
-		gDonePort = NULL;
+		radio_reset_playback_state_after_stop(gui, "start-failed");
 		SetStatus(gui, "Cannot start playback process.");
 		return;
 	}
