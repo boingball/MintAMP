@@ -52,6 +52,7 @@ typedef struct GuiPlaybackStatus {
 	volatile char          radioGenre[64];
 	volatile char          radioStreamUrl[128];
 	volatile char          radioContentType[64];
+	volatile char          radioError[128];
 } GuiPlaybackStatus;
 #define GUIPLAY_PHASE_IDLE      0
 #define GUIPLAY_PHASE_BUFFERING 1

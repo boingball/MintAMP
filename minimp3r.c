@@ -332,12 +332,14 @@ static struct MsgPort *gDonePort;
 static volatile unsigned long gRunCounter;
 static volatile unsigned long gEntryRunId;
 static volatile unsigned long gDoneRunId;
+#define MR_APP_MAGIC 0x4d523047UL
 
 /* ------------------------------------------------------------------------- */
 /* Application state                                                         */
 /* ------------------------------------------------------------------------- */
 
 typedef struct MrApp {
+	unsigned long magic;
 	Object         *winObj;
 	struct Window  *win;
 	struct Menu    *menuStrip;
@@ -456,6 +458,10 @@ typedef struct MrApp {
 	unsigned long activeStreamSessions;
 	unsigned long activeStreamTasks;
 	int   stoppedByUser;
+	char  lastChildExitReason[32];
+	char  lastChildError[128];
+	int   lastChildEverPlayed;
+	int   lastChildFirstData;
 	int   lastPhaseShown;
 	unsigned char artGreyBuf[MR_ART_W * MR_ART_H];
 	int artValid;
@@ -545,6 +551,16 @@ static void SafeCopy(char *dst, size_t size, const char *src)
 		src = "";
 	strncpy(dst, src, size - 1);
 	dst[size - 1] = '\0';
+}
+
+static int MrVerifyAppMagic(MrApp *app, const char *where)
+{
+	if (!app || app->magic != MR_APP_MAGIC) {
+		printf("radio-guard: WARNING app magic corrupt before %s app=%p magic=%08lx expected=%08lx\n",
+			where ? where : "operation", app, app ? app->magic : 0UL, (unsigned long)MR_APP_MAGIC);
+		return 0;
+	}
+	return 1;
 }
 
 
@@ -856,7 +872,7 @@ static void MrSplitStreamTitle(const char *streamTitle, char *artist, unsigned l
 
 static int MrSetRadioMetadata(MrApp *app, int updateStatus)
 {
-	char streamTitle[128], station[128], genre[64], contentType[64], artist[64], title[64], fileInfo[128], status[128];
+	char streamTitle[128], station[128], genre[64], contentType[64], radioError[128], artist[64], title[64], fileInfo[128], status[128];
 	int updates = 0;
 	int radioStatus;
 	int bitrateKbps;
@@ -865,6 +881,7 @@ static int MrSetRadioMetadata(MrApp *app, int updateStatus)
 	MrCopyVolatileString(station, sizeof(station), gGuiPlaybackStatus.radioStationName);
 	MrCopyVolatileString(genre, sizeof(genre), gGuiPlaybackStatus.radioGenre);
 	MrCopyVolatileString(contentType, sizeof(contentType), gGuiPlaybackStatus.radioContentType);
+	MrCopyVolatileString(radioError, sizeof(radioError), gGuiPlaybackStatus.radioError);
 	radioStatus = gGuiPlaybackStatus.radioStatus;
 	bitrateKbps = gGuiPlaybackStatus.radioBitrateKbps;
 
@@ -881,7 +898,7 @@ static int MrSetRadioMetadata(MrApp *app, int updateStatus)
 	updates += SetReadonlyString(app->fileInfoGad, app->win, app->shownFileInfo, sizeof(app->shownFileInfo), fileInfo);
 	if (updateStatus) {
 		if (radioStatus == RADIO_STATUS_ERROR)
-			sprintf(status, "Radio error");
+			sprintf(status, "Stream failed: %s", radioError[0] ? radioError : "radio error");
 		else if (radioStatus == RADIO_STATUS_RECONNECTING)
 			sprintf(status, "Stream dropped - reconnecting");
 		else if (radioStatus == RADIO_STATUS_CONNECTING)
@@ -1148,6 +1165,8 @@ static void StartPlayback(MrApp *app)
 	BPTR nilOut;
 	struct Message *stale;
 
+	if (!MrVerifyAppMagic(app, "StartPlayback"))
+		return;
 	if (!app->inputName[0]) {
 		SetStatus(app, "Pick an audio file first.");
 		return;
@@ -1194,6 +1213,10 @@ static void StartPlayback(MrApp *app)
 	gPlayer.cleanupStage = "";
 	gPlayer.lastIoState = "";
 	gPlayer.donePosted = 0;
+	app->lastChildExitReason[0] = '\0';
+	app->lastChildError[0] = '\0';
+	app->lastChildEverPlayed = 0;
+	app->lastChildFirstData = 0;
 	gPlaybackInterrupted = 0;
 	gDonePort = app->donePort;
 	gDoneRunId = 0;
@@ -1257,13 +1280,32 @@ static void StartPlayback(MrApp *app)
 static void StopPlayback(MrApp *app)
 {
 	struct Task *child;
+	int canStop;
 
-	if (!app->playbackActive) {
-		SetStatus(app, "Nothing is playing.");
+	if (!MrVerifyAppMagic(app, "StopPlayback"))
+		return;
+	printf("radio-guard: before StopPlayback\n");
+	printf("radio-stop: button streamState=%s playbackActive=%d playbackDonePending=%d activeChildCount=%lu process=%p task=%p stopRequested=%d queuedStreamUrl=\"%s\" playlistNextPending=%d session=%lu lastExit=\"%s\" lastError=\"%s\"\n",
+		MrStreamStateName(app->streamState), app->playbackActive,
+		app->playbackDonePending, app->activeChildCount, gPlayer.process,
+		gPlayer.task, gPlayer.stopRequested, app->queuedStreamUrl,
+		app->playlistNextPending, gPlayer.sessionId, app->lastChildExitReason,
+		app->lastChildError);
+	canStop = app->playbackActive &&
+		app->streamState != MR_STREAM_IDLE &&
+		app->streamState != MR_STREAM_EXITED &&
+		app->streamState != MR_STREAM_ERROR &&
+		app->activeChildCount > 0 &&
+		(gPlayer.process || gPlayer.task || PlaybackProcessStillExists());
+	if (!canStop) {
+		printf("Stop ignored: no active playback child\n");
+		SetStatus(app, "Stopped.");
+		printf("radio-guard: after StopPlayback\n");
 		return;
 	}
 	if (gPlayer.stopRequested) {
 		SetStatus(app, "Stopping...");
+		printf("radio-guard: after StopPlayback\n");
 		return;
 	}
 	app->stoppedByUser = 1;
@@ -1297,6 +1339,7 @@ static void StopPlayback(MrApp *app)
 	gPlayer.stage = "STOPPING";
 	SetStatus(app, "Stopping...");
 	UpdateNextButtonState(app);
+	printf("radio-guard: after StopPlayback\n");
 }
 
 static int StopPlaybackAndWait(MrApp *app, int ticks, const char *timeoutStatus)
@@ -1326,12 +1369,31 @@ static void RadioDoProbeAndPlay(MrApp *app);
 static void FinalizePlayback(MrApp *app)
 {
 	int stoppedByUser = app->stoppedByUser;
+	char radioError[128];
+	int failedStart;
+	const char *finalStatus;
 
+	if (!MrVerifyAppMagic(app, "FinalizePlayback"))
+		return;
+	printf("radio-guard: before FinalizePlayback\n");
+	MrCopyVolatileString(radioError, sizeof(radioError), gGuiPlaybackStatus.radioError);
+	failedStart = (!stoppedByUser && gGuiPlaybackStatus.radioStatus == RADIO_STATUS_ERROR &&
+		gGuiPlaybackStatus.decodedFrames == 0);
+	SafeCopy(app->lastChildExitReason, sizeof(app->lastChildExitReason),
+		stoppedByUser ? "stop" : (failedStart ? "error" : "normal"));
+	SafeCopy(app->lastChildError, sizeof(app->lastChildError),
+		failedStart ? (radioError[0] ? radioError : "radio stream failed") : "");
+	app->lastChildEverPlayed = gGuiPlaybackStatus.decodedFrames > 0 ? 1 : 0;
+	app->lastChildFirstData = gGuiPlaybackStatus.radioBufferedBytes > 0 ? 1 : 0;
 	app->playbackActive = 0;
 	app->playbackDonePending = 0;
 	app->stoppedByUser = 0;
-	app->streamState = MR_STREAM_EXITED;
+	app->streamState = failedStart ? MR_STREAM_ERROR : MR_STREAM_EXITED;
 	MrDebugSession("parent receives done and clears child pointer", app);
+	printf("radio-done: parent done received childExit=\"%s\" childError=\"%s\" everPlayed=%d firstData=%d streamStateBeforeFinalize=%s\n",
+		app->lastChildExitReason, app->lastChildError,
+		app->lastChildEverPlayed, app->lastChildFirstData,
+		failedStart ? "ERROR" : "EXITED");
 	gPlayer.process = NULL;
 	gPlayer.task = NULL;
 	gPlayer.stopRequested = 0;
@@ -1344,8 +1406,19 @@ static void FinalizePlayback(MrApp *app)
 	app->elapsedSecs = (stoppedByUser || app->totalSecs <= 0) ? 0 : app->totalSecs;
 	UpdateTimeDisplay(app);
 	SetGauge(app, app->progressEnabled && !stoppedByUser ? 100 : 0);
-	SetStatus(app, stoppedByUser ? "Stopped." : "Finished.");
-	app->streamState = MR_STREAM_IDLE;
+	if (failedStart) {
+		char status[160];
+		sprintf(status, "Stream failed: %s", app->lastChildError[0] ? app->lastChildError : "radio stream failed");
+		finalStatus = status;
+		SetStatus(app, status);
+	} else {
+		finalStatus = stoppedByUser ? "Stopped." : "Finished.";
+		SetStatus(app, finalStatus);
+		app->streamState = MR_STREAM_IDLE;
+	}
+	printf("radio-done: streamStateAfterFinalize=%s guiStatus=\"%s\"\n",
+		MrStreamStateName(app->streamState), finalStatus);
+	printf("radio-guard: after FinalizePlayback\n");
 	if (app->queuedStreamUrl[0]) {
 		app->queuedStreamUrl[0] = '\0';
 		RadioSetStatus(app, "Starting queued stream...");
@@ -1362,6 +1435,10 @@ static void HandleDoneSignal(MrApp *app)
 {
 	struct Message *msg;
 	int gotDone = 0;
+	char doneError[128];
+	const char *doneReason;
+	int doneEverPlayed;
+	int doneFirstData;
 
 	if (!app->donePort)
 		return;
@@ -1370,7 +1447,15 @@ static void HandleDoneSignal(MrApp *app)
 	if (!gotDone)
 		return;
 
-	printf("radio-session: parent receives done message session=%lu doneRun=%lu active=%d pending=%d\n", gPlayer.sessionId, gDoneRunId, app->playbackActive, app->playbackDonePending);
+	MrCopyVolatileString(doneError, sizeof(doneError), gGuiPlaybackStatus.radioError);
+	doneReason = gPlayer.stopRequested ? "stop" :
+		(gGuiPlaybackStatus.radioStatus == RADIO_STATUS_ERROR ? "error" : "normal");
+	doneEverPlayed = gGuiPlaybackStatus.decodedFrames > 0 ? 1 : 0;
+	doneFirstData = gGuiPlaybackStatus.radioBufferedBytes > 0 ? 1 : 0;
+	printf("radio-session: parent receives done message session=%lu doneRun=%lu active=%d pending=%d childExit=\"%s\" childError=\"%s\" everPlayed=%d firstData=%d streamStateBefore=%s\n",
+		gPlayer.sessionId, gDoneRunId, app->playbackActive,
+		app->playbackDonePending, doneReason, doneError,
+		doneEverPlayed, doneFirstData, MrStreamStateName(app->streamState));
 	app->playbackDonePending = 1;
 	/* The child posts its done message just before returning from
 	 * PlaybackEntry(); wait for DOS to actually reap the task before we let a
@@ -1419,10 +1504,13 @@ static void PollPlaybackStatus(MrApp *app)
 	radioActive = gGuiPlaybackStatus.radioActive;
 	if (MrIsRadioInput(app->inputName)) {
 		if (radioStatus == RADIO_STATUS_ERROR) {
+			char radioError[128], status[160];
+			MrCopyVolatileString(radioError, sizeof(radioError), gGuiPlaybackStatus.radioError);
 			gGuiPlaybackStatus.radioActive = 0;
 			gGuiPlaybackStatus.radioBufferedBytes = 0;
-			if (strcmp(app->shownStatus, "Radio error")) {
-				SetStatus(app, "Radio error");
+			sprintf(status, "Stream failed: %s", radioError[0] ? radioError : "radio error");
+			if (strcmp(app->shownStatus, status)) {
+				SetStatus(app, status);
 				updates++;
 			}
 		} else if (radioActive &&
@@ -3980,6 +4068,7 @@ int main(int argc, char **argv)
 	(void)argv;
 
 	/* Defaults that match a typical 030 setup. */
+	app.magic = MR_APP_MAGIC;
 	app.rateIndex = 2;		/* 11025 Hz */
 	app.qualityIndex = 2;		/* Normal   */
 	app.mono = 0;
@@ -4145,15 +4234,18 @@ int main(int argc, char **argv)
 	/* Make sure any running child is stopped and reaped before we tear the
 	 * window (and its shared status block) down. */
 	if (app.playbackActive || app.playbackDonePending || PlaybackProcessStillExists()) {
-		printf("radio-ui: app close cleanup start active=%d donePending=%d\n",
-			app.playbackActive, app.playbackDonePending);
+		printf("radio-guard: app close path\n");
+		printf("radio-ui: app close cleanup start active=%d donePending=%d state=%s process=%p task=%p\n",
+			app.playbackActive, app.playbackDonePending,
+			MrStreamStateName(app.streamState), gPlayer.process, gPlayer.task);
 		if (!StopPlaybackAndWait(&app, 500, "Failed to stop previous stream")) {
 			while (PlaybackProcessStillExists())
 				Delay(5);
 			HandleDoneSignal(&app);
 		}
-		printf("radio-ui: app close cleanup end active=%d donePending=%d\n",
-			app.playbackActive, app.playbackDonePending);
+		printf("radio-ui: app close cleanup end active=%d donePending=%d state=%s process=%p task=%p\n",
+			app.playbackActive, app.playbackDonePending,
+			MrStreamStateName(app.streamState), gPlayer.process, gPlayer.task);
 	}
 
 	SyncFromGadgets(&app);

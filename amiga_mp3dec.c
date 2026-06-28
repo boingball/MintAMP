@@ -5543,6 +5543,7 @@ typedef struct GuiPlaybackStatus {
 	volatile char          radioGenre[64];
 	volatile char          radioStreamUrl[128];
 	volatile char          radioContentType[64];
+	volatile char          radioError[128];
 } GuiPlaybackStatus;
 
 GuiPlaybackStatus gGuiPlaybackStatus;
@@ -5573,6 +5574,7 @@ static void GuiPublishRadioMetadata(RadioStream *radio)
 	GuiCopyVolatileString(gGuiPlaybackStatus.radioGenre, sizeof(gGuiPlaybackStatus.radioGenre), Radio_GetGenre(radio));
 	GuiCopyVolatileString(gGuiPlaybackStatus.radioStreamUrl, sizeof(gGuiPlaybackStatus.radioStreamUrl), Radio_GetStreamUrl(radio));
 	GuiCopyVolatileString(gGuiPlaybackStatus.radioContentType, sizeof(gGuiPlaybackStatus.radioContentType), Radio_GetContentType(radio));
+	GuiCopyVolatileString(gGuiPlaybackStatus.radioError, sizeof(gGuiPlaybackStatus.radioError), Radio_GetError(radio));
 }
 
 
@@ -5583,6 +5585,14 @@ static void GuiMarkRadioError(void)
 	gGuiPlaybackStatus.radioBufferedBytes = 0;
 	gGuiPlaybackStatus.radioBitrateKbps = 0;
 	gGuiPlaybackStatus.radioMetaInt = 0;
+	GuiCopyVolatileString(gGuiPlaybackStatus.radioError, sizeof(gGuiPlaybackStatus.radioError), "");
+}
+
+static void GuiMarkRadioErrorText(const char *message)
+{
+	GuiMarkRadioError();
+	GuiCopyVolatileString(gGuiPlaybackStatus.radioError, sizeof(gGuiPlaybackStatus.radioError),
+		message && message[0] ? message : "radio stream failed");
 }
 
 static void GuiMarkRadioStopped(void)
@@ -8554,7 +8564,7 @@ static int PrimeRadioAacAdtsInput(InputSource *input, int debugDecoder)
 			"Unsupported AAC stream format or no ADTS sync");
 		GuiSetPlaybackPhase(GUIPLAY_PHASE_ERROR);
 		gGuiPlaybackStatus.startupStage = GUISTART_FAILED;
-		GuiMarkRadioError();
+		GuiMarkRadioErrorText(Radio_GetError(input->radio));
 		fprintf(stderr, "radio-aac-startup: early exit reason=no_adts_sync cleanup called=yes global state reset called=yes final phase=%d radioStatus=%d buffered=%lu\n",
 			(int)gGuiPlaybackStatus.phase,
 			(int)Radio_GetStatus(input->radio), total);
@@ -8995,7 +9005,7 @@ static int AmigaGenericInputPlay(const char *sourceName, InputSource *input, con
 		GuiSetPlaybackPhase(GUIPLAY_PHASE_ERROR);
 		gGuiPlaybackStatus.startupStage = GUISTART_FAILED;
 		if (input->radio && ext && StrCaseCmp(ext, "aac") == 0) {
-			GuiMarkRadioError();
+			GuiMarkRadioErrorText("Unsupported AAC stream format or no ADTS sync");
 			fprintf(stderr, "radio-aac-startup: early exit reason=decoder_init_failed cleanup called=yes global state reset called=yes final phase=%d radioStatus=%d\n",
 				(int)gGuiPlaybackStatus.phase, (int)Radio_GetStatus(input->radio));
 		}
@@ -9860,7 +9870,7 @@ int main(int argc, char **argv)
 		GuiPublishStartupStage(GUISTART_INPUT_FOPEN_AFTER);
 		if (!radio || Radio_GetStatus(radio) == RADIO_STATUS_ERROR) {
 			fprintf(stderr, "cannot open radio stream: %s\n", radio ? Radio_GetError(radio) : "out of memory");
-			GuiMarkRadioError();
+			GuiMarkRadioErrorText(radio ? Radio_GetError(radio) : "out of memory");
 			if (radio) Radio_Close(radio);
 			free(resolvedOutName);
 			AmigaFreeNormalizedArgs(&normalized);
@@ -9918,7 +9928,7 @@ int main(int argc, char **argv)
 			GuiPublishStartupStage(GUISTART_INPUT_FOPEN_AFTER);
 			if (!radio || Radio_GetStatus(radio) == RADIO_STATUS_ERROR) {
 				fprintf(stderr, "cannot open radio stream: %s\n", radio ? Radio_GetError(radio) : "out of memory");
-				GuiMarkRadioError();
+				GuiMarkRadioErrorText(radio ? Radio_GetError(radio) : "out of memory");
 				if (radio) Radio_Close(radio);
 				free(resolvedOutName);
 				AmigaFreeNormalizedArgs(&normalized);
