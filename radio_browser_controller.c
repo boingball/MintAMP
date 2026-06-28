@@ -176,7 +176,13 @@ int rb_controller_probe_selected(
 #endif
 
     rc = rb_probe_stream_url(url, info, peek_buf, peek_buf_size, peek_len);
-    if (rc < 0) rb_controller_set_error(controller, rb_probe_error_text(rc));
+    if (rc == RB_STREAM_PROBE_ERR_HTTP_STATUS) {
+        char msg[RB_CONTROLLER_LAST_ERROR_SIZE];
+        snprintf(msg, sizeof(msg), "Stream unavailable (HTTP %d)", info->http_status);
+        rb_controller_set_error(controller, msg);
+    } else if (rc < 0) {
+        rb_controller_set_error(controller, rb_probe_error_text(rc));
+    }
     return rc;
 }
 

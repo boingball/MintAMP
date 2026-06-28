@@ -370,6 +370,7 @@ static int rb_probe_ensure_amissl(void)
 
 static void rb_probe_cleanup_amissl(void)
 {
+    printf("radio-ssl-diag: probe cleanup ENTER probe_init=%d base=%p ext=%p master=%p\n", rb_probe_amissl_initialized, (void *)AmiSSLBase, (void *)AmiSSLExtBase, (void *)AmiSSLMasterBase);
     if (rb_probe_amissl_initialized) {
         CleanupAmiSSL(TAG_DONE);
         rb_probe_amissl_initialized = 0;
@@ -379,6 +380,7 @@ static void rb_probe_cleanup_amissl(void)
         AmiSSLBase = NULL;
         AmiSSLExtBase = NULL;
     }
+    printf("radio-ssl-diag: probe cleanup EXIT  probe_init=%d base=%p ext=%p master=%p\n", rb_probe_amissl_initialized, (void *)AmiSSLBase, (void *)AmiSSLExtBase, (void *)AmiSSLMasterBase);
     /* Deliberately keep amisslmaster.library open for the lifetime of the
      * program.  AmiSSL requires InitAmiSSLMaster() to run exactly once; only the
      * per-task OpenAmiSSL()/CloseAmiSSL() pair above may repeat.  Closing and
@@ -702,6 +704,7 @@ const char *rb_probe_error_text(int rc)
     case RB_STREAM_PROBE_ERR_UNSUPPORTED_CONTENT_TYPE: return "Unsupported stream format";
     case RB_STREAM_PROBE_ERR_SERVER_CLOSED: return "Stream probe failed: server closed connection during probe";
     case RB_STREAM_PROBE_ERR_TLS_HANDSHAKE: return "TLS handshake failed";
+    case RB_STREAM_PROBE_ERR_HTTP_STATUS: return "Stream unavailable (server returned an error status)";
     default: return "Stream probe failed";
     }
 }
@@ -815,6 +818,16 @@ int rb_probe_stream_url(const char *url, RbStreamInfo *info,
         redirects++;
         rc = rb_probe_copy_string(current_url, (int)sizeof(current_url), next_url);
         if (rc < 0) return rc;
+    }
+    /* Only a 2xx response is playable.  A dead/auth-protected stream answers
+     * with 401/403/404/5xx (and usually an empty body), so without this check
+     * the probe would guess the codec from the URL filename and report success,
+     * launching a doomed playback child that buffers nothing and then errors or
+     * stalls.  Reject it here so the GUI shows a clear "stream unavailable"
+     * message and never starts playback. */
+    if (info->http_status < 200 || info->http_status > 299) {
+        rb_probe_transport_close(&transport);
+        return RB_STREAM_PROBE_ERR_HTTP_STATUS;
     }
     while (*peek_len < peek_buf_size) {
         int want2;

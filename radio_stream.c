@@ -327,6 +327,7 @@ static int radio_ssl_global_init(RadioStream *rs)
 
 static void radio_ssl_global_cleanup(void)
 {
+    printf("radio-ssl-diag: cleanup ENTER initialized=%d base=%p ext=%p master=%p\n", radio_amissl_initialized, (void *)AmiSSLBase, (void *)AmiSSLExtBase, (void *)AmiSSLMasterBase);
     RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: AmiSSL global cleanup start initialized=%d base=%p master=%p\n", radio_amissl_initialized, (void *)AmiSSLBase, (void *)AmiSSLMasterBase));
     if (radio_amissl_initialized) {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: CleanupAmiSSL start\n"));
@@ -357,6 +358,7 @@ static void radio_ssl_global_cleanup(void)
      * reclaims it at program exit. */
     RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: amisslmaster kept open master=%p\n", (void *)AmiSSLMasterBase));
     RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: AmiSSL global cleanup complete\n"));
+    printf("radio-ssl-diag: cleanup EXIT  initialized=%d base=%p ext=%p master=%p\n", radio_amissl_initialized, (void *)AmiSSLBase, (void *)AmiSSLExtBase, (void *)AmiSSLMasterBase);
 }
 
 /* Poll SSL_connect on the non-blocking socket — same budget as radio_wait_connected. */
@@ -676,6 +678,7 @@ static int process_bytes(RadioStream *rs, const unsigned char *b, int n)
             if (rs->headerLen >= RADIO_HEADER_MAX - 1) { set_error(rs,"HTTP header too large"); return -1; }
             rs->header[rs->headerLen++] = (char)b[i]; rs->header[rs->headerLen] = 0;
             if (rs->headerLen >= 4 && !memcmp(rs->header + rs->headerLen - 4, "\r\n\r\n", 4)) {
+                printf("radio-http-diag: session=%lu raw HTTP response header (%d bytes) follows:\n%s--- end of header ---\n", rs->session_id, rs->headerLen, rs->header);
                 rs->headerDone = 1; parse_headers(rs, rs->header); if (rs->status == RADIO_STATUS_ERROR) return -1; rs->parseState = RADIO_PARSE_AUDIO;
             }
             continue;
@@ -724,6 +727,10 @@ RadioStream *Radio_Open(const char *url)
     radio_active_stream_tasks++;
     radio_active_decoder_count++;
     printf("radio-resource: session=%lu stream session/task/decoder allocated active_stream_sessions=%ld active_stream_tasks=%ld active_decoder_count=%ld\n", rs->session_id, radio_active_stream_sessions, radio_active_stream_tasks, radio_active_decoder_count);
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+    printf("radio-ssl-diag: Radio_Open session=%lu url=\"%s\" inherited AmiSSL state: initialized=%d base=%p ext=%p master=%p ssl_count=%ld ssl_ctx_count=%ld\n",
+        rs->session_id, url ? url : "(null)", radio_amissl_initialized, (void *)AmiSSLBase, (void *)AmiSSLExtBase, (void *)AmiSSLMasterBase, radio_active_ssl_count, radio_active_ssl_ctx_count);
+#endif
     radio_debug_mem_report(rs->session_id, "before stream start");
     rs->status = RADIO_STATUS_CONNECTING;
     rs->size = RADIO_RING_BYTES;
@@ -773,6 +780,10 @@ void Radio_RequestStop(RadioStream *rs){ if(!rs)return; radio_debug_mem_report(r
 void Radio_Close(RadioStream *rs)
 {
     if (!rs) return;
+    printf("radio-http-diag: Radio_Close session=%lu status=%d everPlayed=%d headerDone=%d firstData=%d used=%lu metaint=%d reconnectAttempts=%d startPumps=%d stopping=%d stopReq=%u contentType=\"%s\" host=\"%s\" path=\"%s\" error=\"%s\"\n",
+        rs->session_id, (int)rs->status, rs->everPlayed, rs->headerDone, rs->firstDataLogged, rs->used, rs->metaint,
+        rs->reconnectAttempts, rs->startPumps, rs->stopping, rs->stop_request_count,
+        rs->contentType, rs->host, rs->path, rs->error);
     RADIO_STOP_DEBUG_PRINTF(("radio-stop: Radio_Close entered session=%lu\n", rs->session_id));
     rs->cleanup_count++;
     if (rs->cleanup_count > 1) radio_duplicate_cleanup_warning(rs, "session cleanup", rs->cleanup_count);
@@ -802,6 +813,38 @@ void Radio_Close(RadioStream *rs)
     RADIO_STOP_DEBUG_PRINTF(("radio-stop: stream task exiting / Radio_Close exited session=%lu task_exit_count=%u cleanup_count=%u stop_request_count=%u ssl_free_count=%u socket_close_count=%u decoder_free_count=%u\n", rs->session_id, rs->task_exit_count, rs->cleanup_count, rs->stop_request_count, rs->ssl_free_count, rs->socket_close_count, rs->decoder_free_count));
     free(rs);
 }
+
+/* Release the process-wide network libraries exactly once, at application exit.
+ *
+ * SocketBase (bsdsocket.library) and the AmiSSL master library are opened lazily
+ * and shared across the probe, the radio_browser search and every playback
+ * child; the per-session code only ever opened them (and, for AmiSSL, kept the
+ * master open for the program's lifetime so repeated InitAmiSSLMaster() could
+ * not relock HTTPS).  Nothing ever *closed* them, so when the app quit it left
+ * bsdsocket.library open with a reference held by a now-dead task; the TCP stack
+ * then kept stale per-task socket state and the next launch of the app could no
+ * longer open a working socket ("Search failed" even though the network is up).
+ * Closing them here, in reverse open order (AmiSSL first, since it was handed
+ * SocketBase), lets the stack reclaim everything cleanly.  Must run on the main
+ * task after every playback child has been stopped and reaped. */
+void Radio_NetworkShutdown(void)
+{
+#if defined(AMIGA_M68K)
+#if defined(HAVE_AMISSL)
+    radio_ssl_global_cleanup();           /* closes any still-open per-task AmiSSL */
+    if (AmiSSLMasterBase) {
+        CloseLibrary(AmiSSLMasterBase);
+        AmiSSLMasterBase = NULL;
+        radio_amissl_initialized = 0;
+    }
+#endif
+    if (SocketBase) {
+        CloseLibrary(SocketBase);
+        SocketBase = NULL;
+    }
+#endif
+}
+
 int Radio_Pump(RadioStream *rs)
 {
     unsigned char b[1024];

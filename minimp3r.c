@@ -4010,6 +4010,12 @@ int main(int argc, char **argv)
 		DeleteMsgPort(app.donePort);
 		app.donePort = NULL;
 	}
+	/* Every playback child has been stopped and reaped above, so it is now safe
+	 * to release the shared network libraries (AmiSSL master + bsdsocket.library)
+	 * that the probe/search/streams opened.  Without this the app left
+	 * bsdsocket.library open on exit and the next launch could not open a working
+	 * socket ("Search failed" with the network otherwise up). */
+	Radio_NetworkShutdown();
 	CloseLibs();
 	return 0;
 }

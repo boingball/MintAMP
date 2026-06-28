@@ -47,6 +47,10 @@ const char *Radio_GetError(RadioStream *rs);
 int Radio_GetBitrate(RadioStream *rs);
 int Radio_GetBufferedBytes(RadioStream *rs);
 const char *Radio_StatusText(RadioStatus status);
+/* Release the process-wide network libraries (AmiSSL master + bsdsocket.library)
+ * exactly once, at application exit.  Call only after every playback child has
+ * been stopped and reaped.  Safe to call when nothing was ever opened. */
+void Radio_NetworkShutdown(void);
 #else
 static RadioStream *Radio_Open(const char *url) { (void)url; return (RadioStream *)0; }
 static void Radio_RequestStop(RadioStream *rs) { (void)rs; }
@@ -65,6 +69,7 @@ static const char *Radio_GetContentType(RadioStream *rs) { (void)rs; return ""; 
 static const char *Radio_GetError(RadioStream *rs) { (void)rs; return "radio support not built"; }
 static int Radio_GetBitrate(RadioStream *rs) { (void)rs; return 0; }
 static int Radio_GetBufferedBytes(RadioStream *rs) { (void)rs; return 0; }
+static void Radio_NetworkShutdown(void) { }
 static const char *Radio_StatusText(RadioStatus status)
 {
     switch (status) {
