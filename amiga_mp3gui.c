@@ -3729,7 +3729,7 @@ static void ShowAbout(HelixAmp3Gui *gui)
 	es.es_StructSize = sizeof(es);
 	es.es_Flags = 0;
 	es.es_Title = (UBYTE *)"About MiniAMP3";
-	es.es_TextFormat = (UBYTE *)"MiniAMP3\nHelix fixed-point MP3 decoder\nAmigaOS GadTools frontend";
+	es.es_TextFormat = (UBYTE *)"MiniAMP3\nMade by boingball\n(C)2026 - v1.0\nTo support this application visit:\nhttps://buymeacoffee.com/boingball\n-----\nMade with decoders from\nHelix MP3 / ACC\nby Real Networks\nlibfoxenflac\nby astoeckel\n\nESP8266Audio\nby earlephilhower\n-----\nAI Used\nClaude and Codex\nLate Nights\nMany";
 	es.es_GadgetFormat = (UBYTE *)"OK";
 	EasyRequest(gui->win, &es, NULL, TAG_DONE);
 }
