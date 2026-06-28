@@ -566,6 +566,8 @@ static void radio_copy_string(char *dst, size_t dstSize, const char *src)
         return;
     if (!src)
         src = "";
+    if (strlen(src) >= dstSize)
+        RADIO_DBG(printf("radio-string: truncated copy dstSize=%lu srcLen=%lu src=\"%s\"\n", (unsigned long)dstSize, (unsigned long)strlen(src), src););
     snprintf(dst, dstSize, "%s", src);
     dst[dstSize - 1] = 0;
 }
@@ -579,8 +581,10 @@ static void radio_copy_bytes(char *dst, size_t dstSize, const unsigned char *src
     if (!src || srcLen <= 0)
         return;
     copyLen = (size_t)srcLen;
-    if (copyLen >= dstSize)
+    if (copyLen >= dstSize) {
+        RADIO_DBG(printf("radio-string: truncated byte copy dstSize=%lu srcLen=%lu\n", (unsigned long)dstSize, (unsigned long)copyLen););
         copyLen = dstSize - 1;
+    }
     memcpy(dst, src, copyLen);
     dst[copyLen] = 0;
 }
@@ -757,7 +761,7 @@ static int reconnect_http(RadioStream *rs)
     return 0;
 }
 
-static void parse_headers(RadioStream *rs,char *h){ char *line=strtok(h,"\r\n"); int code=0; if(line && ci_starts(line,"ICY")) code=200; else if(line && ci_starts(line,"HTTP/")) sscanf(line,"HTTP/%*s %d",&code); else { set_error(rs,"invalid HTTP stream response"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: HTTP header failed\n")); return; } if(code<200||code>299){ char msg[64]; sprintf(msg,"HTTP %d stream error",code); set_error(rs,msg); RADIO_OPEN_DEBUG_PRINTF(("radio-open: HTTP header failed status %d\n", code)); return; } while((line=strtok(NULL,"\r\n"))){ char *v=strchr(line,':'); if(!v) continue; *v++=0; line=trim(line); v=trim(v); if(ci_equals(line,"Content-Type")) radio_copy_string(rs->contentType,sizeof(rs->contentType),v); else if(ci_equals(line,"icy-metaint")){ rs->metaint=atoi(v); rs->audioUntilMeta=rs->metaint; } else if(ci_equals(line,"icy-br")) rs->bitrate=atoi(v); else if(ci_equals(line,"icy-name")) radio_copy_string(rs->stationName,sizeof(rs->stationName),v); else if(ci_equals(line,"icy-genre")) radio_copy_string(rs->genre,sizeof(rs->genre),v); else if(ci_equals(line,"icy-url")) radio_copy_string(rs->streamUrl,sizeof(rs->streamUrl),v); } if(rs->contentType[0] && (ci_starts(rs->contentType,"application/vnd.apple.mpegurl") || ci_starts(rs->contentType,"application/x-mpegurl"))) { set_error(rs,"HLS stream not supported"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: HLS content type unsupported: %s\n", rs->contentType)); return; } RADIO_OPEN_DEBUG_PRINTF(("radio-open: final URL=%s content-type=%s URL codec hint=%s final selected codec=%s\n",
+static void parse_headers(RadioStream *rs,char *h){ if (radio_stream_magic_valid(rs, "parse_headers") < 1) return; char *line=strtok(h,"\r\n"); int code=0; if(line && ci_starts(line,"ICY")) code=200; else if(line && ci_starts(line,"HTTP/")) sscanf(line,"HTTP/%*s %d",&code); else { set_error(rs,"invalid HTTP stream response"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: HTTP header failed\n")); return; } if(code<200||code>299){ char msg[64]; sprintf(msg,"HTTP %d stream error",code); set_error(rs,msg); RADIO_OPEN_DEBUG_PRINTF(("radio-open: HTTP header failed status %d\n", code)); return; } while((line=strtok(NULL,"\r\n"))){ char *v=strchr(line,':'); if(!v) continue; *v++=0; line=trim(line); v=trim(v); if(ci_equals(line,"Content-Type")) radio_copy_string(rs->contentType,sizeof(rs->contentType),v); else if(ci_equals(line,"icy-metaint")){ rs->metaint=atoi(v); rs->audioUntilMeta=rs->metaint; } else if(ci_equals(line,"icy-br")) rs->bitrate=atoi(v); else if(ci_equals(line,"icy-name")) radio_copy_string(rs->stationName,sizeof(rs->stationName),v); else if(ci_equals(line,"icy-genre")) radio_copy_string(rs->genre,sizeof(rs->genre),v); else if(ci_equals(line,"icy-url")) radio_copy_string(rs->streamUrl,sizeof(rs->streamUrl),v); } if(rs->contentType[0] && (ci_starts(rs->contentType,"application/vnd.apple.mpegurl") || ci_starts(rs->contentType,"application/x-mpegurl"))) { set_error(rs,"HLS stream not supported"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: HLS content type unsupported: %s\n", rs->contentType)); return; } RADIO_OPEN_DEBUG_PRINTF(("radio-open: final URL=%s content-type=%s URL codec hint=%s final selected codec=%s\n",
     rs->url, rs->contentType,
     radio_contains_nocase(rs->path,"mp3") ? "MP3" : (radio_contains_nocase(rs->path,"aac") ? "AAC" : "none"),
     (ci_starts(rs->contentType,"audio/mpeg") || ci_starts(rs->contentType,"audio/mp3") || radio_contains_nocase(rs->path,"mp3")) ? "MP3" :
@@ -771,6 +775,10 @@ static void parse_meta(RadioStream *rs,const unsigned char *m,int n)
     int i, keyLen = (int)sizeof(key) - 1;
     if (!rs || !m || n <= 0)
         return;
+    if (!radio_stream_magic_valid(rs, "parse_meta"))
+        return;
+    if (n >= RADIO_META_MAX)
+        RADIO_DBG(printf("radio-icy: metadata truncated session=%lu metaLen=%d capacity=%lu station=\"%s\" url=\"%s\"\n", rs->session_id, n, (unsigned long)RADIO_META_MAX, rs->stationName, rs->url););
     end = m + n;
     for (i = 0; i + keyLen <= n; i++) {
         if (!memcmp(m + i, key, (size_t)keyLen)) {
@@ -801,19 +809,19 @@ static int process_bytes(RadioStream *rs, const unsigned char *b, int n)
         }
         if (rs->metaint > 0 && rs->parseState == RADIO_PARSE_AUDIO && rs->audioUntilMeta == 0) rs->parseState = RADIO_PARSE_META_LEN;
         if (rs->parseState == RADIO_PARSE_META_LEN) {
-            rs->metaLen = b[i] * 16; rs->metaGot = 0; rs->metaLeft = rs->metaLen;
+            rs->metaLen = b[i] * 16; rs->metaGot = 0; rs->metaLeft = rs->metaLen; if (rs->metaLen > RADIO_META_MAX) RADIO_DBG(printf("radio-icy: metadata payload exceeds buffer session=%lu metaLen=%d capacity=%lu; truncating parse copy station=\"%s\" url=\"%s\"\n", rs->session_id, rs->metaLen, (unsigned long)RADIO_META_MAX, rs->stationName, rs->url););
             rs->parseState = rs->metaLen ? RADIO_PARSE_META_PAYLOAD : RADIO_PARSE_AUDIO;
             if (!rs->metaLen) rs->audioUntilMeta = rs->metaint;
             continue;
         }
         if (rs->parseState == RADIO_PARSE_META_PAYLOAD) {
-            if (rs->metaGot < RADIO_META_MAX) rs->meta[rs->metaGot++] = b[i];
+            if (rs->metaGot < RADIO_META_MAX - 1) rs->meta[rs->metaGot++] = b[i];
             rs->metaLeft--;
             if (rs->metaLeft <= 0) { if (rs->metaGot > 0) parse_meta(rs, rs->meta, rs->metaGot); rs->audioUntilMeta = rs->metaint; rs->parseState = RADIO_PARSE_AUDIO; }
             continue;
         }
         if (rs->parseState == RADIO_PARSE_AUDIO) {
-            ring_write(rs, &b[i], 1);
+            if (rs->used >= rs->size) { RADIO_DBG(printf("radio-ring: full drop session=%lu ringFree=0 writeOffset=%lu capacity=%lu station=\"%s\" url=\"%s\"\n", rs->session_id, rs->wpos, rs->size, rs->stationName, rs->url);); } else ring_write(rs, &b[i], 1);
             if (rs->metaint > 0 && rs->audioUntilMeta > 0) rs->audioUntilMeta--;
         }
     }

@@ -7422,7 +7422,11 @@ cleanup:
 #define GENERIC_STARTUP_TIMEOUT_MS 5000UL
 #define AAC_RADIO_STARTUP_TIMEOUT_MS 15000UL
 
+#define GENERIC_STREAM_MAGIC 0x47445354UL
+#define GENERIC_STREAM_GUARD 0x6d704143UL
 typedef struct GenericDecodeStream {
+	unsigned long             magic;
+	unsigned long             preGuard;
 	const struct DecoderOps *ops;
 	DecHandle                handle;
 	int                      channels;    /* as reported by ops->open()          */
@@ -7448,6 +7452,7 @@ typedef struct GenericDecodeStream {
 	FakeStereo               fakeStereo;
 	int                      firstFillDebugPrinted;
 	int                      firstDecodeDebugPrinted;
+	unsigned long             postGuard;
 } GenericDecodeStream;
 
 static void GenericDecodeStreamInit(GenericDecodeStream *gs,
@@ -7456,6 +7461,9 @@ static void GenericDecodeStreamInit(GenericDecodeStream *gs,
 	DecodeStats *stats, TimingStats *timing)
 {
 	memset(gs, 0, sizeof(*gs));
+	gs->magic      = GENERIC_STREAM_MAGIC;
+	gs->preGuard   = GENERIC_STREAM_GUARD;
+	gs->postGuard  = GENERIC_STREAM_GUARD;
 	gs->ops        = ops;
 	gs->handle     = handle;
 	gs->channels   = channels > 2 ? 2 : (channels < 1 ? 1 : channels);
@@ -7463,6 +7471,22 @@ static void GenericDecodeStreamInit(GenericDecodeStream *gs,
 	gs->bitsPerSample = bitsPerSample;
 	gs->stats      = stats;
 	gs->timing     = timing;
+}
+
+
+static int GenericDecodeStreamGuardOk(GenericDecodeStream *gs, const char *where)
+{
+	if (!gs || gs->magic != GENERIC_STREAM_MAGIC ||
+		gs->preGuard != GENERIC_STREAM_GUARD ||
+		gs->postGuard != GENERIC_STREAM_GUARD) {
+		fprintf(stderr, "AAC_OUT: CORRUPTED buffer=AAC decode context session=%lu where=%s magic=%08lx pre=%08lx post=%08lx\n",
+			(unsigned long)gGuiPlaybackStatus.runId, where ? where : "",
+			gs ? gs->magic : 0UL, gs ? gs->preGuard : 0UL, gs ? gs->postGuard : 0UL);
+		if (gs) { gs->decodeError = 1; gs->outOfData = 1; }
+		gPlaybackInterrupted = 1;
+		return 0;
+	}
+	return 1;
 }
 
 /* Max samples per channel to request from the module in one call.
@@ -7492,6 +7516,10 @@ static int GenericDecodeStreamCopySpill(GenericDecodeStream *gs,
 	n = gs->spillCount - gs->spillPos;
 	if (n > maxBytes)
 		n = maxBytes;
+	if (n < 0 || *outBytes < 0 || n > maxBytes - *outBytes) {
+		fprintf(stderr, "Stream failed: AAC output overflow prevented\n");
+		gs->decodeError = 1; return 0;
+	}
 	memcpy(dest + *outBytes, gs->spill.interleaved + gs->spillPos, n);
 	gs->spillPos += n;
 	*outBytes    += n;
@@ -7595,12 +7623,15 @@ static int GenericValidateDecodedPcm(GenericDecodeStream *gs,
 
 	if (GenericIsAacDecoder(gs) || overflow) {
 		fprintf(stderr,
-			"aac-output: codec=%s rate=%ld ch=%lu samples=%lu bps=%lu bytes=%lu destCap=%lu free=%lu offset=%lu %s section=%s masterBefore=%p masterAfter=%p\n",
+			"AAC_OUT: codec=%s rate=%ld ch=%lu samplesPerFrame=%lu outputSamples=%lu outputBytes=%lu destCapacity=%lu ringFree=%lu writeOffset=%lu %s section=%s session=%lu station=\"%s\" url=\"%s\" masterBefore=%p masterAfter=%p\n",
 			GenericCodecName(gs), (long)(gs ? gs->sampleRate : 0), channels,
-			frames, GENERIC_BYTES_PER_SAMPLE, bytes, destCap,
+			frames, samples, bytes, destCap,
 			freeFrames * channels * GENERIC_BYTES_PER_SAMPLE,
 			(destFrames - freeFrames) * channels * GENERIC_BYTES_PER_SAMPLE,
 			overflow ? "OVERFLOW_PREVENTED" : "OK", where ? where : "decode",
+			(unsigned long)gGuiPlaybackStatus.runId,
+			(const char *)gGuiPlaybackStatus.radioStationName,
+			(const char *)gGuiPlaybackStatus.radioStreamUrl,
 			masterBefore, masterAfter);
 	}
 	if (masterBefore != masterAfter) {
@@ -7610,6 +7641,7 @@ static int GenericValidateDecodedPcm(GenericDecodeStream *gs,
 		return 0;
 	}
 	if (overflow) {
+		fprintf(stderr, "Stream failed: AAC output overflow prevented\n");
 		fprintf(stderr,
 			"generic decoder: refusing oversized decoded PCM frame codec=%s frames=%lu channels=%lu samples=%lu bytes=%lu destCap=%lu\n",
 			GenericCodecName(gs), frames, channels, samples, bytes, destCap);
@@ -7681,8 +7713,12 @@ static int GenericDecodeStreamFillS8(GenericDecodeStream *gs,
 		if (opt->debugDecoder && !gs->firstDecodeDebugPrinted && gs->ops && gs->ops->info &&
 			gs->ops->info->extensions && StrCaseCmp(gs->ops->info->extensions, "aac") == 0)
 			fprintf(stderr, "AAC: before first decode\n");
+		if (!GenericDecodeStreamGuardOk(gs, "before mono decode"))
+			break;
 		masterBeforeDecode = GenericAmiSSLMasterSnapshot();
 		nDecoded = gs->ops->decode(gs->handle, gs->decodeBuf, GENERIC_DECODE_CHUNK);
+		if (!GenericDecodeStreamGuardOk(gs, "after mono decode"))
+			break;
 		if (opt->debugDecoder && !gs->firstDecodeDebugPrinted && gs->ops && gs->ops->info &&
 			gs->ops->info->extensions && StrCaseCmp(gs->ops->info->extensions, "aac") == 0)
 			fprintf(stderr, "AAC: after first decode rc=%ld\n", (long)nDecoded);
@@ -7815,6 +7851,10 @@ static int GenericDecodeStreamCopyPlanarSpill(GenericDecodeStream *gs,
 	n = gs->planarSpillCount - gs->planarSpillPos;
 	if (n > maxFrames)
 		n = maxFrames;
+	if (n < 0 || *outFrames < 0 || n > maxFrames - *outFrames) {
+		fprintf(stderr, "Stream failed: AAC output overflow prevented\n");
+		gs->decodeError = 1; return 0;
+	}
 	memcpy(left  + *outFrames, gs->spill.planar[0] + gs->planarSpillPos, (size_t)n);
 	memcpy(right + *outFrames, gs->spill.planar[1] + gs->planarSpillPos, (size_t)n);
 	gs->planarSpillPos += n;
@@ -7881,8 +7921,12 @@ static int GenericDecodeStreamFillPlanarS8(GenericDecodeStream *gs,
 		if (opt->debugDecoder && !gs->firstDecodeDebugPrinted && gs->ops && gs->ops->info &&
 			gs->ops->info->extensions && StrCaseCmp(gs->ops->info->extensions, "aac") == 0)
 			fprintf(stderr, "AAC: before first decode\n");
+		if (!GenericDecodeStreamGuardOk(gs, "before stereo decode"))
+			break;
 		masterBeforeDecode = GenericAmiSSLMasterSnapshot();
 		nDecoded = gs->ops->decode(gs->handle, gs->decodeBuf, GENERIC_DECODE_CHUNK);
+		if (!GenericDecodeStreamGuardOk(gs, "after stereo decode"))
+			break;
 		if (opt->debugDecoder && !gs->firstDecodeDebugPrinted && gs->ops && gs->ops->info &&
 			gs->ops->info->extensions && StrCaseCmp(gs->ops->info->extensions, "aac") == 0)
 			fprintf(stderr, "AAC: after first decode rc=%ld\n", (long)nDecoded);
@@ -8053,6 +8097,8 @@ static unsigned long GenericDecodeStreamFillPlaybackBuffer(
 	signed char *buf, unsigned long maxBytes)
 {
 	const char *fillPath = opt->stereo ? "planar-s8-stereo" : "interleaved-s8-mono";
+	if (!GenericDecodeStreamGuardOk(gs, "fill entry"))
+		return 0;
 	if (opt->debugDecoder) printf("generic-debug: fill entry bufBytes=%lu sourceChannels=%ld outputStereo=%d outputRate=%ld sourceRate=%ld path=%s\n",
 		maxBytes, (long)gs->channels, opt->stereo ? 1 : 0,
 		(long)opt->outputRate, (long)gs->sampleRate, fillPath);
@@ -8852,6 +8898,8 @@ static int AmigaPlayStreamingGeneric(InputSource *input,
 			len[justFreed] = GenericDecodeStreamFillPlaybackBuffer(&stream, opt,
 				&player, justFreed, buf[justFreed], bufBytes);
 			if (stream.decodeError) {
+				if (ops && ops->info && ops->info->extensions && StrCaseCmp(ops->info->extensions, "aac") == 0 && input->radio)
+					Radio_FailStartup(input->radio, "AAC output overflow prevented");
 				err = -1;
 				break;
 			}
@@ -8875,6 +8923,8 @@ static int AmigaPlayStreamingGeneric(InputSource *input,
 			len[decodeAhead] = GenericDecodeStreamFillPlaybackBuffer(&stream, opt,
 				&player, decodeAhead, buf[decodeAhead], bufBytes);
 			if (stream.decodeError) {
+				if (ops && ops->info && ops->info->extensions && StrCaseCmp(ops->info->extensions, "aac") == 0 && input->radio)
+					Radio_FailStartup(input->radio, "AAC output overflow prevented");
 				err = -1;
 				break;
 			}
