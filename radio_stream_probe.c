@@ -43,6 +43,7 @@ static int rb_probe_amissl_initialized = 0;
 #include <unistd.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #define RB_PROBE_SOCKET int
@@ -387,7 +388,7 @@ static void rb_probe_cleanup_amissl(void)
 
 #endif
 
-static int rb_probe_transport_open(RbProbeTransport *transport, const char *host, int port, int use_ssl)
+static int rb_probe_transport_open(RbProbeTransport *transport, const char *host, int port, int use_ssl, RbStreamInfo *info)
 {
     struct hostent *he;
     struct sockaddr_in sa;
@@ -415,6 +416,11 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *host
     sa.sin_family = AF_INET;
     sa.sin_port = htons((unsigned short)port);
     memcpy(&sa.sin_addr, he->h_addr_list[0], (size_t)he->h_length);
+    if (info) {
+        info->have_host_addr = 1;
+        memcpy(&info->host_addr_be, he->h_addr_list[0], sizeof(info->host_addr_be));
+        printf("rb-probe DNS: resolved %s -> %s\n", host, inet_ntoa(sa.sin_addr));
+    }
     if (connect(transport->sock, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
         rb_probe_close_socket(transport->sock);
         transport->sock = RB_PROBE_INVALID_SOCKET;
@@ -696,6 +702,7 @@ const char *rb_probe_error_text(int rc)
     case RB_STREAM_PROBE_ERR_UNSUPPORTED_CONTENT_TYPE: return "Unsupported stream format";
     case RB_STREAM_PROBE_ERR_SERVER_CLOSED: return "Stream probe failed: server closed connection during probe";
     case RB_STREAM_PROBE_ERR_TLS_HANDSHAKE: return "TLS handshake failed";
+    case RB_STREAM_PROBE_ERR_HTTP_STATUS: return "Stream probe failed: HTTP status was not successful";
     default: return "Stream probe failed";
     }
 }
@@ -739,7 +746,7 @@ int rb_probe_stream_url(const char *url, RbStreamInfo *info,
         rc = rb_probe_build_request(request, (int)sizeof(request), &parsed);
         if (rc < 0) return rc;
         request_len = (int)strlen(request);
-        rc = rb_probe_transport_open(&transport, parsed.host, parsed.port, parsed.isSSL);
+        rc = rb_probe_transport_open(&transport, parsed.host, parsed.port, parsed.isSSL, info);
         if (rc < 0) return rc;
         rc = rb_probe_send_all(&transport, request, request_len);
         if (rc < 0) {
@@ -798,6 +805,11 @@ int rb_probe_stream_url(const char *url, RbStreamInfo *info,
         if (rb_probe_is_hls(&parsed, info)) {
             rb_probe_transport_close(&transport);
             return RB_STREAM_PROBE_ERR_HLS_UNSUPPORTED;
+        }
+        if (!rb_probe_is_redirect_status(info->http_status) &&
+            (info->http_status < 200 || info->http_status > 299)) {
+            rb_probe_transport_close(&transport);
+            return RB_STREAM_PROBE_ERR_HTTP_STATUS;
         }
         if (!rb_probe_is_redirect_status(info->http_status)) break;
         rb_probe_transport_close(&transport);

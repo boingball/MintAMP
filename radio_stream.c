@@ -8,6 +8,9 @@
 #include <string.h>
 #include <ctype.h>
 #include <time.h>
+#ifndef AMIGA_M68K
+#include <arpa/inet.h>
+#endif
 
 #ifndef RADIO_RING_BYTES
 #define RADIO_RING_BYTES 65536UL
@@ -624,10 +627,15 @@ static int connect_http(RadioStream *rs){
     /* Resolve once and cache it; gethostbyname() is blocking and would freeze
      * the emulator on every reconnect if we re-resolved each time. */
     if(!rs->haveHostAddr){
-        struct hostent *he=gethostbyname(rs->host);
+        struct hostent *he;
+        printf("radio-dns: WARNING blocking DNS lookup in playback child host=%s\n", rs->host);
+        he=gethostbyname(rs->host);
         if(!he || !he->h_addr){ set_error(rs,"cannot resolve stream host"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: DNS failed for %s\n", rs->host)); return -1; }
         memcpy(&rs->hostAddr, he->h_addr, sizeof(rs->hostAddr));
         rs->haveHostAddr=1;
+    }
+    else {
+        printf("radio-dns: session=%lu using cached probe DNS %s\n", rs->session_id, inet_ntoa(rs->hostAddr));
     }
     if (radio_is_stopping(rs)) return -1;
     rs->sock=socket(AF_INET,SOCK_STREAM,0); if(rs->sock!=RADIO_INVALID_SOCKET){ radio_open_socket_count++; printf("radio-resource: session=%lu socket opened fd=%ld open_socket_count=%ld\n", rs->session_id, (long)rs->sock, radio_open_socket_count); } if(rs->sock==RADIO_INVALID_SOCKET){ set_error(rs,"cannot create socket"); return -1; }
@@ -761,7 +769,7 @@ static int radio_note_start_wait(RadioStream *rs, const char *message)
     return 0;
 }
 
-RadioStream *Radio_Open(const char *url)
+RadioStream *Radio_OpenWithHostAddr(const char *url, int haveHostAddr, unsigned long hostAddrBe)
 {
     RadioStream *rs = (RadioStream *)calloc(1, sizeof(*rs));
     if (!rs) return NULL;
@@ -781,6 +789,10 @@ RadioStream *Radio_Open(const char *url)
     radio_active_stream_sessions++;
     radio_active_stream_tasks++;
     radio_active_decoder_count++;
+    if (haveHostAddr) {
+        memcpy(&rs->hostAddr, &hostAddrBe, sizeof(rs->hostAddr));
+        rs->haveHostAddr = 1;
+    }
     rs->startupTime = time(NULL);
     radio_startup_trace(rs, "stream task entry");
     printf("radio-startup: stream task session id=%lu\n", rs->session_id);
@@ -960,5 +972,10 @@ const char *Radio_GetError(RadioStream *rs){ return rs?(rs->error[0]?rs->error:"
 int Radio_GetBitrate(RadioStream *rs){ return rs?rs->bitrate:0; }
 int Radio_GetBufferedBytes(RadioStream *rs){ return rs?(int)rs->used:0; }
 const char *Radio_StatusText(RadioStatus s){ switch(s){case RADIO_STATUS_CONNECTING:return "Connecting";case RADIO_STATUS_BUFFERING:return "Buffering";case RADIO_STATUS_PLAYING:return "Playing";case RADIO_STATUS_RECONNECTING:return "Reconnecting";case RADIO_STATUS_STOPPING:return "Stopping";case RADIO_STATUS_CLOSED:return "Closed";case RADIO_STATUS_ERROR:return "Error";default:return "Idle";} }
+
+RadioStream *Radio_Open(const char *url)
+{
+    return Radio_OpenWithHostAddr(url, 0, 0);
+}
 
 #endif /* ENABLE_RADIO */

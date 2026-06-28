@@ -386,6 +386,8 @@ typedef struct MrApp {
 	struct MsgPort   *donePort;
 
 	char  inputName[MR_MAX_PATH];
+	int   radioHaveHostAddr;
+	unsigned long radioHostAddrBe;
 	char  lastDrawer[MR_MAX_PATH];
 	char  playlist[MR_PLAYLIST_MAX][MR_MAX_PATH];
 	int   rateIndex;
@@ -903,6 +905,7 @@ static void AddArg(MrPlayArgs *args, const char *text)
 static void BuildPlaybackArgs(MrApp *app, MrPlayArgs *args)
 {
 	char num[16];
+	char hostAddr[16];
 	int isRadio;
 	int useCd32Ultrafast;
 	int useUltrafast;
@@ -929,8 +932,14 @@ static void BuildPlaybackArgs(MrApp *app, MrPlayArgs *args)
 	}
 	AddArg(args, "minimp3r");
 	AddArg(args, "--play");
-	if (isRadio)
+	if (isRadio) {
 		AddArg(args, "--radio-stream");
+		if (app->radioHaveHostAddr) {
+			AddArg(args, "--radio-host-addr-be");
+			sprintf(hostAddr, "%lu", app->radioHostAddrBe);
+			AddArg(args, hostAddr);
+		}
+	}
 	if (app->fastMem)
 		AddArg(args, "--fast-mem");
 	if (useCd32Ultrafast) {
@@ -3095,6 +3104,8 @@ static void RadioDoProbeAndPlay(MrApp *app)
 			return;
 		}
 		SafeCopy(app->inputName, sizeof(app->inputName), app->rbFavouriteUrls[app->rbSelectedFavourite]);
+		app->radioHaveHostAddr = 0;
+		app->radioHostAddrBe = 0;
 		UpdateFileGadget(app);
 		RefreshFileInfoAndTags(app);
 		sprintf(msg, "Starting favourite: %.120s", app->rbFavouriteNames[app->rbSelectedFavourite]);
@@ -3137,6 +3148,8 @@ static void RadioDoProbeAndPlay(MrApp *app)
 		return;
 	}
 	SafeCopy(app->inputName, sizeof(app->inputName), info.final_url);
+	app->radioHaveHostAddr = info.have_host_addr;
+	app->radioHostAddrBe = info.host_addr_be;
 	UpdateFileGadget(app);
 	RefreshFileInfoAndTags(app);
 	sprintf(msg, "Starting: %.120s | type: %.48s | icy-name: %.64s | icy-br: %d | redirects: %d",

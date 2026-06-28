@@ -21,6 +21,8 @@ typedef struct RbStreamInfo {
     int icy_br;
     int icy_metaint;
     RbStreamCodec codec;
+    int have_host_addr;
+    unsigned long host_addr_be;
 } RbStreamInfo;
 
 enum {
@@ -39,7 +41,8 @@ enum {
     RB_STREAM_PROBE_ERR_HLS_UNSUPPORTED = -12,
     RB_STREAM_PROBE_ERR_UNSUPPORTED_CONTENT_TYPE = -13,
     RB_STREAM_PROBE_ERR_SERVER_CLOSED = -14,
-    RB_STREAM_PROBE_ERR_TLS_HANDSHAKE = -15
+    RB_STREAM_PROBE_ERR_TLS_HANDSHAKE = -15,
+    RB_STREAM_PROBE_ERR_HTTP_STATUS = -16
 };
 
 const char *rb_probe_error_text(int rc);

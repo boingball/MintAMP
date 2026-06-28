@@ -359,6 +359,8 @@ typedef struct DecodeOptions {
 	int info;
 	int noMonoMSSideSkip;
 	int radioStream;
+	int radioHaveHostAddr;
+	unsigned long radioHostAddrBe;
 } DecodeOptions;
 
 typedef struct Mp3InputInfo {
@@ -915,6 +917,14 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			fprintf(stderr, "--radio-stream requested, but radio support not built; rebuild with RADIO=1 or HAVE_BSDSOCKET=1\n");
 			return -1;
 #endif
+		} else if (!strcmp(argv[i], "--radio-host-addr-be")) {
+			if (i + 1 >= argc) {
+				fprintf(stderr, "--radio-host-addr-be requires an IPv4 address value\n");
+				return -1;
+			}
+			i++;
+			opt->radioHostAddrBe = strtoul(argv[i], NULL, 0);
+			opt->radioHaveHostAddr = (opt->radioHostAddrBe != 0);
 		} else if (!strcmp(argv[i], "--decode-then-play")) {
 			opt->play = 1;
 			opt->decodeThenPlay = 1;
@@ -9754,7 +9764,7 @@ int main(int argc, char **argv)
 	if (opt.play && opt.radioStream) {
 		RadioStream *radio;
 		GuiPublishStartupStage(GUISTART_INPUT_FOPEN_BEFORE);
-		radio = Radio_Open(opt.inName);
+		radio = Radio_OpenWithHostAddr(opt.inName, opt.radioHaveHostAddr, opt.radioHostAddrBe);
 		GuiPublishStartupStage(GUISTART_INPUT_FOPEN_AFTER);
 		if (!radio || Radio_GetStatus(radio) == RADIO_STATUS_ERROR) {
 			fprintf(stderr, "cannot open radio stream: %s\n", radio ? Radio_GetError(radio) : "out of memory");
@@ -9809,7 +9819,7 @@ int main(int argc, char **argv)
 		if (opt.radioStream) {
 			RadioStream *radio;
 			GuiPublishStartupStage(GUISTART_INPUT_FOPEN_BEFORE);
-			radio = Radio_Open(opt.inName);
+			radio = Radio_OpenWithHostAddr(opt.inName, opt.radioHaveHostAddr, opt.radioHostAddrBe);
 			GuiPublishStartupStage(GUISTART_INPUT_FOPEN_AFTER);
 			if (!radio || Radio_GetStatus(radio) == RADIO_STATUS_ERROR) {
 				fprintf(stderr, "cannot open radio stream: %s\n", radio ? Radio_GetError(radio) : "out of memory");
