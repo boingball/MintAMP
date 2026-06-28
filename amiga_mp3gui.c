@@ -1759,6 +1759,15 @@ static void SplitRadioStreamTitle(const char *streamTitle, char *artist, unsigne
 	}
 }
 
+static void SetRadioFailureStatus(HelixAmp3Gui *gui, const char *fallback)
+{
+	char radioError[128], status[160];
+
+	CopyVolatileGuiString(radioError, sizeof(radioError), gGuiPlaybackStatus.radioError);
+	sprintf(status, "Stream failed: %s", radioError[0] ? radioError : fallback);
+	SetStatus(gui, status);
+}
+
 static void UpdateRadioTagDisplay(HelixAmp3Gui *gui)
 {
 	char streamTitle[128], station[128], genre[64], contentType[64], artist[64], title[64], info[128], status[128];
@@ -1785,10 +1794,11 @@ static void UpdateRadioTagDisplay(HelixAmp3Gui *gui)
 	if (gui->gadFileInfo)
 		GT_SetGadgetAttrs(gui->gadFileInfo, gui->win, NULL,
 			GTTX_Text, (ULONG)gui->fileInfoText, TAG_DONE);
-	if (gGuiPlaybackStatus.radioStatus == RADIO_STATUS_ERROR)
-		sprintf(status, "Radio error");
-	else
-		sprintf(status, "%s... buffer %ld bytes", Radio_StatusText((RadioStatus)gGuiPlaybackStatus.radioStatus), (long)gGuiPlaybackStatus.radioBufferedBytes);
+	if (gGuiPlaybackStatus.radioStatus == RADIO_STATUS_ERROR) {
+		SetRadioFailureStatus(gui, "radio error");
+		return;
+	}
+	sprintf(status, "%s... buffer %ld bytes", Radio_StatusText((RadioStatus)gGuiPlaybackStatus.radioStatus), (long)gGuiPlaybackStatus.radioBufferedBytes);
 	SetStatus(gui, status);
 }
 
@@ -3251,7 +3261,11 @@ static void FinalizePlayback(HelixAmp3Gui *gui)
 	char queuedInputName[HELIXAMP3_MAX_PATH];
 	int queuedHaveRadioHostAddr = gui->queuedHaveRadioHostAddr;
 	unsigned long queuedRadioHostAddrBe = gui->queuedRadioHostAddrBe;
+	int failedRadioStart;
 
+	failedRadioStart = (!stoppedByUser && IsRadioInputName(gui->inputName) &&
+		gGuiPlaybackStatus.radioStatus == RADIO_STATUS_ERROR &&
+		gGuiPlaybackStatus.decodedFrames == 0);
 	SafeCopy(queuedInputName, sizeof(queuedInputName), gui->queuedInputName);
 	gui->playbackDonePending = 0;
 	gui->playbackStoppedByUser = 0;
@@ -3282,7 +3296,11 @@ static void FinalizePlayback(HelixAmp3Gui *gui)
 #if defined(AMIGA_M68K) && defined(MINIAMP3_DEBUG)
 	GuiRunAmigaDosInputRegression(gui, stoppedByUser);
 #else
-	SetStatus(gui, stoppedByUser ? "Stopped - ready." : "Playback finished - ready.");
+	if (failedRadioStart) {
+		SetRadioFailureStatus(gui, "radio stream failed");
+	} else {
+		SetStatus(gui, stoppedByUser ? "Stopped - ready." : "Playback finished - ready.");
+	}
 #endif
 	if (gui->closeRequested) {
 		gui->queuedInputName[0] = '\0';
@@ -3367,8 +3385,13 @@ static void HandleTimerSignal(HelixAmp3Gui *gui)
 		if (gotDone && !gui->playbackDonePending) {
 			gui->playbackDonePending = 1;
 			gui->playbackStoppedByUser = gGuiPlayer.stopRequested ? 1 : 0;
-			SetStatus(gui, gui->playbackStoppedByUser ?
-				"Stopping..." : "Playback finished - ready.");
+			if (gui->playbackStoppedByUser)
+				SetStatus(gui, "Stopping...");
+			else if (IsRadioInputName(gui->inputName) &&
+				gGuiPlaybackStatus.radioStatus == RADIO_STATUS_ERROR)
+				SetRadioFailureStatus(gui, "radio error");
+			else
+				SetStatus(gui, "Playback finished - ready.");
 		}
 	}
 	if (gui->playbackDonePending && PlaybackCanFinalize(gui))
@@ -3396,10 +3419,14 @@ static void HandleTimerSignal(HelixAmp3Gui *gui)
 		unsigned long halfBufferMs = gGuiPlaybackStatus.halfBufferMs;
 		int phaseChanged = (phase != gui->lastDisplayedPhase);
 
-		if (IsRadioInputName(gui->inputName) && gGuiPlaybackStatus.radioActive &&
-			gGuiPlaybackStatus.radioStatus != RADIO_STATUS_STOPPING &&
-			gGuiPlaybackStatus.radioStatus != RADIO_STATUS_CLOSED)
-			UpdateRadioTagDisplay(gui);
+		if (IsRadioInputName(gui->inputName)) {
+			if (gGuiPlaybackStatus.radioStatus == RADIO_STATUS_ERROR) {
+				SetRadioFailureStatus(gui, "radio error");
+			} else if (gGuiPlaybackStatus.radioActive &&
+				gGuiPlaybackStatus.radioStatus != RADIO_STATUS_STOPPING &&
+				gGuiPlaybackStatus.radioStatus != RADIO_STATUS_CLOSED)
+				UpdateRadioTagDisplay(gui);
+		}
 
 		if (phaseChanged)
 			gui->lastDisplayedPhase = phase;
@@ -3585,8 +3612,13 @@ static void HandleDoneSignal(HelixAmp3Gui *gui)
 	if (!gui->playbackDonePending) {
 		gui->playbackStoppedByUser = gGuiPlayer.stopRequested ? 1 : 0;
 		gui->playbackDonePending = 1;
-		SetStatus(gui, gui->playbackStoppedByUser ?
-			"Stopping..." : "Playback finished - ready.");
+		if (gui->playbackStoppedByUser)
+			SetStatus(gui, "Stopping...");
+		else if (IsRadioInputName(gui->inputName) &&
+			gGuiPlaybackStatus.radioStatus == RADIO_STATUS_ERROR)
+			SetRadioFailureStatus(gui, "radio error");
+		else
+			SetStatus(gui, "Playback finished - ready.");
 	}
 
 	if (PlaybackCanFinalize(gui))
