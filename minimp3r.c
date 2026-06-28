@@ -495,6 +495,8 @@ static void CloseRadioWindow(MrApp *app);
 static void OpenRadioWindow(MrApp *app);
 static void HandleRadioWindow(MrApp *app);
 static void HandleDoneSignal(MrApp *app);
+static void RadioSetStatus(MrApp *app, const char *text);
+static void RadioDoProbeAndPlay(MrApp *app);
 
 static void SyncMenuChecks(MrApp *app);
 
@@ -1344,6 +1346,12 @@ static void FinalizePlayback(MrApp *app)
 	SetGauge(app, app->progressEnabled && !stoppedByUser ? 100 : 0);
 	SetStatus(app, stoppedByUser ? "Stopped." : "Finished.");
 	app->streamState = MR_STREAM_IDLE;
+	if (app->queuedStreamUrl[0]) {
+		app->queuedStreamUrl[0] = '\0';
+		RadioSetStatus(app, "Starting queued stream...");
+		RadioDoProbeAndPlay(app);
+		return;
+	}
 	if (app->playlistNextPending) {
 		app->playlistNextPending = 0;
 		StartPlayback(app);
@@ -3203,7 +3211,11 @@ static void RadioDoProbeAndPlay(MrApp *app)
 	printf("radio-ui: play requested currentActive=%d donePending=%d stopRequested=%d state=%s input=\"%s\"\n",
 		app->playbackActive, app->playbackDonePending, gPlayer.stopRequested, MrStreamStateName(app->streamState), app->inputName);
 	if (app->streamState == MR_STREAM_STARTING) { RadioSetStatus(app, "Still starting previous stream"); return; }
-	if (app->streamState == MR_STREAM_STOP_REQUESTED || app->streamState == MR_STREAM_STOPPING || app->streamState == MR_STREAM_STOP_TIMEOUT) { RadioSetStatus(app, "Still stopping previous stream"); return; }
+	if (app->streamState == MR_STREAM_STOP_REQUESTED || app->streamState == MR_STREAM_STOPPING || app->streamState == MR_STREAM_STOP_TIMEOUT) {
+		SafeCopy(app->queuedStreamUrl, sizeof(app->queuedStreamUrl), "radio-selection");
+		RadioSetStatus(app, "Queued stream; waiting for previous stream to stop...");
+		return;
+	}
 	if (app->rbShowingFavourites) {
 		if (app->rbSelectedFavourite >= 0 && app->rbSelectedFavourite < app->rbFavouriteCount &&
 			app->playbackActive && MrIsRadioInput(app->inputName) &&
@@ -3223,14 +3235,12 @@ static void RadioDoProbeAndPlay(MrApp *app)
 	}
 	if ((app->playbackActive || app->playbackDonePending || PlaybackProcessStillExists()) &&
 		MrIsRadioInput(app->inputName)) {
-		RadioSetStatus(app, "Stopping previous stream...");
-		printf("radio-ui: stop old stream requested\n");
-		if (!StopPlaybackAndWait(app, 250, "Still stopping previous stream")) {
-			printf("radio-ui: old stream stop timed out; not starting queued stream\n");
-			RadioSetStatus(app, "Previous stream still stopping - cannot start new stream yet");
-			return;
-		}
-		printf("radio-ui: old stream stopped\n");
+		SafeCopy(app->queuedStreamUrl, sizeof(app->queuedStreamUrl), "radio-selection");
+		RadioSetStatus(app, "Queued stream; stopping previous stream...");
+		printf("radio-ui: queued stream while stopping old stream\n");
+		if (!gPlayer.stopRequested)
+			StopPlayback(app);
+		return;
 	}
 	if (app->rbShowingFavourites) {
 		if (app->rbSelectedFavourite < 0 || app->rbSelectedFavourite >= app->rbFavouriteCount) {
