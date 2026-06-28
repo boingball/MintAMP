@@ -218,6 +218,13 @@ static const STRPTR kSpeedLabels[] = {
 	NULL
 };
 
+static const STRPTR kSpeedLabelsNo22050[] = {
+	(STRPTR)"Normal",
+	(STRPTR)"Superfast low-rate",
+	(STRPTR)"Ultrafast",
+	NULL
+};
+
 static const STRPTR kWidthLabels[] = {
 	(STRPTR)"Normal stereo",
 	(STRPTR)"Fake stereo 1",
@@ -508,6 +515,7 @@ static void RefreshFileInfoAndTags(MrApp *app);
 static void SaveSettings(MrApp *app);
 static void ApplyHardwareAudioFilter(MrApp *app);
 static void UpdateChannelGadgetState(MrApp *app);
+static void UpdateSpeedGadgetChoices(MrApp *app);
 static void UpdateNextButtonState(MrApp *app);
 static void DrawArtPanel(MrApp *app);
 static void SaveSettings(MrApp *app);
@@ -1063,6 +1071,31 @@ static void SetGauge(MrApp *app, int level)
 	if (app->gaugeGad && app->win)
 		SetGadgetAttrs((struct Gadget *)app->gaugeGad, app->win, NULL,
 			FUELGAUGE_Level, (ULONG)level,
+			TAG_DONE);
+}
+
+static int SpeedChoiceFromApp(const MrApp *app)
+{
+	if (app->rateIndex == 3 && app->cd32Ultrafast)
+		return 3;
+	if (app->ultrafast)
+		return 2;
+	if (app->superfastLowrate)
+		return 1;
+	return 0;
+}
+
+static void UpdateSpeedGadgetChoices(MrApp *app)
+{
+	if (app->rateIndex != 3 && app->cd32Ultrafast) {
+		app->cd32Ultrafast = 0;
+		app->ultrafast = 0;
+		app->superfastLowrate = 0;
+	}
+	if (app->win && app->speedGad)
+		SetGadgetAttrs((struct Gadget *)app->speedGad, app->win, NULL,
+			CHOOSER_LabelArray, (ULONG)(app->rateIndex == 3 ? kSpeedLabels : kSpeedLabelsNo22050),
+			CHOOSER_Selected, (ULONG)SpeedChoiceFromApp(app),
 			TAG_DONE);
 }
 
@@ -1963,8 +1996,8 @@ static int MrOpenWindow(MrApp *app)
 	app->speedGad = (Object *)NewObject(CHOOSER_GetClass(), NULL,
 	                GA_ID, GID_SPEED,
 	                GA_RelVerify, TRUE,
-	                CHOOSER_LabelArray, (ULONG)kSpeedLabels,
-	                CHOOSER_Selected, (ULONG)(app->cd32Ultrafast ? 3 : (app->ultrafast ? 2 : (app->superfastLowrate ? 1 : 0))),
+	                CHOOSER_LabelArray, (ULONG)(app->rateIndex == 3 ? kSpeedLabels : kSpeedLabelsNo22050),
+	                CHOOSER_Selected, (ULONG)SpeedChoiceFromApp(app),
 	                TAG_DONE);
 
 	app->widthGad = (Object *)NewObject(CHOOSER_GetClass(), NULL,
@@ -4280,8 +4313,10 @@ static void SyncFromGadgets(MrApp *app)
 			SafeCopy(app->inputName, sizeof(app->inputName), (const char *)path);
 	}
 	if (app->rateGad && GetAttr(CHOOSER_Selected, app->rateGad, &v)) {
-		if ((int)v >= 0 && (int)v < MR_RATE_COUNT)
+		if ((int)v >= 0 && (int)v < MR_RATE_COUNT && app->rateIndex != (int)v) {
 			app->rateIndex = (int)v;
+			UpdateSpeedGadgetChoices(app);
+		}
 	}
 	if (app->qualityGad && GetAttr(CHOOSER_Selected, app->qualityGad, &v))
 		app->qualityIndex = (int)v;
@@ -4302,7 +4337,7 @@ static void SyncFromGadgets(MrApp *app)
 	if (app->fastLowGad && GetAttr(GA_Selected, app->fastLowGad, &v))
 		app->fastLowrate = (v != 0);
 	if (app->speedGad && GetAttr(CHOOSER_Selected, app->speedGad, &v)) {
-		app->cd32Ultrafast = ((int)v == 3);
+		app->cd32Ultrafast = (app->rateIndex == 3 && (int)v == 3);
 		app->ultrafast = ((int)v == 2);
 		app->superfastLowrate = ((int)v == 1 || app->cd32Ultrafast);
 		if (app->cd32Ultrafast) {

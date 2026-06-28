@@ -7470,6 +7470,25 @@ static void GenericDecodeStreamInit(GenericDecodeStream *gs,
  * We halve it so the interleaved output always fits in decodeBuf. */
 #define GENERIC_DECODE_CHUNK (OUTBUF_SAMPS / 2)
 #define GENERIC_BYTES_PER_SAMPLE 2UL
+
+static DecULong GenericDecodeChunkForRateConvert(const GenericDecodeStream *gs,
+	const DecodeOptions *opt, int outputChannels)
+{
+	unsigned long chunk = GENERIC_DECODE_CHUNK;
+	unsigned long maxOutFrames;
+	unsigned long safe;
+	if (gs && opt && outputChannels > 0 && opt->outputRate > gs->sampleRate &&
+		gs->sampleRate > 0) {
+		maxOutFrames = OUTBUF_SAMPS / (unsigned long)outputChannels;
+		safe = (maxOutFrames * (unsigned long)gs->sampleRate) /
+			(unsigned long)opt->outputRate;
+		if (safe > 1UL)
+			safe--;
+		if (safe > 0UL && safe < chunk)
+			chunk = safe;
+	}
+	return (DecULong)chunk;
+}
 #ifndef GENERIC_STARTUP_DECODE_CALL_GUARD
 #define GENERIC_STARTUP_DECODE_CALL_GUARD 128
 #endif
@@ -7682,7 +7701,8 @@ static int GenericDecodeStreamFillS8(GenericDecodeStream *gs,
 			gs->ops->info->extensions && StrCaseCmp(gs->ops->info->extensions, "aac") == 0)
 			fprintf(stderr, "AAC: before first decode\n");
 		masterBeforeDecode = GenericAmiSSLMasterSnapshot();
-		nDecoded = gs->ops->decode(gs->handle, gs->decodeBuf, GENERIC_DECODE_CHUNK);
+		nDecoded = gs->ops->decode(gs->handle, gs->decodeBuf,
+			GenericDecodeChunkForRateConvert(gs, opt, 1));
 		if (opt->debugDecoder && !gs->firstDecodeDebugPrinted && gs->ops && gs->ops->info &&
 			gs->ops->info->extensions && StrCaseCmp(gs->ops->info->extensions, "aac") == 0)
 			fprintf(stderr, "AAC: after first decode rc=%ld\n", (long)nDecoded);
@@ -7882,7 +7902,8 @@ static int GenericDecodeStreamFillPlanarS8(GenericDecodeStream *gs,
 			gs->ops->info->extensions && StrCaseCmp(gs->ops->info->extensions, "aac") == 0)
 			fprintf(stderr, "AAC: before first decode\n");
 		masterBeforeDecode = GenericAmiSSLMasterSnapshot();
-		nDecoded = gs->ops->decode(gs->handle, gs->decodeBuf, GENERIC_DECODE_CHUNK);
+		nDecoded = gs->ops->decode(gs->handle, gs->decodeBuf,
+			GenericDecodeChunkForRateConvert(gs, opt, 2));
 		if (opt->debugDecoder && !gs->firstDecodeDebugPrinted && gs->ops && gs->ops->info &&
 			gs->ops->info->extensions && StrCaseCmp(gs->ops->info->extensions, "aac") == 0)
 			fprintf(stderr, "AAC: after first decode rc=%ld\n", (long)nDecoded);
