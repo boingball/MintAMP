@@ -517,6 +517,7 @@ static void CloseRadioWindow(MrApp *app);
 static void OpenRadioWindow(MrApp *app);
 static void HandleRadioWindow(MrApp *app);
 static void HandleDoneSignal(MrApp *app);
+static void RadioSetStatus(MrApp *app, const char *text);
 static void RadioDoProbeAndPlay(MrApp *app);
 static void RadioSelectResult(MrApp *app, ULONG eventSelected);
 
@@ -1450,8 +1451,6 @@ static int StopPlaybackAndWait(MrApp *app, int ticks, const char *timeoutStatus)
 	RADIO_DBG(printf("radio-session: stop timeout details childTask=%p session=%lu currentStage=\"%s\" lastStartup=\"%s\" lastCleanup=\"%s\" currentUrl=\"%s\" lastReadDecode=\"%s\" stopFlag=%d donePosted=%d\n", gPlayer.task, gPlayer.sessionId, gPlayer.stage ? (const char *)gPlayer.stage : "", gPlayer.startupStage ? (const char *)gPlayer.startupStage : "", gPlayer.cleanupStage ? (const char *)gPlayer.cleanupStage : "", gPlayer.url, gPlayer.lastIoState ? (const char *)gPlayer.lastIoState : "", gPlayer.stopRequested, gPlayer.donePosted);)
 	return 0;
 }
-static void RadioSetStatus(MrApp *app, const char *text);
-static void RadioDoProbeAndPlay(MrApp *app);
 static void FinalizePlayback(MrApp *app)
 {
 	int stoppedByUser = app->stoppedByUser;
