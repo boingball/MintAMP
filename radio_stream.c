@@ -167,6 +167,7 @@ static unsigned long radio_next_session_id = 1;
 static long radio_active_stream_sessions = 0;
 static long radio_active_stream_tasks = 0;
 static long radio_open_socket_count = 0;
+static long radio_playback_open_socket_count = 0;
 static long radio_active_ssl_count = 0;
 static long radio_active_ssl_ctx_count = 0;
 static long radio_active_decoder_count = 0;
@@ -192,9 +193,9 @@ static void radio_debug_mem_report(unsigned long session_id, const char *where)
 
 static void radio_resource_summary(const RadioStream *rs, const char *where)
 {
-    printf("radio-summary: session=%lu %s active_stream_sessions=%ld active_stream_tasks=%ld open_socket_count=%ld active_ssl_count=%ld active_ssl_ctx_count=%ld active_decoder_count=%ld active_audio_buffer_count=%ld active_stream_buffer_count=%ld active_icy_metadata_count=%ld active_gui_nodes=%ld active_gui_strings=%ld amissl_init_count=%ld cleanup_count=%u\n",
+    printf("radio-summary: session=%lu %s active_stream_sessions=%ld active_stream_tasks=%ld open_socket_count=%ld playback_open_socket_count=%ld active_ssl_count=%ld active_ssl_ctx_count=%ld active_decoder_count=%ld active_audio_buffer_count=%ld active_stream_buffer_count=%ld active_icy_metadata_count=%ld active_gui_nodes=%ld active_gui_strings=%ld amissl_init_count=%ld cleanup_count=%u\n",
         rs ? rs->session_id : 0, where ? where : "", radio_active_stream_sessions,
-        radio_active_stream_tasks, radio_open_socket_count, radio_active_ssl_count,
+        radio_active_stream_tasks, radio_open_socket_count, radio_playback_open_socket_count, radio_active_ssl_count,
         radio_active_ssl_ctx_count, radio_active_decoder_count,
         radio_active_audio_buffer_count, radio_active_stream_buffer_count,
         radio_active_icy_metadata_count, radio_gui_listbrowser_node_count,
@@ -298,6 +299,25 @@ static long radio_sock_errno(void)
 #else
     return errno;
 #endif
+}
+
+static long radio_ioerr_value(void)
+{
+#if defined(AMIGA_M68K)
+    return IoErr();
+#else
+    return 0;
+#endif
+}
+
+static void radio_log_socket_failure(RadioStream *rs, const char *context, const char *where)
+{
+    printf("radio-socket: %s socket failed session=%lu host=%s fd=-1 errno=%ld IoErr=%ld open_socket_count=%ld playback_open_socket_count=%ld active_stream_sessions=%ld active_stream_tasks=%ld active_ssl_count=%ld active_ssl_ctx_count=%ld current_state=%d previous_stream_state=n/a old_child_done_posted=n/a parent_done_received=n/a where=%s\n",
+        context ? context : "playback", rs ? rs->session_id : 0, rs ? rs->host : "",
+        radio_sock_errno(), radio_ioerr_value(), radio_open_socket_count,
+        radio_playback_open_socket_count, radio_active_stream_sessions,
+        radio_active_stream_tasks, radio_active_ssl_count, radio_active_ssl_ctx_count,
+        rs ? (int)rs->status : -1, where ? where : "");
 }
 
 /* Forward declaration so the SSL helpers can call set_error before it is
@@ -650,7 +670,7 @@ static int connect_http(RadioStream *rs){
         rs->haveHostAddr=1;
     }
     if (radio_is_stopping(rs)) return -1;
-    rs->sock=socket(AF_INET,SOCK_STREAM,0); if(rs->sock!=RADIO_INVALID_SOCKET){ radio_open_socket_count++; printf("radio-resource: session=%lu socket opened fd=%ld open_socket_count=%ld\n", rs->session_id, (long)rs->sock, radio_open_socket_count); } if(rs->sock==RADIO_INVALID_SOCKET){ set_error(rs,"cannot create socket"); return -1; }
+    rs->sock=socket(AF_INET,SOCK_STREAM,0); if(rs->sock!=RADIO_INVALID_SOCKET){ radio_open_socket_count++; radio_playback_open_socket_count++; printf("radio-socket: playback socket opened session=%lu host=%s fd=%ld open_socket_count=%ld playback_open_socket_count=%ld\n", rs->session_id, rs->host, (long)rs->sock, radio_open_socket_count, radio_playback_open_socket_count); } if(rs->sock==RADIO_INVALID_SOCKET){ radio_log_socket_failure(rs, "playback", "socket"); set_error(rs,"Cannot create socket - TCP stack may still be releasing previous stream"); return -1; }
     /* Go non-blocking BEFORE connect so the connect never stalls the machine. */
     radio_set_nonblocking(rs->sock);
     memset(&sa,0,sizeof(sa)); sa.sin_family=AF_INET; sa.sin_port=htons((unsigned short)rs->port); sa.sin_addr=rs->hostAddr;
@@ -677,11 +697,16 @@ static void close_current_socket(RadioStream *rs)
     radio_ssl_close_stream(rs);
 #endif
     if (rs->sock != RADIO_INVALID_SOCKET) {
+        long closing_fd = (long)rs->sock;
+        long before_all = radio_open_socket_count;
+        long before_playback = radio_playback_open_socket_count;
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: CloseSocket start fd=%ld\n", (long)rs->sock));
         rs->socket_close_count++;
         radio_close_socket(rs->sock);
-        if (radio_open_socket_count > 0) radio_open_socket_count--;
         rs->sock = RADIO_INVALID_SOCKET;
+        if (radio_open_socket_count > 0) radio_open_socket_count--;
+        if (radio_playback_open_socket_count > 0) radio_playback_open_socket_count--;
+        printf("radio-socket: playback socket close session=%lu fd=%ld open_socket_count %ld->%ld playback_open_socket_count %ld->%ld\n", rs->session_id, closing_fd, before_all, radio_open_socket_count, before_playback, radio_playback_open_socket_count);
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: CloseSocket done\n"));
         RADIO_STOP_DEBUG_PRINTF(("radio-stop: socket closed\n"));
     } else {

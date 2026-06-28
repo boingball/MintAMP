@@ -1422,6 +1422,10 @@ static void FinalizePlayback(MrApp *app)
 	if (app->queuedStreamUrl[0]) {
 		app->queuedStreamUrl[0] = '\0';
 		RadioSetStatus(app, "Starting queued stream...");
+#if defined(AMIGA_M68K)
+		printf("radio-done: Delay before queued stream start after parent done received\n");
+		Delay(3);
+#endif
 		RadioDoProbeAndPlay(app);
 		return;
 	}

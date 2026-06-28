@@ -45,6 +45,7 @@ static int rb_probe_amissl_initialized = 0;
 #include <netinet/in.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <errno.h>
 #define RB_PROBE_SOCKET int
 #define RB_PROBE_INVALID_SOCKET (-1)
 #define rb_probe_close_socket(s) close(s)
@@ -73,6 +74,9 @@ static void rb_probe_format_ipv4_be(unsigned long addr_be, char *out, int out_si
 #define RB_PROBE_MAX_REDIRECTS 3
 #define RB_PROBE_MAX_URL 512
 
+static unsigned long rb_probe_next_session_id = 1;
+static long rb_probe_open_socket_count = 0;
+
 typedef struct RbProbeUrl {
     char host[RB_PROBE_MAX_HOST];
     char path[RB_PROBE_MAX_PATH];
@@ -83,6 +87,8 @@ typedef struct RbProbeUrl {
 typedef struct RbProbeTransport {
     RB_PROBE_SOCKET sock;
     int isSSL;
+    unsigned long session_id;
+    char host[RB_PROBE_MAX_HOST];
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     SSL *ssl;
     SSL_CTX *ctx;
@@ -125,6 +131,33 @@ static void rb_probe_copy_trim(char *dst, int dst_size, const char *src, int len
     if (n > dst_size - 1) n = dst_size - 1;
     if (n > 0) memcpy(dst, src + start, (size_t)n);
     dst[n] = '\0';
+}
+
+
+static long rb_probe_sock_errno(void)
+{
+#if defined(AMIGA_M68K)
+    return Errno();
+#else
+    return errno;
+#endif
+}
+
+static long rb_probe_ioerr_value(void)
+{
+#if defined(AMIGA_M68K)
+    return IoErr();
+#else
+    return 0;
+#endif
+}
+
+static void rb_probe_socket_fail(const RbProbeTransport *transport, const char *where)
+{
+    printf("radio-socket: probe socket failed session=%lu host=%s fd=-1 errno=%ld IoErr=%ld open_socket_count=%ld probe_open_socket_count=%ld where=%s\n",
+        transport ? transport->session_id : 0, transport ? transport->host : "",
+        rb_probe_sock_errno(), rb_probe_ioerr_value(), rb_probe_open_socket_count,
+        rb_probe_open_socket_count, where ? where : "");
 }
 
 static void rb_probe_info_init(RbStreamInfo *info)
@@ -409,6 +442,8 @@ static void rb_probe_cleanup_amissl(void)
 
 #endif
 
+static void rb_probe_transport_close(RbProbeTransport *transport);
+
 static int rb_probe_transport_open(RbProbeTransport *transport, const char *host, int port, int use_ssl, unsigned long *host_addr_be)
 {
     struct hostent *he;
@@ -417,6 +452,8 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *host
     if (!transport || !host) return RB_STREAM_PROBE_ERR_BAD_ARG;
     transport->sock = RB_PROBE_INVALID_SOCKET;
     transport->isSSL = 0;
+    transport->session_id = rb_probe_next_session_id++;
+    rb_probe_copy_trim(transport->host, (int)sizeof(transport->host), host, (int)strlen(host));
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     transport->ssl = NULL;
     transport->ctx = NULL;
@@ -439,14 +476,15 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *host
         printf("rb-probe DNS: resolved %s -> %s\n", host, addr_text);
     }
     transport->sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (transport->sock == RB_PROBE_INVALID_SOCKET) return RB_STREAM_PROBE_ERR_CONNECT;
+    if (transport->sock == RB_PROBE_INVALID_SOCKET) { rb_probe_socket_fail(transport, "socket"); return RB_STREAM_PROBE_ERR_CONNECT; }
+    rb_probe_open_socket_count++;
+    printf("radio-socket: probe socket opened session=%lu host=%s fd=%ld open_socket_count=%ld probe_open_socket_count=%ld\n", transport->session_id, transport->host, (long)transport->sock, rb_probe_open_socket_count, rb_probe_open_socket_count);
     memset(&sa, 0, sizeof(sa));
     sa.sin_family = AF_INET;
     sa.sin_port = htons((unsigned short)port);
     memcpy(&sa.sin_addr, he->h_addr_list[0], (size_t)he->h_length);
     if (connect(transport->sock, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
-        rb_probe_close_socket(transport->sock);
-        transport->sock = RB_PROBE_INVALID_SOCKET;
+        rb_probe_transport_close(transport);
         return RB_STREAM_PROBE_ERR_CONNECT;
     }
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
@@ -463,14 +501,12 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *host
         ssl_error_buf[0] = '\0';
         sni_set = 0;
         if (rb_probe_ensure_amissl() != 0) {
-            rb_probe_close_socket(transport->sock);
-            transport->sock = RB_PROBE_INVALID_SOCKET;
+            rb_probe_transport_close(transport);
             return RB_STREAM_PROBE_ERR_CONNECT;
         }
         transport->ctx = SSL_CTX_new(SSLv23_client_method());
         if (!transport->ctx) {
-            rb_probe_close_socket(transport->sock);
-            transport->sock = RB_PROBE_INVALID_SOCKET;
+            rb_probe_transport_close(transport);
             return RB_STREAM_PROBE_ERR_CONNECT;
         }
         /* No CA bundle on classic AmigaOS; skip cert verification for streams. */
@@ -478,8 +514,7 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *host
         transport->ssl = SSL_new(transport->ctx);
         if (!transport->ssl) {
             SSL_CTX_free(transport->ctx); transport->ctx = NULL;
-            rb_probe_close_socket(transport->sock);
-            transport->sock = RB_PROBE_INVALID_SOCKET;
+            rb_probe_transport_close(transport);
             return RB_STREAM_PROBE_ERR_CONNECT;
         }
         SSL_set_fd(transport->ssl, (int)transport->sock);
@@ -500,8 +535,7 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *host
                    ssl_connect_rc, ssl_error, ssl_error_buf[0] ? ssl_error_buf : "none");
             SSL_free(transport->ssl); transport->ssl = NULL;
             SSL_CTX_free(transport->ctx); transport->ctx = NULL;
-            rb_probe_close_socket(transport->sock);
-            transport->sock = RB_PROBE_INVALID_SOCKET;
+            rb_probe_transport_close(transport);
             return RB_STREAM_PROBE_ERR_TLS_HANDSHAKE;
         }
         transport->sslHandshakeDone = 1;
@@ -530,8 +564,14 @@ static void rb_probe_transport_close(RbProbeTransport *transport)
             transport->ctx = NULL;
         }
 #endif
-        rb_probe_close_socket(transport->sock);
-        transport->sock = RB_PROBE_INVALID_SOCKET;
+         {
+            long closing_fd = (long)transport->sock;
+            long before = rb_probe_open_socket_count;
+            rb_probe_close_socket(transport->sock);
+            transport->sock = RB_PROBE_INVALID_SOCKET;
+            if (rb_probe_open_socket_count > 0) rb_probe_open_socket_count--;
+            printf("radio-socket: probe socket close session=%lu fd=%ld open_socket_count %ld->%ld probe_open_socket_count %ld->%ld\n", transport->session_id, closing_fd, before, rb_probe_open_socket_count, before, rb_probe_open_socket_count);
+        }
     }
 }
 

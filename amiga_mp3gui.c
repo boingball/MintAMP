@@ -3324,8 +3324,13 @@ static void FinalizePlayback(HelixAmp3Gui *gui)
 		DrawProgress(gui);
 		if (gui->artDecode.active)
 			SendTimerRequest(gui, ART_TIMER_MICROS);
-		if (queuedPlayPending)
+		if (queuedPlayPending) {
+#if defined(AMIGA_M68K)
+			printf("radio-done: Delay before queued stream start after parent done received\n");
+			Delay(3);
+#endif
 			StartPlayback(gui);
+		}
 		else if (!gui->artDecode.active)
 			SetStatus(gui, "Next file ready.");
 	} else if ((!stoppedByUser || nextPending) &&
