@@ -402,6 +402,8 @@ typedef struct MrApp {
 	int   hardwareFilter;
 	int   decodeThenPlay;
 	int   bench;
+	int   haveRadioHostAddr;
+	unsigned long radioHostAddrBe;
 	int   artEnabled;
 	int   artCacheEnabled;
 	int   artColorEnabled;
@@ -929,8 +931,14 @@ static void BuildPlaybackArgs(MrApp *app, MrPlayArgs *args)
 	}
 	AddArg(args, "minimp3r");
 	AddArg(args, "--play");
-	if (isRadio)
+	if (isRadio) {
 		AddArg(args, "--radio-stream");
+		if (app->haveRadioHostAddr) {
+			AddArg(args, "--radio-host-addr-be");
+			sprintf(num, "%lu", app->radioHostAddrBe);
+			AddArg(args, num);
+		}
+	}
 	if (app->fastMem)
 		AddArg(args, "--fast-mem");
 	if (useCd32Ultrafast) {
@@ -3095,6 +3103,8 @@ static void RadioDoProbeAndPlay(MrApp *app)
 			return;
 		}
 		SafeCopy(app->inputName, sizeof(app->inputName), app->rbFavouriteUrls[app->rbSelectedFavourite]);
+		app->haveRadioHostAddr = 0;
+		app->radioHostAddrBe = 0;
 		UpdateFileGadget(app);
 		RefreshFileInfoAndTags(app);
 		sprintf(msg, "Starting favourite: %.120s", app->rbFavouriteNames[app->rbSelectedFavourite]);
@@ -3137,6 +3147,8 @@ static void RadioDoProbeAndPlay(MrApp *app)
 		return;
 	}
 	SafeCopy(app->inputName, sizeof(app->inputName), info.final_url);
+	app->haveRadioHostAddr = info.have_host_addr;
+	app->radioHostAddrBe = info.host_addr_be;
 	UpdateFileGadget(app);
 	RefreshFileInfoAndTags(app);
 	sprintf(msg, "Starting: %.120s | type: %.48s | icy-name: %.64s | icy-br: %d | redirects: %d",

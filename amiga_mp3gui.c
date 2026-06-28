@@ -480,6 +480,10 @@ typedef struct HelixAmp3Gui {
 	Mp3Tags tags;
 	char  inputName[HELIXAMP3_MAX_PATH];
 	char  queuedInputName[HELIXAMP3_MAX_PATH];
+	int   haveRadioHostAddr;
+	unsigned long radioHostAddrBe;
+	int   queuedHaveRadioHostAddr;
+	unsigned long queuedRadioHostAddrBe;
 	char  fileText[HELIXAMP3_MAX_PATH];
 	char  lastDrawer[HELIXAMP3_MAX_PATH];
 	char  statusText[128];
@@ -3183,6 +3187,8 @@ static void radio_reset_playback_state_after_stop(HelixAmp3Gui *gui, const char 
 		gui->playbackStoppedByUser = 0;
 		gui->queuedPlayPending = 0;
 		gui->queuedInputName[0] = '\0';
+		gui->queuedHaveRadioHostAddr = 0;
+		gui->queuedRadioHostAddrBe = 0;
 		gui->playlistNextPending = 0;
 		gui->lastCleanupStage = GUIPLAY_CLEANUP_NONE;
 		gui->lastStartupStage = GUISTART_NONE;
@@ -3242,6 +3248,8 @@ static void FinalizePlayback(HelixAmp3Gui *gui)
 	int nextPending = gui->playlistNextPending;
 	int queuedPlayPending = gui->queuedPlayPending;
 	char queuedInputName[HELIXAMP3_MAX_PATH];
+	int queuedHaveRadioHostAddr = gui->queuedHaveRadioHostAddr;
+	unsigned long queuedRadioHostAddrBe = gui->queuedRadioHostAddrBe;
 
 	SafeCopy(queuedInputName, sizeof(queuedInputName), gui->queuedInputName);
 	gui->playbackDonePending = 0;
@@ -3277,9 +3285,13 @@ static void FinalizePlayback(HelixAmp3Gui *gui)
 #endif
 	if (gui->closeRequested) {
 		gui->queuedInputName[0] = '\0';
+		gui->haveRadioHostAddr = 0;
+		gui->radioHostAddrBe = 0;
 	} else if (queuedInputName[0]) {
 		CancelArtDecode(gui);
 		SafeCopy(gui->inputName, sizeof(gui->inputName), queuedInputName);
+		gui->haveRadioHostAddr = queuedHaveRadioHostAddr;
+		gui->radioHostAddrBe = queuedRadioHostAddrBe;
 		SetFileDisplay(gui, gui->inputName);
 		ReadMp3Tags(gui->inputName, &gui->tags, gui->artEnabled);
 		if (is_url_path(gui->inputName))
@@ -4857,12 +4869,16 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 		}
 		if (app->playbackActive || app->playbackDonePending) {
 			SafeCopy(app->queuedInputName, sizeof(app->queuedInputName), app->rbFavouriteUrls[app->rbSelectedFavourite]);
+			app->queuedHaveRadioHostAddr = 0;
+			app->queuedRadioHostAddrBe = 0;
 			app->queuedPlayPending = 1;
 			StopPlayback(app);
 			RadioSetStatus(app, "Stopping current stream before playing favourite...");
 			return;
 		}
 		SelectInternetStream(app, app->rbFavouriteUrls[app->rbSelectedFavourite]);
+		app->haveRadioHostAddr = 0;
+		app->radioHostAddrBe = 0;
 		sprintf(msg, "Playing favourite: %.120s", app->rbFavouriteNames[app->rbSelectedFavourite]);
 		RadioSetStatus(app, msg);
 		StartPlayback(app);
@@ -4904,12 +4920,16 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 	}
 	if (app->playbackActive || app->playbackDonePending) {
 		SafeCopy(app->queuedInputName, sizeof(app->queuedInputName), info.final_url);
+		app->queuedHaveRadioHostAddr = info.have_host_addr;
+		app->queuedRadioHostAddrBe = info.host_addr_be;
 		app->queuedPlayPending = 1;
 		StopPlayback(app);
 		RadioSetStatus(app, "Stopping current stream before playing selection...");
 		return;
 	}
 	SelectInternetStream(app, info.final_url);
+	app->haveRadioHostAddr = info.have_host_addr;
+	app->radioHostAddrBe = info.host_addr_be;
 	sprintf(msg, "Playing: %.120s | type: %.48s | icy-name: %.64s | icy-br: %d | redirects: %d",
 		info.final_url, info.content_type, info.icy_name, info.icy_br, info.redirect_count);
 	RadioSetStatus(app, msg);
@@ -5661,11 +5681,15 @@ static void SelectInternetStream(HelixAmp3Gui *gui, const char *url)
 	}
 	if (gui->playbackActive || gui->playbackDonePending) {
 		SafeCopy(gui->queuedInputName, sizeof(gui->queuedInputName), url);
+		gui->queuedHaveRadioHostAddr = 0;
+		gui->queuedRadioHostAddrBe = 0;
 		SetStatus(gui, "Internet stream selected for next Play.");
 		return;
 	}
 	CancelArtDecode(gui);
 	SafeCopy(gui->inputName, sizeof(gui->inputName), url);
+	gui->haveRadioHostAddr = 0;
+	gui->radioHostAddrBe = 0;
 	SetFileDisplay(gui, gui->inputName);
 	SetInternetStreamMetadata(gui);
 	gui->elapsedSecs = 0;
@@ -5835,8 +5859,14 @@ static void BuildPlaybackArgs(HelixAmp3Gui *gui, HelixAmp3Args *args)
 	memset(args, 0, sizeof(*args));
 	AddArg(args, "amiga_mp3dec");
 	AddArg(args, "--play");
-	if (is_url_path(gui->inputName))
+	if (is_url_path(gui->inputName)) {
 		AddArg(args, "--radio-stream");
+		if (gui->haveRadioHostAddr) {
+			AddArg(args, "--radio-host-addr-be");
+			sprintf(num, "%lu", gui->radioHostAddrBe);
+			AddArg(args, num);
+		}
+	}
 	if (gui->fastMem)
 		AddArg(args, "--fast-mem");
 	if (gui->cd32Ultrafast) {

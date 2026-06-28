@@ -21,6 +21,8 @@ typedef struct RbStreamInfo {
     int icy_br;
     int icy_metaint;
     RbStreamCodec codec;
+    int have_host_addr;
+    unsigned long host_addr_be;
 } RbStreamInfo;
 
 enum {

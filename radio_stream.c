@@ -79,6 +79,7 @@ static int radio_amissl_initialized = 0;
 #include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #define RADIO_SOCKET int
@@ -581,8 +582,12 @@ static int connect_http(RadioStream *rs){
     if (radio_is_stopping(rs)) return -1;
     /* Resolve once and cache it; gethostbyname() is blocking and would freeze
      * the emulator on every reconnect if we re-resolved each time. */
-    if(!rs->haveHostAddr){
-        struct hostent *he=gethostbyname(rs->host);
+    if(rs->haveHostAddr){
+        printf("radio-dns: session=%lu using cached probe DNS %s\n", rs->session_id, inet_ntoa(rs->hostAddr));
+    } else {
+        struct hostent *he;
+        printf("radio-dns: WARNING blocking DNS lookup in playback child host=%s\n", rs->host);
+        he=gethostbyname(rs->host);
         if(!he || !he->h_addr){ set_error(rs,"cannot resolve stream host"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: DNS failed for %s\n", rs->host)); return -1; }
         memcpy(&rs->hostAddr, he->h_addr, sizeof(rs->hostAddr));
         rs->haveHostAddr=1;
@@ -716,13 +721,17 @@ static int radio_note_start_wait(RadioStream *rs, const char *message)
     return 0;
 }
 
-RadioStream *Radio_Open(const char *url)
+RadioStream *Radio_OpenWithHostAddr(const char *url, int haveHostAddr, unsigned long hostAddrBe)
 {
     RadioStream *rs = (RadioStream *)calloc(1, sizeof(*rs));
     if (!rs) return NULL;
     if (!radio_atexit_registered) { atexit(radio_app_exit_report); radio_atexit_registered = 1; }
     radio_reset_session_state(rs);
     rs->session_id = radio_next_session_id++;
+    if (haveHostAddr) {
+        memcpy(&rs->hostAddr, &hostAddrBe, sizeof(rs->hostAddr));
+        rs->haveHostAddr = 1;
+    }
     radio_active_stream_sessions++;
     radio_active_stream_tasks++;
     radio_active_decoder_count++;
@@ -775,6 +784,11 @@ RadioStream *Radio_Open(const char *url)
         RADIO_OPEN_DEBUG_PRINTF(("radio-open: Radio_Open returning error\n"));
     }
     return rs;
+}
+
+RadioStream *Radio_Open(const char *url)
+{
+    return Radio_OpenWithHostAddr(url, 0, 0);
 }
 void Radio_RequestStop(RadioStream *rs){ if(!rs)return; radio_debug_mem_report(rs->session_id, "before stop"); rs->stop_request_count++; RADIO_STOP_DEBUG_PRINTF(("radio-stop: session=%lu stop requested count=%u status=%d fd=%ld\n", rs->session_id, rs->stop_request_count, (int)rs->status, (long)rs->sock)); if(rs->status==RADIO_STATUS_CLOSED)return; rs->stopping=1; rs->reconnectAttempts=RADIO_RECONNECT_MAX; rs->reconnectDelay=0; rs->status=RADIO_STATUS_STOPPING; close_current_socket(rs); RADIO_STOP_DEBUG_PRINTF(("radio-stop: marked stopping\n")); }
 void Radio_Close(RadioStream *rs)

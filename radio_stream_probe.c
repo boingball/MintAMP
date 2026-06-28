@@ -43,6 +43,7 @@ static int rb_probe_amissl_initialized = 0;
 #include <unistd.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #define RB_PROBE_SOCKET int
@@ -395,7 +396,7 @@ static void rb_probe_cleanup_amissl(void)
 
 #endif
 
-static int rb_probe_transport_open(RbProbeTransport *transport, const char *host, int port, int use_ssl)
+static int rb_probe_transport_open(RbProbeTransport *transport, const char *host, int port, int use_ssl, unsigned long *host_addr_be)
 {
     struct hostent *he;
     struct sockaddr_in sa;
@@ -417,6 +418,10 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *host
 #endif
     he = gethostbyname(host);
     if (!he || !he->h_addr_list || !he->h_addr_list[0]) return RB_STREAM_PROBE_ERR_DNS;
+    if (host_addr_be) {
+        memcpy(host_addr_be, he->h_addr_list[0], sizeof(*host_addr_be));
+        printf("rb-probe DNS: resolved %s -> %s\n", host, inet_ntoa(*(struct in_addr *)he->h_addr_list[0]));
+    }
     transport->sock = socket(AF_INET, SOCK_STREAM, 0);
     if (transport->sock == RB_PROBE_INVALID_SOCKET) return RB_STREAM_PROBE_ERR_CONNECT;
     memset(&sa, 0, sizeof(sa));
@@ -748,7 +753,9 @@ int rb_probe_stream_url(const char *url, RbStreamInfo *info,
         rc = rb_probe_build_request(request, (int)sizeof(request), &parsed);
         if (rc < 0) return rc;
         request_len = (int)strlen(request);
-        rc = rb_probe_transport_open(&transport, parsed.host, parsed.port, parsed.isSSL);
+        rc = rb_probe_transport_open(&transport, parsed.host, parsed.port, parsed.isSSL, &info->host_addr_be);
+        if (rc == RB_STREAM_PROBE_OK)
+            info->have_host_addr = 1;
         if (rc < 0) return rc;
         rc = rb_probe_send_all(&transport, request, request_len);
         if (rc < 0) {

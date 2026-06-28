@@ -29,6 +29,7 @@ typedef enum {
 } RadioStatus;
 
 #if ENABLE_RADIO
+RadioStream *Radio_OpenWithHostAddr(const char *url, int haveHostAddr, unsigned long hostAddrBe);
 RadioStream *Radio_Open(const char *url);
 void Radio_RequestStop(RadioStream *rs);
 void Radio_Close(RadioStream *rs);
@@ -52,6 +53,7 @@ const char *Radio_StatusText(RadioStatus status);
  * been stopped and reaped.  Safe to call when nothing was ever opened. */
 void Radio_NetworkShutdown(void);
 #else
+static RadioStream *Radio_OpenWithHostAddr(const char *url, int haveHostAddr, unsigned long hostAddrBe) { (void)url; (void)haveHostAddr; (void)hostAddrBe; return (RadioStream *)0; }
 static RadioStream *Radio_Open(const char *url) { (void)url; return (RadioStream *)0; }
 static void Radio_RequestStop(RadioStream *rs) { (void)rs; }
 static void Radio_Close(RadioStream *rs) { (void)rs; }
