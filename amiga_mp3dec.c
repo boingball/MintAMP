@@ -25,6 +25,9 @@
 #include <dos/dos.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
+#ifdef HAVE_AMISSL
+extern struct Library *AmiSSLMasterBase;
+#endif
 #ifndef AUDIONAME
 #define AUDIONAME "audio.device"
 #endif
@@ -7456,6 +7459,7 @@ static void GenericDecodeStreamInit(GenericDecodeStream *gs,
  * OUTBUF_SAMPS is sized for an MP3 frame (2 ch * 2 gran * 576 = 2304).
  * We halve it so the interleaved output always fits in decodeBuf. */
 #define GENERIC_DECODE_CHUNK (OUTBUF_SAMPS / 2)
+#define GENERIC_BYTES_PER_SAMPLE 2UL
 #ifndef GENERIC_STARTUP_DECODE_CALL_GUARD
 #define GENERIC_STARTUP_DECODE_CALL_GUARD 128
 #endif
@@ -7534,6 +7538,78 @@ static int GenericRateConvertFrame(RateState *rate, const short *in, short *out,
 }
 
 
+
+static int GenericIsAacDecoder(const GenericDecodeStream *gs)
+{
+	return gs && gs->ops && gs->ops->info && gs->ops->info->extensions &&
+		StrCaseCmp(gs->ops->info->extensions, "aac") == 0;
+}
+
+static const char *GenericCodecName(const GenericDecodeStream *gs)
+{
+	return GenericIsAacDecoder(gs) ? "AAC/AAC+" : "generic";
+}
+
+#ifdef HAVE_AMISSL
+static void *GenericAmiSSLMasterSnapshot(void)
+{
+	return (void *)AmiSSLMasterBase;
+}
+#else
+static void *GenericAmiSSLMasterSnapshot(void)
+{
+	return NULL;
+}
+#endif
+
+static int GenericValidateDecodedPcm(GenericDecodeStream *gs,
+	const DecodeOptions *opt, DecLong nDecoded, unsigned long destFrames,
+	unsigned long freeFrames, const char *where, void *masterBefore)
+{
+	unsigned long channels;
+	unsigned long frames;
+	unsigned long samples;
+	unsigned long bytes;
+	unsigned long destCap;
+	void *masterAfter;
+	int overflow;
+
+	(void)opt;
+	channels = (unsigned long)(gs && gs->channels > 0 ? gs->channels : 0);
+	frames = (unsigned long)(nDecoded > 0 ? nDecoded : 0);
+	samples = frames * channels;
+	bytes = samples * GENERIC_BYTES_PER_SAMPLE;
+	destCap = destFrames * channels * GENERIC_BYTES_PER_SAMPLE;
+	overflow = (channels == 0 || frames > destFrames || samples > (unsigned long)OUTBUF_SAMPS);
+	masterAfter = GenericAmiSSLMasterSnapshot();
+
+	if (GenericIsAacDecoder(gs) || overflow) {
+		fprintf(stderr,
+			"aac-output: codec=%s rate=%ld ch=%lu samples=%lu bps=%lu bytes=%lu destCap=%lu free=%lu offset=%lu %s section=%s masterBefore=%p masterAfter=%p\n",
+			GenericCodecName(gs), (long)(gs ? gs->sampleRate : 0), channels,
+			frames, GENERIC_BYTES_PER_SAMPLE, bytes, destCap,
+			freeFrames * channels * GENERIC_BYTES_PER_SAMPLE,
+			(destFrames - freeFrames) * channels * GENERIC_BYTES_PER_SAMPLE,
+			overflow ? "OVERFLOW_PREVENTED" : "OK", where ? where : "decode",
+			masterBefore, masterAfter);
+	}
+	if (masterBefore != masterAfter) {
+		fprintf(stderr,
+			"MEMORY CORRUPTION: AmiSSLMasterBase changed during AAC output handling section=%s before=%p after=%p\n",
+			where ? where : "decode", masterBefore, masterAfter);
+		return 0;
+	}
+	if (overflow) {
+		fprintf(stderr,
+			"generic decoder: refusing oversized decoded PCM frame codec=%s frames=%lu channels=%lu samples=%lu bytes=%lu destCap=%lu\n",
+			GenericCodecName(gs), frames, channels, samples, bytes, destCap);
+		gs->decodeError = 1;
+		gs->outOfData = 1;
+		return 0;
+	}
+	return 1;
+}
+
 static void GenericPrintFirstDecodePcmDebug(const GenericDecodeStream *gs,
 	const DecodeOptions *opt, DecLong moduleFrames)
 {
@@ -7580,6 +7656,7 @@ static int GenericDecodeStreamFillS8(GenericDecodeStream *gs,
 
 	while (produced < maxBytes && !gs->outOfData && !gPlaybackInterrupted) {
 		DecLong nDecoded;
+		void   *masterBeforeDecode;
 		int     outSamps;
 		int     direct;
 		int     spill;
@@ -7594,6 +7671,7 @@ static int GenericDecodeStreamFillS8(GenericDecodeStream *gs,
 		if (opt->debugDecoder && !gs->firstDecodeDebugPrinted && gs->ops && gs->ops->info &&
 			gs->ops->info->extensions && StrCaseCmp(gs->ops->info->extensions, "aac") == 0)
 			fprintf(stderr, "AAC: before first decode\n");
+		masterBeforeDecode = GenericAmiSSLMasterSnapshot();
 		nDecoded = gs->ops->decode(gs->handle, gs->decodeBuf, GENERIC_DECODE_CHUNK);
 		if (opt->debugDecoder && !gs->firstDecodeDebugPrinted && gs->ops && gs->ops->info &&
 			gs->ops->info->extensions && StrCaseCmp(gs->ops->info->extensions, "aac") == 0)
@@ -7624,6 +7702,12 @@ static int GenericDecodeStreamFillS8(GenericDecodeStream *gs,
 			(long)(nDecoded > 0 ? nDecoded * (DecLong)gs->channels : 0),
 			gPlaybackInterrupted ? 1 : 0, gs->consecutiveZeroOutput,
 			gs->outOfData, gs->decodeError);
+
+		if (nDecoded > 0 && !GenericValidateDecodedPcm(gs, opt, nDecoded,
+			GENERIC_DECODE_CHUNK, GENERIC_DECODE_CHUNK, "mono decode/copy",
+			masterBeforeDecode))
+			break;
+
 
 		if (nDecoded < 0) {
 			gs->decodeError = 1;
@@ -7766,6 +7850,7 @@ static int GenericDecodeStreamFillPlanarS8(GenericDecodeStream *gs,
 
 	while (produced < maxFrames && !gs->outOfData && !gPlaybackInterrupted) {
 		DecLong     nDecoded;
+		void       *masterBeforeDecode;
 		const short *pcm;
 		int          frames;
 		int          channels;
@@ -7786,6 +7871,7 @@ static int GenericDecodeStreamFillPlanarS8(GenericDecodeStream *gs,
 		if (opt->debugDecoder && !gs->firstDecodeDebugPrinted && gs->ops && gs->ops->info &&
 			gs->ops->info->extensions && StrCaseCmp(gs->ops->info->extensions, "aac") == 0)
 			fprintf(stderr, "AAC: before first decode\n");
+		masterBeforeDecode = GenericAmiSSLMasterSnapshot();
 		nDecoded = gs->ops->decode(gs->handle, gs->decodeBuf, GENERIC_DECODE_CHUNK);
 		if (opt->debugDecoder && !gs->firstDecodeDebugPrinted && gs->ops && gs->ops->info &&
 			gs->ops->info->extensions && StrCaseCmp(gs->ops->info->extensions, "aac") == 0)
@@ -7817,6 +7903,11 @@ static int GenericDecodeStreamFillPlanarS8(GenericDecodeStream *gs,
 			(long)(nDecoded > 0 ? nDecoded * (DecLong)gs->channels : 0),
 			gPlaybackInterrupted ? 1 : 0, gs->consecutiveZeroOutput,
 			gs->outOfData, gs->decodeError);
+
+		if (nDecoded > 0 && !GenericValidateDecodedPcm(gs, opt, nDecoded,
+			GENERIC_DECODE_CHUNK, (unsigned long)(maxFrames - produced),
+			"stereo decode/copy", masterBeforeDecode))
+			break;
 
 		if (nDecoded < 0) {
 			gs->decodeError = 1;

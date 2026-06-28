@@ -27,7 +27,7 @@
  * SBR doubles to 2048 samples/ch, but SBR is disabled in this build. */
 /* Leave margin for decoders that can report larger frames (for example SBR
  * builds producing 2048 samples/ch stereo).  Capacity is interleaved shorts. */
-#define AAC_OUT_CAP  (2048UL * 2UL)
+#define AAC_OUT_CAP  (4096UL * 2UL)
 
 /* Refill the I/O buffer when fewer than this many bytes remain.
  * AAC_MAINBUF_SIZE guarantees at least one full frame fits after refill. */
@@ -74,6 +74,8 @@ typedef struct AacState {
 
     /* Decoded PCM (interleaved signed 16-bit, host byte order) */
     short         *outbuf;
+    unsigned char *outbufAlloc;
+    unsigned long  outbufAllocBytes;
     unsigned long  outbufFill;   /* valid interleaved shorts */
     unsigned long  outbufPos;    /* read cursor in shorts */
 
@@ -102,6 +104,52 @@ typedef struct AacState {
 } AacState;
 
 static int AacRefillBuf(AacState *st);
+static void AacTracePoint(AacState *st, const char *point, long err,
+                          const AACFrameInfo *fi, long decodeReturn);
+
+#define AAC_GUARD_BYTES 32UL
+#define AAC_GUARD_PATTERN 0xA5
+
+static void AacFillGuard(unsigned char *p)
+{
+    unsigned long i;
+    if (!p) return;
+    for (i = 0; i < AAC_GUARD_BYTES; i++) p[i] = (unsigned char)AAC_GUARD_PATTERN;
+}
+
+static int AacCheckGuard(const unsigned char *p)
+{
+    unsigned long i;
+    if (!p) return 0;
+    for (i = 0; i < AAC_GUARD_BYTES; i++)
+        if (p[i] != (unsigned char)AAC_GUARD_PATTERN)
+            return 0;
+    return 1;
+}
+
+static int AacCheckOutputCanary(AacState *st, const char *where)
+{
+    unsigned char *pre;
+    unsigned char *post;
+    (void)where;
+    if (!st || !st->outbufAlloc) return 1;
+    pre = st->outbufAlloc;
+    post = st->outbufAlloc + AAC_GUARD_BYTES + (AAC_OUT_CAP * (unsigned long)sizeof(short));
+    if (!AacCheckGuard(pre) || !AacCheckGuard(post)) {
+        st->error = 1;
+        AacTracePoint(st, where ? where : "AAC output canary corrupted", -999, 0, 0);
+        return 0;
+    }
+    return 1;
+}
+
+static void AacInitOutputCanary(AacState *st)
+{
+    if (!st || !st->outbufAlloc) return;
+    AacFillGuard(st->outbufAlloc);
+    AacFillGuard(st->outbufAlloc + AAC_GUARD_BYTES + (AAC_OUT_CAP * (unsigned long)sizeof(short)));
+}
+
 
 #ifdef AAC_MODULE_DEBUG
 #define AAC_TRACE_MARKER "AAC MODULE DEBUG TRACE"
@@ -360,7 +408,7 @@ static void AacFreeState(AacState *st)
 {
     if (!st) return;
     if (st->aacHandle) AACFreeDecoder(st->aacHandle);
-    if (st->outbuf)    ModuleFree(st->outbuf);
+    if (st->outbufAlloc) ModuleFree(st->outbufAlloc);
     if (st->iobuf)     ModuleFree(st->iobuf);
     ModuleFree(st);
 }
@@ -438,8 +486,12 @@ static int AacDecodeFrame(AacState *st)
     st->lastInputBefore = oldInputOff;
     st->lastSamplesProduced = 0;
 
+    if (!AacCheckOutputCanary(st, "before normal AACDecode canary"))
+        return -1;
     AacTracePoint(st, "07 before normal AACDecode", st->lastDecodeErr, 0, 0);
     err = AACDecode(st->aacHandle, &st->iobufReadPtr, &st->iobufLeft, st->outbuf);
+    if (!AacCheckOutputCanary(st, "after normal AACDecode canary"))
+        return -1;
     st->lastDecodeErr = err;
     st->lastBytesAfter = (unsigned long)(st->iobufLeft < 0 ? 0 : st->iobufLeft);
     st->lastInputAfter = (unsigned long)(st->iobufReadPtr - st->iobuf);
@@ -505,8 +557,11 @@ static DecHandle AacOpen(DecoderReadCb readFn, DecoderSeekCb seekFn,
     st->iobufReadPtr = st->iobuf;
     st->iobufLeft    = 0;
 
-    st->outbuf = (short *)ModuleAlloc(AAC_OUT_CAP * sizeof(short));
-    if (!st->outbuf) { AacFreeState(st); return NULL; }
+    st->outbufAllocBytes = AAC_GUARD_BYTES + (AAC_OUT_CAP * (unsigned long)sizeof(short)) + AAC_GUARD_BYTES;
+    st->outbufAlloc = (unsigned char *)ModuleAlloc(st->outbufAllocBytes);
+    if (!st->outbufAlloc) { AacFreeState(st); return NULL; }
+    st->outbuf = (short *)(st->outbufAlloc + AAC_GUARD_BYTES);
+    AacInitOutputCanary(st);
 
     st->readFn   = readFn;
     st->seekFn   = seekFn;
@@ -546,11 +601,17 @@ static DecHandle AacOpen(DecoderReadCb readFn, DecoderSeekCb seekFn,
         int oldBytesLeft = st->iobufLeft;
         st->lastBytesBefore = (unsigned long)oldBytesLeft;
         st->lastInputBefore = (unsigned long)(oldInputPtr - st->iobuf);
+        if (!AacCheckOutputCanary(st, "before first/probe AACDecode canary")) {
+            AacFreeState(st); return NULL;
+        }
         AacTracePoint(st, "03 before first/probe AACDecode", st->lastDecodeErr, 0, 0);
         err = AACDecode(st->aacHandle,
                         &st->iobufReadPtr,
                         &st->iobufLeft,
                         st->outbuf);
+        if (!AacCheckOutputCanary(st, "after first/probe AACDecode canary")) {
+            AacFreeState(st); return NULL;
+        }
         st->lastDecodeErr = err;
         st->lastBytesAfter = (unsigned long)(st->iobufLeft < 0 ? 0 : st->iobufLeft);
         st->lastInputAfter = (unsigned long)(st->iobufReadPtr - st->iobuf);
@@ -608,6 +669,8 @@ static DecLong AacDecode(DecHandle handle, short *outBuf,
             unsigned long avail = (st->outbufFill - st->outbufPos) / ch;
             unsigned long take = (unsigned long)(maxSamplesPerChan - produced);
             unsigned long i, total;
+            if (!AacCheckOutputCanary(st, "before AAC output copy canary"))
+                return -1;
             if (take > avail) take = avail;
             total = take * ch;
             {
@@ -616,6 +679,8 @@ static DecLong AacDecode(DecHandle handle, short *outBuf,
                 for (i = 0; i < total; i++)
                     dst[i] = src[i];
             }
+            if (!AacCheckOutputCanary(st, "after AAC output copy canary"))
+                return -1;
             st->outbufPos += take * ch;
             produced      += take;
             st->errCount   = 0;
