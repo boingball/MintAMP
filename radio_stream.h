@@ -34,6 +34,8 @@ void Radio_RequestStop(RadioStream *rs);
 void Radio_Close(RadioStream *rs);
 int Radio_Pump(RadioStream *rs);
 int Radio_ReadAudio(RadioStream *rs, unsigned char *buf, int maxBytes);
+int Radio_ReadStartupAudio(RadioStream *rs, unsigned char *buf, int maxBytes, unsigned long timeoutMs);
+void Radio_FailStartup(RadioStream *rs, const char *message);
 RadioStatus Radio_GetStatus(RadioStream *rs);
 const char *Radio_GetTitle(RadioStream *rs);
 const char *Radio_GetStationName(RadioStream *rs);
@@ -51,6 +53,8 @@ static void Radio_RequestStop(RadioStream *rs) { (void)rs; }
 static void Radio_Close(RadioStream *rs) { (void)rs; }
 static int Radio_Pump(RadioStream *rs) { (void)rs; return -1; }
 static int Radio_ReadAudio(RadioStream *rs, unsigned char *buf, int maxBytes) { (void)rs; (void)buf; (void)maxBytes; return 0; }
+static int Radio_ReadStartupAudio(RadioStream *rs, unsigned char *buf, int maxBytes, unsigned long timeoutMs) { (void)rs; (void)buf; (void)maxBytes; (void)timeoutMs; return 0; }
+static void Radio_FailStartup(RadioStream *rs, const char *message) { (void)rs; (void)message; }
 static RadioStatus Radio_GetStatus(RadioStream *rs) { (void)rs; return RADIO_STATUS_CLOSED; }
 static const char *Radio_GetTitle(RadioStream *rs) { (void)rs; return ""; }
 static const char *Radio_GetStationName(RadioStream *rs) { (void)rs; return ""; }

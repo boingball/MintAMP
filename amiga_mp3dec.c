@@ -7400,6 +7400,7 @@ cleanup:
 #define GENERIC_STALL_LIMIT 64
 #define GENERIC_STARTUP_TIMEOUT_ITERATIONS 64
 #define GENERIC_STARTUP_TIMEOUT_MS 5000UL
+#define AAC_RADIO_STARTUP_TIMEOUT_MS 15000UL
 
 typedef struct GenericDecodeStream {
 	const struct DecoderOps *ops;
@@ -8407,6 +8408,7 @@ static int ValidateAacAdtsInput(InputSource *input, int debugDecoder)
 static int PrimeRadioAacAdtsInput(InputSource *input, int debugDecoder)
 {
 	unsigned long total = 0;
+	clock_t startedAt;
 	int sync = -1;
 	int pump;
 	int i;
@@ -8416,9 +8418,10 @@ static int PrimeRadioAacAdtsInput(InputSource *input, int debugDecoder)
 
 	fprintf(stderr, "radio-aac-startup: transport read start max=%lu\n",
 		(unsigned long)sizeof(input->prefix));
+	startedAt = clock();
 	for (pump = 0; pump < 64 && total < sizeof(input->prefix); pump++) {
-		size_t got = InputSourceRead(input, input->prefix + total,
-			sizeof(input->prefix) - total);
+		size_t got = (size_t)Radio_ReadStartupAudio(input->radio, input->prefix + total,
+			(int)(sizeof(input->prefix) - total), AAC_RADIO_STARTUP_TIMEOUT_MS);
 		fprintf(stderr, "radio-aac-startup: transport read bytes returned=%lu total=%lu status=%d\n",
 			(unsigned long)got, total + (unsigned long)got,
 			(int)Radio_GetStatus(input->radio));
@@ -8428,19 +8431,29 @@ static int PrimeRadioAacAdtsInput(InputSource *input, int debugDecoder)
 		sync = FindAdtsSyncLocal(input->prefix, (size_t)total);
 		if (sync >= 0 && total >= (unsigned long)sync + 7UL)
 			break;
+		if (PlaybackElapsedMilliseconds(startedAt, clock()) >=
+			AAC_RADIO_STARTUP_TIMEOUT_MS) {
+			fprintf(stderr, "radio-aac-startup: AAC stream start timeout while searching ADTS sync buffered=%lu\n",
+				total);
+			break;
+		}
 	}
 	input->prefixSize = total;
 	input->prefixPos = 0;
 
-	fprintf(stderr, "radio-aac-startup: first bytes available=%lu first16=",
-		total < 16UL ? total : 16UL);
-	for (i = 0; i < 16 && (unsigned long)i < total; i++)
+	fprintf(stderr, "radio-aac-startup: first bytes available=%lu first32=",
+		total < 32UL ? total : 32UL);
+	for (i = 0; i < 32 && (unsigned long)i < total; i++)
 		fprintf(stderr, "%s%02lx", i ? " " : "", (unsigned long)input->prefix[i]);
 	fprintf(stderr, "\n");
 	fprintf(stderr, "radio-aac-startup: AAC sync detection start buffered=%lu\n", total);
 	if (sync < 0) {
-		fprintf(stderr, "radio-aac-startup: ADTS sync not found reason=\"Unsupported AAC stream format or no ADTS sync\"\n");
+		fprintf(stderr, "radio-aac-startup: ADTS sync not found reason=\"Unsupported AAC stream format or no ADTS sync\" bytesSkipped=0 searchWindow=%lu\n",
+			total);
 		fprintf(stderr, "Unsupported AAC stream format or no ADTS sync\n");
+		Radio_FailStartup(input->radio,
+			total == 0 ? "AAC stream start timeout" :
+			"Unsupported AAC stream format or no ADTS sync");
 		GuiSetPlaybackPhase(GUIPLAY_PHASE_ERROR);
 		gGuiPlaybackStatus.startupStage = GUISTART_FAILED;
 		GuiMarkRadioError();
@@ -8449,8 +8462,8 @@ static int PrimeRadioAacAdtsInput(InputSource *input, int debugDecoder)
 			(int)Radio_GetStatus(input->radio), total);
 		return 0;
 	}
-	fprintf(stderr, "radio-aac-startup: ADTS sync found offset=%d buffered=%lu\n",
-		sync, total);
+	fprintf(stderr, "radio-aac-startup: ADTS sync found offset=%d buffered=%lu bytesSkipped=%d\n",
+		sync, total, sync);
 	if (sync > 0) {
 		memmove(input->prefix, input->prefix + sync, (size_t)(total - (unsigned long)sync));
 		input->prefixSize = total - (unsigned long)sync;
@@ -8552,8 +8565,12 @@ static int AmigaPlayStreamingGeneric(InputSource *input,
 		fprintf(stderr, "radio-aac-startup: audio output init start rate=%d sourceRate=%lu channels=%u requestedBytes=%lu\n",
 			playbackRate, sinfo->sampleRate, sinfo->channels, requestedBytes);
 	if (AmigaSetupPlaybackBuffers(&player, opt, period, requestedBytes,
-		opt->stereo ? 2UL : 1UL, 0, buf, &bufBytes, &cleanupStatus) != 0)
+		opt->stereo ? 2UL : 1UL, 0, buf, &bufBytes, &cleanupStatus) != 0) {
+		if (ops && ops->info && ops->info->extensions &&
+			StrCaseCmp(ops->info->extensions, "aac") == 0)
+			fprintf(stderr, "radio-aac-startup: audio output init result=failure\n");
 		goto cleanup;
+	}
 	if (ops && ops->info && ops->info->extensions &&
 		StrCaseCmp(ops->info->extensions, "aac") == 0)
 		fprintf(stderr, "radio-aac-startup: audio output init result=success bufBytes=%lu halfSlots=%lu\n",
@@ -8610,6 +8627,11 @@ static int AmigaPlayStreamingGeneric(InputSource *input,
 			PlaybackElapsedMilliseconds(startupStartedAt, clock()) >=
 			GENERIC_STARTUP_TIMEOUT_MS)) {
 			fprintf(stderr, "generic decoder: startup timed out before PCM output\n");
+			if (ops && ops->info && ops->info->extensions &&
+				StrCaseCmp(ops->info->extensions, "aac") == 0) {
+				fprintf(stderr, "radio-aac-startup: AAC stream start timeout before first decoded frame\n");
+				Radio_FailStartup(input->radio, "AAC stream start timeout");
+			}
 			stream.decodeError = 1;
 			GuiSetPlaybackPhase(GUIPLAY_PHASE_ERROR);
 			gGuiPlaybackStatus.startupStage = GUISTART_FAILED;
@@ -8626,6 +8648,11 @@ static int AmigaPlayStreamingGeneric(InputSource *input,
 			gGuiPlaybackStatus.startupStage = GUISTART_FAILED;
 			goto cleanup;
 		}
+		if (active == 0 && len[0] > 0 && len[0] / playbackChannels > 0 &&
+			ops && ops->info && ops->info->extensions &&
+			StrCaseCmp(ops->info->extensions, "aac") == 0)
+			fprintf(stderr, "radio-aac-startup: first decoded frame ready bytes=%lu samplesPerChannel=%lu\n",
+				len[0], len[0] / playbackChannels);
 		if (active == 0 && (len[0] == 0 || len[0] / playbackChannels == 0)) {
 			fprintf(stderr, "generic decoder: first buffer fill produced zero bytes\n");
 			GuiSetPlaybackPhase(GUIPLAY_PHASE_ERROR);
