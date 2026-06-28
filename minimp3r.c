@@ -567,6 +567,7 @@ static void HandleDoneSignal(MrApp *app);
 /* ------------------------------------------------------------------------- */
 
 
+#ifdef RADIO_DEBUG
 static void AppCloseDebug(const char *stage, const MrApp *app)
 {
 	long active_stream_sessions = 0;
@@ -592,6 +593,9 @@ static void AppCloseDebug(const char *stage, const MrApp *app)
 		socket_base, amissl_base, amissl_master_base
 	);
 }
+#else
+#define AppCloseDebug(stage, app) do { (void)(stage); (void)(app); } while (0)
+#endif
 
 static int AppHasActivePlaybackChild(const MrApp *app)
 {
@@ -616,7 +620,7 @@ static void AppCloseShutdown(MrApp *app)
 		}
 	} else {
 		AppCloseDebug("playback already idle, skip stop", app);
-		printf("APP_CLOSE: playback idle, no stop needed\n");
+		AppCloseDebug("playback idle, no stop needed", app);
 	}
 	AppCloseDebug("dispose radio browser controller", app);
 	AppCloseDebug("free favourites/search results", app);
