@@ -10614,6 +10614,17 @@ int main(int argc, char **argv)
 				return gret;
 			}
 			RADIO_MP3_PATH_BREADCRUMB("before internal MP3 path is selected");
+#if defined(RADIO_DEBUG_MP3_ISOLATION_STAGE)
+			fprintf(stderr, "radio-mp3-stage: COMPILED stage=%d immediate return test\n",
+				RADIO_DEBUG_MP3_ISOLATION_STAGE);
+			RADIO_MP3_PATH_BREADCRUMB("radio-mp3-stage: COMPILED stage immediate return test");
+
+#if RADIO_DEBUG_MP3_ISOLATION_STAGE == 1
+			RADIO_MP3_PATH_BREADCRUMB("radio-mp3-stage-A: immediate return before any Stage A function call");
+			fprintf(stderr, "radio-mp3-stage-A: immediate return before any Stage A function call\n");
+			return 0;
+#endif
+#endif
 #if RADIO_DEBUG_MP3_ISOLATION_BYPASS_PLAYBACK && RADIO_DEBUG_MP3_ISOLATION_STAGE <= 0
 			if (radioMp3Selected && input.radio) {
 				int ok;
