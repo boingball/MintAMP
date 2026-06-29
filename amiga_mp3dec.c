@@ -7921,6 +7921,69 @@ static void RadioMp3StageFreePcm(RadioMp3StagePcm *pcm)
 		pcm->bytes = 0;
 }
 
+
+static int RadioMp3StageRawHelixDecodeA1(const unsigned char *capture,
+	unsigned long captured)
+{
+	HMP3Decoder rawDecoder;
+	unsigned char *readPtr;
+	int bytesLeft;
+	short decodeBuf[OUTBUF_SAMPS];
+	int frames;
+	int err;
+
+	fprintf(stderr, "radio-mp3-stage-A1: raw Helix decode begin bytes=%lu\n",
+		captured);
+	if (!capture || captured == 0 || captured > 2147483647UL) {
+		fprintf(stderr, "radio-mp3-stage-A1: raw Helix decode FAIL err=%d\n",
+			ERR_MP3_INDATA_UNDERFLOW);
+		return 0;
+	}
+	rawDecoder = MP3InitDecoder();
+	if (!rawDecoder) {
+		fprintf(stderr, "radio-mp3-stage-A1: raw Helix decode FAIL err=%d\n",
+			ERR_MP3_OUT_OF_MEMORY);
+		return 0;
+	}
+	readPtr = (unsigned char *)capture;
+	bytesLeft = (int)captured;
+	frames = 0;
+	err = ERR_MP3_NONE;
+	while (frames < 3 && bytesLeft > 0) {
+		int offset;
+		MP3FrameInfo info;
+
+		offset = FindValidatedMpegSync(readPtr, bytesLeft);
+		if (offset < 0) {
+			err = ERR_MP3_INDATA_UNDERFLOW;
+			break;
+		}
+		readPtr += offset;
+		bytesLeft -= offset;
+		err = MP3Decode(rawDecoder, &readPtr, &bytesLeft, decodeBuf, 0);
+		MP3GetLastFrameInfo(rawDecoder, &info);
+		fprintf(stderr,
+			"radio-mp3-stage-A1: frame=%d MP3Decode return code=%d bytes remaining=%d sample rate=%d channels=%d bitrate=%d outputSamps=%d\n",
+			frames + 1, err, bytesLeft, info.samprate, info.nChans,
+			info.bitrate, info.outputSamps);
+		if (err == ERR_MP3_NONE) {
+			frames++;
+			continue;
+		}
+		if (err == ERR_MP3_MAINDATA_UNDERFLOW)
+			continue;
+		break;
+	}
+	MP3FreeDecoder(rawDecoder);
+	if (frames > 0)
+		fprintf(stderr, "radio-mp3-stage-A1: raw Helix decode PASS frames=%d\n",
+			frames);
+	else
+		fprintf(stderr, "radio-mp3-stage-A1: raw Helix decode FAIL err=%d\n",
+			err);
+	return frames > 0;
+}
+
 static int RadioMp3StageDecodeToRam(InputSource *input, HMP3Decoder decoder,
 	const DecodeOptions *opt, DecodeStats *stats, TimingStats *timing,
 	RadioMp3StagePcm *pcm)
@@ -8040,6 +8103,10 @@ static int RadioMp3StageDecodeToRam(InputSource *input, HMP3Decoder decoder,
 	}
 
 	syncOffset = FindValidatedMpegSync(capture, (int)captured);
+	(void)RadioMp3StageRawHelixDecodeA1(capture, captured);
+	rc = 0;
+	reason = "stage A1 complete";
+	goto cleanup;
 #ifdef HAVE_AMIGA_AUDIO_DEVICE
 	dumpAmigaFile = Open((STRPTR)RADIO_MP3_DEBUG_DUMP_PATH, MODE_OLDFILE);
 	fprintf(stderr, "radio-mp3-stage-A: dump file open result=%p\n", (void *)dumpAmigaFile);
