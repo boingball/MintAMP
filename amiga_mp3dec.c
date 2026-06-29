@@ -7574,9 +7574,37 @@ static int GenericIsAacDecoder(const GenericDecodeStream *gs)
 		StrCaseCmp(gs->ops->info->extensions, "aac") == 0;
 }
 
+static const char *GenericCodecExtension(const GenericDecodeStream *gs)
+{
+	return (gs && gs->ops && gs->ops->info && gs->ops->info->extensions) ?
+		gs->ops->info->extensions : "unknown";
+}
+
 static const char *GenericCodecName(const GenericDecodeStream *gs)
 {
 	return GenericIsAacDecoder(gs) ? "AAC/AAC+" : "generic";
+}
+
+static DecULong GenericDecodeRequestChunk(const GenericDecodeStream *gs,
+	const DecodeOptions *opt, int outputChannels)
+{
+	if (GenericIsAacDecoder(gs))
+		return GenericDecodeChunkForRateConvert(gs, opt, outputChannels);
+	return GENERIC_DECODE_CHUNK;
+}
+
+static void GenericPrintDecodeRequestDebug(const GenericDecodeStream *gs,
+	const DecodeOptions *opt, int outputChannels, DecULong requestChunk,
+	DecLong moduleFrames)
+{
+	if (!opt || !opt->debugDecoder)
+		return;
+	fprintf(stderr,
+		"generic-debug: decode-request codec=%s extension=%s sourceRate=%ld outputRate=%ld outputChannels=%ld requestedChunk=%lu returnFrames=%ld\n",
+		GenericCodecName(gs), GenericCodecExtension(gs),
+		(long)(gs ? gs->sampleRate : 0),
+		(long)(opt->outputRate > 0 ? opt->outputRate : (gs ? gs->sampleRate : 0)),
+		(long)outputChannels, (unsigned long)requestChunk, (long)moduleFrames);
 }
 
 #ifdef HAVE_AMISSL
@@ -7690,19 +7718,21 @@ static int GenericDecodeStreamFillS8(GenericDecodeStream *gs,
 		int     direct;
 		int     spill;
 		int     i;
+		DecULong requestChunk;
 
 		if (AmigaPlaybackStopRequested(opt, "inside generic mono decode loop"))
 			break;
 
+		requestChunk = GenericDecodeRequestChunk(gs, opt, 1);
 		if (opt->debugDecoder && !gs->firstDecodeDebugPrinted)
 			fprintf(stderr, "generic-debug: first decode call entered maxSamplesPerChan=%lu\n",
-				(unsigned long)GENERIC_DECODE_CHUNK);
+				(unsigned long)requestChunk);
 		if (opt->debugDecoder && !gs->firstDecodeDebugPrinted && gs->ops && gs->ops->info &&
 			gs->ops->info->extensions && StrCaseCmp(gs->ops->info->extensions, "aac") == 0)
 			fprintf(stderr, "AAC: before first decode\n");
 		masterBeforeDecode = GenericAmiSSLMasterSnapshot();
-		nDecoded = gs->ops->decode(gs->handle, gs->decodeBuf,
-			GenericDecodeChunkForRateConvert(gs, opt, 1));
+		nDecoded = gs->ops->decode(gs->handle, gs->decodeBuf, requestChunk);
+		GenericPrintDecodeRequestDebug(gs, opt, 1, requestChunk, nDecoded);
 		if (opt->debugDecoder && !gs->firstDecodeDebugPrinted && gs->ops && gs->ops->info &&
 			gs->ops->info->extensions && StrCaseCmp(gs->ops->info->extensions, "aac") == 0)
 			fprintf(stderr, "AAC: after first decode rc=%ld\n", (long)nDecoded);
@@ -7886,6 +7916,7 @@ static int GenericDecodeStreamFillPlanarS8(GenericDecodeStream *gs,
 		int          channels;
 		int          i;
 		int          direct;
+		DecULong     requestChunk;
 
 		if (AmigaPlaybackStopRequested(opt, "inside generic stereo decode loop"))
 			break;
@@ -7895,15 +7926,16 @@ static int GenericDecodeStreamFillPlanarS8(GenericDecodeStream *gs,
 			break;
 		}
 
+		requestChunk = GenericDecodeRequestChunk(gs, opt, 2);
 		if (opt->debugDecoder && !gs->firstDecodeDebugPrinted)
 			fprintf(stderr, "generic-debug: first decode call entered maxSamplesPerChan=%lu\n",
-				(unsigned long)GENERIC_DECODE_CHUNK);
+				(unsigned long)requestChunk);
 		if (opt->debugDecoder && !gs->firstDecodeDebugPrinted && gs->ops && gs->ops->info &&
 			gs->ops->info->extensions && StrCaseCmp(gs->ops->info->extensions, "aac") == 0)
 			fprintf(stderr, "AAC: before first decode\n");
 		masterBeforeDecode = GenericAmiSSLMasterSnapshot();
-		nDecoded = gs->ops->decode(gs->handle, gs->decodeBuf,
-			GenericDecodeChunkForRateConvert(gs, opt, 2));
+		nDecoded = gs->ops->decode(gs->handle, gs->decodeBuf, requestChunk);
+		GenericPrintDecodeRequestDebug(gs, opt, 2, requestChunk, nDecoded);
 		if (opt->debugDecoder && !gs->firstDecodeDebugPrinted && gs->ops && gs->ops->info &&
 			gs->ops->info->extensions && StrCaseCmp(gs->ops->info->extensions, "aac") == 0)
 			fprintf(stderr, "AAC: after first decode rc=%ld\n", (long)nDecoded);
