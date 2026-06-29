@@ -7926,6 +7926,8 @@ static int RadioMp3StageDecodeToRam(InputSource *input, HMP3Decoder decoder,
 			pcm->frames, pcm->sampleRate, pcm->channels, pcm->bitrate,
 			(unsigned long)n, pcm->bytes);
 	}
+	fprintf(stderr, "radio-mp3-stage-A: decoded frames=%lu produced bytes=%lu (S8 RAM, internal Helix MP3 path, no audio.device)\n",
+		pcm->frames, pcm->bytes);
 	RADIO_MP3_PATH_BREADCRUMB("Stage A: decoded first frames to RAM, no audio.device");
 	return pcm->bytes > 0 ? 0 : -1;
 }
@@ -7977,6 +7979,12 @@ static int RadioMp3RunIsolationStage(InputSource *input, HMP3Decoder decoder,
 	int ret;
 
 	RADIO_MP3_PATH_BREADCRUMB("staged isolation: entry");
+#if RADIO_DEBUG_MP3_ISOLATION
+	if (RADIO_DEBUG_MP3_ISOLATION_STAGE == 1) {
+		RADIO_MP3_PATH_BREADCRUMB("Stage A: prebuffer/dump before Helix S8 RAM decode");
+		RadioMp3DumpIsolationBytes(input);
+	}
+#endif
 	if (RadioMp3StageDecodeToRam(input, decoder, opt, stats, timing, &pcm) != 0)
 		return 1;
 	playbackRate = pcm.sampleRate > 0 ? pcm.sampleRate : PlaybackOutputSampleRate(opt, stats);
@@ -10555,7 +10563,7 @@ int main(int argc, char **argv)
 				return gret;
 			}
 			RADIO_MP3_PATH_BREADCRUMB("before internal MP3 path is selected");
-#if RADIO_DEBUG_MP3_ISOLATION_BYPASS_PLAYBACK
+#if RADIO_DEBUG_MP3_ISOLATION_BYPASS_PLAYBACK && RADIO_DEBUG_MP3_ISOLATION_STAGE <= 0
 			if (radioMp3Selected && input.radio) {
 				int ok;
 				RADIO_MP3_PATH_BREADCRUMB("isolation bypass: before dump/preflight");

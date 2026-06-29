@@ -370,6 +370,14 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   can enable the detailed GUI startup log, watchdog text, task/process pointers,
   and embedded audio-open diagnostics by building with `-DMINIAMP3_DEBUG`, for
   example `make -f Makefile.amiga gui EXTRA_CFLAGS=-DMINIAMP3_DEBUG`.
+- MP3 radio startup can be isolated with `RADIO_DEBUG_MP3_ISOLATION_STAGE=1`.
+  Build a radio-enabled debug binary with
+  `EXTRA_CFLAGS="-DRADIO_DEBUG -DRADIO_DEBUG_MP3_ISOLATION_STAGE=1"`; the
+  MP3 radio URL is opened, up to 128 KiB is prebuffered and dumped to
+  `T:MiniAMP3-radio-mp3-dump.mp3`, the built-in Helix MP3 decoder path decodes
+  frames into S8 RAM, and the process returns before opening `audio.device`. A
+  successful run logs `radio-mp3-stage-A: decoded frames=` and
+  `produced bytes=` with both values greater than zero.
 - `--debug-play` prints startup diagnostics for Paula streaming, including the requested volume percent, mapped `ioa_Volume`, initial request volume, selected live-update method, volume sequence count, and the
   actual output rate, PAL period, requested buffer depth, selected half-buffer
   samples/bytes, chip submission buffer addresses/sizes, optional stereo work
