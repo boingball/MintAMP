@@ -7922,66 +7922,90 @@ static void RadioMp3StageFreePcm(RadioMp3StagePcm *pcm)
 }
 
 
-static int RadioMp3StageRawHelixDecodeA1(const unsigned char *capture,
-	unsigned long captured)
+static int RadioMp3Stage1RawMp3Decode(RadioStream *radio)
 {
-	HMP3Decoder rawDecoder;
+	unsigned char *capture;
+	unsigned long captured;
+	int idle;
+	int syncOffset;
+	HMP3Decoder decoder;
 	unsigned char *readPtr;
 	int bytesLeft;
 	short decodeBuf[OUTBUF_SAMPS];
-	int frames;
+	int frame;
 	int err;
 
-	fprintf(stderr, "radio-mp3-stage-A1: raw Helix decode begin bytes=%lu\n",
-		captured);
-	if (!capture || captured == 0 || captured > 2147483647UL) {
-		fprintf(stderr, "radio-mp3-stage-A1: raw Helix decode FAIL err=%d\n",
-			ERR_MP3_INDATA_UNDERFLOW);
-		return 0;
+	fprintf(stderr, "radio-mp3-stage-1: begin raw MP3Decode-only probe\n");
+	capture = (unsigned char *)RadioMp3StageAllocAny(RADIO_MP3_DEBUG_DUMP_LIMIT,
+		"stage 1 captured MP3 heap buffer");
+	if (!capture) {
+		fprintf(stderr, "radio-mp3-stage-1: captured bytes=0\n");
+		if (radio)
+			Radio_Close(radio);
+		fprintf(stderr, "radio-mp3-stage-1: radio stream closed\n");
+		return 1;
 	}
-	rawDecoder = MP3InitDecoder();
-	if (!rawDecoder) {
-		fprintf(stderr, "radio-mp3-stage-A1: raw Helix decode FAIL err=%d\n",
-			ERR_MP3_OUT_OF_MEMORY);
-		return 0;
+
+	captured = 0;
+	idle = 0;
+	while (radio && captured < RADIO_MP3_DEBUG_DUMP_LIMIT && idle < 500 &&
+		!gPlaybackInterrupted) {
+		unsigned long room = RADIO_MP3_DEBUG_DUMP_LIMIT - captured;
+		int want = room < 1024UL ? (int)room : 1024;
+		int got = Radio_ReadAudio(radio, capture + captured, want);
+		if (got > 0) {
+			captured += (unsigned long)got;
+			idle = 0;
+			continue;
+		}
+		if (Radio_GetStatus(radio) == RADIO_STATUS_ERROR ||
+			Radio_GetStatus(radio) == RADIO_STATUS_CLOSED)
+			break;
+		Radio_Pump(radio);
+		RadioDecodeYield();
+		idle++;
 	}
-	readPtr = (unsigned char *)capture;
-	bytesLeft = (int)captured;
-	frames = 0;
+	fprintf(stderr, "radio-mp3-stage-1: captured bytes=%lu\n", captured);
+	if (radio)
+		Radio_Close(radio);
+	fprintf(stderr, "radio-mp3-stage-1: radio stream closed\n");
+
+	syncOffset = captured <= 2147483647UL ?
+		FindValidatedMpegSync(capture, (int)captured) : -1;
+	fprintf(stderr, "radio-mp3-stage-1: sync offset=%d\n", syncOffset);
+
+	decoder = MP3InitDecoder();
+	fprintf(stderr, "radio-mp3-stage-1: decoder pointer=%p\n", (void *)decoder);
+	if (!decoder) {
+		RadioMp3StageFreeAny(capture);
+		return 1;
+	}
+
+	readPtr = capture;
+	bytesLeft = captured <= 2147483647UL ? (int)captured : 0;
+	if (syncOffset > 0 && syncOffset <= bytesLeft) {
+		readPtr += syncOffset;
+		bytesLeft -= syncOffset;
+	}
 	err = ERR_MP3_NONE;
-	while (frames < 3 && bytesLeft > 0) {
-		int offset;
+	for (frame = 0; frame < 3 && bytesLeft > 0; frame++) {
 		MP3FrameInfo info;
 
-		offset = FindValidatedMpegSync(readPtr, bytesLeft);
-		if (offset < 0) {
-			err = ERR_MP3_INDATA_UNDERFLOW;
-			break;
-		}
-		readPtr += offset;
-		bytesLeft -= offset;
-		err = MP3Decode(rawDecoder, &readPtr, &bytesLeft, decodeBuf, 0);
-		MP3GetLastFrameInfo(rawDecoder, &info);
+		memset(&info, 0, sizeof(info));
+		err = MP3Decode(decoder, &readPtr, &bytesLeft, decodeBuf, 0);
+		MP3GetLastFrameInfo(decoder, &info);
 		fprintf(stderr,
-			"radio-mp3-stage-A1: frame=%d MP3Decode return code=%d bytes remaining=%d sample rate=%d channels=%d bitrate=%d outputSamps=%d\n",
-			frames + 1, err, bytesLeft, info.samprate, info.nChans,
+			"radio-mp3-stage-1: frame=%d MP3Decode err=%d bytesLeft=%d sampleRate=%d channels=%d bitrate=%d outputSamps=%d\n",
+			frame + 1, err, bytesLeft, info.samprate, info.nChans,
 			info.bitrate, info.outputSamps);
-		if (err == ERR_MP3_NONE) {
-			frames++;
-			continue;
-		}
-		if (err == ERR_MP3_MAINDATA_UNDERFLOW)
-			continue;
-		break;
+		if (err != ERR_MP3_NONE && err != ERR_MP3_MAINDATA_UNDERFLOW)
+			break;
 	}
-	MP3FreeDecoder(rawDecoder);
-	if (frames > 0)
-		fprintf(stderr, "radio-mp3-stage-A1: raw Helix decode PASS frames=%d\n",
-			frames);
-	else
-		fprintf(stderr, "radio-mp3-stage-A1: raw Helix decode FAIL err=%d\n",
-			err);
-	return frames > 0;
+
+	MP3FreeDecoder(decoder);
+	RadioMp3StageFreeAny(capture);
+	fprintf(stderr, "radio-mp3-stage-1: return cleanly\n");
+	return 0;
 }
 
 static int RadioMp3StageDecodeToRam(InputSource *input, HMP3Decoder decoder,
@@ -8103,7 +8127,7 @@ static int RadioMp3StageDecodeToRam(InputSource *input, HMP3Decoder decoder,
 	}
 
 	syncOffset = FindValidatedMpegSync(capture, (int)captured);
-	(void)RadioMp3StageRawHelixDecodeA1(capture, captured);
+	fprintf(stderr, "radio-mp3-stage-A: sync offset=%d\n", syncOffset);
 	rc = 0;
 	reason = "stage A1 complete";
 	goto cleanup;
@@ -10790,6 +10814,18 @@ int main(int argc, char **argv)
 			AmigaFreeNormalizedArgs(&normalized);
 			return 1;
 		}
+#if defined(RADIO_DEBUG_MP3_ISOLATION_STAGE) && RADIO_DEBUG_MP3_ISOLATION_STAGE == 1
+		{
+			int stageRc;
+
+			fprintf(stderr, "radio-mp3-stage-1: opened MP3 radio URL=%s\n", opt.inName);
+			stageRc = RadioMp3Stage1RawMp3Decode(radio);
+			RadioDebugMp3DumpReset();
+			free(resolvedOutName);
+			AmigaFreeNormalizedArgs(&normalized);
+			return stageRc == 0 ? 0 : 1;
+		}
+#endif
 		InputSourceInitRadio(&input, radio);
 		RadioDebugMp3DumpReset();
 		{
@@ -10819,39 +10855,6 @@ int main(int argc, char **argv)
 				return gret;
 			}
 			RADIO_MP3_PATH_BREADCRUMB("before internal MP3 path is selected");
-#if defined(RADIO_DEBUG_MP3_ISOLATION_STAGE)
-			fprintf(stderr, "radio-mp3-stage: COMPILED stage=%d Stage A boundary call\n",
-				RADIO_DEBUG_MP3_ISOLATION_STAGE);
-			RADIO_MP3_PATH_BREADCRUMB("radio-mp3-stage: COMPILED stage boundary call");
-
-#if RADIO_DEBUG_MP3_ISOLATION_STAGE == 1
-			{
-				RadioMp3StagePcm stagePcm;
-				int stageRc;
-
-				RADIO_MP3_PATH_BREADCRUMB("radio-mp3-stage-A: caller before function call");
-				fprintf(stderr, "radio-mp3-stage-A: caller before function call\n");
-				stageRc = RadioMp3StageDecodeToRam(&input, decoder, &opt, &stats,
-					opt.bench ? &timing : NULL, &stagePcm);
-				fprintf(stderr, "radio-mp3-stage-A: decoded frames=%lu produced bytes=%lu\n",
-					stagePcm.frames, stagePcm.bytes);
-				fprintf(stderr, "radio-mp3-stage-A: closing radio\n");
-				InputSourceClose(&input);
-				RadioMp3StageFreePcm(&stagePcm);
-				MP3FreeDecoder(decoder);
-				fprintf(stderr, "radio-mp3-stage-A: cleanup complete\n");
-				fprintf(stderr, "radio-mp3-stage-A: returning rc=%d\n",
-					stageRc == 0 ? 0 : 1);
-				CloseInputFile(&infile, opt.debugCleanup);
-				if (outfile)
-					fclose(outfile);
-				RadioDebugMp3DumpReset();
-				free(resolvedOutName);
-				AmigaFreeNormalizedArgs(&normalized);
-				return stageRc == 0 ? 0 : 1;
-			}
-#endif
-#endif
 #if RADIO_DEBUG_MP3_ISOLATION_BYPASS_PLAYBACK && RADIO_DEBUG_MP3_ISOLATION_STAGE <= 0
 			if (radioMp3Selected && input.radio) {
 				int ok;
