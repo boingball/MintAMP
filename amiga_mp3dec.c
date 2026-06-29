@@ -38,6 +38,10 @@ extern struct Library *AmiSSLMasterBase;
 #include "assembly.h"
 #include "statname.h"
 
+#ifndef RADIO_MP3_PATH_LOG
+#define RADIO_MP3_PATH_LOG "T:MiniAMP3-mp3-path.log"
+#endif
+
 volatile int gMiniAmp3EmbeddedPlayback;
 static int gMiniAmp3DebugPlayRequested;
 
@@ -46,6 +50,45 @@ static int gMiniAmp3DebugPlayRequested;
 static volatile int gPlaybackInterrupted;
 #else
 static volatile sig_atomic_t gPlaybackInterrupted;
+#endif
+
+
+#ifdef RADIO_DEBUG
+static void RadioDebugMp3PathBreadcrumb(const char *msg)
+{
+	char line[256];
+	int n;
+	n = snprintf(line, sizeof(line), "radio-mp3-path: %s\n", msg ? msg : "(null)");
+	if (n < 0)
+		return;
+	if (n > (int)sizeof(line))
+		n = (int)sizeof(line);
+	printf("%s", line);
+	fflush(stdout);
+#if defined(AMIGA_M68K) && (defined(__amigaos__) || defined(__AMIGA__) || defined(__MORPHOS__))
+	{
+		BPTR fh = Open((STRPTR)RADIO_MP3_PATH_LOG, MODE_READWRITE);
+		if (!fh)
+			fh = Open((STRPTR)RADIO_MP3_PATH_LOG, MODE_NEWFILE);
+		if (fh) {
+			Seek(fh, 0, OFFSET_END);
+			Write(fh, line, (LONG)n);
+			Close(fh);
+		}
+	}
+#else
+	{
+		FILE *f = fopen(RADIO_MP3_PATH_LOG, "ab");
+		if (f) {
+			fwrite(line, 1, (size_t)n, f);
+			fclose(f);
+		}
+	}
+#endif
+}
+#define RADIO_MP3_PATH_BREADCRUMB(msg) RadioDebugMp3PathBreadcrumb(msg)
+#else
+#define RADIO_MP3_PATH_BREADCRUMB(msg) do { (void)(msg); } while (0)
 #endif
 
 static int MiniAmp3ConsoleSuppressed(void)
@@ -279,7 +322,14 @@ int STATNAME(PolyphaseStereoFastLowrateStride2Reduced_HAS_AMIGA_M68K_ASM_RUNTIME
 #define RADIO_MP3_DEBUG_DUMP_LIMIT (128UL * 1024UL)
 #define RADIO_MP3_PREFLIGHT_MIN_BYTES (12 * 1024)
 #define RADIO_MP3_PREFLIGHT_MAX_BYTES READBUF_SIZE
-#define RADIO_MP3_PREFLIGHT_FRAMES 3
+#define RADIO_MP3_PREFLIGHT_FRAMES 5
+#ifndef RADIO_DEBUG_MP3_ISOLATION_BYPASS_PLAYBACK
+#ifdef RADIO_DEBUG
+#define RADIO_DEBUG_MP3_ISOLATION_BYPASS_PLAYBACK 1
+#else
+#define RADIO_DEBUG_MP3_ISOLATION_BYPASS_PLAYBACK 0
+#endif
+#endif
 
 #ifdef HAVE_AMIGA_AUDIO_DEVICE
 #include "decoders/decoder_module.h"
@@ -2097,6 +2147,39 @@ static int FillReadBuffer(unsigned char *readBuf, unsigned char *readPtr, int bu
 
 
 #if RADIO_DEBUG_MP3_ISOLATION
+static int RadioMp3DumpIsolationBytes(InputSource *input)
+{
+	unsigned char buf[1024];
+	unsigned long total;
+	int idle;
+
+	if (!input || !input->radio)
+		return 0;
+	RADIO_MP3_PATH_BREADCRUMB("isolation dump: prebuffer/dump 128KB begin");
+	total = 0;
+	idle = 0;
+	while (total < RADIO_MP3_DEBUG_DUMP_LIMIT && idle < 500) {
+		int got = (int)InputSourceRead(input, buf, sizeof(buf));
+		if (got > 0) {
+			RadioDebugMp3DumpBytes(input, buf, got);
+			total += (unsigned long)got;
+			idle = 0;
+			continue;
+		}
+		if (input->lastReadState == INPUT_READ_EOF ||
+			input->lastReadState == INPUT_READ_ERROR ||
+			input->lastReadState == INPUT_READ_STOP)
+			break;
+		Radio_Pump(input->radio);
+		RadioDecodeYield();
+		idle++;
+	}
+	RADIO_MP3_PATH_BREADCRUMB("isolation dump: prebuffer/dump 128KB end");
+	fprintf(stderr, "radio-mp3-debug: isolation dump bytes=%lu buffered=%d\n",
+		total, Radio_GetBufferedBytes(input->radio));
+	return total > 0;
+}
+
 static int RadioMp3Preflight(InputSource *input)
 {
 	HMP3Decoder preDecoder;
@@ -5397,8 +5480,14 @@ static int DecodeStreamCopySpill(DecodeStream *stream, signed char *dest,
 static int DecodeStreamFillS8(DecodeStream *stream, const DecodeOptions *opt,
 	signed char *dest, int maxBytes)
 {
+	static int firstS8Breadcrumb;
 	MP3FrameInfo info;
 	int produced;
+
+	if (!firstS8Breadcrumb) {
+		RADIO_MP3_PATH_BREADCRUMB("before first DecodeStreamFillS8");
+		firstS8Breadcrumb = 1;
+	}
 
 	produced = 0;
 	DecodeStreamCopySpill(stream, dest, maxBytes, &produced);
@@ -5635,8 +5724,14 @@ static int DecodeStreamCopyPlanarSpill(DecodeStream *stream, signed char *left,
 static int DecodeStreamFillPlanarS8(DecodeStream *stream, const DecodeOptions *opt,
 	signed char *left, signed char *right, int maxFrames)
 {
+	static int firstPlanarBreadcrumb;
 	MP3FrameInfo info;
 	int produced;
+
+	if (!firstPlanarBreadcrumb) {
+		RADIO_MP3_PATH_BREADCRUMB("before first DecodeStreamFillPlanarS8");
+		firstPlanarBreadcrumb = 1;
+	}
 
 	produced = 0;
 	if (!stream->fakeStereo.configured)
@@ -9561,6 +9656,7 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 	int refill;
 	int err;
 
+	RADIO_MP3_PATH_BREADCRUMB("first line of AmigaPlayStreaming");
 	memset(&player, 0, sizeof(player));
 	PlaybackCleanupStatusInit(&cleanupStatus);
 	/* Publish an immediate child-side state before any probing or
@@ -9591,6 +9687,7 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 	GuiPublishStartupStage(GUISTART_STREAM_INIT);
 	if (AmigaPlaybackStopRequested(opt, "before stream init"))
 		goto cleanup;
+	RADIO_MP3_PATH_BREADCRUMB("before DecodeStreamInit");
 	DecodeStreamInit(&stream, input, decoder, stats, timing);
 	if (AmigaPlaybackStopRequested(opt, "after stream init"))
 		goto cleanup;
@@ -10245,6 +10342,7 @@ int main(int argc, char **argv)
 		RadioStream *radio;
 		GuiPublishStartupStage(GUISTART_INPUT_FOPEN_BEFORE);
 		radio = Radio_OpenWithHostAddr(opt.inName, opt.haveRadioHostAddr, opt.radioHostAddrBe);
+		RADIO_MP3_PATH_BREADCRUMB("after Radio_OpenWithHostAddr returns");
 		GuiPublishStartupStage(GUISTART_INPUT_FOPEN_AFTER);
 		if (!radio || Radio_GetStatus(radio) == RADIO_STATUS_ERROR) {
 			fprintf(stderr, "cannot open radio stream: %s\n", radio ? Radio_GetError(radio) : "out of memory");
@@ -10263,13 +10361,17 @@ int main(int argc, char **argv)
 				Radio_Pump(radio);
 		}
 		GuiPublishRadioMetadata(radio);
+		RADIO_MP3_PATH_BREADCRUMB("after content-type is read");
 #ifdef RADIO_DEBUG
 		fprintf(stderr, "radio-mp3-debug: content-type=\"%s\" metaint=%d buffered=%d\n",
 			Radio_GetContentType(radio), Radio_GetMetaInt(radio), Radio_GetBufferedBytes(radio));
 #endif
 		{
 			const char *radioExt = RadioDecoderExtFromUrlOrType(opt.inName, Radio_GetContentType(radio));
-			if (radioExt && StrCaseCmp(radioExt, "mp3") != 0) {
+			int radioMp3Selected = (!radioExt || StrCaseCmp(radioExt, "mp3") == 0);
+			if (radioMp3Selected)
+				RADIO_MP3_PATH_BREADCRUMB("after RadioDecoderExtFromUrlOrType selects mp3");
+			if (!radioMp3Selected) {
 				int gret = AmigaGenericInputPlay(opt.inName, &input, radioExt, &opt, &stats, 1);
 				printf("radio-teardown: generic(AAC/FLAC) play returned, freeing resolvedOutName=%p\n", (void *)resolvedOutName);
 				free(resolvedOutName);
@@ -10278,6 +10380,21 @@ int main(int argc, char **argv)
 				printf("radio-teardown: normalized args freed, returning gret=%d from main\n", gret);
 				return gret;
 			}
+			RADIO_MP3_PATH_BREADCRUMB("before internal MP3 path is selected");
+#if RADIO_DEBUG_MP3_ISOLATION_BYPASS_PLAYBACK
+			if (radioMp3Selected && input.radio) {
+				int ok;
+				RADIO_MP3_PATH_BREADCRUMB("isolation bypass: before dump/preflight");
+				RadioMp3DumpIsolationBytes(&input);
+				ok = RadioMp3Preflight(&input);
+				RADIO_MP3_PATH_BREADCRUMB("isolation bypass: after preflight, closing radio");
+				InputSourceClose(&input);
+				free(resolvedOutName);
+				AmigaFreeNormalizedArgs(&normalized);
+				RADIO_MP3_PATH_BREADCRUMB("isolation bypass: returning before playback");
+				return ok ? 0 : 1;
+			}
+#endif
 		}
 	} else if (opt.play) {
 		/* If the file extension is not .mp3, try a generic decoder module. */
@@ -10519,6 +10636,8 @@ int main(int argc, char **argv)
 		int playErr;
 		TimingStats *playTiming;
 
+		RADIO_MP3_PATH_BREADCRUMB("before HelixAmp3CliMain enters opt.play block");
+
 		if (input.radio && !RadioMp3Preflight(&input)) {
 			fprintf(stderr, "Invalid MP3 radio stream\n");
 			Radio_FailStartup(input.radio, "Invalid MP3 radio stream");
@@ -10565,8 +10684,10 @@ int main(int argc, char **argv)
 		}
 		if (opt.decodeThenPlay)
 			playErr = AmigaPlayDecodeThenPlay(&input, decoder, &opt, &stats, playTiming);
-		else
+		else {
+			RADIO_MP3_PATH_BREADCRUMB("before AmigaPlayStreaming is called");
 			playErr = AmigaPlayStreaming(&input, decoder, &opt, &stats, playTiming);
+		}
 		if (opt.bench)
 			endClock = clock();
 		if (!stats.outputSampleRate)
