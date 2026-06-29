@@ -213,6 +213,11 @@ static int radio_stream_magic_valid(const RadioStream *rs, const char *where)
     return ok;
 }
 
+static int radio_stream_magic_is_valid(const RadioStream *rs)
+{
+    return rs && rs->magic == RADIO_STREAM_MAGIC;
+}
+
 static void radio_resource_summary(const RadioStream *rs, const char *where)
 {
     RADIO_DBG(printf("radio-summary: session=%lu %s active_stream_sessions=%ld active_stream_tasks=%ld open_socket_count=%ld playback_open_socket_count=%ld active_ssl_count=%ld active_ssl_ctx_count=%ld active_decoder_count=%ld active_audio_buffer_count=%ld active_stream_buffer_count=%ld active_icy_metadata_count=%ld active_gui_nodes=%ld active_gui_strings=%ld amissl_init_count=%ld cleanup_count=%u\n",
@@ -724,8 +729,7 @@ static int connect_http(RadioStream *rs){
 
 static void close_current_socket(RadioStream *rs)
 {
-    if (!rs) return;
-    radio_stream_magic_valid(rs, "close_current_socket");
+    if (!radio_stream_magic_is_valid(rs)) return;
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     radio_ssl_close_stream(rs);
 #endif
@@ -907,10 +911,11 @@ RadioStream *Radio_Open(const char *url)
 {
     return Radio_OpenWithHostAddr(url, 0, 0);
 }
-void Radio_RequestStop(RadioStream *rs){ if(!rs)return; radio_debug_mem_report(rs->session_id, "before stop"); rs->stop_request_count++; RADIO_STOP_DEBUG_PRINTF(("radio-stop: session=%lu stop requested count=%u status=%d fd=%ld\n", rs->session_id, rs->stop_request_count, (int)rs->status, (long)rs->sock)); if(rs->status==RADIO_STATUS_CLOSED)return; rs->stopping=1; rs->reconnectAttempts=RADIO_RECONNECT_MAX; rs->reconnectDelay=0; rs->status=RADIO_STATUS_STOPPING; close_current_socket(rs); RADIO_STOP_DEBUG_PRINTF(("radio-stop: marked stopping\n")); }
+void Radio_RequestStop(RadioStream *rs){ if(!radio_stream_magic_is_valid(rs))return; if(rs->cleanupDone||rs->status==RADIO_STATUS_CLOSED)return; radio_debug_mem_report(rs->session_id, "before stop"); rs->stop_request_count++; RADIO_STOP_DEBUG_PRINTF(("radio-stop: session=%lu stop requested count=%u status=%d fd=%ld\n", rs->session_id, rs->stop_request_count, (int)rs->status, (long)rs->sock)); rs->stopping=1; rs->reconnectAttempts=RADIO_RECONNECT_MAX; rs->reconnectDelay=0; rs->status=RADIO_STATUS_STOPPING; close_current_socket(rs); RADIO_STOP_DEBUG_PRINTF(("radio-stop: marked stopping\n")); }
 void Radio_Close(RadioStream *rs)
 {
-    if (!rs) return;
+    if (!radio_stream_magic_is_valid(rs)) return;
+    if (rs->cleanupDone) return;
     RADIO_DBG(printf("radio-http-diag: Radio_Close session=%lu status=%d everPlayed=%d headerDone=%d firstData=%d used=%lu metaint=%d reconnectAttempts=%d startPumps=%d stopping=%d stopReq=%u contentType=\"%s\" host=\"%s\" path=\"%s\" error=\"%s\"\n",
         rs->session_id, (int)rs->status, rs->everPlayed, rs->headerDone, rs->firstDataLogged, rs->used, rs->metaint,
         rs->reconnectAttempts, rs->startPumps, rs->stopping, rs->stop_request_count,
@@ -946,6 +951,7 @@ void Radio_Close(RadioStream *rs)
 #if defined(AMIGA_M68K)
     radio_release_idle_socketbase();
 #endif
+    rs->magic = 0;
     free(rs);
 }
 

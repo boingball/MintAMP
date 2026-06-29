@@ -1697,7 +1697,9 @@ static void InputSourceClose(InputSource *input)
 	input->memoryPos = 0;
 	if (input->radio) {
 		RadioStream *radio = input->radio;
-		Radio_RequestStop(radio);
+
+		/* Detach the stream before closing it so asynchronous Stop paths cannot
+		 * request/close the same RadioStream after Radio_Close frees it. */
 		input->radio = NULL;
 		GuiMarkRadioStopped();
 		Radio_Close(radio);
@@ -1749,7 +1751,8 @@ static size_t InputSourceRead(InputSource *input, void *dest, size_t bytes)
 	if (input && input->radio) {
 		RadioStatus status;
 		if (gPlaybackInterrupted) {
-			Radio_RequestStop(input->radio);
+			/* Stop is cooperative here.  The owner will close the RadioStream once
+			 * through InputSourceClose; do not close the socket from the read path. */
 			GuiMarkRadioStopped();
 			input->lastReadState = INPUT_READ_STOP;
 			return 0;
@@ -10633,10 +10636,15 @@ int main(int argc, char **argv)
 				fprintf(stderr, "radio-mp3-stage-A: caller before function call\n");
 				stageRc = RadioMp3StageDecodeToRam(&input, decoder, &opt, &stats,
 					opt.bench ? &timing : NULL, &stagePcm);
-				fprintf(stderr, "radio-mp3-stage-A: returned rc=%d\n", stageRc);
+				fprintf(stderr, "radio-mp3-stage-A: decoded frames=%lu produced bytes=%lu\n",
+					stagePcm.frames, stagePcm.bytes);
+				fprintf(stderr, "radio-mp3-stage-A: closing radio\n");
+				InputSourceClose(&input);
 				RadioMp3StageFreePcm(&stagePcm);
 				MP3FreeDecoder(decoder);
-				InputSourceClose(&input);
+				fprintf(stderr, "radio-mp3-stage-A: cleanup complete\n");
+				fprintf(stderr, "radio-mp3-stage-A: returning rc=%d\n",
+					stageRc == 0 ? 0 : 1);
 				CloseInputFile(&infile, opt.debugCleanup);
 				if (outfile)
 					fclose(outfile);
