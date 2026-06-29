@@ -6914,10 +6914,14 @@ static void AmigaAudioCommitOne(AmigaAudioPlayer *player, int index, int ch)
 			(unsigned long)player->req[index][ch]->ioa_Length);
 	}
 	if (!firstBeginIoBreadcrumb) {
-		RADIO_MP3_PATH_BREADCRUMB("first BeginIO");
+		RADIO_MP3_PATH_BREADCRUMB("before BeginIO");
 		firstBeginIoBreadcrumb = 1;
 	}
 	BeginIO((struct IORequest *)player->req[index][ch]);
+	if (firstBeginIoBreadcrumb == 1) {
+		RADIO_MP3_PATH_BREADCRUMB("after BeginIO");
+		firstBeginIoBreadcrumb = 2;
+	}
 	if (player->debugPlay)
 		printf("debug-play: BeginIO called buffer=%s ch=%d result=unavailable(void) io_Error=%ld\n",
 			PlaybackBufferName(index), ch,
@@ -7084,10 +7088,14 @@ static int AmigaAudioWaitOne(AmigaAudioPlayer *player, int index, int ch)
 	}
 #endif
 	if (!firstWaitIoBreadcrumb) {
-		RADIO_MP3_PATH_BREADCRUMB("first WaitIO");
+		RADIO_MP3_PATH_BREADCRUMB("before WaitIO");
 		firstWaitIoBreadcrumb = 1;
 	}
 	err = WaitIO(req);
+	if (firstWaitIoBreadcrumb == 1) {
+		RADIO_MP3_PATH_BREADCRUMB("after WaitIO");
+		firstWaitIoBreadcrumb = 2;
+	}
 	if (!err)
 		err = player->req[index][ch]->ioa_Request.io_Error;
 	if (player->debugPlay)
@@ -7446,11 +7454,18 @@ static int AmigaAudioPreparePlaybackBuffer(AmigaAudioPlayer *player, int index,
 	signed char *buf, unsigned long len)
 {
 	static int firstPrepareBreadcrumb;
+	int err;
+
 	if (!firstPrepareBreadcrumb) {
-		RADIO_MP3_PATH_BREADCRUMB("first AmigaAudioPreparePlaybackBuffer");
+		RADIO_MP3_PATH_BREADCRUMB("before AmigaAudioPreparePlaybackBuffer");
 		firstPrepareBreadcrumb = 1;
 	}
-	return AmigaAudioPrepare(player, index, buf, len);
+	err = AmigaAudioPrepare(player, index, buf, len);
+	if (firstPrepareBreadcrumb == 1) {
+		RADIO_MP3_PATH_BREADCRUMB("after AmigaAudioPreparePlaybackBuffer");
+		firstPrepareBreadcrumb = 2;
+	}
+	return err;
 }
 
 static void FillDebugToneBuffer(const DecodeOptions *opt,
@@ -7485,7 +7500,7 @@ static int AmigaAudioCommitPlaybackBuffer(AmigaAudioPlayer *player, int index)
 {
 	static int firstCommitBreadcrumb;
 	if (!firstCommitBreadcrumb) {
-		RADIO_MP3_PATH_BREADCRUMB("first AmigaAudioCommitPlaybackBuffer");
+		RADIO_MP3_PATH_BREADCRUMB("before AmigaAudioCommitPlaybackBuffer");
 		firstCommitBreadcrumb = 1;
 	}
 	return AmigaAudioCommit(player, index);
@@ -10112,6 +10127,7 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 	int initialDecodeSlots;
 	int liveSlots;
 	int refill;
+	int firstLiveRefillBreadcrumb;
 	int err;
 
 	RADIO_MP3_PATH_BREADCRUMB("AmigaPlayStreaming entry");
@@ -10128,6 +10144,7 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 	len[0] = 0;
 	len[1] = 0;
 	len[2] = 0;
+	firstLiveRefillBreadcrumb = 0;
 	err = -1;
 	GuiPublishStartupStage(GUISTART_PROBE_RATE);
 	if (AmigaPlaybackStopRequested(opt, "before input rate probe"))
@@ -10181,12 +10198,13 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 	if (AmigaPlaybackStopRequested(opt, "before audio setup"))
 		goto cleanup;
 	gGuiPlaybackStatus.requestedBytes = requestedBytes;
-	RADIO_MP3_PATH_BREADCRUMB("AmigaSetupPlaybackBuffers");
+	RADIO_MP3_PATH_BREADCRUMB("before AmigaSetupPlaybackBuffers");
 	if (AmigaSetupPlaybackBuffers(&player, opt, period, requestedBytes,
 		opt->stereo ? 2UL : startupLen, 0, buf, &bufBytes,
 		&cleanupStatus) != 0) {
 		goto cleanup;
 	}
+	RADIO_MP3_PATH_BREADCRUMB("after AmigaSetupPlaybackBuffers");
 	halfMilliseconds = PlaybackBufferDurationMilliseconds(opt, bufBytes,
 		playbackRate);
 	gGuiPlaybackStatus.halfBufferMs = halfMilliseconds;
@@ -10321,6 +10339,10 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 				PlaybackBufferName(active));
 
 		justFreed = active;
+		if (!firstLiveRefillBreadcrumb) {
+			RADIO_MP3_PATH_BREADCRUMB("before first live refill while audio.device is active");
+			firstLiveRefillBreadcrumb = 1;
+		}
 		if (opt->stereo) {
 			activeMilliseconds = PlaybackBufferDurationMilliseconds(opt,
 				len[decodeAhead], playbackRate);
