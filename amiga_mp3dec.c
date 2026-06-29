@@ -7972,6 +7972,7 @@ static int RadioMp3StageDecodeToRam(InputSource *input, HMP3Decoder decoder,
 	}
 	fprintf(stderr, "radio-mp3-stage-A: decoded frames=%lu produced bytes=%lu (S8 RAM, internal Helix MP3 path, no audio.device)\n",
 		pcm->frames, pcm->bytes);
+	fprintf(stderr, "radio-mp3-stage-A: produced bytes=%lu\n", pcm->bytes);
 	RADIO_MP3_PATH_BREADCRUMB("Stage A: decoded first frames to RAM, no audio.device");
 	RadioMp3StageFreeAny(stream);
 	if (pcm->bytes == 0) {
@@ -10615,14 +10616,35 @@ int main(int argc, char **argv)
 			}
 			RADIO_MP3_PATH_BREADCRUMB("before internal MP3 path is selected");
 #if defined(RADIO_DEBUG_MP3_ISOLATION_STAGE)
-			fprintf(stderr, "radio-mp3-stage: COMPILED stage=%d immediate return test\n",
+			fprintf(stderr, "radio-mp3-stage: COMPILED stage=%d Stage A boundary call\n",
 				RADIO_DEBUG_MP3_ISOLATION_STAGE);
-			RADIO_MP3_PATH_BREADCRUMB("radio-mp3-stage: COMPILED stage immediate return test");
+			RADIO_MP3_PATH_BREADCRUMB("radio-mp3-stage: COMPILED stage boundary call");
 
 #if RADIO_DEBUG_MP3_ISOLATION_STAGE == 1
-			RADIO_MP3_PATH_BREADCRUMB("radio-mp3-stage-A: immediate return before any Stage A function call");
-			fprintf(stderr, "radio-mp3-stage-A: immediate return before any Stage A function call\n");
-			return 0;
+			{
+				RadioMp3StagePcm stagePcm;
+				int stageRc;
+
+#if RADIO_DEBUG_MP3_ISOLATION
+				RADIO_MP3_PATH_BREADCRUMB("Stage A: prebuffer/dump before Helix S8 RAM decode");
+				RadioMp3DumpIsolationBytes(&input);
+#endif
+				RADIO_MP3_PATH_BREADCRUMB("radio-mp3-stage-A: caller before function call");
+				fprintf(stderr, "radio-mp3-stage-A: caller before function call\n");
+				stageRc = RadioMp3StageDecodeToRam(&input, decoder, &opt, &stats,
+					opt.bench ? &timing : NULL, &stagePcm);
+				fprintf(stderr, "radio-mp3-stage-A: returned rc=%d\n", stageRc);
+				RadioMp3StageFreePcm(&stagePcm);
+				MP3FreeDecoder(decoder);
+				InputSourceClose(&input);
+				CloseInputFile(&infile, opt.debugCleanup);
+				if (outfile)
+					fclose(outfile);
+				RadioDebugMp3DumpReset();
+				free(resolvedOutName);
+				AmigaFreeNormalizedArgs(&normalized);
+				return stageRc == 0 ? 0 : 1;
+			}
 #endif
 #endif
 #if RADIO_DEBUG_MP3_ISOLATION_BYPASS_PLAYBACK && RADIO_DEBUG_MP3_ISOLATION_STAGE <= 0
