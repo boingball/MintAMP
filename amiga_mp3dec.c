@@ -267,6 +267,20 @@ int STATNAME(PolyphaseStereoFastLowrateStride2Reduced_HAS_AMIGA_M68K_ASM_RUNTIME
 #define READBUF_SIZE (1024 * 16)
 #define OUTBUF_SAMPS (MAX_NCHAN * MAX_NGRAN * MAX_NSAMP)
 
+#ifndef RADIO_DEBUG_MP3_ISOLATION
+#ifdef RADIO_DEBUG
+#define RADIO_DEBUG_MP3_ISOLATION 1
+#else
+#define RADIO_DEBUG_MP3_ISOLATION 0
+#endif
+#endif
+
+#define RADIO_MP3_DEBUG_DUMP_PATH "T:MiniAMP3-radio-mp3-dump.mp3"
+#define RADIO_MP3_DEBUG_DUMP_LIMIT (128UL * 1024UL)
+#define RADIO_MP3_PREFLIGHT_MIN_BYTES (12 * 1024)
+#define RADIO_MP3_PREFLIGHT_MAX_BYTES READBUF_SIZE
+#define RADIO_MP3_PREFLIGHT_FRAMES 3
+
 #ifdef HAVE_AMIGA_AUDIO_DEVICE
 #include "decoders/decoder_module.h"
 #endif
@@ -1859,6 +1873,83 @@ static int FindValidatedMpegSync(const unsigned char *buf, int nBytes)
 	return -1;
 }
 
+
+#if RADIO_DEBUG_MP3_ISOLATION
+static FILE *gRadioMp3DebugDump;
+static unsigned long gRadioMp3DebugDumpWritten;
+static unsigned char gRadioMp3DebugFirst64[64];
+static int gRadioMp3DebugFirstCount;
+
+static void RadioDebugMp3DumpReset(void)
+{
+	if (gRadioMp3DebugDump) {
+		fclose(gRadioMp3DebugDump);
+		gRadioMp3DebugDump = NULL;
+	}
+	gRadioMp3DebugDumpWritten = 0;
+	gRadioMp3DebugFirstCount = 0;
+}
+
+static void RadioDebugMp3LogFirstBytesAndSync(void)
+{
+	int i;
+	int sync;
+	fprintf(stderr, "radio-mp3-debug: first %d bytes hex=", gRadioMp3DebugFirstCount);
+	for (i = 0; i < gRadioMp3DebugFirstCount; i++)
+		fprintf(stderr, "%02x%s", gRadioMp3DebugFirst64[i], i + 1 == gRadioMp3DebugFirstCount ? "" : " ");
+	fprintf(stderr, "\n");
+	sync = FindValidatedMpegSync(gRadioMp3DebugFirst64, gRadioMp3DebugFirstCount);
+	fprintf(stderr, "radio-mp3-debug: first MPEG sync offset=%d\n", sync);
+}
+
+static void RadioDebugMp3DumpBytes(InputSource *input, const unsigned char *buf, int nBytes)
+{
+	unsigned long room;
+	unsigned long todo;
+	int copy;
+
+	if (!input || !input->radio || !buf || nBytes <= 0)
+		return;
+	if (gRadioMp3DebugDumpWritten >= RADIO_MP3_DEBUG_DUMP_LIMIT)
+		return;
+	if (!gRadioMp3DebugDump) {
+		gRadioMp3DebugDump = fopen(RADIO_MP3_DEBUG_DUMP_PATH, "wb");
+		if (!gRadioMp3DebugDump) {
+			fprintf(stderr, "radio-mp3-debug: cannot open dump %s\n", RADIO_MP3_DEBUG_DUMP_PATH);
+			gRadioMp3DebugDumpWritten = RADIO_MP3_DEBUG_DUMP_LIMIT;
+			return;
+		}
+		fprintf(stderr, "radio-mp3-debug: dump path=%s limit=%lu\n", RADIO_MP3_DEBUG_DUMP_PATH, (unsigned long)RADIO_MP3_DEBUG_DUMP_LIMIT);
+	}
+	copy = 64 - gRadioMp3DebugFirstCount;
+	if (copy > nBytes)
+		copy = nBytes;
+	if (copy > 0) {
+		memcpy(gRadioMp3DebugFirst64 + gRadioMp3DebugFirstCount, buf, (size_t)copy);
+		gRadioMp3DebugFirstCount += copy;
+		if (gRadioMp3DebugFirstCount == 64)
+			RadioDebugMp3LogFirstBytesAndSync();
+	}
+	room = RADIO_MP3_DEBUG_DUMP_LIMIT - gRadioMp3DebugDumpWritten;
+	todo = (unsigned long)nBytes < room ? (unsigned long)nBytes : room;
+	if (todo > 0) {
+		unsigned long wrote = (unsigned long)fwrite(buf, 1, (size_t)todo, gRadioMp3DebugDump);
+		gRadioMp3DebugDumpWritten += wrote;
+		fflush(gRadioMp3DebugDump);
+		fprintf(stderr, "radio-mp3-debug: bytes written to dump=%lu buffered=%d\n",
+			gRadioMp3DebugDumpWritten, Radio_GetBufferedBytes(input->radio));
+		if (gRadioMp3DebugDumpWritten >= RADIO_MP3_DEBUG_DUMP_LIMIT) {
+			fflush(gRadioMp3DebugDump);
+			fclose(gRadioMp3DebugDump);
+			gRadioMp3DebugDump = NULL;
+		}
+	}
+}
+#else
+#define RadioDebugMp3DumpReset() do { } while (0)
+#define RadioDebugMp3DumpBytes(input, buf, nBytes) do { (void)(input); (void)(buf); (void)(nBytes); } while (0)
+#endif
+
 static int InputSourcePrepareMp3(InputSource *input)
 {
 	if (input->radio)
@@ -1978,6 +2069,7 @@ static int FillReadBuffer(unsigned char *readBuf, unsigned char *readPtr, int bu
 #endif
 		got = (int)InputSourceRead(input, readBuf + bytesLeft + nRead, (size_t)(want - nRead));
 		if (got > 0) {
+			RadioDebugMp3DumpBytes(input, readBuf + bytesLeft + nRead, got);
 			nRead += got;
 			if (!input || !input->radio || nRead >= minRadioBytes)
 				break;
@@ -2002,6 +2094,95 @@ static int FillReadBuffer(unsigned char *readBuf, unsigned char *readPtr, int bu
 #endif
 	return nRead;
 }
+
+
+#if RADIO_DEBUG_MP3_ISOLATION
+static int RadioMp3Preflight(InputSource *input)
+{
+	HMP3Decoder preDecoder;
+	unsigned char readBuf[READBUF_SIZE];
+	unsigned char *readPtr;
+	short decodeBuf[OUTBUF_SAMPS];
+	int bytesLeft;
+	int frames;
+	int eofReached;
+
+	if (!input || !input->radio)
+		return 1;
+	fprintf(stderr, "radio-mp3-preflight: content-type=\"%s\" metaint=%d buffered=%d\n",
+		Radio_GetContentType(input->radio), Radio_GetMetaInt(input->radio),
+		Radio_GetBufferedBytes(input->radio));
+	preDecoder = MP3InitDecoder();
+	if (!preDecoder)
+		return 0;
+	readPtr = readBuf;
+	bytesLeft = 0;
+	frames = 0;
+	eofReached = 0;
+	while (frames < RADIO_MP3_PREFLIGHT_FRAMES && !eofReached) {
+		int nRead;
+		int offset;
+		int err;
+		unsigned char *frameStart;
+		int frameBytes;
+		MP3FrameInfo info;
+
+		if (bytesLeft < RADIO_MP3_PREFLIGHT_MIN_BYTES) {
+			nRead = FillReadBuffer(readBuf, readPtr, RADIO_MP3_PREFLIGHT_MAX_BYTES,
+				bytesLeft, input);
+			bytesLeft += nRead;
+			readPtr = readBuf;
+			if (nRead == 0 && (input->lastReadState == INPUT_READ_EOF ||
+				input->lastReadState == INPUT_READ_ERROR ||
+				input->lastReadState == INPUT_READ_STOP))
+				eofReached = 1;
+		}
+		offset = FindValidatedMpegSync(readPtr, bytesLeft);
+		fprintf(stderr, "radio-mp3-preflight: syncOffset=%d bytesLeft=%d buffered=%d\n",
+			offset, bytesLeft, Radio_GetBufferedBytes(input->radio));
+		if (offset < 0) {
+			if (bytesLeft > 3) {
+				readPtr += bytesLeft - 3;
+				bytesLeft = 3;
+			}
+			if (eofReached)
+				break;
+			continue;
+		}
+		readPtr += offset;
+		bytesLeft -= offset;
+		InputSourceAlignDecodePointer(readBuf, &readPtr, &bytesLeft);
+		frameStart = readPtr;
+		frameBytes = bytesLeft;
+		fprintf(stderr, "radio-mp3-preflight: MP3Decode entry frame=%d bytesLeft=%d\n",
+			frames + 1, bytesLeft);
+		err = MP3Decode(preDecoder, &readPtr, &bytesLeft, decodeBuf, 0);
+		fprintf(stderr, "radio-mp3-preflight: MP3Decode return code=%d bytesLeft=%d buffered=%d\n",
+			err, bytesLeft, Radio_GetBufferedBytes(input->radio));
+		if (err == ERR_MP3_INDATA_UNDERFLOW && !eofReached) {
+			readPtr = frameStart;
+			bytesLeft = frameBytes;
+			continue;
+		}
+		if (err == ERR_MP3_MAINDATA_UNDERFLOW)
+			continue;
+		if (err) {
+			MP3FreeDecoder(preDecoder);
+			return 0;
+		}
+		MP3GetLastFrameInfo(preDecoder, &info);
+		if (frames == 0)
+			fprintf(stderr, "radio-mp3-preflight: first frame info sampleRate=%d channels=%d bitrate=%d outputSamps=%d\n",
+				info.samprate, info.nChans, info.bitrate, info.outputSamps);
+		frames++;
+	}
+	MP3FreeDecoder(preDecoder);
+	fprintf(stderr, "radio-mp3-preflight: decoded frames=%d\n", frames);
+	return frames > 0;
+}
+#else
+static int RadioMp3Preflight(InputSource *input) { (void)input; return 1; }
+#endif
 
 static TimingStats *gTiming;
 
@@ -5264,6 +5445,11 @@ static int DecodeStreamFillS8(DecodeStream *stream, const DecodeOptions *opt,
 		frameStart = stream->readPtr;
 		frameBytes = stream->bytesLeft;
 
+#ifdef RADIO_DEBUG
+		if (stream->input->radio)
+			fprintf(stderr, "radio-mp3-decode: MP3Decode entry bytesLeft=%d buffered=%d\n",
+				stream->bytesLeft, Radio_GetBufferedBytes(stream->input->radio));
+#endif
 		if (stream->timing) {
 			clock_t t0 = clock();
 			err = MP3Decode(stream->decoder, &stream->readPtr,
@@ -5318,6 +5504,11 @@ static int DecodeStreamFillS8(DecodeStream *stream, const DecodeOptions *opt,
 		}
 
 		MP3GetLastFrameInfo(stream->decoder, &info);
+#ifdef RADIO_DEBUG
+		if (stream->input->radio && stream->stats->decodedFrames == 0)
+			fprintf(stderr, "radio-mp3-decode: first frame info sampleRate=%d channels=%d bitrate=%d outputSamps=%d\n",
+				info.samprate, info.nChans, info.bitrate, info.outputSamps);
+#endif
 		UpdateFirstFrameStats(stream->stats, &info);
 		if (!stream->effectiveRate) {
 			stream->effectiveRate = EffectiveOutputSampleRate(opt, info.samprate);
@@ -5501,6 +5692,11 @@ static int DecodeStreamFillPlanarS8(DecodeStream *stream, const DecodeOptions *o
 		frameStart = stream->readPtr;
 		frameBytes = stream->bytesLeft;
 
+#ifdef RADIO_DEBUG
+		if (stream->input->radio)
+			fprintf(stderr, "radio-mp3-decode: MP3Decode entry bytesLeft=%d buffered=%d\n",
+				stream->bytesLeft, Radio_GetBufferedBytes(stream->input->radio));
+#endif
 		if (stream->timing) {
 			t0 = clock();
 			err = MP3Decode(stream->decoder, &stream->readPtr,
@@ -5550,6 +5746,11 @@ static int DecodeStreamFillPlanarS8(DecodeStream *stream, const DecodeOptions *o
 		}
 
 		MP3GetLastFrameInfo(stream->decoder, &info);
+#ifdef RADIO_DEBUG
+		if (stream->input->radio && stream->stats->decodedFrames == 0)
+			fprintf(stderr, "radio-mp3-decode: first frame info sampleRate=%d channels=%d bitrate=%d outputSamps=%d\n",
+				info.samprate, info.nChans, info.bitrate, info.outputSamps);
+#endif
 		UpdateFirstFrameStats(stream->stats, &info);
 		if (!stream->effectiveRate) {
 			stream->effectiveRate = EffectiveOutputSampleRate(opt, info.samprate);
@@ -10054,6 +10255,7 @@ int main(int argc, char **argv)
 			return 1;
 		}
 		InputSourceInitRadio(&input, radio);
+		RadioDebugMp3DumpReset();
 		{
 			int probePump;
 			for (probePump = 0; probePump < 200 && !Radio_GetContentType(radio)[0] &&
@@ -10061,6 +10263,10 @@ int main(int argc, char **argv)
 				Radio_Pump(radio);
 		}
 		GuiPublishRadioMetadata(radio);
+#ifdef RADIO_DEBUG
+		fprintf(stderr, "radio-mp3-debug: content-type=\"%s\" metaint=%d buffered=%d\n",
+			Radio_GetContentType(radio), Radio_GetMetaInt(radio), Radio_GetBufferedBytes(radio));
+#endif
 		{
 			const char *radioExt = RadioDecoderExtFromUrlOrType(opt.inName, Radio_GetContentType(radio));
 			if (radioExt && StrCaseCmp(radioExt, "mp3") != 0) {
@@ -10313,6 +10519,21 @@ int main(int argc, char **argv)
 		int playErr;
 		TimingStats *playTiming;
 
+		if (input.radio && !RadioMp3Preflight(&input)) {
+			fprintf(stderr, "Invalid MP3 radio stream\n");
+			Radio_FailStartup(input.radio, "Invalid MP3 radio stream");
+			GuiMarkRadioErrorText("Invalid MP3 radio stream");
+			MP3FreeDecoder(decoder);
+			InputSourceClose(&input);
+			CloseInputFile(&infile, opt.debugCleanup);
+			if (outfile)
+				fclose(outfile);
+			RadioDebugMp3DumpReset();
+			free(resolvedOutName);
+			AmigaFreeNormalizedArgs(&normalized);
+			return 1;
+		}
+
 		GuiPublishStartupStage(GUISTART_STREAM_INIT);
 		if (AmigaPlaybackStopRequested(&opt, "immediately before playback")) {
 			MP3FreeDecoder(decoder);
@@ -10409,6 +10630,7 @@ int main(int argc, char **argv)
 		printf("radio-teardown: MP3 path MP3FreeDecoder start\n");
 		MP3FreeDecoder(decoder);
 		printf("radio-teardown: MP3 path InputSourceClose start\n");
+		RadioDebugMp3DumpReset();
 		InputSourceClose(&input);
 		CloseInputFile(&infile, opt.debugCleanup);
 		gTiming = NULL;
