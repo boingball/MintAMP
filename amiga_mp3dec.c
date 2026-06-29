@@ -331,6 +331,14 @@ int STATNAME(PolyphaseStereoFastLowrateStride2Reduced_HAS_AMIGA_M68K_ASM_RUNTIME
 #endif
 #endif
 
+#ifndef RADIO_DEBUG_MP3_ISOLATION_STAGE
+#define RADIO_DEBUG_MP3_ISOLATION_STAGE 0
+#endif
+
+#ifndef RADIO_MP3_ISOLATION_STAGE_FRAMES
+#define RADIO_MP3_ISOLATION_STAGE_FRAMES 16
+#endif
+
 #ifdef HAVE_AMIGA_AUDIO_DEVICE
 #include "decoders/decoder_module.h"
 #endif
@@ -2266,6 +2274,15 @@ static int RadioMp3Preflight(InputSource *input)
 #else
 static int RadioMp3Preflight(InputSource *input) { (void)input; return 1; }
 #endif
+
+typedef struct RadioMp3StagePcm {
+	signed char *data;
+	unsigned long bytes;
+	int sampleRate;
+	int channels;
+	int bitrate;
+	unsigned long frames;
+} RadioMp3StagePcm;
 
 static TimingStats *gTiming;
 
@@ -6833,6 +6850,7 @@ static const char *PlaybackBufferName(int index);
 
 static void AmigaAudioCommitOne(AmigaAudioPlayer *player, int index, int ch)
 {
+	static int firstBeginIoBreadcrumb;
 	if (gPlaybackInterrupted || player->stopping)
 		return;
 	player->req[index][ch]->ioa_Request.io_Command = CMD_WRITE;
@@ -6853,6 +6871,10 @@ static void AmigaAudioCommitOne(AmigaAudioPlayer *player, int index, int ch)
 		AmigaAudioPrintBufferStats(ch ? "right-before-BeginIO" : "left-before-BeginIO",
 			(signed char *)player->req[index][ch]->ioa_Data,
 			(unsigned long)player->req[index][ch]->ioa_Length);
+	}
+	if (!firstBeginIoBreadcrumb) {
+		RADIO_MP3_PATH_BREADCRUMB("first BeginIO");
+		firstBeginIoBreadcrumb = 1;
 	}
 	BeginIO((struct IORequest *)player->req[index][ch]);
 	if (player->debugPlay)
@@ -6991,6 +7013,7 @@ static int AmigaAudioDone(AmigaAudioPlayer *player, int index)
 
 static int AmigaAudioWaitOne(AmigaAudioPlayer *player, int index, int ch)
 {
+	static int firstWaitIoBreadcrumb;
 	struct IORequest *req;
 	int err;
 
@@ -7019,6 +7042,10 @@ static int AmigaAudioWaitOne(AmigaAudioPlayer *player, int index, int ch)
 		}
 	}
 #endif
+	if (!firstWaitIoBreadcrumb) {
+		RADIO_MP3_PATH_BREADCRUMB("first WaitIO");
+		firstWaitIoBreadcrumb = 1;
+	}
 	err = WaitIO(req);
 	if (!err)
 		err = player->req[index][ch]->ioa_Request.io_Error;
@@ -7327,6 +7354,11 @@ static unsigned long DecodeStreamFillPlaybackBuffer(DecodeStream *stream,
 	const DecodeOptions *opt, AmigaAudioPlayer *player, int index,
 	signed char *buf, unsigned long maxBytes)
 {
+	static int firstPlaybackFillBreadcrumb;
+	if (!firstPlaybackFillBreadcrumb) {
+		RADIO_MP3_PATH_BREADCRUMB("first DecodeStreamFillPlaybackBuffer call");
+		firstPlaybackFillBreadcrumb = 1;
+	}
 	if (gPlaybackInterrupted)
 		return 0;
 	if (opt->stereo) {
@@ -7372,6 +7404,11 @@ static int AmigaAudioCopyStereoDecodeAheadToSlot(AmigaAudioPlayer *player,
 static int AmigaAudioPreparePlaybackBuffer(AmigaAudioPlayer *player, int index,
 	signed char *buf, unsigned long len)
 {
+	static int firstPrepareBreadcrumb;
+	if (!firstPrepareBreadcrumb) {
+		RADIO_MP3_PATH_BREADCRUMB("first AmigaAudioPreparePlaybackBuffer");
+		firstPrepareBreadcrumb = 1;
+	}
 	return AmigaAudioPrepare(player, index, buf, len);
 }
 
@@ -7405,6 +7442,11 @@ static void FillDebugToneBuffer(const DecodeOptions *opt,
 
 static int AmigaAudioCommitPlaybackBuffer(AmigaAudioPlayer *player, int index)
 {
+	static int firstCommitBreadcrumb;
+	if (!firstCommitBreadcrumb) {
+		RADIO_MP3_PATH_BREADCRUMB("first AmigaAudioCommitPlaybackBuffer");
+		firstCommitBreadcrumb = 1;
+	}
 	return AmigaAudioCommit(player, index);
 }
 
@@ -7826,6 +7868,134 @@ cleanup:
 		gGuiPlaybackStatus.phase = GUIPLAY_PHASE_DONE;
 	}
 	return err;
+}
+
+static void RadioMp3StageFreePcm(RadioMp3StagePcm *pcm)
+{
+	if (pcm && pcm->data) {
+		free(pcm->data);
+		pcm->data = NULL;
+	}
+	if (pcm)
+		pcm->bytes = 0;
+}
+
+static int RadioMp3StageDecodeToRam(InputSource *input, HMP3Decoder decoder,
+	const DecodeOptions *opt, DecodeStats *stats, TimingStats *timing,
+	RadioMp3StagePcm *pcm)
+{
+	DecodeStream stream;
+	unsigned long cap;
+	int n;
+	int targetFrames;
+
+	memset(pcm, 0, sizeof(*pcm));
+	targetFrames = RADIO_MP3_ISOLATION_STAGE_FRAMES;
+	if (targetFrames <= 0)
+		targetFrames = 1;
+	cap = (unsigned long)targetFrames * 2304UL * (opt->stereo ? 2UL : 1UL);
+	pcm->data = (signed char *)malloc((size_t)cap);
+	if (!pcm->data) {
+		fprintf(stderr, "radio-mp3-stage-A: cannot allocate %lu byte RAM buffer\n", cap);
+		return -1;
+	}
+	RADIO_MP3_PATH_BREADCRUMB("Stage A: before DecodeStreamInit");
+	DecodeStreamInit(&stream, input, decoder, stats, timing);
+	while (pcm->bytes < cap && pcm->frames < (unsigned long)targetFrames &&
+		!stream.outOfData && !gPlaybackInterrupted) {
+		unsigned long beforeFrames = stats->decodedFrames;
+		n = DecodeStreamFillS8(&stream, opt, pcm->data + pcm->bytes,
+			(int)(cap - pcm->bytes));
+		if (n < 0 || stream.decodeError) {
+			fprintf(stderr, "radio-mp3-stage-A: decode error\n");
+			RadioMp3StageFreePcm(pcm);
+			return -1;
+		}
+		if (n == 0)
+			break;
+		pcm->bytes += (unsigned long)n;
+		if (stats->decodedFrames > beforeFrames)
+			pcm->frames += stats->decodedFrames - beforeFrames;
+		else
+			pcm->frames++;
+		pcm->sampleRate = stats->outputSampleRate ?
+			stats->outputSampleRate : PlaybackOutputSampleRate(opt, stats);
+		pcm->channels = opt->stereo ? 2 : 1;
+		pcm->bitrate = stats->bitrate;
+		fprintf(stderr, "radio-mp3-stage-A: frameCount=%lu sampleRate=%d channels=%d bitrate=%d producedBytes=%lu totalBytes=%lu\n",
+			pcm->frames, pcm->sampleRate, pcm->channels, pcm->bitrate,
+			(unsigned long)n, pcm->bytes);
+	}
+	RADIO_MP3_PATH_BREADCRUMB("Stage A: decoded first frames to RAM, no audio.device");
+	return pcm->bytes > 0 ? 0 : -1;
+}
+
+static int RadioMp3StagePlaySilence(const DecodeOptions *opt, int playbackRate)
+{
+	AmigaAudioPlayer player;
+	PlaybackCleanupStatus cleanupStatus;
+	signed char *buf[3];
+	unsigned long requestedBytes;
+	unsigned long chunkBytes;
+	unsigned int period;
+	int err;
+
+	memset(&player, 0, sizeof(player));
+	PlaybackCleanupStatusInit(&cleanupStatus);
+	buf[0] = buf[1] = buf[2] = NULL;
+	chunkBytes = 0;
+	period = AmigaPalAudioPeriod(playbackRate);
+	requestedBytes = PlaybackRequestedChunkBytes(opt, playbackRate);
+	RADIO_MP3_PATH_BREADCRUMB("Stage B: before AmigaSetupPlaybackBuffers");
+	err = AmigaSetupPlaybackBuffers(&player, opt, period, requestedBytes,
+		opt->stereo ? 2UL : 1UL, 0, buf, &chunkBytes, &cleanupStatus);
+	if (err == 0) {
+		if (opt->stereo) {
+			memset(player.splitWorkBuf[0][0], 0, chunkBytes / 2UL);
+			memset(player.splitWorkBuf[0][1], 0, chunkBytes / 2UL);
+		} else {
+			memset(buf[0], 0, chunkBytes);
+		}
+		RADIO_MP3_PATH_BREADCRUMB("Stage B: before prepare/commit silence");
+		if (AmigaAudioPreparePlaybackBuffer(&player, 0, opt->stereo ? NULL : buf[0],
+			chunkBytes) != 0 || AmigaAudioCommitPlaybackBuffer(&player, 0) != 0 ||
+			AmigaAudioWait(&player, 0) != 0)
+			err = -1;
+	}
+	fprintf(stderr, "radio-mp3-stage-B: rate=%d period=%u requestedBytes=%lu chunkBytes=%lu channels=%d result=%d\n",
+		playbackRate, period, requestedBytes, chunkBytes, opt->stereo ? 2 : 1, err);
+	AmigaAudioClose(&player, &cleanupStatus);
+	RADIO_MP3_PATH_BREADCRUMB("Stage B: closed audio.device after silence");
+	return err;
+}
+
+static int RadioMp3RunIsolationStage(InputSource *input, HMP3Decoder decoder,
+	const DecodeOptions *opt, DecodeStats *stats, TimingStats *timing)
+{
+	RadioMp3StagePcm pcm;
+	int playbackRate;
+	int ret;
+
+	RADIO_MP3_PATH_BREADCRUMB("staged isolation: entry");
+	if (RadioMp3StageDecodeToRam(input, decoder, opt, stats, timing, &pcm) != 0)
+		return 1;
+	playbackRate = pcm.sampleRate > 0 ? pcm.sampleRate : PlaybackOutputSampleRate(opt, stats);
+	if (RADIO_DEBUG_MP3_ISOLATION_STAGE == 1) {
+		RadioMp3StageFreePcm(&pcm);
+		RADIO_MP3_PATH_BREADCRUMB("Stage A: returning cleanly");
+		return 0;
+	}
+	ret = RadioMp3StagePlaySilence(opt, playbackRate);
+	if (RADIO_DEBUG_MP3_ISOLATION_STAGE == 2 || ret != 0) {
+		RadioMp3StageFreePcm(&pcm);
+		RADIO_MP3_PATH_BREADCRUMB("Stage B: returning cleanly");
+		return ret == 0 ? 0 : 1;
+	}
+	RADIO_MP3_PATH_BREADCRUMB("Stage C: before AmigaPlayWholeBuffer decoded PCM");
+	ret = AmigaPlayWholeBuffer(pcm.data, pcm.bytes, opt, stats);
+	RadioMp3StageFreePcm(&pcm);
+	RADIO_MP3_PATH_BREADCRUMB("Stage C: returning after decoded PCM playback");
+	return ret == 0 ? 0 : 1;
 }
 
 
@@ -9656,7 +9826,7 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 	int refill;
 	int err;
 
-	RADIO_MP3_PATH_BREADCRUMB("first line of AmigaPlayStreaming");
+	RADIO_MP3_PATH_BREADCRUMB("AmigaPlayStreaming entry");
 	memset(&player, 0, sizeof(player));
 	PlaybackCleanupStatusInit(&cleanupStatus);
 	/* Publish an immediate child-side state before any probing or
@@ -9679,6 +9849,7 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 	if (AmigaPlaybackStopRequested(opt, "after input rate probe"))
 		goto cleanup;
 	playbackRate = EffectiveOutputSampleRate(opt, inputSampleRate);
+	RADIO_MP3_PATH_BREADCRUMB("PlaybackOutputSampleRate");
 	if (playbackRate <= 0)
 		playbackRate = opt->outputRate > 0 ? opt->outputRate : 8287;
 	stats->outputSampleRate = playbackRate;
@@ -9691,10 +9862,12 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 	DecodeStreamInit(&stream, input, decoder, stats, timing);
 	if (AmigaPlaybackStopRequested(opt, "after stream init"))
 		goto cleanup;
+	RADIO_MP3_PATH_BREADCRUMB("AmigaPalAudioPeriod");
 	period = AmigaPalAudioPeriod(playbackRate);
 	gGuiPlaybackStatus.paulaPeriod = period;
 	PrintFastLowrateOutputRateDifference(opt, playbackRate);
 	printf("play output rate: %d Hz\n", playbackRate);
+	RADIO_MP3_PATH_BREADCRUMB("PlaybackRequestedChunkBytes");
 	requestedBytes = PlaybackRequestedChunkBytes(opt, playbackRate);
 	if (requestedBytes > PlaybackMaxChunkBytes(opt->stereo))
 		printf("requested %d second half-buffer exceeds audio.device per-write limit; maximum at this rate is %lu ms\n",
@@ -9720,6 +9893,7 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 	if (AmigaPlaybackStopRequested(opt, "before audio setup"))
 		goto cleanup;
 	gGuiPlaybackStatus.requestedBytes = requestedBytes;
+	RADIO_MP3_PATH_BREADCRUMB("AmigaSetupPlaybackBuffers");
 	if (AmigaSetupPlaybackBuffers(&player, opt, period, requestedBytes,
 		opt->stereo ? 2UL : startupLen, 0, buf, &bufBytes,
 		&cleanupStatus) != 0) {
@@ -10652,6 +10826,24 @@ int main(int argc, char **argv)
 			AmigaFreeNormalizedArgs(&normalized);
 			return 1;
 		}
+#if RADIO_DEBUG_MP3_ISOLATION_STAGE > 0
+		if (input.radio) {
+			int stageRet;
+			RADIO_MP3_PATH_BREADCRUMB("before MP3 staged playback isolation");
+			stageRet = RadioMp3RunIsolationStage(&input, decoder, &opt, &stats,
+				opt.bench ? &timing : NULL);
+			MP3FreeDecoder(decoder);
+			InputSourceClose(&input);
+			CloseInputFile(&infile, opt.debugCleanup);
+			if (outfile)
+				fclose(outfile);
+			RadioDebugMp3DumpReset();
+			free(resolvedOutName);
+			AmigaFreeNormalizedArgs(&normalized);
+			RADIO_MP3_PATH_BREADCRUMB("after MP3 staged playback isolation");
+			return stageRet;
+		}
+#endif
 
 		GuiPublishStartupStage(GUISTART_STREAM_INIT);
 		if (AmigaPlaybackStopRequested(&opt, "immediately before playback")) {
