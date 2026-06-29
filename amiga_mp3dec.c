@@ -13,6 +13,7 @@
 #include <stdarg.h>
 #ifndef AMIGA_M68K
 #include <signal.h>
+#include <unistd.h>
 #endif
 
 #if defined(AMIGA_M68K) && (defined(__amigaos__) || defined(__AMIGA__) || defined(__MORPHOS__))
@@ -377,6 +378,14 @@ typedef struct Mp3InputInfo {
 	MP3FrameInfo firstFrameInfo;
 } Mp3InputInfo;
 
+typedef enum InputReadState {
+	INPUT_READ_OK,
+	INPUT_READ_EOF,
+	INPUT_READ_TEMPORARY,
+	INPUT_READ_ERROR,
+	INPUT_READ_STOP
+} InputReadState;
+
 typedef struct InputSource {
 	FILE *file;
 #ifdef HAVE_AMIGA_AUDIO_DEVICE
@@ -391,6 +400,7 @@ typedef struct InputSource {
 	unsigned long prefixPos;
 	Mp3InputInfo info;
 	RadioStream *radio;
+	InputReadState lastReadState;
 } InputSource;
 
 static void InputSourceInit(InputSource *input, FILE *file);
@@ -1610,8 +1620,19 @@ static void CloseInputFile(FILE **file, int debugCleanup)
 		printf("debug-cleanup: input file closed: yes\n");
 }
 
+static void RadioDecodeYield(void)
+{
+#if defined(AMIGA_M68K) && defined(HAVE_AMIGA_AUDIO_DEVICE)
+	Delay(1);
+#else
+	usleep(20000);
+#endif
+}
+
 static size_t InputSourceRead(InputSource *input, void *dest, size_t bytes)
 {
+	if (input)
+		input->lastReadState = INPUT_READ_OK;
 	if (input && input->prefixPos < input->prefixSize) {
 		unsigned long avail = input->prefixSize - input->prefixPos;
 		size_t take = bytes < (size_t)avail ? bytes : (size_t)avail;
@@ -1626,16 +1647,37 @@ static size_t InputSourceRead(InputSource *input, void *dest, size_t bytes)
 		if (gPlaybackInterrupted) {
 			Radio_RequestStop(input->radio);
 			GuiMarkRadioStopped();
+			input->lastReadState = INPUT_READ_STOP;
 			return 0;
 		}
 		status = Radio_GetStatus(input->radio);
-		if (status == RADIO_STATUS_STOPPING || status == RADIO_STATUS_CLOSED)
+		if (status == RADIO_STATUS_STOPPING) {
+			input->lastReadState = INPUT_READ_STOP;
 			return 0;
+		}
+		if (status == RADIO_STATUS_CLOSED) {
+			input->lastReadState = INPUT_READ_EOF;
+			return 0;
+		}
+		if (status == RADIO_STATUS_ERROR) {
+			input->lastReadState = INPUT_READ_ERROR;
+			return 0;
+		}
 		{
 			size_t got = (size_t)Radio_ReadAudio(input->radio, (unsigned char *)dest, (int)bytes);
 			status = Radio_GetStatus(input->radio);
 			if (status != RADIO_STATUS_STOPPING && status != RADIO_STATUS_CLOSED)
 				GuiPublishRadioMetadata(input->radio);
+			if (got == 0) {
+				if (gPlaybackInterrupted || status == RADIO_STATUS_STOPPING)
+					input->lastReadState = INPUT_READ_STOP;
+				else if (status == RADIO_STATUS_CLOSED)
+					input->lastReadState = INPUT_READ_EOF;
+				else if (status == RADIO_STATUS_ERROR)
+					input->lastReadState = INPUT_READ_ERROR;
+				else
+					input->lastReadState = INPUT_READ_TEMPORARY;
+			}
 			return got;
 		}
 	}
@@ -1911,15 +1953,53 @@ static int FillReadBuffer(unsigned char *readBuf, unsigned char *readPtr, int bu
 	int bytesLeft, InputSource *input)
 {
 	int nRead;
+	int want;
+	int attempts;
+	int minRadioBytes;
 
 	memmove(readBuf, readPtr, bytesLeft);
-	nRead = (int)InputSourceRead(input, readBuf + bytesLeft,
-		(size_t)(bufSize - bytesLeft));
-	if (nRead < bufSize - bytesLeft) {
-		memset(readBuf + bytesLeft + nRead, 0,
-			bufSize - bytesLeft - nRead);
+	want = bufSize - bytesLeft;
+	minRadioBytes = 1;
+	if (input && input->radio && input->info.firstFrameFound &&
+		bytesLeft < 2 * MAINBUF_SIZE)
+		minRadioBytes = 2 * MAINBUF_SIZE - bytesLeft;
+	if (minRadioBytes > want)
+		minRadioBytes = want;
+	nRead = 0;
+	attempts = input && input->radio ? 250 : 1;
+	while (attempts-- > 0 && nRead < want) {
+		int got;
+#ifdef RADIO_DEBUG
+		RadioStatus status = input && input->radio ? Radio_GetStatus(input->radio) : RADIO_STATUS_CLOSED;
+		int buffered = input && input->radio ? Radio_GetBufferedBytes(input->radio) : 0;
+		if (input && input->radio)
+			printf("radio-mp3-fill: request=%d bytesLeft=%d gotSoFar=%d status=%s buffered=%d eofState=%d\n",
+				want, bytesLeft, nRead, Radio_StatusText(status), buffered, input->lastReadState);
+#endif
+		got = (int)InputSourceRead(input, readBuf + bytesLeft + nRead, (size_t)(want - nRead));
+		if (got > 0) {
+			nRead += got;
+			if (!input || !input->radio || nRead >= minRadioBytes)
+				break;
+			continue;
+		}
+		if (!input || !input->radio || input->lastReadState == INPUT_READ_EOF ||
+			input->lastReadState == INPUT_READ_ERROR || input->lastReadState == INPUT_READ_STOP)
+			break;
+		Radio_Pump(input->radio);
+		RadioDecodeYield();
 	}
-
+	if (input && input->radio && nRead == 0 && input->lastReadState == INPUT_READ_TEMPORARY)
+		Radio_FailStartup(input->radio, "MP3 radio stream did not buffer audio");
+	if (nRead < want) {
+		memset(readBuf + bytesLeft + nRead, 0, (size_t)(want - nRead));
+	}
+#ifdef RADIO_DEBUG
+	if (input && input->radio)
+		printf("radio-mp3-fill: returned=%d status=%s buffered=%d eofState=%d\n",
+			nRead, Radio_StatusText(Radio_GetStatus(input->radio)),
+			Radio_GetBufferedBytes(input->radio), input->lastReadState);
+#endif
 	return nRead;
 }
 
@@ -5153,11 +5233,21 @@ static int DecodeStreamFillS8(DecodeStream *stream, const DecodeOptions *opt,
 				READBUF_SIZE, stream->bytesLeft, stream->input);
 			stream->bytesLeft += nRead;
 			stream->readPtr = stream->readBuf;
-			if (nRead == 0)
+			if (nRead == 0 && (!stream->input->radio ||
+				stream->input->lastReadState == INPUT_READ_EOF ||
+				stream->input->lastReadState == INPUT_READ_ERROR ||
+				stream->input->lastReadState == INPUT_READ_STOP))
 				stream->eofReached = 1;
 		}
 
 		offset = FindValidatedMpegSync(stream->readPtr, stream->bytesLeft);
+#ifdef RADIO_DEBUG
+		if (stream->input->radio)
+			printf("radio-mp3-decode: syncOffset=%d bytesLeft=%d eofReached=%d status=%s buffered=%d\n",
+				offset, stream->bytesLeft, stream->eofReached,
+				Radio_StatusText(Radio_GetStatus(stream->input->radio)),
+				Radio_GetBufferedBytes(stream->input->radio));
+#endif
 		if (offset < 0) {
 			if (stream->eofReached)
 				break;
@@ -5193,8 +5283,20 @@ static int DecodeStreamFillS8(DecodeStream *stream, const DecodeOptions *opt,
 #endif
 		if (gPlaybackInterrupted)
 			break;
+#ifdef RADIO_DEBUG
+		if (stream->input->radio)
+			printf("radio-mp3-decode: MP3Decode err=%d bytesLeft=%d eofReached=%d status=%s buffered=%d\n",
+				err, stream->bytesLeft, stream->eofReached,
+				Radio_StatusText(Radio_GetStatus(stream->input->radio)),
+				Radio_GetBufferedBytes(stream->input->radio));
+#endif
 		if (err) {
-			if (err == ERR_MP3_INDATA_UNDERFLOW &&
+			if (err == ERR_MP3_INDATA_UNDERFLOW && stream->input->radio &&
+				!stream->eofReached) {
+				stream->readPtr = frameStart;
+				stream->bytesLeft = frameBytes;
+				continue;
+			} else if (err == ERR_MP3_INDATA_UNDERFLOW &&
 				stream->stats->decodedFrames == 0 && frameBytes > 1) {
 				stream->readPtr = frameStart + 1;
 				stream->bytesLeft = frameBytes - 1;
@@ -5368,11 +5470,21 @@ static int DecodeStreamFillPlanarS8(DecodeStream *stream, const DecodeOptions *o
 				READBUF_SIZE, stream->bytesLeft, stream->input);
 			stream->bytesLeft += nRead;
 			stream->readPtr = stream->readBuf;
-			if (nRead == 0)
+			if (nRead == 0 && (!stream->input->radio ||
+				stream->input->lastReadState == INPUT_READ_EOF ||
+				stream->input->lastReadState == INPUT_READ_ERROR ||
+				stream->input->lastReadState == INPUT_READ_STOP))
 				stream->eofReached = 1;
 		}
 
 		offset = FindValidatedMpegSync(stream->readPtr, stream->bytesLeft);
+#ifdef RADIO_DEBUG
+		if (stream->input->radio)
+			printf("radio-mp3-decode: syncOffset=%d bytesLeft=%d eofReached=%d status=%s buffered=%d\n",
+				offset, stream->bytesLeft, stream->eofReached,
+				Radio_StatusText(Radio_GetStatus(stream->input->radio)),
+				Radio_GetBufferedBytes(stream->input->radio));
+#endif
 		if (offset < 0) {
 			if (stream->eofReached)
 				break;
@@ -5404,8 +5516,20 @@ static int DecodeStreamFillPlanarS8(DecodeStream *stream, const DecodeOptions *o
 #endif
 		if (gPlaybackInterrupted)
 			break;
+#ifdef RADIO_DEBUG
+		if (stream->input->radio)
+			printf("radio-mp3-decode: MP3Decode err=%d bytesLeft=%d eofReached=%d status=%s buffered=%d\n",
+				err, stream->bytesLeft, stream->eofReached,
+				Radio_StatusText(Radio_GetStatus(stream->input->radio)),
+				Radio_GetBufferedBytes(stream->input->radio));
+#endif
 		if (err) {
-			if (err == ERR_MP3_INDATA_UNDERFLOW &&
+			if (err == ERR_MP3_INDATA_UNDERFLOW && stream->input->radio &&
+				!stream->eofReached) {
+				stream->readPtr = frameStart;
+				stream->bytesLeft = frameBytes;
+				continue;
+			} else if (err == ERR_MP3_INDATA_UNDERFLOW &&
 				stream->stats->decodedFrames == 0 && frameBytes > 1) {
 				stream->readPtr = frameStart + 1;
 				stream->bytesLeft = frameBytes - 1;
@@ -10323,11 +10447,20 @@ int main(int argc, char **argv)
 				bytesLeft, &input);
 			bytesLeft += nRead;
 			readPtr = readBuf;
-			if (nRead == 0)
+			if (nRead == 0 && (!input.radio ||
+				input.lastReadState == INPUT_READ_EOF ||
+				input.lastReadState == INPUT_READ_ERROR ||
+				input.lastReadState == INPUT_READ_STOP))
 				eofReached = 1;
 		}
 
 		offset = FindValidatedMpegSync(readPtr, bytesLeft);
+#ifdef RADIO_DEBUG
+		if (input.radio)
+			printf("radio-mp3-decode: syncOffset=%d bytesLeft=%d eofReached=%d status=%s buffered=%d\n",
+				offset, bytesLeft, eofReached, Radio_StatusText(Radio_GetStatus(input.radio)),
+				Radio_GetBufferedBytes(input.radio));
+#endif
 		if (offset < 0) {
 			if (eofReached)
 				break;
@@ -10351,8 +10484,18 @@ int main(int argc, char **argv)
 		} else {
 			err = MP3Decode(decoder, &readPtr, &bytesLeft, decodeBuf, 0);
 		}
+		#ifdef RADIO_DEBUG
+		if (input.radio)
+			printf("radio-mp3-decode: MP3Decode err=%d bytesLeft=%d eofReached=%d status=%s buffered=%d\n",
+				err, bytesLeft, eofReached, Radio_StatusText(Radio_GetStatus(input.radio)),
+				Radio_GetBufferedBytes(input.radio));
+#endif
 		if (err) {
-			if (err == ERR_MP3_INDATA_UNDERFLOW &&
+			if (err == ERR_MP3_INDATA_UNDERFLOW && input.radio && !eofReached) {
+				readPtr = frameStart;
+				bytesLeft = frameBytes;
+				continue;
+			} else if (err == ERR_MP3_INDATA_UNDERFLOW &&
 				stats.decodedFrames == 0 && frameBytes > 1) {
 				readPtr = frameStart + 1;
 				bytesLeft = frameBytes - 1;
