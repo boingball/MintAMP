@@ -51,6 +51,7 @@
 #include <libraries/gadtools.h>
 #include <hardware/cia.h>
 #include "picojpeg.h"
+#include "lodepng.h"
 #include "radio_stream.h"
 #include "radio_browser_controller.h"
 #include "radio_browser_http.h"
@@ -121,6 +122,13 @@
  * -DENABLE_RADIO_ARTWORK=0; it never touches stream playback either way. */
 #ifndef ENABLE_RADIO_ARTWORK
 #define ENABLE_RADIO_ARTWORK 1
+#endif
+/* PNG favicon support via lodepng (most Radio Browser favicons are PNG).
+ * Disable by building with -DENABLE_PNG_ARTWORK=0 -- note this only skips
+ * the decode calls; lodepng.c must also be dropped from the Makefile's
+ * source list to actually shrink the binary. */
+#ifndef ENABLE_PNG_ARTWORK
+#define ENABLE_PNG_ARTWORK 1
 #endif
 #define MR_FAVICON_MAX_BYTES (256L * 1024L)
 
@@ -2941,6 +2949,19 @@ static int MrUrlIsJpeg(const char *url)
 		(ContainsTextNoCase(dot, ".jpg") || ContainsTextNoCase(dot, ".jpeg"));
 }
 
+static int MrUrlIsPng(const char *url)
+{
+	const char *q, *dot;
+	int len;
+	if (!url || !url[0]) return 0;
+	q = strchr(url, '?');
+	len = (int)(q ? (q - url) : (int)strlen(url));
+	dot = url + len;
+	while (dot > url && dot[-1] != '/' && dot[-1] != ':') dot--;
+	while (*dot && dot < url + len && *dot != '.') dot++;
+	return (dot < url + len) && ContainsTextNoCase(dot, ".png");
+}
+
 /* Uppercased file extension (without the dot) of a URL's path, e.g. "PNG"
  * for ".../icon.png?x=1".  Empty if there's no recognizable extension.
  * Used only to label the artwork placeholder so it's visible at a glance
@@ -2982,6 +3003,110 @@ static int MrIsJpegMagic(const unsigned char *data, int bytes)
 	return bytes >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF;
 }
 
+#if ENABLE_PNG_ARTWORK
+static int MrContentTypeIsPng(const char *contentType)
+{
+	return contentType && ContainsTextNoCase(contentType, "image/png");
+}
+
+static int MrIsPngMagic(const unsigned char *data, int bytes)
+{
+	static const unsigned char sig[8] = { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
+	return bytes >= 8 && memcmp(data, sig, sizeof(sig)) == 0;
+}
+
+/* Decodes a PNG favicon via lodepng into the same downsampled grey/RGB
+ * thumbnail buffers DecodeJpegToGrey() produces, so the rest of the
+ * artwork pipeline (cache, dithered/colour rendering) doesn't need to
+ * know which decoder ran.  lodepng_inspect() reads just the IHDR header
+ * first so an oversized PNG is rejected before lodepng_decode32() would
+ * malloc width*height*4 bytes for it -- the 256KB download cap bounds the
+ * compressed input, but a small PNG can still declare huge dimensions. */
+static int DecodePngToGrey(const unsigned char *pngData, unsigned long pngBytes,
+	unsigned char *greyOut, unsigned char *rgbOut, int outW, int outH)
+{
+	LodePNGState state;
+	unsigned pw = 0, ph = 0, err;
+	unsigned char *image;
+	static unsigned char xMap[MR_MAX_JPEG_DIM], yMap[MR_MAX_JPEG_DIM];
+	static unsigned long greyAccum[MR_ART_W * MR_ART_H];
+	static unsigned long rAccum[MR_ART_W * MR_ART_H];
+	static unsigned long gAccum[MR_ART_W * MR_ART_H];
+	static unsigned long bAccum[MR_ART_W * MR_ART_H];
+	static unsigned short greyCount[MR_ART_W * MR_ART_H];
+	unsigned x, y;
+	int i;
+
+	if (!pngData || pngBytes <= 8 || !greyOut ||
+		outW <= 0 || outW > MR_ART_W || outH <= 0 || outH > MR_ART_H)
+		return -1;
+
+	lodepng_state_init(&state);
+	err = lodepng_inspect(&pw, &ph, &state, pngData, (size_t)pngBytes);
+	lodepng_state_cleanup(&state);
+	if (err) {
+		RADIO_DBG(printf("radio-art: lodepng_inspect failed err=%u (%s)\n",
+			err, lodepng_error_text(err));)
+		return -1;
+	}
+	if (pw == 0 || ph == 0 || pw > MR_MAX_JPEG_DIM || ph > MR_MAX_JPEG_DIM) {
+		RADIO_DBG(printf("radio-art: png dimensions out of range %ux%u (max %d)\n",
+			pw, ph, MR_MAX_JPEG_DIM);)
+		return -1;
+	}
+
+	image = NULL;
+	err = lodepng_decode32(&image, &pw, &ph, pngData, (size_t)pngBytes);
+	if (err || !image) {
+		RADIO_DBG(printf("radio-art: lodepng_decode32 failed err=%u (%s)\n",
+			err, lodepng_error_text(err));)
+		if (image) free(image);
+		return -1;
+	}
+	RADIO_DBG(printf("radio-art: png %ux%u decoded ok\n", pw, ph);)
+
+	memset(greyOut, 0x80, (size_t)(outW * outH));
+	if (rgbOut)
+		memset(rgbOut, 0x80, (size_t)(outW * outH * 3));
+	memset(greyAccum, 0, sizeof(greyAccum));
+	memset(rAccum, 0, sizeof(rAccum));
+	memset(gAccum, 0, sizeof(gAccum));
+	memset(bAccum, 0, sizeof(bAccum));
+	memset(greyCount, 0, sizeof(greyCount));
+
+	for (x = 0; x < pw; x++) xMap[x] = (unsigned char)(((unsigned long)x * (unsigned long)outW) / pw);
+	for (y = 0; y < ph; y++) yMap[y] = (unsigned char)(((unsigned long)y * (unsigned long)outH) / ph);
+
+	/* Alpha is ignored (treated as opaque), matching DecodeJpegToGrey's
+	 * source format -- favicons are rarely meaningfully transparent. */
+	for (y = 0; y < ph; y++) {
+		const unsigned char *row = image + 4UL * (unsigned long)y * (unsigned long)pw;
+		int dstY = yMap[y];
+		for (x = 0; x < pw; x++) {
+			const unsigned char *px = row + 4 * x;
+			unsigned char r = px[0], g = px[1], b = px[2];
+			int dst = dstY * outW + xMap[x];
+			greyAccum[dst] += (77UL * r + 150UL * g + 29UL * b + 128UL) >> 8;
+			rAccum[dst] += r; gAccum[dst] += g; bAccum[dst] += b;
+			if (greyCount[dst] != 0xffff) greyCount[dst]++;
+		}
+	}
+	free(image);
+
+	for (i = 0; i < outW * outH; i++)
+		if (greyCount[i]) {
+			unsigned short c = greyCount[i];
+			greyOut[i] = (unsigned char)((greyAccum[i] + (c / 2)) / c);
+			if (rgbOut) {
+				rgbOut[i * 3    ] = (unsigned char)((rAccum[i] + (c / 2)) / c);
+				rgbOut[i * 3 + 1] = (unsigned char)((gAccum[i] + (c / 2)) / c);
+				rgbOut[i * 3 + 2] = (unsigned char)((bAccum[i] + (c / 2)) / c);
+			}
+		}
+	return 0;
+}
+#endif /* ENABLE_PNG_ARTWORK */
+
 /* Favicon artwork is fetched from the Radio Browser station's "favicon"
  * field only, never from the MP3/ICY stream, and only once playback has
  * already started picking a station (see RadioDoProbeAndPlay).  The fetch
@@ -2989,9 +3114,12 @@ static int MrIsJpegMagic(const unsigned char *data, int bytes)
  * connection handling with the stream probe used to start playback but is
  * a separate code path that the probe's stream-playback logic never calls
  * into -- so this never touches the MP3 stream's SSL read loop.  Any
- * failure here (bad URL, unsupported TLS, oversized body, non-JPEG, broken
- * decode) just leaves artValid 0 and never affects playback. */
-static int LoadRadioFaviconJpeg(MrApp *app)
+ * failure here (bad URL, unsupported TLS, oversized body, unsupported
+ * format, broken decode) just leaves artValid 0 and never affects
+ * playback.  JPEG and PNG are tried in that order based on URL extension
+ * or Content-Type, each independently confirmed via magic bytes before
+ * decoding; anything else (ICO, WebP, SVG, ...) is silently rejected. */
+static int LoadRadioFaviconImage(MrApp *app)
 {
 	char contentType[64];
 	static unsigned char response[MR_FAVICON_MAX_BYTES];
@@ -3009,24 +3137,40 @@ static int LoadRadioFaviconJpeg(MrApp *app)
 		return 0;
 	}
 	RADIO_DBG(printf("radio-art: fetched %d bytes content-type=\"%s\"\n", bytes, contentType);)
-	if (bytes <= 4)
+	if (bytes <= 8)
 		return 0;
-	if (!MrUrlIsJpeg(app->currentRadioFavicon) && !MrContentTypeIsJpeg(contentType)) {
-		RADIO_DBG(printf("radio-art: rejected, neither URL nor content-type look like JPEG\n");)
-		return 0;
+
+	if (MrUrlIsJpeg(app->currentRadioFavicon) || MrContentTypeIsJpeg(contentType)) {
+		if (!MrIsJpegMagic(response, bytes)) {
+			RADIO_DBG(printf("radio-art: rejected, claimed JPEG but first bytes are not FF D8 FF (%02X %02X %02X)\n",
+				response[0], response[1], response[2]);)
+			return 0;
+		}
+		if (DecodeJpegToGrey(response, (unsigned long)bytes, app->artGreyBuf, app->artRGBBuf,
+			MR_ART_W, MR_ART_H, 0) != 0) {
+			RADIO_DBG(printf("radio-art: picojpeg decode failed\n");)
+			return 0;
+		}
+		app->artValid = 1;
+		return 1;
 	}
-	if (!MrIsJpegMagic(response, bytes)) {
-		RADIO_DBG(printf("radio-art: rejected, first bytes are not FF D8 FF (%02X %02X %02X)\n",
-			bytes > 0 ? response[0] : 0, bytes > 1 ? response[1] : 0, bytes > 2 ? response[2] : 0);)
-		return 0;
+#if ENABLE_PNG_ARTWORK
+	if (MrUrlIsPng(app->currentRadioFavicon) || MrContentTypeIsPng(contentType)) {
+		if (!MrIsPngMagic(response, bytes)) {
+			RADIO_DBG(printf("radio-art: rejected, claimed PNG but signature bytes don't match\n");)
+			return 0;
+		}
+		if (DecodePngToGrey(response, (unsigned long)bytes, app->artGreyBuf, app->artRGBBuf,
+			MR_ART_W, MR_ART_H) != 0) {
+			RADIO_DBG(printf("radio-art: lodepng decode failed\n");)
+			return 0;
+		}
+		app->artValid = 1;
+		return 1;
 	}
-	if (DecodeJpegToGrey(response, (unsigned long)bytes, app->artGreyBuf, app->artRGBBuf,
-		MR_ART_W, MR_ART_H, 0) != 0) {
-		RADIO_DBG(printf("radio-art: picojpeg decode failed\n");)
-		return 0;
-	}
-	app->artValid = 1;
-	return 1;
+#endif
+	RADIO_DBG(printf("radio-art: rejected, unsupported favicon type (url and content-type don't look like JPEG or PNG)\n");)
+	return 0;
 }
 #endif /* ENABLE_RADIO_ARTWORK */
 
@@ -3041,7 +3185,7 @@ static void UpdateArtwork(MrApp *app, MrMp3Info *info)
 		app->artValid = 1;
 		SaveArtworkCache(app);
 #if ENABLE_RADIO_ARTWORK
-	} else if (app->artEnabled && MrIsRadioInput(app->inputName) && LoadRadioFaviconJpeg(app)) {
+	} else if (app->artEnabled && MrIsRadioInput(app->inputName) && LoadRadioFaviconImage(app)) {
 		SaveArtworkCache(app);
 #endif
 	}
@@ -3203,7 +3347,7 @@ static void RefreshFileInfoAndTags(MrApp *app)
 		SetReadonlyString(app->fileInfoGad, app->win, app->shownFileInfo, sizeof(app->shownFileInfo), "Internet Stream");
 		UpdateRatingDisplay(app); UpdateTimeDisplay(app); SetGauge(app, 0);
 		/* Radio has no local MP3/ID3 art, only an optional station favicon,
-		 * so this is the only place that drives LoadRadioFaviconJpeg() for
+		 * so this is the only place that drives LoadRadioFaviconImage() for
 		 * radio input -- without it, switching stations (or "Reload Art
 		 * from File") never re-attempts the favicon fetch, and any layout
 		 * repaint of the placeholder gadget is never redrawn. */

@@ -37,6 +37,15 @@ ifneq ($(filter 1 yes true on,$(DEBUG)),)
 DEBUG_CPPFLAGS := -DRADIO_DEBUG
 endif
 
+# PNG favicon decoding for minimp3r's radio artwork (lvandeve/lodepng,
+# vendored as lodepng.c/.h).  Decoder-only, no encoder/disk-IO/ancillary
+# chunk support compiled in -- minimp3r feeds it an in-memory buffer
+# directly, same as the JPEG path.  Disable with -DENABLE_PNG_ARTWORK=0 in
+# EXTRA_CFLAGS and drop lodepng.c from GUIR_SOURCES below to also shrink
+# the binary; the C-level guard alone only skips the decode calls.
+PNG_CPPFLAGS := -DENABLE_PNG_ARTWORK -DLODEPNG_NO_COMPILE_ENCODER \
+	-DLODEPNG_NO_COMPILE_DISK -DLODEPNG_NO_COMPILE_ANCILLARY_CHUNKS
+
 SOURCES := amiga_mp3dec.c $(RADIO_SOURCES) $(DECODER_SOURCES)
 GUI_SOURCES := amiga_mp3gui.c picojpeg.c $(RADIO_SOURCES) \
 	radio_browser_controller.c radio_browser.c radio_browser_url.c \
@@ -45,7 +54,9 @@ GUI_SOURCES := amiga_mp3gui.c picojpeg.c $(RADIO_SOURCES) \
 # minimp3r is the ReAction/ClassAct frontend; it pulls amiga_mp3dec.c in itself
 # (like amiga_mp3gui.c) so only the shared decoder modules are listed here.  The
 # ReAction classes are opened at runtime, so no extra linker flag is needed.
-GUIR_SOURCES := minimp3r.c picojpeg.c $(RADIO_SOURCES) \
+# lodepng.c is only needed here -- the radio favicon artwork feature (and its
+# PNG support) is minimp3r-only, not wired into the GadTools frontend above.
+GUIR_SOURCES := minimp3r.c picojpeg.c lodepng.c $(RADIO_SOURCES) \
 	radio_browser_controller.c radio_browser.c radio_browser_url.c \
 	radio_browser_http.c radio_browser_json.c radio_stream_probe.c
 
@@ -132,7 +143,7 @@ $(GUI_TARGET): $(GUI_SOURCES) amiga_mp3dec.c $(DECODER_SOURCES) $(FAST030_ASM_SO
 # as the GadTools GUI since it targets 030+/3.5/3.9 machines.  minimp3r.c
 # #includes amiga_mp3dec.c, so only the shared decoder modules are linked.
 $(GUIR_TARGET): $(GUIR_SOURCES) amiga_mp3dec.c $(DECODER_SOURCES) $(FAST030_ASM_SOURCES)
-	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(SSL_CPPFLAGS) $(DEBUG_CPPFLAGS) $(EXTRA_CFLAGS) \
+	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(SSL_CPPFLAGS) $(PNG_CPPFLAGS) $(DEBUG_CPPFLAGS) $(EXTRA_CFLAGS) \
 		-o $@ $(GUIR_SOURCES) $(DECODER_SOURCES) $(FAST030_ASM_SOURCES)
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
 
@@ -166,7 +177,7 @@ print-gui-command:
 	@printf '%s\n' '$(AMIGA_HUNK_FAST_PREFERRED) $(GUI_TARGET)'
 
 print-guir-command:
-	@printf '%s\n' '$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(EXTRA_CFLAGS) -o $(GUIR_TARGET) $(GUIR_SOURCES) $(DECODER_SOURCES) $(FAST030_ASM_SOURCES)'
+	@printf '%s\n' '$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(PNG_CPPFLAGS) $(EXTRA_CFLAGS) -o $(GUIR_TARGET) $(GUIR_SOURCES) $(DECODER_SOURCES) $(FAST030_ASM_SOURCES)'
 	@printf '%s\n' '$(AMIGA_HUNK_FAST_PREFERRED) $(GUIR_TARGET)'
 
 print-fast030-command:
