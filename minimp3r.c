@@ -571,6 +571,7 @@ static void MrDebugSession(const char *event, const MrApp *app)
 
 static int PlaybackProcessStillExists(void);
 static int StopPlaybackAndWait(MrApp *app, int ticks, const char *timeoutStatus);
+static void FinalizePlayback(MrApp *app);
 static void HandleDoneSignal(MrApp *app);
 
 /* ------------------------------------------------------------------------- */
@@ -1532,6 +1533,11 @@ static int StopPlaybackAndWait(MrApp *app, int ticks, const char *timeoutStatus)
 		return 1;
 	if (!app->playbackActive && !app->playbackDonePending && !PlaybackProcessStillExists())
 		return 1;
+	if (app->playbackDonePending && !PlaybackProcessStillExists()) {
+		FinalizePlayback(app);
+		if (!app->playbackActive && !app->playbackDonePending && !PlaybackProcessStillExists())
+			return 1;
+	}
 	StopPlayback(app);
 	for (waited = 0; waited < ticks; waited++) {
 		HandleDoneSignal(app);
@@ -2277,10 +2283,23 @@ static int MrOpenWindow(MrApp *app)
 	return 1;
 }
 
+static void DrainMainWindowMessages(MrApp *app)
+{
+	ULONG result;
+	UWORD code = 0;
+
+	if (!app || !app->win || !app->winObj)
+		return;
+	ModifyIDCMP(app->win, 0);
+	while ((result = RA_HandleInput(app->winObj, &code)) != WMHI_LASTMSG)
+		;
+}
+
 static void MrCloseWindow(MrApp *app)
 {
 	CloseRadioWindow(app);
 	ClosePlaylistWindow(app);
+	DrainMainWindowMessages(app);
 	if (app->win && app->menuStrip) {
 		ClearMenuStrip(app->win);
 	}
