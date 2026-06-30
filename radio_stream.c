@@ -439,6 +439,20 @@ static int radio_ssl_do_handshake(RadioStream *rs)
         if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
             radio_backoff_sleep(); continue;
         }
+        /* SSL_ERROR_WANT_READ/WRITE just means "call again later" on a
+         * non-blocking socket; anything else is a real handshake failure,
+         * and the OpenSSL/AmiSSL error queue has the actual reason (cipher
+         * mismatch, protocol version, rejected cert, ...) that
+         * SSL_get_error()'s numeric code alone doesn't say. */
+        {
+            unsigned long ssl_lib_error = ERR_get_error();
+            char ssl_error_buf[160];
+            ssl_error_buf[0] = '\0';
+            if (ssl_lib_error != 0)
+                ERR_error_string_n(ssl_lib_error, ssl_error_buf, sizeof(ssl_error_buf));
+            RADIO_DBG(printf("radio-tls: SSL_connect failed session=%lu ssl_error=%d lib_error=%08lx (%s)\n",
+                rs ? rs->session_id : 0, e, ssl_lib_error, ssl_error_buf[0] ? ssl_error_buf : "none"););
+        }
         return -1;
     }
     RADIO_DBG(printf("radio-tls: SSL_connect timeout session=%lu last_ssl_error=%d fd=%ld\n", rs ? rs->session_id : 0, last_error, rs ? (long)rs->sock : -1L););
@@ -455,10 +469,44 @@ static int radio_ssl_connect(RadioStream *rs)
     rs->ctx = SSL_CTX_new(method);
     if (rs->ctx) { rs->ctxFreed = 0; radio_active_ssl_ctx_count++; RADIO_DBG(printf("radio-resource: session=%lu SSL_CTX allocated active_ssl_ctx_count=%ld\n", rs->session_id, radio_active_ssl_ctx_count)); }
     if (!rs->ctx) { set_error(rs, "AmiSSL init failed"); return -1; }
+#ifdef RADIO_SSL_VERIFY_PEER
+    /* SSLCERTS=1 build: verify the server's certificate chain against
+     * AmiSSL's installed root CA bundle -- SSL_CTX_set_default_verify_paths()
+     * picks it up the same way it would on any other OpenSSL-based build --
+     * and the hostname against the certificate, instead of accepting
+     * anything.  Falls back to no verification if the cert store can't be
+     * loaded at all (e.g. AmiSSL's update pack with the root certs was
+     * never installed), rather than refusing to play: a missing/broken
+     * cert store shouldn't be able to break streaming outright. */
+    if (SSL_CTX_set_default_verify_paths(rs->ctx)) {
+        SSL_CTX_set_verify(rs->ctx, SSL_VERIFY_PEER, NULL);
+        RADIO_DBG(printf("radio-tls: cert verification enabled session=%lu host=%s\n", rs->session_id, rs->host););
+    } else {
+        SSL_CTX_set_verify(rs->ctx, SSL_VERIFY_NONE, NULL);
+        RADIO_DBG(printf("radio-tls: cert store unavailable, verification disabled session=%lu\n", rs->session_id););
+    }
+#else
+    /* No CA bundle path assumed by default; skip cert verification for
+     * streams.  Build with SSLCERTS=1 to verify against AmiSSL's
+     * installed root certs instead (see above). */
     SSL_CTX_set_verify(rs->ctx, SSL_VERIFY_NONE, NULL);
+#endif
     rs->ssl = SSL_new(rs->ctx);
     if (rs->ssl) { rs->sslFreed = 0; radio_active_ssl_count++; RADIO_DBG(printf("radio-resource: session=%lu SSL allocated active_ssl_count=%ld\n", rs->session_id, radio_active_ssl_count)); }
     if (!rs->ssl) { radio_ssl_close_stream(rs); set_error(rs, "AmiSSL init failed"); return -1; }
+#ifdef RADIO_SSL_VERIFY_PEER
+    /* SNI and hostname verification only matter once we're actually
+     * checking the chain; sending SNI unconditionally would be a (probably
+     * harmless) behavior change to the default no-verify build that wasn't
+     * asked for here. */
+#ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
+    SSL_set_tlsext_host_name(rs->ssl, rs->host);
+#endif
+    {
+        X509_VERIFY_PARAM *verify_param = SSL_get0_param(rs->ssl);
+        if (verify_param) X509_VERIFY_PARAM_set1_host(verify_param, rs->host, 0);
+    }
+#endif
     set_fd_ok = SSL_set_fd(rs->ssl, (int)rs->sock);
     if (!set_fd_ok) { RADIO_DBG(printf("radio-tls: SSL_set_fd failed session=%lu fd=%ld ssl=%p ctx=%p\n", rs->session_id, (long)rs->sock, (void *)rs->ssl, (void *)rs->ctx);); radio_ssl_close_stream(rs); set_error(rs, "TLS handshake failed"); return -1; }
     if (radio_ssl_do_handshake(rs) != 0) {
