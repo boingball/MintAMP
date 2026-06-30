@@ -251,8 +251,8 @@ static int rb_http_status_is_2xx(const char *response, int len)
     return code >= 200 && code < 300;
 }
 
-int rb_http_get_json(const char *host, const char *path,
-                     char *out_body, int out_body_size)
+int rb_http_get_binary(const char *host, const char *path,
+                       unsigned char *out_body, int out_body_size)
 {
     RbHttpTransport transport;
     char request[RB_HTTP_MAX_REQUEST];
@@ -291,7 +291,7 @@ int rb_http_get_json(const char *host, const char *path,
             out_body[0] = '\0';
             return rc;
         }
-        n = (int)recv(transport.sock, out_body + len, want, 0);
+        n = (int)recv(transport.sock, (char *)out_body + len, want, 0);
         if (n < 0) {
             rb_http_transport_close(&transport);
             out_body[0] = '\0';
@@ -319,12 +319,12 @@ int rb_http_get_json(const char *host, const char *path,
     rb_http_transport_close(&transport);
     out_body[len] = '\0';
 
-    header_end = rb_http_find_headers_end(out_body, len);
+    header_end = rb_http_find_headers_end((const char *)out_body, len);
     if (header_end < 0) {
         out_body[0] = '\0';
         return RB_HTTP_ERR_NO_HEADERS;
     }
-    if (!rb_http_status_is_2xx(out_body, len)) {
+    if (!rb_http_status_is_2xx((const char *)out_body, len)) {
         out_body[0] = '\0';
         return RB_HTTP_ERR_STATUS;
     }
@@ -336,6 +336,16 @@ int rb_http_get_json(const char *host, const char *path,
     }
     memmove(out_body, out_body + header_end, (size_t)body_len);
     out_body[body_len] = '\0';
+    return body_len;
+}
+
+int rb_http_get_json(const char *host, const char *path,
+                     char *out_body, int out_body_size)
+{
+    int body_len;
+
+    body_len = rb_http_get_binary(host, path, (unsigned char *)out_body, out_body_size);
+    if (body_len < 0) return body_len;
     return 0;
 }
 

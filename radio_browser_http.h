@@ -11,6 +11,13 @@
 #define RB_HTTP_ERR_BAD_ARG      (-8)
 #define RB_HTTP_ERR_TIMEOUT      (-9)
 
+int rb_http_get_binary(
+    const char *host,
+    const char *path,
+    unsigned char *out_body,
+    int out_body_size
+);
+
 int rb_http_get_json(
     const char *host,
     const char *path,
