@@ -420,6 +420,7 @@ typedef struct MrApp {
 	char            rbFavouriteNames[MR_RADIO_FAV_MAX][RB_MAX_NAME];
 	char            rbFavouriteUrls[MR_RADIO_FAV_MAX][RB_MAX_URL];
 	char            currentRadioStationName[RB_MAX_NAME];
+	char            currentRadioFavicon[RB_MAX_FAVICON];
 	APTR            rbVisualInfo;
 	RadioBrowserController rbController;
 
@@ -2754,14 +2755,18 @@ static void BuildArtColorPens(MrApp *app)
 
 static void ArtworkCacheName(MrApp *app, char *dst, size_t dstSize)
 {
-	const char *base;
+	const char *source, *base, *end;
 	char safe[80];
 	int i, j;
 	EnvName(dst, dstSize, "ArtCache");
-	base = app->inputName + strlen(app->inputName);
-	while (base > app->inputName && base[-1] != '/' && base[-1] != ':')
+	source = (MrIsRadioInput(app->inputName) && app->currentRadioFavicon[0]) ?
+		app->currentRadioFavicon : app->inputName;
+	end = strchr(source, '?');
+	if (!end) end = source + strlen(source);
+	base = end;
+	while (base > source && base[-1] != '/' && base[-1] != ':')
 		base--;
-	for (i = 0, j = 0; base[i] && j < (int)sizeof(safe) - 1; i++) {
+	for (i = 0, j = 0; base + i < end && base[i] && j < (int)sizeof(safe) - 1; i++) {
 		unsigned char c = (unsigned char)base[i];
 		if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))
 			safe[j++] = (char)c;
@@ -2854,6 +2859,40 @@ static void CleanArtworkCache(MrApp *app)
 		SetStatus(app, "No cached artwork files to remove.");
 }
 
+
+static int MrUrlIsJpeg(const char *url)
+{
+	const char *q, *dot;
+	int len;
+	if (!url || !url[0]) return 0;
+	q = strchr(url, '?');
+	len = (int)(q ? (q - url) : (int)strlen(url));
+	dot = url + len;
+	while (dot > url && dot[-1] != '/' && dot[-1] != ':') dot--;
+	while (*dot && dot < url + len && *dot != '.') dot++;
+	return (dot < url + len) &&
+		(ContainsTextNoCase(dot, ".jpg") || ContainsTextNoCase(dot, ".jpeg"));
+}
+
+static int LoadRadioFaviconJpeg(MrApp *app)
+{
+	RbStreamInfo info;
+	static unsigned char response[512L * 1024L + 1024L];
+	int bytes = 0;
+	int rc;
+	if (!app || !app->currentRadioFavicon[0] || !MrUrlIsJpeg(app->currentRadioFavicon))
+		return 0;
+	memset(&info, 0, sizeof(info));
+	rc = rb_probe_stream_url(app->currentRadioFavicon, &info, response, (int)sizeof(response), &bytes);
+	if (rc < 0 || bytes <= 4)
+		return 0;
+	if (DecodeJpegToGrey(response, (unsigned long)bytes, app->artGreyBuf, app->artRGBBuf,
+		MR_ART_W, MR_ART_H, 0) != 0)
+		return 0;
+	app->artValid = 1;
+	return 1;
+}
+
 static void UpdateArtwork(MrApp *app, MrMp3Info *info)
 {
 	ReleaseArtColorPens(app);
@@ -2863,6 +2902,8 @@ static void UpdateArtwork(MrApp *app, MrMp3Info *info)
 	} else if (app->artEnabled && info && info->artData && info->artBytes > 4 &&
 		DecodeJpegToGrey(info->artData, info->artBytes, app->artGreyBuf, app->artRGBBuf, MR_ART_W, MR_ART_H, info->artIsPng) == 0) {
 		app->artValid = 1;
+		SaveArtworkCache(app);
+	} else if (app->artEnabled && MrIsRadioInput(app->inputName) && LoadRadioFaviconJpeg(app)) {
 		SaveArtworkCache(app);
 	}
 	if (app->artColorEnabled && app->artValid)
@@ -3654,6 +3695,7 @@ static void RadioDoProbeAndPlay(MrApp *app)
 			return;
 		}
 		SafeCopy(app->inputName, sizeof(app->inputName), app->rbFavouriteUrls[app->rbSelectedFavourite]);
+		app->currentRadioFavicon[0] = '\0';
 		app->haveRadioHostAddr = 0;
 		app->radioHostAddrBe = 0;
 		UpdateFileGadget(app);
@@ -3707,6 +3749,7 @@ static void RadioDoProbeAndPlay(MrApp *app)
 	}
 #endif
 	SafeCopy(app->inputName, sizeof(app->inputName), info.final_url);
+	SafeCopy(app->currentRadioFavicon, sizeof(app->currentRadioFavicon), st->favicon);
 	app->haveRadioHostAddr = info.have_host_addr;
 	app->radioHostAddrBe = info.host_addr_be;
 	UpdateFileGadget(app);
