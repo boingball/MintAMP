@@ -2831,11 +2831,11 @@ static int DecodeProgressiveJpegDcPreviewToGrey(const unsigned char *jpg, unsign
 				anyDcScan = 1;
 				mx = (width + maxh * 8 - 1) / (maxh * 8); my = (height + maxv * 8 - 1) / (maxv * 8);
 				for (mi = 0; scanOk && mi < mx * my; mi++) for (i = 0; scanOk && i < ns; i++) { c = scanComp[i]; for (by = 0; scanOk && by < comp[c].v; by++) for (bx = 0; bx < comp[c].h; bx++) { int x = (mi % mx) * comp[c].h + bx, y = (mi / mx) * comp[c].v + by, sym, diff; if (x >= comp[c].bw || y >= comp[c].bh) continue; if (!hdc[comp[c].td].valid) { failReason = "no DC Huffman table"; scanOk = 0; break; } sym = MrJpegDecodeHuff(&br, &hdc[comp[c].td]); diff = MrJpegReceiveExtend(&br, sym); if (sym < 0 || diff == -40999) { failReason = "bad entropy decode"; scanOk = 0; break; } comp[c].prevDc += diff; dc[c][y * comp[c].bw + x] = (short)(comp[c].prevDc << Al); comp[c].haveDc = 1; anyDc = 1; } }
+				if (scanHasLuma && comp[0].haveDc && !lumaDcReady) { lumaDcReady = 1; RADIO_DBG(printf("radio-art: progressive JPEG luma DC ready\n");) }
 				if (!scanOk) {
-					if (lumaDcReady) { laterScanFailed = 1; comp[1].haveDc = comp[2].haveDc = 0; break; }
+					if (comp[0].haveDc) { laterScanFailed = 1; goto render_preview; }
 					goto fail;
 				}
-				if (scanHasLuma && comp[0].haveDc && !lumaDcReady) { lumaDcReady = 1; RADIO_DBG(printf("radio-art: progressive JPEG luma DC ready\n");) }
 			} else {
 				/* AC scans and refinement scans are not needed for the DC preview. */
 			}
@@ -2847,16 +2847,20 @@ static int DecodeProgressiveJpegDcPreviewToGrey(const unsigned char *jpg, unsign
 	if (!anyDcScan) { failReason = "no DC scan found"; goto fail; }
 	if (!anyDc) { failReason = "no DC Huffman table"; goto fail; }
 	if (!lumaDcReady || !comp[0].haveDc) { failReason = "no luma DC"; goto fail; }
+
+render_preview:
+	if (!comp[0].haveDc) { failReason = failReason ? failReason : "no luma DC"; goto fail; }
 	memset(greyOut, 0x80, (size_t)(outW * outH)); if (rgbOut) memset(rgbOut, 0x80, (size_t)(outW * outH * 3)); memset(greyAccum,0,sizeof(greyAccum)); memset(rAccum,0,sizeof(rAccum)); memset(gAccum,0,sizeof(gAccum)); memset(bAccum,0,sizeof(bAccum)); memset(greyCount,0,sizeof(greyCount));
 	for (i = 0; i < width * height; i++) { int x = i % width, y = i / width, dst = (y * outH / height) * outW + (x * outW / width); int yb = (y * comp[0].v * comp[0].bh) / height / comp[0].v, xb = (x * comp[0].h * comp[0].bw) / width / comp[0].h; int Y = 128 + (dc[0][yb * comp[0].bw + xb] * (int)qdc[comp[0].tq] + 4) / 8; int R = Y, G = Y, B = Y; if (Y < 0) Y = 0; else if (Y > 255) Y = 255; if (comps == 3 && comp[1].haveDc && comp[2].haveDc) { int cbx = x * comp[1].bw / width, cby = y * comp[1].bh / height, crx = x * comp[2].bw / width, cry = y * comp[2].bh / height; int Cb = 128 + (dc[1][cby * comp[1].bw + cbx] * (int)qdc[comp[1].tq] + 4) / 8; int Cr = 128 + (dc[2][cry * comp[2].bw + crx] * (int)qdc[comp[2].tq] + 4) / 8; R = Y + ((359 * (Cr - 128)) >> 8); G = Y - ((88 * (Cb - 128) + 183 * (Cr - 128)) >> 8); B = Y + ((454 * (Cb - 128)) >> 8); if (R<0)R=0; else if(R>255)R=255; if(G<0)G=0; else if(G>255)G=255; if(B<0)B=0; else if(B>255)B=255; }
 		greyAccum[dst] += (77UL * R + 150UL * G + 29UL * B + 128UL) >> 8; rAccum[dst] += R; gAccum[dst] += G; bAccum[dst] += B; if (greyCount[dst] != 0xffff) greyCount[dst]++; }
 	for (i = 0; i < outW * outH; i++) if (greyCount[i]) { unsigned short c = greyCount[i]; greyOut[i] = (unsigned char)((greyAccum[i] + c / 2) / c); if (rgbOut) { rgbOut[i*3] = (unsigned char)((rAccum[i] + c / 2) / c); rgbOut[i*3+1] = (unsigned char)((gAccum[i] + c / 2) / c); rgbOut[i*3+2] = (unsigned char)((bAccum[i] + c / 2) / c); } }
 	if (laterScanFailed) RADIO_DBG(printf("radio-art: progressive JPEG later scan failed, keeping luma preview\n");)
-	if (comps == 3 && comp[1].haveDc && comp[2].haveDc) RADIO_DBG(printf("radio-art: progressive JPEG colour DC available\n");)
-	else RADIO_DBG(printf("radio-art: progressive JPEG using greyscale DC preview\n");)
+	if (comps == 3 && comp[1].haveDc && comp[2].haveDc) RADIO_DBG(printf("radio-art: progressive JPEG colour DC preview used\n");)
+	else RADIO_DBG(printf("radio-art: progressive JPEG greyscale DC preview used\n");)
 	return 0;
 
 fail:
+	if (comp[0].haveDc && failReason && !strcmp(failReason, "bad entropy decode")) { laterScanFailed = 1; goto render_preview; }
 	RADIO_DBG(printf("radio-art: progressive JPEG DC preview unsupported: %s\n", failReason ? failReason : "bad entropy decode");)
 	return -1;
 }
