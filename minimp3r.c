@@ -2908,20 +2908,35 @@ static int LoadRadioFaviconJpeg(MrApp *app)
 	char contentType[64];
 	static unsigned char response[MR_FAVICON_MAX_BYTES];
 	int bytes = 0;
-	if (!app || !app->currentRadioFavicon[0])
+	int rc;
+	if (!app || !app->currentRadioFavicon[0]) {
+		RADIO_DBG(printf("radio-art: no favicon URL for current station\n");)
 		return 0;
-	if (rb_probe_fetch_binary(app->currentRadioFavicon, response, (int)sizeof(response),
-		&bytes, contentType, (int)sizeof(contentType)) != RB_STREAM_PROBE_OK)
+	}
+	RADIO_DBG(printf("radio-art: fetching favicon url=%s\n", app->currentRadioFavicon);)
+	rc = rb_probe_fetch_binary(app->currentRadioFavicon, response, (int)sizeof(response),
+		&bytes, contentType, (int)sizeof(contentType));
+	if (rc != RB_STREAM_PROBE_OK) {
+		RADIO_DBG(printf("radio-art: fetch failed rc=%d (%s)\n", rc, rb_probe_error_text(rc));)
 		return 0;
+	}
+	RADIO_DBG(printf("radio-art: fetched %d bytes content-type=\"%s\"\n", bytes, contentType);)
 	if (bytes <= 4)
 		return 0;
-	if (!MrUrlIsJpeg(app->currentRadioFavicon) && !MrContentTypeIsJpeg(contentType))
+	if (!MrUrlIsJpeg(app->currentRadioFavicon) && !MrContentTypeIsJpeg(contentType)) {
+		RADIO_DBG(printf("radio-art: rejected, neither URL nor content-type look like JPEG\n");)
 		return 0;
-	if (!MrIsJpegMagic(response, bytes))
+	}
+	if (!MrIsJpegMagic(response, bytes)) {
+		RADIO_DBG(printf("radio-art: rejected, first bytes are not FF D8 FF (%02X %02X %02X)\n",
+			bytes > 0 ? response[0] : 0, bytes > 1 ? response[1] : 0, bytes > 2 ? response[2] : 0);)
 		return 0;
+	}
 	if (DecodeJpegToGrey(response, (unsigned long)bytes, app->artGreyBuf, app->artRGBBuf,
-		MR_ART_W, MR_ART_H, 0) != 0)
+		MR_ART_W, MR_ART_H, 0) != 0) {
+		RADIO_DBG(printf("radio-art: picojpeg decode failed\n");)
 		return 0;
+	}
 	app->artValid = 1;
 	return 1;
 }
@@ -3786,6 +3801,7 @@ static void RadioDoProbeAndPlay(MrApp *app)
 #endif
 	SafeCopy(app->inputName, sizeof(app->inputName), info.final_url);
 	SafeCopy(app->currentRadioFavicon, sizeof(app->currentRadioFavicon), st->favicon);
+	RADIO_DBG(printf("radio-art: station favicon=\"%s\"\n", app->currentRadioFavicon);)
 	app->haveRadioHostAddr = info.have_host_addr;
 	app->radioHostAddrBe = info.host_addr_be;
 	UpdateFileGadget(app);
