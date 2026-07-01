@@ -127,6 +127,18 @@ typedef enum {
     RADIO_PARSE_META_PAYLOAD
 } RadioParseState;
 
+/* Transport close mode: GRACEFUL attempts SSL_shutdown() (only meaningful for
+ * a clean stop of a healthy, still-connected TLS session); ABORT always skips
+ * it.  Calling SSL_shutdown() on a session whose peer/socket is already in an
+ * error, HTTP-error, or closed state is what produces the recoverable AmiSSL
+ * alerts this mode split exists to avoid -- every failure/timeout/error path
+ * must use ABORT. */
+typedef enum {
+    RADIO_CLOSE_GRACEFUL = 0,
+    RADIO_CLOSE_ABORT = 1
+} RadioCloseMode;
+static const char *radio_close_mode_name(RadioCloseMode mode) { return mode == RADIO_CLOSE_GRACEFUL ? "graceful" : "abort"; }
+
 #define RADIO_STREAM_MAGIC 0x52535452UL
 
 struct RadioStream {
@@ -420,6 +432,7 @@ static void radio_ssl_global_cleanup(void)
     RADIO_DBG(printf("radio-ssl-diag: cleanup EXIT  initialized=%d base=%p ext=%p master=%p\n", radio_amissl_initialized, (void *)AmiSSLBase, (void *)AmiSSLExtBase, (void *)AmiSSLMasterBase););
 }
 
+static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode);
 static void radio_ssl_close_stream(RadioStream *rs);
 static void radio_abort_current_socket(RadioStream *rs);
 
@@ -518,17 +531,22 @@ static int radio_ssl_connect(RadioStream *rs)
     return 0;
 }
 
-static void radio_ssl_close_stream(RadioStream *rs)
+static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
 {
+    int shutdown_called = 0;
     if (!rs) return;
-    RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: HTTPS cleanup start ssl=%p ctx=%p fd=%ld handshake=%d\n", (void *)rs->ssl, (void *)rs->ctx, (long)rs->sock, rs->sslHandshakeDone));
-    if (rs->ssl && rs->sslHandshakeDone && rs->sock != RADIO_INVALID_SOCKET && !rs->socketClosed) {
+    RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: HTTPS cleanup start mode=%s ssl=%p ctx=%p fd=%ld handshake=%d\n", radio_close_mode_name(mode), (void *)rs->ssl, (void *)rs->ctx, (long)rs->sock, rs->sslHandshakeDone));
+    if (mode == RADIO_CLOSE_GRACEFUL && rs->ssl && rs->sslHandshakeDone && rs->sock != RADIO_INVALID_SOCKET && !rs->socketClosed) {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_shutdown start ssl=%p\n", (void *)rs->ssl));
         SSL_shutdown(rs->ssl);
+        shutdown_called = 1;
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_shutdown done\n"));
     } else {
-        RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_shutdown skipped ssl=%p fd=%ld handshake=%d\n", (void *)rs->ssl, (long)rs->sock, rs->sslHandshakeDone));
+        RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_shutdown skipped mode=%s ssl=%p fd=%ld handshake=%d\n", radio_close_mode_name(mode), (void *)rs->ssl, (long)rs->sock, rs->sslHandshakeDone));
     }
+    RADIO_DBG(printf("radio-cleanup: ssl-close mode=%s session=%lu status=%d sslHandshakeDone=%d ssl_shutdown=%s ssl=%p ctx=%p fd=%ld open_socket_count=%ld\n",
+        radio_close_mode_name(mode), rs->session_id, (int)rs->status, rs->sslHandshakeDone,
+        shutdown_called ? "called" : "skipped", (void *)rs->ssl, (void *)rs->ctx, (long)rs->sock, radio_open_socket_count););
     if (rs->ssl && !rs->sslFreed) {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_free start session=%lu ssl=%p ctx=%p fd=%ld\n", rs->session_id, (void *)rs->ssl, (void *)rs->ctx, (long)rs->sock));
         rs->ssl_free_count++;
@@ -554,6 +572,11 @@ static void radio_ssl_close_stream(RadioStream *rs)
     }
     RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: HTTPS cleanup complete\n"));
 }
+
+/* Safe default used by every error/timeout/handshake-failure path: never
+ * attempts SSL_shutdown() on a session that may already be in an error or
+ * peer-closed state. */
+static void radio_ssl_close_stream(RadioStream *rs) { radio_ssl_close_stream_mode(rs, RADIO_CLOSE_ABORT); }
 #endif /* AMIGA_M68K && HAVE_AMISSL */
 
 /* Drive a non-blocking connect() to completion by re-issuing connect() and
@@ -794,15 +817,28 @@ static void radio_abort_current_socket(RadioStream *rs)
     }
 }
 
-static void close_current_socket(RadioStream *rs)
+static void close_current_socket_mode(RadioStream *rs, RadioCloseMode mode)
 {
+    long before;
     if (!rs) return;
     radio_stream_magic_valid(rs, "close_current_socket");
+    before = radio_open_socket_count;
+    RADIO_DBG(printf("radio-cleanup: close mode=%s session=%lu status=%d fd=%ld open_socket_count_before=%ld\n",
+        radio_close_mode_name(mode), rs->session_id, (int)rs->status, (long)rs->sock, before););
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-    radio_ssl_close_stream(rs);
+    radio_ssl_close_stream_mode(rs, mode);
 #endif
     radio_abort_current_socket(rs);
+    RADIO_DBG(printf("radio-cleanup: close mode=%s session=%lu complete open_socket_count_after=%ld\n",
+        radio_close_mode_name(mode), rs->session_id, radio_open_socket_count););
 }
+/* Safe default: always abort (skip SSL_shutdown).  Every call site below
+ * this comment represents a failed/aborted transport (connect/handshake
+ * failure, send/recv error, start timeout, stop before healthy playback) --
+ * exactly the states where SSL_shutdown() can provoke a recoverable AmiSSL
+ * alert.  The one deliberate exception is Radio_RequestStop()'s explicit
+ * graceful pre-close of a still-healthy RADIO_STATUS_PLAYING session. */
+static void close_current_socket(RadioStream *rs) { close_current_socket_mode(rs, RADIO_CLOSE_ABORT); }
 
 static int reconnect_http(RadioStream *rs)
 {
@@ -963,7 +999,34 @@ RadioStream *Radio_Open(const char *url)
 {
     return Radio_OpenWithHostAddr(url, 0, 0);
 }
-void Radio_RequestStop(RadioStream *rs){ if(!rs)return; radio_debug_mem_report(rs->session_id, "before stop"); rs->stop_request_count++; RADIO_STOP_DEBUG_PRINTF(("radio-stop: session=%lu stop requested count=%u status=%d fd=%ld\n", rs->session_id, rs->stop_request_count, (int)rs->status, (long)rs->sock)); if(rs->status==RADIO_STATUS_CLOSED)return; rs->stopping=1; rs->reconnectAttempts=RADIO_RECONNECT_MAX; rs->reconnectDelay=0; rs->status=RADIO_STATUS_STOPPING; radio_abort_current_socket(rs); RADIO_STOP_DEBUG_PRINTF(("radio-stop: marked stopping\n")); }
+void Radio_RequestStop(RadioStream *rs)
+{
+    RadioCloseMode mode;
+    if (!rs) return;
+    radio_debug_mem_report(rs->session_id, "before stop");
+    rs->stop_request_count++;
+    RADIO_STOP_DEBUG_PRINTF(("radio-stop: session=%lu stop requested count=%u status=%d fd=%ld\n", rs->session_id, rs->stop_request_count, (int)rs->status, (long)rs->sock));
+    if (rs->status == RADIO_STATUS_CLOSED) return;
+    /* Snapshot the close mode before anything below mutates rs->status: only
+     * a still-healthy RADIO_STATUS_PLAYING session at the moment stop is
+     * requested qualifies as a "clean stop of a healthy played stream" --
+     * everything else (error, buffering/reconnecting, never played) is an
+     * abort.  The graceful SSL_shutdown() (if any) must happen here, before
+     * radio_abort_current_socket() below force-closes the fd, or it would
+     * have no live socket left to write the close_notify to. */
+    mode = (rs->status == RADIO_STATUS_PLAYING) ? RADIO_CLOSE_GRACEFUL : RADIO_CLOSE_ABORT;
+    RADIO_DBG(printf("radio-cleanup: close mode=%s session=%lu status=%d (Radio_RequestStop)\n", radio_close_mode_name(mode), rs->session_id, (int)rs->status););
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+    if (mode == RADIO_CLOSE_GRACEFUL)
+        radio_ssl_close_stream_mode(rs, mode);
+#endif
+    rs->stopping = 1;
+    rs->reconnectAttempts = RADIO_RECONNECT_MAX;
+    rs->reconnectDelay = 0;
+    rs->status = RADIO_STATUS_STOPPING;
+    radio_abort_current_socket(rs);
+    RADIO_STOP_DEBUG_PRINTF(("radio-stop: marked stopping\n"));
+}
 void Radio_Close(RadioStream *rs)
 {
     if (!rs) return;

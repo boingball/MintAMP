@@ -89,6 +89,17 @@ static void rb_probe_release_idle_socketbase(void)
 }
 #endif
 
+/* Transport close mode: GRACEFUL attempts SSL_shutdown() (only for a clean,
+ * successful 2xx probe/fetch); ABORT always skips it.  301/redirects,
+ * non-2xx statuses, TLS/recv/server-close errors must use ABORT -- calling
+ * SSL_shutdown() on a session in one of those states is what produces
+ * recoverable AmiSSL alerts. */
+typedef enum {
+    RB_PROBE_CLOSE_GRACEFUL = 0,
+    RB_PROBE_CLOSE_ABORT = 1
+} RbProbeCloseMode;
+static const char *rb_probe_close_mode_name(RbProbeCloseMode mode) { return mode == RB_PROBE_CLOSE_GRACEFUL ? "graceful" : "abort"; }
+
 typedef struct RbProbeUrl {
     char host[RB_PROBE_MAX_HOST];
     char path[RB_PROBE_MAX_PATH];
@@ -457,6 +468,7 @@ static void rb_probe_cleanup_amissl(void)
 
 #endif
 
+static void rb_probe_transport_close_mode(RbProbeTransport *transport, RbProbeCloseMode mode, int http_status);
 static void rb_probe_transport_close(RbProbeTransport *transport);
 
 static int rb_probe_transport_open(RbProbeTransport *transport, const char *host, int port, int use_ssl, unsigned long *host_addr_be)
@@ -562,13 +574,26 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *host
     return RB_STREAM_PROBE_OK;
 }
 
-static void rb_probe_transport_close(RbProbeTransport *transport)
+static void rb_probe_transport_close_mode(RbProbeTransport *transport, RbProbeCloseMode mode, int http_status)
 {
-    if (transport && transport->sock != RB_PROBE_INVALID_SOCKET) {
+    if (!transport) return;
+    RADIO_DBG(printf("radio-cleanup: probe close mode=%s session=%lu http_status=%d sslHandshakeDone=%d ssl=%p ctx=%p fd=%ld open_socket_count_before=%ld\n",
+        rb_probe_close_mode_name(mode), transport->session_id, http_status,
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-        if (transport->ssl && transport->sslHandshakeDone) {
+        transport->sslHandshakeDone, (void *)transport->ssl, (void *)transport->ctx,
+#else
+        0, (void *)0, (void *)0,
+#endif
+        (long)transport->sock, rb_probe_open_socket_count);)
+    if (transport->sock != RB_PROBE_INVALID_SOCKET) {
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+        int shutdown_called = 0;
+        if (mode == RB_PROBE_CLOSE_GRACEFUL && transport->ssl && transport->sslHandshakeDone) {
             SSL_shutdown(transport->ssl);
+            shutdown_called = 1;
         }
+        RADIO_DBG(printf("radio-cleanup: probe ssl_shutdown session=%lu mode=%s %s\n",
+            transport->session_id, rb_probe_close_mode_name(mode), shutdown_called ? "called" : "skipped");)
         if (transport->ssl) {
             SSL_free(transport->ssl);
             transport->ssl = NULL;
@@ -588,6 +613,15 @@ static void rb_probe_transport_close(RbProbeTransport *transport)
             RADIO_DBG(printf("radio-socket: probe socket close session=%lu fd=%ld open_socket_count %ld->%ld probe_open_socket_count %ld->%ld\n", transport->session_id, closing_fd, before, rb_probe_open_socket_count, before, rb_probe_open_socket_count);)
         }
     }
+    RADIO_DBG(printf("radio-cleanup: probe close mode=%s session=%lu complete open_socket_count_after=%ld\n",
+        rb_probe_close_mode_name(mode), transport->session_id, rb_probe_open_socket_count);)
+}
+
+/* Safe default used by every connect/handshake/send/recv/redirect/HTTP-error
+ * failure path in this file: never attempts SSL_shutdown(). */
+static void rb_probe_transport_close(RbProbeTransport *transport)
+{
+    rb_probe_transport_close_mode(transport, RB_PROBE_CLOSE_ABORT, -1);
 }
 
 static int rb_probe_send_all(RbProbeTransport *transport, const char *buf, int len)
@@ -917,7 +951,7 @@ static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
             return RB_STREAM_PROBE_ERR_HLS_UNSUPPORTED;
         }
         if (!rb_probe_is_redirect_status(info->http_status)) break;
-        rb_probe_transport_close(&transport);
+        rb_probe_transport_close_mode(&transport, RB_PROBE_CLOSE_ABORT, info->http_status);
         *peek_len = 0;
         if (!location[0]) return RB_STREAM_PROBE_ERR_BAD_URL;
         if (redirects >= RB_PROBE_MAX_REDIRECTS) return RB_STREAM_PROBE_ERR_TOO_MANY_REDIRECTS;
@@ -934,7 +968,7 @@ static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
      * stalls.  Reject it here so the GUI shows a clear "stream unavailable"
      * message and never starts playback. */
     if (info->http_status < 200 || info->http_status > 299) {
-        rb_probe_transport_close(&transport);
+        rb_probe_transport_close_mode(&transport, RB_PROBE_CLOSE_ABORT, info->http_status);
         return RB_STREAM_PROBE_ERR_HTTP_STATUS;
     }
     while (*peek_len < peek_buf_size) {
@@ -964,7 +998,10 @@ static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
         if (n2 == 0) break;
         *peek_len += n2;
     }
-    rb_probe_transport_close(&transport);
+    /* http_status was already verified 2xx above (redirects and non-2xx
+     * responses both returned before reaching here) -- this is a clean,
+     * successful fetch, so a graceful SSL_shutdown() is safe. */
+    rb_probe_transport_close_mode(&transport, RB_PROBE_CLOSE_GRACEFUL, info->http_status);
     info->redirect_count = redirects;
     rc = rb_probe_set_final_url(info, current_url);
     if (rc < 0) {
@@ -1097,7 +1134,7 @@ static int rb_probe_fetch_binary_impl(const char *url, unsigned char *out_buf, i
         memcpy(parse_buf, header_buf, (size_t)header_end);
         rb_probe_parse_headers(parse_buf, header_end, &info, location, (int)sizeof(location));
         if (!rb_probe_is_redirect_status(info.http_status)) break;
-        rb_probe_transport_close(&transport);
+        rb_probe_transport_close_mode(&transport, RB_PROBE_CLOSE_ABORT, info.http_status);
         *out_len = 0;
         if (!location[0]) return RB_STREAM_PROBE_ERR_BAD_URL;
         if (redirects >= RB_PROBE_MAX_REDIRECTS) return RB_STREAM_PROBE_ERR_TOO_MANY_REDIRECTS;
@@ -1129,7 +1166,12 @@ static int rb_probe_fetch_binary_impl(const char *url, unsigned char *out_buf, i
         if (n == 0) break;
         *out_len += n;
     }
-    rb_probe_transport_close(&transport);
+    /* Status isn't checked until after this close, so pick the mode from the
+     * already-parsed http_status directly: 2xx is a clean fetch (graceful),
+     * anything else is an HTTP error (abort). */
+    rb_probe_transport_close_mode(&transport,
+        (info.http_status >= 200 && info.http_status <= 299) ? RB_PROBE_CLOSE_GRACEFUL : RB_PROBE_CLOSE_ABORT,
+        info.http_status);
 
     if (info.http_status < 200 || info.http_status > 299)
         return RB_STREAM_PROBE_ERR_HTTP_STATUS;
