@@ -792,7 +792,7 @@ static int connect_http(RadioStream *rs){
         if (radio_is_stopping(rs)) { close_current_socket(rs); return -1; }
     }
 #endif
-    n=snprintf(req,sizeof(req),"GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: MiniAMP3/experimental\r\nIcy-MetaData: 1\r\nConnection: close\r\n\r\n",rs->path,rs->host);
+    n=snprintf(req,sizeof(req),"GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: BoingPlayer/0.1 AmigaOS\r\nIcy-MetaData: 1\r\nConnection: close\r\n\r\n",rs->path,rs->host);
     if(radio_send_all(rs,req,n)!=0){ close_current_socket(rs); set_error(rs, rs->isSSL ? "HTTPS read failed" : "cannot send HTTP request"); return -1; }
     reset_parser(rs);
     return 0;
