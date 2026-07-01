@@ -3847,6 +3847,7 @@ static const char *ProbeCodecName(RbStreamCodec codec)
 {
 	if (codec == RB_STREAM_CODEC_MP3) return "MP3";
 	if (codec == RB_STREAM_CODEC_AAC) return "AAC";
+	if (codec == RB_STREAM_CODEC_OGG) return "OGG";
 	return "unknown";
 }
 
@@ -4278,7 +4279,8 @@ static void RadioDoProbeAndPlay(MrApp *app)
 		RadioSetStatus(app, app->rbController.last_error);
 		return;
 	}
-	if (info.codec != RB_STREAM_CODEC_MP3 && info.codec != RB_STREAM_CODEC_AAC) {
+	if (info.codec != RB_STREAM_CODEC_MP3 && info.codec != RB_STREAM_CODEC_AAC &&
+		info.codec != RB_STREAM_CODEC_OGG) {
 		sprintf(msg, "Unsupported stream codec: %s (%.48s)", ProbeCodecName(info.codec), info.content_type);
 		RadioSetStatus(app, msg);
 		return;

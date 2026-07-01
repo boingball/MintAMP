@@ -8,7 +8,8 @@ extern "C" {
 typedef enum {
     RB_STREAM_CODEC_UNKNOWN = 0,
     RB_STREAM_CODEC_MP3,
-    RB_STREAM_CODEC_AAC
+    RB_STREAM_CODEC_AAC,
+    RB_STREAM_CODEC_OGG
 } RbStreamCodec;
 
 typedef struct RbStreamInfo {

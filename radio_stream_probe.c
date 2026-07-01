@@ -760,15 +760,25 @@ static RbStreamCodec rb_probe_detect_codec(const RbProbeUrl *url, const RbStream
         RADIO_DBG(printf("rb-probe codec: initial byte sniff=ADTS final=AAC\n");)
         return RB_STREAM_CODEC_AAC;
     }
+    if (peek && peek_len >= 4 && peek[0] == 'O' && peek[1] == 'g' && peek[2] == 'g' && peek[3] == 'S') {
+        RADIO_DBG(printf("rb-probe codec: initial byte sniff=OggS final=OGG\n");)
+        return RB_STREAM_CODEC_OGG;
+    }
     if (info && info->content_type[0]) {
         if (rb_probe_contains_nocase(info->content_type, "audio/mpeg") ||
             rb_probe_contains_nocase(info->content_type, "audio/mp3")) return RB_STREAM_CODEC_MP3;
         if (rb_probe_contains_nocase(info->content_type, "audio/aac") ||
             rb_probe_contains_nocase(info->content_type, "audio/aacp") ||
             rb_probe_contains_nocase(info->content_type, "audio/x-aac")) return RB_STREAM_CODEC_AAC;
+        if (rb_probe_contains_nocase(info->content_type, "audio/ogg") ||
+            rb_probe_contains_nocase(info->content_type, "application/ogg") ||
+            rb_probe_contains_nocase(info->content_type, "audio/vorbis") ||
+            rb_probe_contains_nocase(info->content_type, "audio/x-vorbis")) return RB_STREAM_CODEC_OGG;
     }
     if (url && (rb_probe_contains_nocase(url->path, ".aac") || rb_probe_contains_nocase(url->path, ".aacp")))
         return RB_STREAM_CODEC_AAC;
+    if (url && (rb_probe_contains_nocase(url->path, ".ogg") || rb_probe_contains_nocase(url->path, ".oga")))
+        return RB_STREAM_CODEC_OGG;
     if (rb_probe_url_has_mp3_hint(url))
         return RB_STREAM_CODEC_MP3;
     return RB_STREAM_CODEC_UNKNOWN;
@@ -998,10 +1008,13 @@ static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
         if (n2 == 0) break;
         *peek_len += n2;
     }
-    /* http_status was already verified 2xx above (redirects and non-2xx
-     * responses both returned before reaching here) -- this is a clean,
-     * successful fetch, so a graceful SSL_shutdown() is safe. */
-    rb_probe_transport_close_mode(&transport, RB_PROBE_CLOSE_GRACEFUL, info->http_status);
+    /* Always abort here, never SSL_shutdown(): this probe runs before every
+     * single station switch, so it is the most frequently exercised close in
+     * the app, and calling SSL_shutdown() from any of this app's teardown
+     * paths (this one, the favicon fetch below, and Radio_RequestStop()) is
+     * what has been producing AN_BadFreeAddr (0x0100000F) recoverable
+     * alerts.  Skipping the clean TLS close_notify is harmless. */
+    rb_probe_transport_close_mode(&transport, RB_PROBE_CLOSE_ABORT, info->http_status);
     info->redirect_count = redirects;
     rc = rb_probe_set_final_url(info, current_url);
     if (rc < 0) {
@@ -1014,7 +1027,7 @@ static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
            current_url, info->content_type, rb_probe_url_has_mp3_hint(&parsed) ? "MP3" : "none", *peek_len);)
     info->codec = rb_probe_detect_codec(&parsed, info, peek_buf, *peek_len);
     RADIO_DBG(printf("rb-probe codec: final selected codec=%s\n",
-           info->codec == RB_STREAM_CODEC_MP3 ? "MP3" : (info->codec == RB_STREAM_CODEC_AAC ? "AAC" : "unsupported"));)
+           info->codec == RB_STREAM_CODEC_MP3 ? "MP3" : (info->codec == RB_STREAM_CODEC_AAC ? "AAC" : (info->codec == RB_STREAM_CODEC_OGG ? "OGG" : "unsupported")));)
     if (rb_probe_is_hls(&parsed, info)) {
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
         rb_probe_cleanup_amissl();
@@ -1166,12 +1179,10 @@ static int rb_probe_fetch_binary_impl(const char *url, unsigned char *out_buf, i
         if (n == 0) break;
         *out_len += n;
     }
-    /* Status isn't checked until after this close, so pick the mode from the
-     * already-parsed http_status directly: 2xx is a clean fetch (graceful),
-     * anything else is an HTTP error (abort). */
-    rb_probe_transport_close_mode(&transport,
-        (info.http_status >= 200 && info.http_status <= 299) ? RB_PROBE_CLOSE_GRACEFUL : RB_PROBE_CLOSE_ABORT,
-        info.http_status);
+    /* Always abort (see the matching comment in rb_probe_stream_url_impl()):
+     * this runs on every favicon fetch, so a graceful SSL_shutdown() here is
+     * just as frequent a source of AN_BadFreeAddr as the station probe. */
+    rb_probe_transport_close_mode(&transport, RB_PROBE_CLOSE_ABORT, info.http_status);
 
     if (info.http_status < 200 || info.http_status > 299)
         return RB_STREAM_PROBE_ERR_HTTP_STATUS;
@@ -1205,6 +1216,7 @@ static const char *rb_probe_codec_name(RbStreamCodec codec)
     switch (codec) {
     case RB_STREAM_CODEC_MP3: return "MP3";
     case RB_STREAM_CODEC_AAC: return "AAC";
+    case RB_STREAM_CODEC_OGG: return "OGG";
     default: return "unknown";
     }
 }

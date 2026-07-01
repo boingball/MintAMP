@@ -642,6 +642,8 @@ static void radio_copy_string(char *dst, size_t dstSize, const char *src)
         return;
     if (!src)
         src = "";
+    if (strlen(src) >= dstSize)
+        RADIO_DBG(printf("radio-string: truncated copy dstSize=%lu srcLen=%lu src=\"%s\"\n", (unsigned long)dstSize, (unsigned long)strlen(src), src););
     snprintf(dst, dstSize, "%s", src);
     dst[dstSize - 1] = 0;
 }
@@ -655,8 +657,10 @@ static void radio_copy_bytes(char *dst, size_t dstSize, const unsigned char *src
     if (!src || srcLen <= 0)
         return;
     copyLen = (size_t)srcLen;
-    if (copyLen >= dstSize)
+    if (copyLen >= dstSize) {
+        RADIO_DBG(printf("radio-string: truncated byte copy dstSize=%lu srcLen=%lu\n", (unsigned long)dstSize, (unsigned long)copyLen););
         copyLen = dstSize - 1;
+    }
     memcpy(dst, src, copyLen);
     dst[copyLen] = 0;
 }
@@ -788,7 +792,7 @@ static int connect_http(RadioStream *rs){
         if (radio_is_stopping(rs)) { close_current_socket(rs); return -1; }
     }
 #endif
-    n=snprintf(req,sizeof(req),"GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: MiniAMP3/experimental\r\nIcy-MetaData: 1\r\nConnection: close\r\n\r\n",rs->path,rs->host);
+    n=snprintf(req,sizeof(req),"GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: BoingPlayer/0.1 AmigaOS\r\nIcy-MetaData: 1\r\nConnection: close\r\n\r\n",rs->path,rs->host);
     if(radio_send_all(rs,req,n)!=0){ close_current_socket(rs); set_error(rs, rs->isSSL ? "HTTPS read failed" : "cannot send HTTP request"); return -1; }
     reset_parser(rs);
     return 0;
@@ -854,7 +858,7 @@ static int reconnect_http(RadioStream *rs)
     return 0;
 }
 
-static void parse_headers(RadioStream *rs,char *h){ char *line=strtok(h,"\r\n"); int code=0; if(line && ci_starts(line,"ICY")) code=200; else if(line && ci_starts(line,"HTTP/")) sscanf(line,"HTTP/%*s %d",&code); else { set_error(rs,"invalid HTTP stream response"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: HTTP header failed\n")); return; } if(code<200||code>299){ char msg[64]; sprintf(msg,"HTTP %d stream error",code); set_error(rs,msg); RADIO_OPEN_DEBUG_PRINTF(("radio-open: HTTP header failed status %d\n", code)); return; } while((line=strtok(NULL,"\r\n"))){ char *v=strchr(line,':'); if(!v) continue; *v++=0; line=trim(line); v=trim(v); if(ci_equals(line,"Content-Type")) radio_copy_string(rs->contentType,sizeof(rs->contentType),v); else if(ci_equals(line,"icy-metaint")){ rs->metaint=atoi(v); rs->audioUntilMeta=rs->metaint; } else if(ci_equals(line,"icy-br")) rs->bitrate=atoi(v); else if(ci_equals(line,"icy-name")) radio_copy_string(rs->stationName,sizeof(rs->stationName),v); else if(ci_equals(line,"icy-genre")) radio_copy_string(rs->genre,sizeof(rs->genre),v); else if(ci_equals(line,"icy-url")) radio_copy_string(rs->streamUrl,sizeof(rs->streamUrl),v); } if(rs->contentType[0] && (ci_starts(rs->contentType,"application/vnd.apple.mpegurl") || ci_starts(rs->contentType,"application/x-mpegurl"))) { set_error(rs,"HLS stream not supported"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: HLS content type unsupported: %s\n", rs->contentType)); return; } RADIO_OPEN_DEBUG_PRINTF(("radio-open: final URL=%s content-type=%s URL codec hint=%s final selected codec=%s\n",
+static void parse_headers(RadioStream *rs,char *h){ if (radio_stream_magic_valid(rs, "parse_headers") < 1) return; char *line=strtok(h,"\r\n"); int code=0; if(line && ci_starts(line,"ICY")) code=200; else if(line && ci_starts(line,"HTTP/")) sscanf(line,"HTTP/%*s %d",&code); else { set_error(rs,"invalid HTTP stream response"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: HTTP header failed\n")); return; } if(code<200||code>299){ char msg[64]; sprintf(msg,"HTTP %d stream error",code); set_error(rs,msg); RADIO_OPEN_DEBUG_PRINTF(("radio-open: HTTP header failed status %d\n", code)); return; } while((line=strtok(NULL,"\r\n"))){ char *v=strchr(line,':'); if(!v) continue; *v++=0; line=trim(line); v=trim(v); if(ci_equals(line,"Content-Type")) radio_copy_string(rs->contentType,sizeof(rs->contentType),v); else if(ci_equals(line,"icy-metaint")){ rs->metaint=atoi(v); rs->audioUntilMeta=rs->metaint; } else if(ci_equals(line,"icy-br")) rs->bitrate=atoi(v); else if(ci_equals(line,"icy-name")) radio_copy_string(rs->stationName,sizeof(rs->stationName),v); else if(ci_equals(line,"icy-genre")) radio_copy_string(rs->genre,sizeof(rs->genre),v); else if(ci_equals(line,"icy-url")) radio_copy_string(rs->streamUrl,sizeof(rs->streamUrl),v); } if(rs->contentType[0] && (ci_starts(rs->contentType,"application/vnd.apple.mpegurl") || ci_starts(rs->contentType,"application/x-mpegurl"))) { set_error(rs,"HLS stream not supported"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: HLS content type unsupported: %s\n", rs->contentType)); return; } RADIO_OPEN_DEBUG_PRINTF(("radio-open: final URL=%s content-type=%s URL codec hint=%s final selected codec=%s\n",
     rs->url, rs->contentType,
     radio_contains_nocase(rs->path,"mp3") ? "MP3" : (radio_contains_nocase(rs->path,"aac") ? "AAC" : "none"),
     (ci_starts(rs->contentType,"audio/mpeg") || ci_starts(rs->contentType,"audio/mp3") || radio_contains_nocase(rs->path,"mp3")) ? "MP3" :
@@ -868,6 +872,10 @@ static void parse_meta(RadioStream *rs,const unsigned char *m,int n)
     int i, keyLen = (int)sizeof(key) - 1;
     if (!rs || !m || n <= 0)
         return;
+    if (!radio_stream_magic_valid(rs, "parse_meta"))
+        return;
+    if (n >= RADIO_META_MAX)
+        RADIO_DBG(printf("radio-icy: metadata truncated session=%lu metaLen=%d capacity=%lu station=\"%s\" url=\"%s\"\n", rs->session_id, n, (unsigned long)RADIO_META_MAX, rs->stationName, rs->url););
     end = m + n;
     for (i = 0; i + keyLen <= n; i++) {
         if (!memcmp(m + i, key, (size_t)keyLen)) {
@@ -898,19 +906,19 @@ static int process_bytes(RadioStream *rs, const unsigned char *b, int n)
         }
         if (rs->metaint > 0 && rs->parseState == RADIO_PARSE_AUDIO && rs->audioUntilMeta == 0) rs->parseState = RADIO_PARSE_META_LEN;
         if (rs->parseState == RADIO_PARSE_META_LEN) {
-            rs->metaLen = b[i] * 16; rs->metaGot = 0; rs->metaLeft = rs->metaLen;
+            rs->metaLen = b[i] * 16; rs->metaGot = 0; rs->metaLeft = rs->metaLen; if (rs->metaLen > RADIO_META_MAX) RADIO_DBG(printf("radio-icy: metadata payload exceeds buffer session=%lu metaLen=%d capacity=%lu; truncating parse copy station=\"%s\" url=\"%s\"\n", rs->session_id, rs->metaLen, (unsigned long)RADIO_META_MAX, rs->stationName, rs->url););
             rs->parseState = rs->metaLen ? RADIO_PARSE_META_PAYLOAD : RADIO_PARSE_AUDIO;
             if (!rs->metaLen) rs->audioUntilMeta = rs->metaint;
             continue;
         }
         if (rs->parseState == RADIO_PARSE_META_PAYLOAD) {
-            if (rs->metaGot < RADIO_META_MAX) rs->meta[rs->metaGot++] = b[i];
+            if (rs->metaGot < RADIO_META_MAX - 1) rs->meta[rs->metaGot++] = b[i];
             rs->metaLeft--;
             if (rs->metaLeft <= 0) { if (rs->metaGot > 0) parse_meta(rs, rs->meta, rs->metaGot); rs->audioUntilMeta = rs->metaint; rs->parseState = RADIO_PARSE_AUDIO; }
             continue;
         }
         if (rs->parseState == RADIO_PARSE_AUDIO) {
-            ring_write(rs, &b[i], 1);
+            if (rs->used >= rs->size) { RADIO_DBG(printf("radio-ring: full drop session=%lu ringFree=0 writeOffset=%lu capacity=%lu station=\"%s\" url=\"%s\"\n", rs->session_id, rs->wpos, rs->size, rs->stationName, rs->url);); } else ring_write(rs, &b[i], 1);
             if (rs->metaint > 0 && rs->audioUntilMeta > 0) rs->audioUntilMeta--;
         }
     }
@@ -933,6 +941,13 @@ RadioStream *Radio_OpenWithHostAddr(const char *url, int haveHostAddr, unsigned 
 {
     RadioStream *rs = (RadioStream *)calloc(1, sizeof(*rs));
     if (!rs) return NULL;
+    /* radio_stream_magic_valid() (used by close_current_socket(),
+     * parse_headers(), parse_meta(), ...) compares against this field to
+     * catch a corrupted/stale RadioStream* before it gets dereferenced --
+     * that check is only meaningful if the magic is actually stamped on a
+     * freshly allocated stream, so it must happen before anything else can
+     * observe or act on rs. */
+    rs->magic = RADIO_STREAM_MAGIC;
     if (!radio_atexit_registered) { atexit(radio_app_exit_report); radio_atexit_registered = 1; }
     radio_reset_session_state(rs);
     rs->session_id = radio_next_session_id++;
@@ -1007,19 +1022,19 @@ void Radio_RequestStop(RadioStream *rs)
     rs->stop_request_count++;
     RADIO_STOP_DEBUG_PRINTF(("radio-stop: session=%lu stop requested count=%u status=%d fd=%ld\n", rs->session_id, rs->stop_request_count, (int)rs->status, (long)rs->sock));
     if (rs->status == RADIO_STATUS_CLOSED) return;
-    /* Snapshot the close mode before anything below mutates rs->status: only
-     * a still-healthy RADIO_STATUS_PLAYING session at the moment stop is
-     * requested qualifies as a "clean stop of a healthy played stream" --
-     * everything else (error, buffering/reconnecting, never played) is an
-     * abort.  The graceful SSL_shutdown() (if any) must happen here, before
-     * radio_abort_current_socket() below force-closes the fd, or it would
-     * have no live socket left to write the close_notify to. */
-    mode = (rs->status == RADIO_STATUS_PLAYING) ? RADIO_CLOSE_GRACEFUL : RADIO_CLOSE_ABORT;
+    /* Always abort, never call SSL_shutdown() here, even for a healthy
+     * RADIO_STATUS_PLAYING session: a prior revision tried a "graceful"
+     * SSL_shutdown() in exactly that case to write a clean TLS close_notify
+     * before tearing the socket down, and that is what has been producing
+     * AN_BadFreeAddr (0x0100000F, "memory header not located") when
+     * interrupting a playing HTTPS stream to switch to another station --
+     * SSL_shutdown() on a still-live AmiSSL session from a stop/interrupt
+     * request is not safe here, on a non-blocking socket, from this call
+     * path.  Skipping it just means the peer sees an unclean TCP close
+     * instead of a TLS close_notify, which is harmless and exactly what
+     * every other stop/error/timeout path already does. */
+    mode = RADIO_CLOSE_ABORT;
     RADIO_DBG(printf("radio-cleanup: close mode=%s session=%lu status=%d (Radio_RequestStop)\n", radio_close_mode_name(mode), rs->session_id, (int)rs->status););
-#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-    if (mode == RADIO_CLOSE_GRACEFUL)
-        radio_ssl_close_stream_mode(rs, mode);
-#endif
     rs->stopping = 1;
     rs->reconnectAttempts = RADIO_RECONNECT_MAX;
     rs->reconnectDelay = 0;

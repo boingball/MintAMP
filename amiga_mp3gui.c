@@ -4675,6 +4675,7 @@ static const char *ProbeCodecName(RbStreamCodec codec)
 {
 	if (codec == RB_STREAM_CODEC_MP3) return "MP3";
 	if (codec == RB_STREAM_CODEC_AAC) return "AAC";
+	if (codec == RB_STREAM_CODEC_OGG) return "OGG";
 	return "unknown";
 }
 
@@ -4995,7 +4996,8 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 		RadioSetStatus(app, app->rbController.last_error);
 		return;
 	}
-	if (info.codec != RB_STREAM_CODEC_MP3 && info.codec != RB_STREAM_CODEC_AAC) {
+	if (info.codec != RB_STREAM_CODEC_MP3 && info.codec != RB_STREAM_CODEC_AAC &&
+		info.codec != RB_STREAM_CODEC_OGG) {
 		sprintf(msg, "Unsupported stream codec: %s (%.48s)", ProbeCodecName(info.codec), info.content_type);
 		radio_reset_playback_state_after_stop(app, "probe-unsupported-codec");
 		RadioSetStatus(app, msg);
@@ -6392,10 +6394,15 @@ static void StopPlayback(HelixAmp3Gui *gui)
 		RADIO_STOP_DEBUG_PRINTF(("radio-stop: GUI radio pointer cleared\n"));
 	}
 	/* Wake the playback subprocess immediately so it does not sit in WaitIO
-	 * for the remainder of a multi-second audio buffer.
-	 * Use Forbid/FindTask/Signal/Permit to avoid AN_SignalError: if the child
-	 * process is between FreeSignal and RemTask during DOS exit cleanup,
-	 * FindTask will fail and we skip the Signal safely. */
+	 * for the remainder of a multi-second audio buffer.  Use Forbid/FindTask/
+	 * Signal/Permit so that if the child process is between exiting and
+	 * RemTask during DOS cleanup, FindTask will fail and we skip the Signal
+	 * safely instead of racing a task pointer that is about to go stale.
+	 * (0x0100000F, the alert this project actually hits during flaky stream
+	 * switches, is AN_BadFreeAddr -- "memory header not located", i.e. a bad
+	 * address/size passed to FreeMem() -- not a signal-delivery alert; the
+	 * Forbid/FindTask guard here is unrelated defensive hygiene, not a fix
+	 * for that alert.) */
 	{
 		struct Task *child;
 		Forbid();
@@ -6441,10 +6448,12 @@ static void WaitForPlaybackShutdown(HelixAmp3Gui *gui)
 
 		gGuiPlayer.stopRequested = 1;
 		gPlaybackInterrupted = 1;
-		/* Skip signal if done message already received: child is in DOS exit
-		 * cleanup where SIGBREAKF_CTRL_C may already be freed, causing
-		 * AN_SignalError (0x0100000F).  Use Forbid/FindTask/Signal/Permit to
-		 * close the race between FreeSignal and RemTask in all other cases. */
+		/* Skip signal if done message already received: the child may be
+		 * mid-exit and its task pointer about to go stale.  Use Forbid/
+		 * FindTask/Signal/Permit to close that race in all other cases.
+		 * (0x0100000F is AN_BadFreeAddr -- a bad address/size passed to
+		 * FreeMem() -- not a signal-delivery alert; see the note above
+		 * StopPlayback()'s equivalent guard.) */
 		if (!gui->playbackDonePending) {
 			struct Task *child;
 			Forbid();
