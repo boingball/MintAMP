@@ -4955,6 +4955,11 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 	int rc;
 	const RadioBrowserStation *st;
 	char msg[512];
+	if (Radio_IsMemoryPoisoned()) {
+		RadioSetStatus(app, "Memory corruption detected - restart app");
+		RADIO_DBG(printf("radio-memory: refusing RadioDoProbeAndPlay after MiniMem/ring corruption\n");)
+		return;
+	}
 	if (app->rbShowingFavourites) {
 		if (app->rbSelectedFavourite < 0 || app->rbSelectedFavourite >= app->rbFavouriteCount) {
 			RadioSetStatus(app, "Select a favourite first.");
@@ -6228,6 +6233,11 @@ static void StartPlayback(HelixAmp3Gui *gui)
 	BPTR nilOut;
 	struct Process *thisProc;
 
+	if (Radio_IsMemoryPoisoned()) {
+		SetStatus(gui, "Memory corruption detected - restart app");
+		RADIO_DBG(printf("radio-memory: refusing StartPlayback after MiniMem/ring corruption url=\"%s\"\n", gui->inputName);)
+		return;
+	}
 	if (!gui->inputName[0]) {
 		SetStatus(gui, "Browse to an audio file first.");
 		return;

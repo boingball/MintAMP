@@ -203,6 +203,9 @@ static long radio_active_icy_metadata_count = 0;
 static long radio_gui_listbrowser_node_count = 0;
 static long radio_gui_string_count = 0;
 static int radio_atexit_registered = 0;
+static int radioMemoryPoisoned = 0;
+static unsigned long radio_poison_session_id = 0;
+static char radio_poison_url[256];
 
 /* bsdsocket.library and AmiSSL are opened once by Radio_NetworkInit() at app
  * startup and closed once by Radio_NetworkShutdown() at app exit -- these
@@ -223,6 +226,27 @@ static void radio_debug_mem_report(unsigned long session_id, const char *where)
     RADIO_DBG(printf("radio-mem: session=%lu %s AvailMem(any)=n/a fast=n/a chip=n/a\n",
         session_id, where ? where : ""));
 #endif
+}
+
+void Radio_MarkMemoryPoisoned(const char *where)
+{
+    radioMemoryPoisoned = 1;
+    printf("radio-memory: Memory corruption detected - restart app (where=%s session=%lu url=\"%s\")\n",
+        where ? where : "", radio_poison_session_id,
+        radio_poison_url[0] ? radio_poison_url : "");
+}
+
+int Radio_IsMemoryPoisoned(void)
+{
+    return radioMemoryPoisoned;
+}
+
+int Radio_CheckMiniMem(const char *where)
+{
+    int corrupt = MiniMem_CheckAll(where);
+    if (corrupt > 0)
+        Radio_MarkMemoryPoisoned(where);
+    return corrupt;
 }
 
 static int radio_stream_magic_valid(const RadioStream *rs, const char *where)
@@ -872,12 +896,16 @@ static int radio_ring_check_canary(RadioStream *rs, const char *where)
         }
     }
     if (bad) {
+        radio_poison_session_id = rs->session_id;
+        radio_copy_string(radio_poison_url, sizeof(radio_poison_url), rs->url);
         RADIO_DBG(printf("radio-canary: CORRUPTED buffer=stream/audio ring session=%lu where=%s expected_capacity=%lu last_write_size=%lu codec=%s url=\"%s\"\n",
             rs->session_id, where ? where : "", rs->size, rs->ringLastWrite,
             ((ci_starts(rs->contentType,"audio/aac") || ci_starts(rs->contentType,"audio/aacp") || radio_contains_nocase(rs->path,"aac")) ? "AAC" : "MP3/unknown"),
             rs->url));
         rs->stopping = 1;
-        rs->status = RADIO_STATUS_STOPPING;
+        rs->status = RADIO_STATUS_ERROR;
+        set_error(rs, "Memory corruption detected - restart app");
+        Radio_MarkMemoryPoisoned(where);
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
         /* One soak-test session hit this with no SSL_ERROR_SSL involved at
          * all -- a perfectly healthy, actively-streaming connection whose
@@ -1217,6 +1245,13 @@ RadioStream *Radio_OpenWithHostAddr(const char *url, int haveHostAddr, unsigned 
     if (!radio_atexit_registered) { atexit(radio_app_exit_report); radio_atexit_registered = 1; }
     radio_reset_session_state(rs);
     rs->session_id = radio_next_session_id++;
+    if (radioMemoryPoisoned) {
+        rs->status = RADIO_STATUS_ERROR;
+        radio_copy_string(rs->url, sizeof(rs->url), url ? url : "");
+        set_error(rs, "Memory corruption detected - restart app");
+        RADIO_OPEN_DEBUG_PRINTF(("radio-open: refused stream start after memory poison session=%lu url=\"%s\"\n", rs->session_id, rs->url));
+        return rs;
+    }
     if (haveHostAddr) {
         memcpy(&rs->hostAddr, &hostAddrBe, sizeof(rs->hostAddr));
         rs->haveHostAddr = 1;
@@ -1230,8 +1265,17 @@ RadioStream *Radio_OpenWithHostAddr(const char *url, int haveHostAddr, unsigned 
         rs->session_id, url ? url : "(null)", radio_amissl_initialized, (void *)AmiSSLBase, (void *)AmiSSLExtBase, (void *)AmiSSLMasterBase, radio_active_ssl_count, radio_active_ssl_ctx_count));
 #endif
     radio_debug_mem_report(rs->session_id, "before stream start");
+    radio_poison_session_id = rs->session_id;
+    radio_copy_string(radio_poison_url, sizeof(radio_poison_url), url ? url : "");
+    if (Radio_CheckMiniMem("before ring buffer allocated") > 0) {
+        set_error(rs, "Memory corruption detected - restart app");
+        RADIO_OPEN_DEBUG_PRINTF(("radio-open: refused ring allocation after MiniMem corruption session=%lu url=\"%s\"\n", rs->session_id, radio_poison_url));
+        return rs;
+    }
     rs->status = RADIO_STATUS_CONNECTING;
     rs->size = RADIO_RING_BYTES;
+    RADIO_DBG(printf("radio-resource: session=%lu ring buffer owner url=\"%s\" allocFile=radio_stream.c allocLine=Radio_OpenWithHostAddr\n",
+        rs->session_id, radio_poison_url);)
     rs->ringAlloc = (unsigned char *)malloc(rs->size + 2UL * RADIO_RING_GUARD_BYTES);
     if (rs->ringAlloc) { rs->ring = rs->ringAlloc + RADIO_RING_GUARD_BYTES; radio_ring_set_canary(rs); }
     /* Printed unconditionally (not RADIO_DBG-gated) so it's visible even if
@@ -1255,7 +1299,10 @@ RadioStream *Radio_OpenWithHostAddr(const char *url, int haveHostAddr, unsigned 
      * whether malloc() is handing back an already-damaged block -- pointing
      * at heap/free-list corruption from an earlier session -- or whether
      * this allocation starts clean and something corrupts it afterward. */
-    MiniMem_CheckAll("after ring buffer allocated");
+    if (Radio_CheckMiniMem("after ring buffer allocated") > 0) {
+        set_error(rs, "Memory corruption detected - restart app");
+        return rs;
+    }
     if (rs->ring) { radio_active_stream_buffer_count++; radio_active_audio_buffer_count++; RADIO_DBG(printf("radio-resource: session=%lu stream/audio buffer allocated active_stream_buffer_count=%ld active_audio_buffer_count=%ld\n", rs->session_id, radio_active_stream_buffer_count, radio_active_audio_buffer_count)); }
     if (!rs->ring) {
         rs->size = 0;
@@ -1358,7 +1405,7 @@ void Radio_Close(RadioStream *rs)
         if (radio_ring_check_canary(rs, "before cleanup") == 0)
             free(rs->ringAlloc);
         else
-            RADIO_DBG(printf("radio-cleanup: session=%lu ring buffer free skipped (corrupted), leaking to avoid smashing the allocator\n", rs->session_id));
+            RADIO_DBG(printf("radio-cleanup: session=%lu url=\"%s\" ring buffer free skipped (corrupted), quarantining/leaking to avoid smashing the allocator\n", rs->session_id, rs->url));
         if (radio_active_stream_buffer_count > 0) radio_active_stream_buffer_count--;
     } }
     if (rs->audio_buffer_free_count > 1) radio_duplicate_cleanup_warning(rs, "audio buffer free", rs->audio_buffer_free_count);
