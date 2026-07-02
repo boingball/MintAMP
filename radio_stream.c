@@ -808,7 +808,41 @@ static void radio_copy_bytes(char *dst, size_t dstSize, const unsigned char *src
 static void set_error(RadioStream *rs, const char *msg) { if (rs) { radio_copy_string(rs->error,sizeof(rs->error),msg); rs->status = RADIO_STATUS_ERROR; RADIO_OPEN_DEBUG_PRINTF(("radio-open: %s\n", msg ? msg : "error")); } }
 static void radio_ring_set_canary(RadioStream *rs);
 static int radio_ring_check_canary(RadioStream *rs, const char *where);
-static int ring_write(RadioStream *rs, const unsigned char *p, int n) { int i=0; if (radio_ring_check_canary(rs, "before ring_write") < 0) return 0; while (i<n && rs->used<rs->size) { rs->ring[rs->wpos++]=p[i++]; if(rs->wpos>=rs->size)rs->wpos=0; rs->used++; } rs->ringLastWrite=(unsigned long)i; radio_ring_check_canary(rs, "after ring_write"); return i; }
+static int ring_write(RadioStream *rs, const unsigned char *p, int n)
+{
+    int written = 0;
+    if (!rs || !p || n <= 0 || !rs->ring || !rs->size) return 0;
+    if (radio_ring_check_canary(rs, "before ring_write") < 0) return 0;
+    while (written < n && rs->used < rs->size) {
+        unsigned long freeBytes = rs->size - rs->used;
+        unsigned long endBytes = rs->size - rs->wpos;
+        unsigned long todo = (unsigned long)(n - written);
+        unsigned long beforeWpos = rs->wpos;
+        unsigned long beforeUsed = rs->used;
+        int wrapped;
+        if (todo > freeBytes) todo = freeBytes;
+        if (todo > endBytes) todo = endBytes;
+        if (todo == 0) break;
+        memcpy(rs->ring + rs->wpos, p + written, (size_t)todo);
+        rs->wpos += todo;
+        if (rs->wpos >= rs->size) rs->wpos = 0;
+        rs->used += todo;
+        written += (int)todo;
+        rs->ringLastWrite = todo;
+        wrapped = (rs->wpos <= beforeWpos && todo > 0) ? 1 : 0;
+        RADIO_DBG(printf("radio-ring: write session=%lu icy_state=%d metaint=%d bytes_to_ring=%lu wpos_before=%lu wpos_after=%lu fill_before=%lu fill_after=%lu free_before=%lu free_after=%lu wrapped=%d url=\"%s\"\n",
+            rs->session_id, (int)rs->parseState, rs->metaint, todo, beforeWpos, rs->wpos,
+            beforeUsed, rs->used, rs->size - beforeUsed, rs->size - rs->used, wrapped, rs->url););
+        if (radio_ring_check_canary(rs, "after ring_write") < 0) break;
+    }
+    if (written == 0) {
+        rs->ringLastWrite = 0;
+        RADIO_DBG(printf("radio-ring: no write session=%lu icy_state=%d metaint=%d requested=%d fill=%lu ring_free=%lu wpos=%lu capacity=%lu url=\"%s\"\n",
+            rs->session_id, (int)rs->parseState, rs->metaint, n, rs->used,
+            rs->size > rs->used ? rs->size - rs->used : 0, rs->wpos, rs->size, rs->url););
+    }
+    return written;
+}
 static int ring_read(RadioStream *rs, unsigned char *p, int n) { int i=0; if (radio_ring_check_canary(rs, "before ring_read") < 0) return 0; while (i<n && rs->used) { p[i++]=rs->ring[rs->rpos++]; if(rs->rpos>=rs->size)rs->rpos=0; rs->used--; } radio_ring_check_canary(rs, "after ring_read"); return i; }
 static int ci_starts(const char *s,const char *p){ while(*p) { if(tolower((unsigned char)*s++)!=tolower((unsigned char)*p++)) return 0; } return 1; }
 static int ci_equals(const char *a,const char *b){ while(*a&&*b){ if(tolower((unsigned char)*a++)!=tolower((unsigned char)*b++)) return 0; } return *a==0&&*b==0; }
@@ -1067,43 +1101,91 @@ static void parse_meta(RadioStream *rs,const unsigned char *m,int n)
 
 static int process_bytes(RadioStream *rs, const unsigned char *b, int n)
 {
-    int i;
-    for (i = 0; i < n; i++) {
-        /* radio_ring_check_canary() (called from ring_write() below) sets
-         * rs->stopping the instant it finds the ring buffer corrupted --
-         * without this check, a single large read (up to sizeof(b), i.e.
-         * up to 1024 bytes) would keep calling ring_write() once per
-         * remaining byte in this same batch, re-detecting and re-logging
-         * the same corruption hundreds of times per Radio_Pump() cycle
-         * for as long as the connection kept delivering data, which is
-         * exactly what one soak test session did before it could even
-         * reach the stop/cleanup path. */
+    int i = 0;
+    if (!rs || !b || n <= 0) return 0;
+    while (i < n) {
+        int avail;
         if (rs->stopping) break;
         if (rs->parseState == RADIO_PARSE_HEADER) {
             if (rs->headerLen >= RADIO_HEADER_MAX - 1) { set_error(rs,"HTTP header too large"); return -1; }
-            rs->header[rs->headerLen++] = (char)b[i]; rs->header[rs->headerLen] = 0;
+            rs->header[rs->headerLen++] = (char)b[i++]; rs->header[rs->headerLen] = 0;
             if (rs->headerLen >= 4 && !memcmp(rs->header + rs->headerLen - 4, "\r\n\r\n", 4)) {
                 RADIO_DBG(printf("radio-http-diag: session=%lu raw HTTP response header (%d bytes) follows:\n%s--- end of header ---\n", rs->session_id, rs->headerLen, rs->header););
                 rs->headerDone = 1; parse_headers(rs, rs->header); if (rs->status == RADIO_STATUS_ERROR) return -1; rs->parseState = RADIO_PARSE_AUDIO;
             }
             continue;
         }
-        if (rs->metaint > 0 && rs->parseState == RADIO_PARSE_AUDIO && rs->audioUntilMeta == 0) rs->parseState = RADIO_PARSE_META_LEN;
+
+        avail = n - i;
+        if (rs->metaint > 0 && rs->parseState == RADIO_PARSE_AUDIO && rs->audioUntilMeta <= 0)
+            rs->parseState = RADIO_PARSE_META_LEN;
+
+        RADIO_DBG(printf("radio-icy: loop session=%lu icy_state=%d metaint=%d audio_until_meta=%d meta_remaining=%d src_avail=%d fill=%lu ring_free=%lu wpos=%lu url=\"%s\"\n",
+            rs->session_id, (int)rs->parseState, rs->metaint, rs->audioUntilMeta,
+            rs->metaLeft, avail, rs->used, rs->size > rs->used ? rs->size - rs->used : 0, rs->wpos, rs->url););
+
         if (rs->parseState == RADIO_PARSE_META_LEN) {
-            rs->metaLen = b[i] * 16; rs->metaGot = 0; rs->metaLeft = rs->metaLen; if (rs->metaLen > RADIO_META_MAX) RADIO_DBG(printf("radio-icy: metadata payload exceeds buffer session=%lu metaLen=%d capacity=%lu; truncating parse copy station=\"%s\" url=\"%s\"\n", rs->session_id, rs->metaLen, (unsigned long)RADIO_META_MAX, rs->stationName, rs->url););
-            rs->parseState = rs->metaLen ? RADIO_PARSE_META_PAYLOAD : RADIO_PARSE_AUDIO;
-            if (!rs->metaLen) rs->audioUntilMeta = rs->metaint;
+            int lenByte = b[i++];
+            rs->metaLen = lenByte * 16;
+            rs->metaGot = 0;
+            rs->metaLeft = rs->metaLen;
+            RADIO_DBG(printf("radio-icy: metadata length session=%lu len_byte=%d meta_len=%d src_avail_after=%d metaint=%d url=\"%s\"\n",
+                rs->session_id, lenByte, rs->metaLen, n - i, rs->metaint, rs->url););
+            if (rs->metaLen > RADIO_META_MAX)
+                RADIO_DBG(printf("radio-icy: metadata payload exceeds buffer session=%lu metaLen=%d capacity=%lu; truncating parse copy station=\"%s\" url=\"%s\"\n", rs->session_id, rs->metaLen, (unsigned long)RADIO_META_MAX, rs->stationName, rs->url););
+            if (rs->metaLen == 0) {
+                rs->audioUntilMeta = rs->metaint;
+                rs->parseState = RADIO_PARSE_AUDIO;
+            } else {
+                rs->parseState = RADIO_PARSE_META_PAYLOAD;
+            }
             continue;
         }
+
         if (rs->parseState == RADIO_PARSE_META_PAYLOAD) {
-            if (rs->metaGot < RADIO_META_MAX - 1) rs->meta[rs->metaGot++] = b[i];
-            rs->metaLeft--;
-            if (rs->metaLeft <= 0) { if (rs->metaGot > 0) parse_meta(rs, rs->meta, rs->metaGot); rs->audioUntilMeta = rs->metaint; rs->parseState = RADIO_PARSE_AUDIO; }
+            int take = rs->metaLeft < avail ? rs->metaLeft : avail;
+            int copy = take;
+            if (copy > RADIO_META_MAX - 1 - rs->metaGot) copy = RADIO_META_MAX - 1 - rs->metaGot;
+            if (copy > 0) {
+                memcpy(rs->meta + rs->metaGot, b + i, (size_t)copy);
+                rs->metaGot += copy;
+            }
+            i += take;
+            rs->metaLeft -= take;
+            RADIO_DBG(printf("radio-icy: metadata payload session=%lu consumed=%d copied=%d meta_remaining=%d src_avail_after=%d url=\"%s\"\n",
+                rs->session_id, take, copy, rs->metaLeft, n - i, rs->url););
+            if (rs->metaLeft <= 0) {
+                if (rs->metaGot > 0) parse_meta(rs, rs->meta, rs->metaGot);
+                rs->audioUntilMeta = rs->metaint;
+                rs->parseState = RADIO_PARSE_AUDIO;
+            }
             continue;
         }
+
         if (rs->parseState == RADIO_PARSE_AUDIO) {
-            if (rs->used >= rs->size) { RADIO_DBG(printf("radio-ring: full drop session=%lu ringFree=0 writeOffset=%lu capacity=%lu station=\"%s\" url=\"%s\"\n", rs->session_id, rs->wpos, rs->size, rs->stationName, rs->url);); } else ring_write(rs, &b[i], 1);
-            if (rs->metaint > 0 && rs->audioUntilMeta > 0) rs->audioUntilMeta--;
+            int audioAvail = avail;
+            int wanted, wrote;
+            if (rs->metaint > 0 && rs->audioUntilMeta < audioAvail) audioAvail = rs->audioUntilMeta;
+            wanted = audioAvail;
+            if (wanted > 0 && rs->size > rs->used && (unsigned long)wanted > rs->size - rs->used)
+                wanted = (int)(rs->size - rs->used);
+            if (wanted <= 0) {
+                RADIO_DBG(printf("radio-ring: full/wait session=%lu icy_state=%d metaint=%d audio_until_meta=%d src_avail=%d fill=%lu ring_free=%lu wpos=%lu capacity=%lu url=\"%s\"\n",
+                    rs->session_id, (int)rs->parseState, rs->metaint, rs->audioUntilMeta, avail,
+                    rs->used, rs->size > rs->used ? rs->size - rs->used : 0, rs->wpos, rs->size, rs->url););
+                break;
+            }
+            RADIO_DBG(printf("radio-icy: audio write plan session=%lu metaint=%d audio_until_meta_before=%d src_avail=%d bytes_to_ring=%d fill_before=%lu ring_free_before=%lu wpos_before=%lu url=\"%s\"\n",
+                rs->session_id, rs->metaint, rs->audioUntilMeta, avail, wanted, rs->used,
+                rs->size > rs->used ? rs->size - rs->used : 0, rs->wpos, rs->url););
+            wrote = ring_write(rs, b + i, wanted);
+            i += wrote;
+            if (rs->metaint > 0) rs->audioUntilMeta -= wrote;
+            RADIO_DBG(printf("radio-icy: audio write done session=%lu wrote=%d audio_until_meta_after=%d src_avail_after=%d fill_after=%lu ring_free_after=%lu wpos_after=%lu url=\"%s\"\n",
+                rs->session_id, wrote, rs->audioUntilMeta, n - i, rs->used,
+                rs->size > rs->used ? rs->size - rs->used : 0, rs->wpos, rs->url););
+            if (wrote <= 0) break;
+            continue;
         }
     }
     return 0;
