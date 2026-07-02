@@ -1,31 +1,49 @@
-# Amiga libhelix MP3/AAC/FLAC Player
+# MiniAMP3 for Classic AmigaOS
 
-Classic AmigaOS m68k audio player based on the Helix fixed-point decoders, with local MP3 playback, AAC-LC ADTS support, FLAC decoder modules, ReAction/GadTools front-ends, m68k optimisations, and experimental HTTP MP3 internet radio with ICY metadata.
+Classic AmigaOS m68k audio player with local MP3 playback, modular AAC/FLAC decoders, ReAction and GadTools front-ends, Radio Browser search, ICY metadata, station artwork, and direct HTTP/HTTPS internet radio.
 
-This started as an Amiga port of the Helix MP3 decoder and has grown into a modular audio player for classic Amiga systems and emulators.
+This started as an Amiga port of the Helix fixed-point MP3 decoder. It has grown into a small but surprisingly capable classic Amiga audio player for real hardware and emulators.
 
-## Current features
+```text
+Classic AmigaOS • m68k • Paula • MP3 • AAC • FLAC • HTTP/HTTPS radio • ReAction • GadTools
+```
 
-- Local MP3 playback using the Helix fixed-point MP3 decoder
-- m68k optimised MP3 decode path
-- AAC-LC ADTS playback via external `aac.decoder`
-- Optional AAC m68k asm helpers with `AACASM=1`
-- FLAC playback via external `flac.decoder`
+## Highlights
+
+- Local MP3 playback using the Helix fixed-point decoder
+- m68k optimised MP3 decode path for 030+ builds
+- AAC-LC ADTS playback through external `aac.decoder`
+- Optional AAC m68k helper paths with `AACASM=1`
+- FLAC playback through external `flac.decoder`
 - Modular decoder loading
-- ReAction GUI front-end
-- GadTools GUI front-end
-- CLI playback mode
-- HTTP MP3 internet radio support with `RADIO=1`
-- ICY metadata parsing
-- Live title/artist updates from radio streams
-- Radio station, genre, bitrate and content-type display
+- ReAction/ClassAct GUI: `minimp3r`
+- GadTools GUI: `miniamp3`
+- CLI playback mode: `amiga_mp3dec.fastexp`
+- Direct HTTP and HTTPS internet radio with `RADIO=1 SSL=1`
+- Radio Browser station search
+- ICY metadata parsing and live title/artist updates
+- Station name, genre, bitrate and content-type display
+- JPEG and PNG station artwork support in the ReAction front-end
 - Resilient radio buffering and reconnect handling
-- Paula playback output
+- Paula audio.device playback output
 - Fast low-rate playback options for slower classic systems
+
+## Project status
+
+MiniAMP3 is active classic Amiga development.
+
+Current focus areas:
+
+- ReAction GUI polish
+- GadTools GUI parity
+- internet radio stability
+- station artwork and logo handling
+- AAC/FLAC performance improvements
+- further m68k optimisation
 
 ## Screenshots
 
-Add screenshots here when ready.
+Screenshots are expected under:
 
 ```text
 docs/screenshots/
@@ -34,7 +52,8 @@ docs/screenshots/
 Suggested screenshots:
 
 - ReAction GUI playing a local MP3
-- ReAction GUI playing HTTP radio with ICY metadata
+- ReAction GUI showing Radio Browser results
+- ReAction GUI playing HTTPS radio with ICY metadata and artwork
 - GadTools GUI
 - CLI playback output
 
@@ -44,33 +63,79 @@ Suggested screenshots:
 |---|---:|---|
 | MP3 | Working | Main supported format. Helix fixed-point decoder with m68k optimisation. |
 | AAC-LC ADTS | Working | External decoder module. ADTS `.aac` streams/files only. |
-| FLAC | Working | External decoder module. Performance depends heavily on CPU. |
-| HTTP MP3/AAC radio | Working | Plain `http://` MP3 and ADTS AAC/AAC+ streams. ICY metadata supported where provided. |
-| HTTPS radio | Not supported | Use plain HTTP streams for now. |
-| HLS / M3U8 | Not supported | Out of scope currently. |
+| FLAC | Working | External decoder module. Performance depends heavily on CPU, output rate and file complexity. |
+| HTTP MP3/AAC radio | Working | Direct `http://` MP3 and ADTS AAC/AAC+ streams. ICY metadata supported where provided. |
+| HTTPS MP3/AAC radio | Working with AmiSSL | Build with `RADIO=1 SSL=1`. Uses AmiSSL and classic-Amiga-specific teardown quarantine for stability. |
+| Radio Browser search | Working | Used by the GUI radio search. |
+| JPEG artwork | Working | Station logo/artwork support in `minimp3r`. |
+| PNG artwork | Working | `lodepng` is compiled into the ReAction front-end only. |
+| HLS / M3U8 | Not supported | Out of scope currently. Direct stream URLs only. |
 
 ## Internet radio
 
-The player can stream direct HTTP MP3 and ADTS AAC/AAC+ radio streams when built with `RADIO=1`.
+Radio support is enabled at build time with `RADIO=1`.
 
-Known working test stream:
+Plain HTTP radio:
+
+```sh
+make -f Makefile.amiga radio030
+```
+
+HTTPS radio through AmiSSL:
+
+```sh
+make -f Makefile.amiga sslradio030
+```
+
+ReAction/ClassAct GUI with HTTPS radio:
+
+```sh
+make -f Makefile.amiga sslguir
+```
+
+GadTools GUI with HTTPS radio:
+
+```sh
+make -f Makefile.amiga sslgui
+```
+
+Optional certificate verification can be enabled with `SSLCERTS=1` when an AmiSSL root certificate bundle is installed and working:
+
+```sh
+make -f Makefile.amiga sslguir SSLCERTS=1
+```
+
+Without `SSLCERTS=1`, HTTPS radio still uses TLS transport, but certificate verification is disabled for compatibility with classic Amiga setups.
+
+### Known working radio streams
+
+Plain HTTP MP3:
 
 ```text
 http://ice1.somafm.com/groovesalad-128-mp3
 ```
 
-Expected metadata from this stream:
+HTTPS MP3:
 
 ```text
-Station: Groove Salad
-Genre: Ambient Chill
-Bitrate: 128 kbps
-Content-Type: audio/mpeg
-Title/Artist: updates automatically from ICY StreamTitle
-Track: Live
+https://icecast.walmradio.com:8443/classic
 ```
 
-Radio support currently expects direct plain HTTP MP3 or ADTS AAC/AAC+ streams. It does not currently support HTTPS, HLS, or playlist parsing.
+Expected metadata includes station name, genre, bitrate, content type and live ICY `StreamTitle` updates where the station provides them.
+
+## AmiSSL stability note
+
+Classic AmigaOS/AmiSSL teardown can be fragile when rapidly switching HTTPS streams from short-lived playback child tasks.
+
+MiniAMP3 therefore uses a conservative stability pattern for HTTPS radio:
+
+- the probe path reuses a shared probe `SSL_CTX` rather than creating/freeing one for every station probe
+- probe SSL objects are quarantined on dangerous close/EOF paths
+- playback child tasks skip/quarantine `SSL_free()`, `SSL_CTX_free()` and per-task `CleanupAmiSSL()` during stream teardown
+
+This intentionally leaks small per-session AmiSSL objects during the app run. That is a trade-off for runtime stability on classic AmigaOS: repeated station switching previously reproduced delayed `Software Failure #80000008` crashes, while the quarantine path stopped the crash during repeated manual testing.
+
+If you are changing the HTTPS radio code, do not remove this quarantine behaviour unless you have stress-tested repeated HTTPS station switching on the target AmigaOS/AmiSSL setup.
 
 ## Build requirements
 
@@ -79,6 +144,9 @@ Radio support currently expects direct plain HTTP MP3 or ADTS AAC/AAC+ streams. 
 - `m68k-amigaos-nm`
 - GNU Make
 - Git with submodule support
+- AmiSSL SDK headers for HTTPS radio builds
+- ReAction/ClassAct runtime classes for `minimp3r`
+- `bsdsocket.library` at runtime for radio
 
 Check the toolchain:
 
@@ -103,7 +171,8 @@ That document covers:
 - FLAC decoder build
 - AAC decoder build
 - AAC asm build with `AACASM=1`
-- radio build with `RADIO=1`
+- radio builds with `RADIO=1`
+- HTTPS/AmiSSL builds with `SSL=1`
 - decoder entrypoint checks
 - copying files to Amiga/WinUAE
 - runtime tests
@@ -127,12 +196,24 @@ git submodule foreach --recursive 'git reset --hard && git clean -fd'
 
 make -C decoders clean || true
 find . -name "*.o" -delete
-rm -f amiga_mp3dec.fastexp minimp3r
+rm -f amiga_mp3dec.fastexp miniamp3 minimp3r
 rm -f decoders/*.decoder decoders/*.decoder.map
 
 make -C decoders flac
 make -C decoders aac AACASM=1
-make -f Makefile.amiga fast030 RADIO=1
+make -f Makefile.amiga sslguir
+```
+
+Useful alternative builds:
+
+```sh
+make -f Makefile.amiga fast030       # CLI/local playback focused build
+make -f Makefile.amiga radio030      # CLI/radio build without HTTPS
+make -f Makefile.amiga sslradio030   # CLI/radio build with HTTPS/AmiSSL
+make -f Makefile.amiga gui RADIO=1   # GadTools GUI with radio
+make -f Makefile.amiga guir RADIO=1  # ReAction GUI with radio
+make -f Makefile.amiga sslgui        # GadTools GUI with HTTPS radio
+make -f Makefile.amiga sslguir       # ReAction GUI with HTTPS radio/artwork
 ```
 
 Verify decoder module entrypoints:
@@ -157,8 +238,9 @@ Keep the player and decoder modules together.
 Typical Amiga-side layout:
 
 ```text
-libhelix-mp3/
+MiniAMP3/
   minimp3r
+  miniamp3
   amiga_mp3dec.fastexp
   decoders/
     aac.decoder
@@ -168,8 +250,9 @@ libhelix-mp3/
 Depending on the build target/front-end, the executable may be:
 
 ```text
-amiga_mp3dec.fastexp
-minimp3r
+amiga_mp3dec.fastexp   CLI/local and radio playback
+miniamp3               GadTools GUI
+minimp3r               ReAction/ClassAct GUI
 ```
 
 ## Runtime tests
@@ -198,6 +281,12 @@ HTTP MP3 radio:
 amiga_mp3dec.fastexp --play "http://ice1.somafm.com/groovesalad-128-mp3"
 ```
 
+HTTPS MP3 radio:
+
+```text
+amiga_mp3dec.fastexp --play "https://icecast.walmradio.com:8443/classic"
+```
+
 ## Decoder modules
 
 External decoder modules must export `DecoderModuleEntry` as the first real text symbol.
@@ -219,7 +308,7 @@ This is important because the Amiga module loader expects to enter the decoder m
 
 ## AAC notes
 
-AAC support currently targets AAC-LC ADTS files.
+AAC support currently targets AAC-LC ADTS files and streams.
 
 The AAC decoder uses the `decoders/esp8266audio` submodule, with the AAC source under:
 
@@ -268,46 +357,16 @@ make -C decoders flac
 
 FLAC is heavier than MP3 and performance depends on CPU, file complexity, output rate and playback settings.
 
-## Radio notes
+## Artwork notes
 
-Build with radio support:
+The ReAction/ClassAct front-end can fetch and display station artwork where the radio station or Radio Browser metadata provides a usable logo URL.
 
-```sh
-make -f Makefile.amiga fast030 RADIO=1
-```
+Supported artwork decode paths:
 
-Radio support uses Amiga `bsdsocket.library` at runtime.
+- JPEG through `picojpeg`
+- PNG through vendored `lodepng`
 
-Important notes:
-
-- Use direct plain HTTP MP3 stream URLs.
-- HTTPS is not currently supported.
-- HLS/M3U8 is not currently supported.
-- ICY metadata is stripped from the audio stream before MP3 decode.
-- ICY `StreamTitle` updates the GUI title/artist fields.
-- Radio streams are live, so duration is displayed as Live.
-
-## Known good radio stream
-
-```text
-http://ice1.somafm.com/groovesalad-128-mp3
-```
-
-Useful header check on the host:
-
-```sh
-curl -I http://ice1.somafm.com/groovesalad-128-mp3
-```
-
-Expected headers include:
-
-```text
-Content-Type: audio/mpeg
-icy-br: 128
-icy-genre: Ambient Chill
-icy-name: Groove Salad: a nicely chilled plate of ambient beats and grooves. [SomaFM]
-icy-url: http://somafm.com
-```
+Artwork support is intentionally wired into `minimp3r` only. The GadTools and CLI builds do not need PNG/JPEG artwork support.
 
 ## Development notes
 
@@ -318,6 +377,7 @@ Do not commit generated files:
 *.decoder
 *.decoder.map
 *.fastexp
+miniamp3
 minimp3r
 test audio files
 *:Zone.Identifier
@@ -337,32 +397,22 @@ AAC local playback
 AAC TNS-heavy file
 FLAC local playback
 HTTP MP3 radio playback
+HTTPS MP3 radio playback
+Radio Browser search
 ICY title/artist metadata updates
+Station artwork display where provided
 Stop on radio stream
 Menus after stopping radio
 Restart radio after stopping
+Repeated manual HTTPS station switching
 DecoderModuleEntry still at offset 0
 ```
-
-## Project status
-
-This is an active classic Amiga development project.
-
-Current focus areas:
-
-- ReAction GUI polish
-- GadTools GUI parity
-- FLAC performance improvements
-- AAC performance improvements
-- radio preset/station handling
-- artwork/station logo support
-- further m68k optimisation
 
 ## Credits
 
 This project builds on fixed-point decoder work from the Helix family of decoders and related open-source audio decoder code.
 
-Amiga port, decoder module integration, GUI work, radio streaming and m68k optimisation work by boingball.
+Amiga port, decoder module integration, GUI work, radio streaming, artwork integration and m68k optimisation work by boingball.
 
 ## Licence
 
