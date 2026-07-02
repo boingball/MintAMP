@@ -52,12 +52,15 @@
 #include <exec/types.h>
 #include <exec/libraries.h>
 #include <exec/memory.h>
+#include <exec/memory.h>
+#include <exec/execbase.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
 #include <proto/bsdsocket.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netdb.h>
+extern struct ExecBase *SysBase;
 struct Library *SocketBase = NULL;
 #define RADIO_SOCKET long
 #define RADIO_INVALID_SOCKET (-1)
@@ -162,7 +165,13 @@ struct RadioStream {
     unsigned long magic;
     RADIO_SOCKET sock;
     RadioStatus status;
-    char url[256], host[128], path[192];
+    /* Sized to match the probe's RB_PROBE_MAX_* (512/256/512): the old
+     * url[256]/host[128]/path[192] silently truncated long tokenized stream
+     * paths -- f121.rndfnk.com's 194-char path lost the end of its auth
+     * token, the server answered the mangled request with data AmiSSL's
+     * record parser could not survive, and playback died with "invalid
+     * record" while the (512-byte) probe of the same URL worked fine. */
+    char url[512], host[256], path[512];
     int port, bitrate, metaint, audioUntilMeta, headerDone;
     unsigned int streamStateFlags;
     int decoderStarted, playbackStarted, audioInitialized;
@@ -196,6 +205,7 @@ struct RadioStream {
     SSL_CTX *ctx;
     int sslHandshakeDone;
     int sslStatePoisoned; /* see radio_ssl_read()'s SSL_ERROR_SSL handling */
+    int tlsFaultCounted;  /* this session already counted toward the fault fuse */
 #endif
 };
 
@@ -267,28 +277,87 @@ int Radio_IsMemoryPoisoned(void)
 
 const char *Radio_TlsPoisonedMessage(void)
 {
-    /* Reboot, not just app restart: once poisoned cleanup has been skipped,
-     * the corrupted amissl.library stays resident with a nonzero open count
-     * (AmigaOS never reclaims library opens from an exited process), so a
-     * relaunch gets handed the same broken library. */
-    return "HTTPS disabled after fatal TLS/memory faults; reboot before using HTTPS.";
+    /* Only detected memory corruption reaches this state now (TLS faults
+     * quarantine and continue). Reboot, not just app restart: once poisoned
+     * cleanup has been skipped, the corrupted amissl.library stays resident
+     * with a nonzero open count (AmigaOS never reclaims library opens from
+     * an exited process), so a relaunch gets handed the same broken
+     * library. */
+    return "HTTPS disabled after memory corruption; reboot before using HTTPS.";
 }
 
-/* Fatal SSL_read faults are now survivable: the session fails cleanly and
- * HTTPS stays enabled (see Radio_ReportTlsFault()). Only repeated faults in
- * one run -- corruption-grade misbehaviour, not one bad station -- blow this
- * fuse and hard-poison HTTPS. */
-#define RADIO_TLS_FAULT_LIMIT 6
+/* Fatal SSL_read faults are survivable: the faulting session's SSL/SSL_CTX
+ * are quarantined (leaked, never freed -- an f121.rndfnk.com run proved
+ * SSL_free() after "0A000126 unexpected eof" corrupts the exec heap:
+ * AN_BadFreeAddr mid-SSL_free, then a deadend AN_MemCorrupt) and the
+ * faulting task skips its CleanupAmiSSL(), but HTTPS itself stays enabled
+ * for fresh sessions with fresh objects -- always. There is deliberately no
+ * fault-count fuse any more: each quarantined fault costs one leaked
+ * SSL/SSL_CTX (~100-150KB) and nothing else, whereas disabling HTTPS costs
+ * the user the rest of their session, so only *detected memory corruption*
+ * (ring canary / MiniMem check failures) hard-poisons now. */
 static long radio_tls_fault_count = 0;
+/* Once any SSL_free/SSL_CTX_free/CleanupAmiSSL has been skipped this run,
+ * dead tasks have left dangling per-task state inside AmiSSL, so the final
+ * CloseAmiSSL() walk at app exit is no longer safe -- Radio_NetworkShutdown()
+ * abandons the instance instead (same as hard poison, but HTTPS keeps
+ * working until then). */
+static int radio_tls_shutdown_quarantine = 0;
 
 void Radio_ReportTlsFault(const char *where)
 {
     radio_tls_fault_count++;
-    RADIO_DBG(printf("radio-tls: TLS fault %ld of %d where=%s session=%lu url=\"%s\" -- HTTPS stays enabled below the limit\n",
-        radio_tls_fault_count, RADIO_TLS_FAULT_LIMIT, where ? where : "",
+    radio_tls_shutdown_quarantine = 1;
+    RADIO_DBG(printf("radio-tls: TLS fault %ld where=%s session=%lu url=\"%s\" -- objects quarantined, HTTPS stays enabled\n",
+        radio_tls_fault_count, where ? where : "",
         radio_poison_session_id, radio_poison_url[0] ? radio_poison_url : ""));
-    if (radio_tls_fault_count >= RADIO_TLS_FAULT_LIMIT)
-        Radio_MarkTlsPoisoned(where);
+    (void)where;
+}
+
+/* Hosts that triggered a fatal AmiSSL fault this run. The fault can corrupt
+ * memory INSIDE the failing AmiSSL call itself (an exec AN_BadFreeAddr alert
+ * has been observed raised from within SSL_read, before the app regains
+ * control), so quarantining objects afterwards is not enough for a repeat
+ * offender: the only real protection is to never speak TLS to that host
+ * again until restart. Other hosts stay fully usable. */
+#define RADIO_TLS_FAULT_HOSTS_MAX 8
+static char radio_tls_fault_hosts[RADIO_TLS_FAULT_HOSTS_MAX][256];
+static int radio_tls_fault_host_count = 0;
+
+static int radio_host_equal_nocase(const char *a, const char *b)
+{
+    while (*a && *b) {
+        char ca = *a, cb = *b;
+        if (ca >= 'A' && ca <= 'Z') ca = (char)(ca - 'A' + 'a');
+        if (cb >= 'A' && cb <= 'Z') cb = (char)(cb - 'A' + 'a');
+        if (ca != cb) return 0;
+        a++; b++;
+    }
+    return *a == *b;
+}
+
+void Radio_NoteTlsFaultHost(const char *host)
+{
+    int i;
+    if (!host || !host[0]) return;
+    for (i = 0; i < radio_tls_fault_host_count; i++)
+        if (radio_host_equal_nocase(radio_tls_fault_hosts[i], host)) return;
+    if (radio_tls_fault_host_count >= RADIO_TLS_FAULT_HOSTS_MAX) return;
+    strncpy(radio_tls_fault_hosts[radio_tls_fault_host_count], host,
+        sizeof(radio_tls_fault_hosts[0]) - 1);
+    radio_tls_fault_hosts[radio_tls_fault_host_count][sizeof(radio_tls_fault_hosts[0]) - 1] = '\0';
+    radio_tls_fault_host_count++;
+    RADIO_DBG(printf("radio-tls: host \"%s\" blocked for HTTPS until restart (TLS fault) blocked_host_count=%d\n",
+        host, radio_tls_fault_host_count));
+}
+
+int Radio_IsTlsFaultHost(const char *host)
+{
+    int i;
+    if (!host || !host[0]) return 0;
+    for (i = 0; i < radio_tls_fault_host_count; i++)
+        if (radio_host_equal_nocase(radio_tls_fault_hosts[i], host)) return 1;
+    return 0;
 }
 
 void Radio_MarkTlsPoisoned(const char *where)
@@ -301,6 +370,7 @@ void Radio_MarkTlsPoisoned(const char *where)
         }
     }
     radioAmiSslPoisoned = 1;
+    radio_tls_shutdown_quarantine = 1;
     RADIO_DBG(printf("radio-tls: AmiSSL poisoned where=%s session=%lu url=\"%s\"\n",
         where ? where : "", radio_poison_session_id,
         radio_poison_url[0] ? radio_poison_url : ""));
@@ -322,6 +392,61 @@ int Radio_CheckMiniMem(const char *where)
     if (corrupt > 0)
         Radio_MarkMemoryPoisoned(where);
     return corrupt;
+}
+
+/* Proactive exec-heap validation (debug builds): walks every MemHeader's
+ * free-chunk list under Forbid() checking the same invariants exec's own
+ * FreeMem() trips AN_MemCorrupt (81000005) on -- chunk inside its header's
+ * bounds, aligned, sanely sized, strictly ascending, free-byte total
+ * matching mh_Free. A TLS-clean run still died with AN_MemCorrupt inside a
+ * healthy SSL_free() after three perfect play/stop cycles, so something
+ * corrupts exec memory silently during NORMAL operation and is only
+ * discovered ages later; running this at every session boundary brackets
+ * the corruptor to one interval in the log instead. Read-only, so it is
+ * safe to call anywhere; costs one list walk (a few hundred nodes). */
+void Radio_DebugCheckExecMem(const char *where)
+{
+#if defined(AMIGA_M68K) && defined(RADIO_DEBUG)
+    struct MemHeader *mh;
+    long headers = 0;
+    long chunks = 0;
+    unsigned long total_free = 0;
+    const char *fault = NULL;
+    void *fault_addr = NULL;
+    Forbid();
+    for (mh = (struct MemHeader *)((struct ExecBase *)SysBase)->MemList.lh_Head;
+         mh->mh_Node.ln_Succ && !fault;
+         mh = (struct MemHeader *)mh->mh_Node.ln_Succ) {
+        struct MemChunk *mc = mh->mh_First;
+        unsigned long header_free = 0;
+        long guard = 0;
+        headers++;
+        while (mc) {
+            if ((void *)mc < mh->mh_Lower || (void *)mc >= mh->mh_Upper) { fault = "chunk outside header"; fault_addr = (void *)mc; break; }
+            if (((unsigned long)mc) & 3UL) { fault = "misaligned chunk"; fault_addr = (void *)mc; break; }
+            if (mc->mc_Bytes == 0 || (unsigned long)mc + mc->mc_Bytes > (unsigned long)mh->mh_Upper) { fault = "bad chunk size"; fault_addr = (void *)mc; break; }
+            if (mc->mc_Next && mc->mc_Next <= mc) { fault = "non-ascending chunk"; fault_addr = (void *)mc; break; }
+            header_free += mc->mc_Bytes;
+            chunks++;
+            if (++guard > 65536) { fault = "chunk list loop"; fault_addr = (void *)mc; break; }
+            mc = mc->mc_Next;
+        }
+        if (!fault && header_free != mh->mh_Free) { fault = "mh_Free mismatch"; fault_addr = (void *)mh; }
+        total_free += header_free;
+    }
+    Permit();
+    if (fault) {
+        printf("radio-memcheck: CORRUPT %s at %p where=%s (exec heap damaged BEFORE this point)\n",
+            fault, fault_addr, where ? where : "");
+        fflush(stdout);
+    } else {
+        printf("radio-memcheck: OK where=%s headers=%ld chunks=%ld free=%lu\n",
+            where ? where : "", headers, chunks, total_free);
+        fflush(stdout);
+    }
+#else
+    (void)where;
+#endif
 }
 
 static int radio_stream_magic_valid(const RadioStream *rs, const char *where)
@@ -378,6 +503,7 @@ static void radio_reset_session_state(RadioStream *rs)
     rs->ssl = NULL;
     rs->ctx = NULL;
     rs->sslHandshakeDone = 0;
+    rs->tlsFaultCounted = 0;
 #endif
     rs->bitrate = rs->metaint = rs->audioUntilMeta = rs->headerDone = 0;
     rs->streamStateFlags = 0;
@@ -478,6 +604,19 @@ static void set_error(RadioStream *rs, const char *msg);
  * app startup; radio_ssl_global_init()/rb_probe_ensure_amissl() keep a lazy
  * fallback for builds that skip Radio_NetworkInit(). Requires SocketBase.
  * Returns 0 when the shared instance is (already) open. */
+/* The task that ran OpenAmiSSLTags(): per the AmiSSL v5/v6 SDK, that call
+ * already initializes AmiSSL for the calling task, and only OTHER
+ * subprocesses sharing the instance call InitAmiSSL()/CleanupAmiSSL().
+ * Running that pair in the opener task as well (as this app used to, around
+ * every probe) tears down and recreates state OpenAmiSSLTags() owns. */
+static void *radio_amissl_opener_task = NULL;
+
+int Radio_AmiSslTaskIsOpener(void)
+{
+    return AmiSSLBase && radio_amissl_opener_task &&
+        radio_amissl_opener_task == (void *)FindTask(NULL);
+}
+
 static int radio_amissl_open_shared(void)
 {
     if (AmiSSLBase) return 0;
@@ -487,12 +626,11 @@ static int radio_amissl_open_shared(void)
         if (!AmiSSLMasterBase) return -1;
         radio_amisslmaster_open_count++;
         RADIO_DBG(printf("radio-netinit: amisslmaster.library opened amisslmaster_open_count=%ld\n", radio_amisslmaster_open_count););
-        if (!InitAmiSSLMaster(AMISSL_CURRENT_VERSION, TRUE)) {
-            CloseLibrary(AmiSSLMasterBase); AmiSSLMasterBase = NULL;
-            radio_amisslmaster_close_count++;
-            return -1;
-        }
     }
+    /* No InitAmiSSLMaster() here: that is the old v3/v4 entry point, and the
+     * v5/v6 SDK explicitly replaces InitAmiSSLMaster()/OpenAmiSSL()/
+     * InitAmiSSL() with this single OpenAmiSSLTags() call -- mixing the two
+     * init styles on the same master library is off-spec. */
     if (OpenAmiSSLTags(AMISSL_CURRENT_VERSION,
                        AmiSSL_UsesOpenSSLStructs, TRUE,
                        AmiSSL_GetAmiSSLBase, (ULONG)&AmiSSLBase,
@@ -502,8 +640,9 @@ static int radio_amissl_open_shared(void)
                        TAG_DONE) != 0) {
         return -1;
     }
+    radio_amissl_opener_task = (void *)FindTask(NULL);
     radio_openamissltags_count++;
-    RADIO_DBG(printf("radio-netinit: OpenAmiSSLTags OK base=%p ext=%p openamissltags_count=%ld\n", (void *)AmiSSLBase, (void *)AmiSSLExtBase, radio_openamissltags_count););
+    RADIO_DBG(printf("radio-netinit: OpenAmiSSLTags OK base=%p ext=%p opener_task=%p openamissltags_count=%ld\n", (void *)AmiSSLBase, (void *)AmiSSLExtBase, radio_amissl_opener_task, radio_openamissltags_count););
     return 0;
 }
 
@@ -550,6 +689,14 @@ static int radio_ssl_global_init(RadioStream *rs)
             set_error(rs, "AmiSSL unavailable"); return -1;
         }
     }
+    if (Radio_AmiSslTaskIsOpener()) {
+        /* Per the AmiSSL v5/v6 SDK, OpenAmiSSLTags() already initialized
+         * AmiSSL for the task that called it; only OTHER subprocesses run
+         * the InitAmiSSL()/CleanupAmiSSL() pair. */
+        radio_amissl_initialized = 1;
+        RADIO_DBG(printf("radio-resource: session=%lu task is the OpenAmiSSLTags opener, InitAmiSSL not needed\n", rs ? rs->session_id : 0););
+        return 0;
+    }
     /* Deliberately using AmiSSL's own auto-allocated timer.device port here
      * (not AmiSSL_TimerPort with one of our own) -- a caller-supplied port
      * was tried and reverted after it correlated with the playback child
@@ -589,8 +736,14 @@ static void radio_ssl_global_cleanup(void)
          * once any task has poisoned AmiSSL, its internals are suspect for
          * every task, so nobody gets to call CleanupAmiSSL() again. */
         RADIO_DBG(printf("radio-cleanup: CleanupAmiSSL skipped (poisoned) leaking per-task AmiSSL state to avoid crashing on corrupted AmiSSL internals\n"););
-        Radio_MarkTlsPoisoned("CleanupAmiSSL skipped for poisoned AmiSSL session");
         radio_amissl_initialized = 0;
+    } else if (radio_amissl_initialized && Radio_AmiSslTaskIsOpener()) {
+        /* The opener task's state belongs to OpenAmiSSLTags()/CloseAmiSSL(),
+         * not to an InitAmiSSL()/CleanupAmiSSL() pair -- calling
+         * CleanupAmiSSL() here would tear down state OpenAmiSSLTags() owns
+         * (the SDK reserves that pair for other subprocesses only). */
+        radio_amissl_initialized = 0;
+        RADIO_DBG(printf("radio-cleanup: CleanupAmiSSL not needed (this task is the OpenAmiSSLTags opener)\n"););
     } else if (radio_amissl_initialized) {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: CleanupAmiSSL start\n"));
         CleanupAmiSSL(TAG_DONE);
@@ -603,20 +756,17 @@ static void radio_ssl_global_cleanup(void)
     }
     radio_amissl_task_poisoned = 0;
     /* Keep the shared AmiSSL instance (AmiSSLBase/AmiSSLExtBase) *and*
-     * amisslmaster.library open for the lifetime of the program now --
-     * CloseAmiSSL() is called exactly once, from Radio_NetworkShutdown(),
-     * not after every session. AmiSSL requires InitAmiSSLMaster() to run
-     * exactly once; only the per-task InitAmiSSL()/CleanupAmiSSL() pair
-     * above is allowed to repeat. The previous code closed and re-opened
-     * the master library on every stream stop, so a stop->probe->start
-     * cycle (Play pressed on an already-playing stream) re-ran
-     * InitAmiSSLMaster() several times in quick succession and wedged the
-     * next HTTPS connection, freezing the machine.  AmiSSLBase/
-     * AmiSSLMasterBase are shared with radio_stream_probe.c through their
-     * weak symbols and the OS reclaims them at program exit regardless. */
+     * amisslmaster.library open for the lifetime of the program --
+     * OpenAmiSSLTags() runs exactly once and CloseAmiSSL() is called
+     * exactly once, from Radio_NetworkShutdown(), not after every session.
+     * Only the per-task InitAmiSSL()/CleanupAmiSSL() pair above (for
+     * non-opener subprocesses) is allowed to repeat. The previous code
+     * closed and re-opened the master library on every stream stop, which
+     * wedged the next HTTPS connection and froze the machine. */
     RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: AmiSSL base kept open base=%p master=%p\n", (void *)AmiSSLBase, (void *)AmiSSLMasterBase));
     RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: AmiSSL global cleanup complete\n"));
     RADIO_DBG(printf("radio-ssl-diag: cleanup EXIT  initialized=%d base=%p ext=%p master=%p\n", radio_amissl_initialized, (void *)AmiSSLBase, (void *)AmiSSLExtBase, (void *)AmiSSLMasterBase););
+    Radio_DebugCheckExecMem("after child AmiSSL cleanup");
 }
 
 static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode);
@@ -667,9 +817,27 @@ static int radio_ssl_do_handshake(RadioStream *rs)
                 ERR_error_string_n(ssl_lib_error, ssl_error_buf, sizeof(ssl_error_buf));
             RADIO_DBG(printf("SSL_CONNECT_FATAL session=%lu err=%d lib_error=%08lx (%s)\n",
                 rs ? rs->session_id : 0, e, ssl_lib_error, ssl_error_buf[0] ? ssl_error_buf : "none"););
-            /* Handshake failures are a normal per-server outcome (protocol/
-             * cipher mismatch, bad record); drain the rest of the queue so
-             * the failure cannot masquerade as a later session's fault. */
+            if (rs && (e == SSL_ERROR_SSL || ssl_lib_error != 0)) {
+                /* Fatal AmiSSL-level handshake failure -- quarantine this
+                 * session's SSL/SSL_CTX exactly like a fatal SSL_read fault.
+                 * An f111.rndfnk.com run disproved the assumption that
+                 * handshake-failure frees are safe: SSL_connect failed with
+                 * "0A0C0103 internal error", SSL_free and SSL_CTX_free then
+                 * appeared to succeed, and CleanupAmiSSL() looped endless
+                 * AN_BadFreeAddr alerts walking the damaged internals. After
+                 * ANY fatal AmiSSL error, nothing of that session may be
+                 * freed again. HTTPS itself stays enabled. */
+                rs->sslStatePoisoned = 1;
+                radio_amissl_task_poisoned = 1;
+                Radio_NoteTlsFaultHost(rs->host);
+                if (!rs->tlsFaultCounted) {
+                    rs->tlsFaultCounted = 1;
+                    Radio_ReportTlsFault(e == SSL_ERROR_SSL ? "SSL_ERROR_SSL from SSL_connect" : "fatal AmiSSL error queue from SSL_connect");
+                }
+                RADIO_DBG(printf("radio-tls: session=%lu handshake SSL state quarantined -- will skip SSL_free/SSL_CTX_free/CleanupAmiSSL\n", rs->session_id));
+            }
+            /* Drain the rest of the queue so the failure cannot masquerade
+             * as a later session's fault. */
             ERR_clear_error();
         }
         return -1;
@@ -682,6 +850,11 @@ static int radio_ssl_connect(RadioStream *rs)
 {
     const SSL_METHOD *method;
     int set_fd_ok;
+    if (Radio_IsTlsFaultHost(rs->host)) {
+        set_error(rs, "station triggered a TLS fault; blocked until app restart");
+        RADIO_DBG(printf("radio-tls: session=%lu refusing TLS to fault-blocked host \"%s\"\n", rs->session_id, rs->host));
+        return -1;
+    }
     if (radio_ssl_global_init(rs) != 0) return -1;
     /* rs->ctx persists across reconnects within this task (see
      * radio_ssl_free_ctx(), only called once from Radio_Close()) -- a
@@ -733,6 +906,20 @@ static int radio_ssl_connect(RadioStream *rs)
          * installed root certs instead (see above). */
         SSL_CTX_set_verify(rs->ctx, SSL_VERIFY_NONE, NULL);
 #endif
+#ifdef SSL_OP_IGNORE_UNEXPECTED_EOF
+        /* OpenSSL 3.x (AmiSSL v5): report a peer that drops the connection
+         * without close_notify as a clean SSL_ERROR_ZERO_RETURN
+         * end-of-stream instead of the fatal SSL_ERROR_SSL "0A000126
+         * unexpected eof while reading" -- the exact fatal error path that
+         * corrupted AmiSSL's internals on f121.rndfnk.com and forced the
+         * whole TLS-fault quarantine machinery to engage. Streaming servers
+         * drop connections abruptly all the time (expiring tokenized URLs
+         * especially), and a truncation "attack" on a public radio stream
+         * is not a meaningful threat, so the clean-EOF interpretation is
+         * strictly better here: the session just reconnects, with no fault,
+         * no quarantine, no leak. */
+        SSL_CTX_set_options(rs->ctx, SSL_OP_IGNORE_UNEXPECTED_EOF);
+#endif
     }
     rs->ssl = SSL_new(rs->ctx);
     if (rs->ssl) { rs->sslFreed = 0; radio_active_ssl_count++; RADIO_DBG(printf("radio-resource: session=%lu SSL allocated active_ssl_count=%ld\n", rs->session_id, radio_active_ssl_count)); }
@@ -783,7 +970,6 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
          * SSL object. The app-wide flag counts too: another task's poison
          * means the same shared AmiSSL internals are suspect here. */
         RADIO_DBG(printf("radio-cleanup: SSL_free skipped (poisoned) session=%lu ssl=%p leaking to avoid crashing on corrupted AmiSSL state\n", rs->session_id, (void *)rs->ssl));
-        Radio_MarkTlsPoisoned("SSL_free skipped for poisoned AmiSSL session");
         rs->sslFreed = 1;
         if (radio_active_ssl_count > 0) radio_active_ssl_count--;
         rs->ssl = NULL;
@@ -827,7 +1013,6 @@ static void radio_ssl_free_ctx(RadioStream *rs)
          * itself, not just SSL_free(), needs to be skipped once poisoned
          * (again including app-wide poison from another task). */
         RADIO_DBG(printf("radio-cleanup: SSL_CTX_free skipped (poisoned) session=%lu ctx=%p leaking to avoid crashing on corrupted AmiSSL state\n", rs->session_id, (void *)rs->ctx));
-        Radio_MarkTlsPoisoned("SSL_CTX_free skipped for poisoned AmiSSL session");
         rs->ctxFreed = 1;
         if (radio_active_ssl_ctx_count > 0) radio_active_ssl_ctx_count--;
         rs->ctx = NULL;
@@ -1074,6 +1259,14 @@ static int parse_url(RadioStream *rs, const char *url)
     memcpy(rs->host, p, (size_t)hl); rs->host[hl] = 0;
     rs->port = colon ? atoi(colon + 1) : default_port;
     if (rs->port <= 0) rs->port = default_port;
+    if (*slash && strlen(slash) >= sizeof(rs->path)) {
+        /* Refuse rather than truncate: a cut-off path (usually the end of
+         * an auth token) makes the server respond in ways that have proven
+         * fatal to AmiSSL's record parser. */
+        RADIO_DBG(printf("radio-open: path too long (%lu >= %lu) url=\"%s\"\n",
+            (unsigned long)strlen(slash), (unsigned long)sizeof(rs->path), url));
+        return -1;
+    }
     radio_copy_string(rs->path, sizeof(rs->path), *slash ? slash : "/");
     radio_copy_string(rs->url, sizeof(rs->url), url);
     return 0;
@@ -1094,7 +1287,7 @@ static void reset_parser(RadioStream *rs)
 }
 
 static int connect_http(RadioStream *rs){
-    struct sockaddr_in sa; char req[512]; int n; int cr;
+    struct sockaddr_in sa; char req[1024]; int n; int cr;
 #if defined(AMIGA_M68K)
     if(!SocketBase) SocketBase=OpenLibrary("bsdsocket.library",4); if(!SocketBase){ set_error(rs,"bsdsocket.library unavailable"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: bsdsocket open failed\n")); return -1; }
 #endif
@@ -1139,6 +1332,12 @@ static int connect_http(RadioStream *rs){
 #endif
     RADIO_DBG(printf("radio-http: session=%lu starting HTTP request phase isSSL=%d sslHandshakeDone=%d\n", rs->session_id, rs->isSSL, rs->sslHandshakeDone););
     n=snprintf(req,sizeof(req),"GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: BoingPlayer/0.1 AmigaOS\r\nIcy-MetaData: 1\r\nConnection: close\r\n\r\n",rs->path,rs->host);
+    if(n<0 || n>=(int)sizeof(req)){
+        /* Never send a truncated request: a cut-off auth token is exactly
+         * what provoked the malformed server response behind the
+         * "invalid record" AmiSSL fault chain. */
+        close_current_socket(rs); set_error(rs,"stream URL too long"); return -1;
+    }
     if(radio_send_all(rs,req,n)!=0){ close_current_socket(rs); set_error(rs, rs->isSSL ? "HTTPS read failed" : "cannot send HTTP request"); return -1; }
     reset_parser(rs);
     rs->decoderStarted = rs->playbackStarted = 0;
@@ -1661,6 +1860,7 @@ void Radio_NetworkInit(void)
     if (SocketBase && radio_amissl_open_shared() != 0)
         RADIO_DBG(printf("radio-netinit: shared AmiSSL open failed (HTTPS unavailable until retry)\n"););
 #endif
+    Radio_DebugCheckExecMem("after Radio_NetworkInit");
 #endif
 }
 
@@ -1676,16 +1876,22 @@ void Radio_NetworkShutdown(void)
     }
     radio_network_shutdown_started = 1;
 #if defined(HAVE_AMISSL)
-    if (Radio_IsTlsPoisoned()) {
-        /* SSL_free()/SSL_CTX_free()/CleanupAmiSSL() were already deliberately
-         * skipped for this run because AmiSSL's internals are suspect -- the
-         * final CloseAmiSSL()/CloseLibrary() walk the same corrupted state
-         * and were the last remaining source of recoverable alerts on app
-         * close after poison. Abandon the whole shared instance instead: the
-         * OS reclaims it when the process exits. */
-        printf("APP_CLOSE: AmiSSL poisoned, skipping final AmiSSL shutdown\n");
-        RADIO_DBG(printf("radio-netshutdown: AmiSSL poisoned (reason=%s), abandoning base=%p ext=%p master=%p without CleanupAmiSSL/CloseAmiSSL/CloseLibrary\n",
-            Radio_TlsPoisonReason(), (void *)AmiSSLBase, (void *)AmiSSLExtBase, (void *)AmiSSLMasterBase););
+    if (Radio_IsTlsPoisoned() || radio_tls_shutdown_quarantine) {
+        /* SSL_free()/SSL_CTX_free()/CleanupAmiSSL() were deliberately
+         * skipped at least once this run (TLS fault quarantine or full
+         * poison), so tasks have left dangling per-task state inside the
+         * shared instance -- the final CloseAmiSSL()/CloseLibrary() walk
+         * exactly that state and were the last remaining source of
+         * recoverable alerts on app close. Abandon the whole shared
+         * instance instead: the OS reclaims it when the process exits. */
+        if (Radio_IsTlsPoisoned())
+            printf("APP_CLOSE: AmiSSL poisoned, skipping final AmiSSL shutdown\n");
+        else
+            printf("APP_CLOSE: AmiSSL quarantined after TLS fault(s), skipping final AmiSSL shutdown\n");
+        RADIO_DBG(printf("radio-netshutdown: AmiSSL %s (reason=%s, tls_fault_count=%ld), abandoning base=%p ext=%p master=%p without CleanupAmiSSL/CloseAmiSSL/CloseLibrary\n",
+            Radio_IsTlsPoisoned() ? "poisoned" : "quarantined",
+            Radio_TlsPoisonReason(), radio_tls_fault_count,
+            (void *)AmiSSLBase, (void *)AmiSSLExtBase, (void *)AmiSSLMasterBase););
         AmiSSLBase = NULL;
         AmiSSLExtBase = NULL;
         AmiSSLMasterBase = NULL;
@@ -1733,8 +1939,8 @@ void Radio_NetworkShutdown(void)
         radio_open_socket_count, radio_active_ssl_count,
         radio_active_ssl_ctx_count, Radio_IsTlsPoisoned(),
         Radio_TlsPoisonReason()););
-    RADIO_DBG(printf("radio-netshutdown: tls_fault_count=%ld (fault limit %d)\n",
-        radio_tls_fault_count, RADIO_TLS_FAULT_LIMIT););
+    RADIO_DBG(printf("radio-netshutdown: tls_fault_count=%ld shutdown_quarantine=%d\n",
+        radio_tls_fault_count, radio_tls_shutdown_quarantine););
 #endif
 }
 
@@ -1783,25 +1989,33 @@ int Radio_Pump(RadioStream *rs)
                 RADIO_DBG(printf("radio-ssl-read: session=%lu read failed ssl_error=%d lib_error=%08lx (%s)\n",
                     rs->session_id, e, ssl_lib_error, ssl_error_buf[0] ? ssl_error_buf : "none"));
                 if (e == SSL_ERROR_SSL || ssl_lib_error != 0) {
-                    /* A record-layer failure inside SSL_read(). The old
-                     * hard-poison-on-first-fault policy here dated from soak
-                     * tests where the following SSL_free()/SSL_CTX_free()
-                     * crashed -- but those runs also had two AmiSSL
-                     * instances open in one task (the weak-symbol merge
-                     * failure fixed in rb_probe_ensure_amissl()), which is
-                     * the likelier culprit. Treat this as a normal stream
-                     * error now: the session fails cleanly, its SSL objects
-                     * are freed normally below, and HTTPS stays enabled.
-                     * Radio_ReportTlsFault() keeps a fuse: corruption-grade
-                     * repeated faults still hard-poison, and once poisoned
-                     * this session's objects are leaked as before. */
-                    Radio_ReportTlsFault(e == SSL_ERROR_SSL ? "SSL_ERROR_SSL from SSL_read" : "fatal AmiSSL error queue from SSL_read");
-                    ERR_clear_error();
-                    if (Radio_IsTlsPoisoned()) {
-                        rs->sslStatePoisoned = 1;
-                        radio_amissl_task_poisoned = 1;
-                        RADIO_DBG(printf("radio-ssl-read: session=%lu SSL state marked poisoned (fault limit reached) -- will skip SSL_free/SSL_CTX_free/CleanupAmiSSL on close\n", rs->session_id));
+                    /* A fatal record-layer failure inside SSL_read(). This
+                     * session's SSL/SSL_CTX must never be freed again: an
+                     * f121.rndfnk.com run that hit "0A000126 unexpected eof
+                     * while reading" and then freed them normally crashed
+                     * with AN_BadFreeAddr *inside* the following SSL_free()
+                     * and a deadend AN_MemCorrupt right after -- AmiSSL's
+                     * own bookkeeping is not safe to walk after this error,
+                     * single shared instance or not. Quarantine (leak) the
+                     * objects and skip this task's CleanupAmiSSL(), exactly
+                     * like the original poison handling -- but unlike it,
+                     * HTTPS stays enabled: a fresh session gets fresh
+                     * objects (and a reconnect of this session orphans the
+                     * ctx, see radio_ssl_connect()). Only repeated faults
+                     * blow the fuse into a full hard poison; each session
+                     * counts toward it once, so one flaky station's
+                     * reconnect loop cannot brick HTTPS on its own. */
+                    rs->sslStatePoisoned = 1;
+                    radio_amissl_task_poisoned = 1;
+                    Radio_NoteTlsFaultHost(rs->host);
+                    if (!rs->tlsFaultCounted) {
+                        rs->tlsFaultCounted = 1;
+                        Radio_ReportTlsFault(e == SSL_ERROR_SSL ? "SSL_ERROR_SSL from SSL_read" : "fatal AmiSSL error queue from SSL_read");
+                    } else {
+                        RADIO_DBG(printf("radio-tls: repeat TLS fault in session=%lu (already counted) -- quarantining objects again\n", rs->session_id));
                     }
+                    ERR_clear_error();
+                    RADIO_DBG(printf("radio-ssl-read: session=%lu SSL state quarantined -- will skip SSL_free/SSL_CTX_free/CleanupAmiSSL on close\n", rs->session_id));
                 }
             }
         }
@@ -1845,6 +2059,7 @@ int Radio_Pump(RadioStream *rs)
         if (!rs->lastMemReportClock) rs->lastMemReportClock = now;
         if ((unsigned long)((now - rs->lastMemReportClock) * 1000UL / CLOCKS_PER_SEC) >= 10000UL) {
             radio_debug_mem_report(rs->session_id, "playing 10s sample");
+            Radio_DebugCheckExecMem("playing 10s sample");
             rs->lastMemReportClock = now;
         }
     }

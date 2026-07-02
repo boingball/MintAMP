@@ -68,19 +68,32 @@ void Radio_GetNetworkBases(void **socket_base, void **amissl_base, void **amissl
  * weak-symbol copies of the bases do not reliably merge with the strong
  * definitions under the m68k hunk linker).  All NULL when not open. */
 void Radio_GetAmiSslShared(void **amissl_base, void **amissl_ext_base, void **amissl_master_base);
+/* True when the calling task is the one that ran OpenAmiSSLTags(): per the
+ * AmiSSL v5/v6 SDK that task is already initialized and must NOT run the
+ * per-subprocess InitAmiSSL()/CleanupAmiSSL() pair. */
+int Radio_AmiSslTaskIsOpener(void);
 int Radio_IsMemoryPoisoned(void);
 void Radio_MarkMemoryPoisoned(const char *where);
 int Radio_IsTlsPoisoned(void);
 void Radio_MarkTlsPoisoned(const char *where);
 /* Record a fatal-but-survivable TLS fault (SSL_ERROR_SSL from SSL_read):
- * the failing session is torn down normally and HTTPS stays enabled.
- * Repeated faults in one run blow a fuse and hard-poison HTTPS. */
+ * the failing session's SSL objects are quarantined (leaked, never freed)
+ * and HTTPS stays enabled -- always. Only detected memory corruption
+ * hard-poisons HTTPS (Radio_MarkTlsPoisoned()). */
 void Radio_ReportTlsFault(const char *where);
+/* Per-run blocklist of hosts that triggered a fatal AmiSSL fault: the fault
+ * can corrupt memory inside the failing AmiSSL call itself, so a known
+ * offender must not be contacted over TLS again until restart. */
+void Radio_NoteTlsFaultHost(const char *host);
+int Radio_IsTlsFaultHost(const char *host);
 const char *Radio_TlsPoisonedMessage(void);
 /* First (root-cause) reason AmiSSL was marked poisoned this run, or
  * "not-poisoned". */
 const char *Radio_TlsPoisonReason(void);
 int Radio_CheckMiniMem(const char *where);
+/* Debug builds: validate exec's memory free lists (the invariants behind
+ * AN_MemCorrupt) and log OK/CORRUPT with a location tag. No-op in release. */
+void Radio_DebugCheckExecMem(const char *where);
 #else
 static RadioStream *Radio_OpenWithHostAddr(const char *url, int haveHostAddr, unsigned long hostAddrBe) { (void)url; (void)haveHostAddr; (void)hostAddrBe; return (RadioStream *)0; }
 static RadioStream *Radio_Open(const char *url) { (void)url; return (RadioStream *)0; }
@@ -123,14 +136,18 @@ static void Radio_GetAmiSslShared(void **amissl_base, void **amissl_ext_base, vo
     if (amissl_ext_base) *amissl_ext_base = 0;
     if (amissl_master_base) *amissl_master_base = 0;
 }
+static int Radio_AmiSslTaskIsOpener(void) { return 0; }
 static int Radio_IsMemoryPoisoned(void) { return 0; }
 static void Radio_MarkMemoryPoisoned(const char *where) { (void)where; }
 static int Radio_IsTlsPoisoned(void) { return 0; }
 static void Radio_MarkTlsPoisoned(const char *where) { (void)where; }
 static void Radio_ReportTlsFault(const char *where) { (void)where; }
-static const char *Radio_TlsPoisonedMessage(void) { return "HTTPS disabled after fatal TLS/memory faults; reboot before using HTTPS."; }
+static void Radio_NoteTlsFaultHost(const char *host) { (void)host; }
+static int Radio_IsTlsFaultHost(const char *host) { (void)host; return 0; }
+static const char *Radio_TlsPoisonedMessage(void) { return "HTTPS disabled after memory corruption; reboot before using HTTPS."; }
 static const char *Radio_TlsPoisonReason(void) { return "not-poisoned"; }
 static int Radio_CheckMiniMem(const char *where) { (void)where; return 0; }
+static void Radio_DebugCheckExecMem(const char *where) { (void)where; }
 static const char *Radio_StatusText(RadioStatus status)
 {
     switch (status) {

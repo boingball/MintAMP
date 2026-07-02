@@ -5802,6 +5802,13 @@ static void GuiPublishStartupStage(int stage)
 	if (gGuiPlaybackStatus.startupStage == stage)
 		return;
 	gGuiPlaybackStatus.startupStage = stage;
+	/* Two hard machine halts (one #80000008, one dead black screen) have
+	 * landed in the silent window between radio_stream.c's "first decoder
+	 * frame / playback buffer ready" line and the first post-startup pump
+	 * line -- exactly the span these stages cover. Emitting them into the
+	 * debug log (flushed, so the last one survives the halt) turns "died
+	 * somewhere in decoder/audio startup" into a precise stage number. */
+	RADIO_DBG(printf("radio-startup: stage=%d\n", stage);)
 #ifdef MINIAMP3_DEBUG
 	GuiWriteDetailedStartupLog(stage);
 #endif
@@ -6309,6 +6316,7 @@ static void AmigaAudioClose(AmigaAudioPlayer *player,
 	gGuiPlaybackStatus.cleanupStage = GUIPLAY_CLEANUP_COMPLETE;
 	gGuiPlaybackStatus.cleanupComplete = 1;
 	AmigaAudioCleanupTrace(player, "cleanupComplete set=1\n");
+	Radio_DebugCheckExecMem("after audio device cleanup");
 }
 
 static int AmigaAudioOpenOne(AmigaAudioPlayer *player, int ch,
@@ -8404,7 +8412,13 @@ static int LoadDecoderModuleForExt(const char *ext,
 			fprintf(stderr, "decoder module discovery: trying %s\n", path);
 		if (debugDecoder && ext && StrCaseCmp(ext, "aac") == 0)
 			fprintf(stderr, "AAC: before LoadSeg\n");
+		/* Flushed stdout breadcrumbs (RADIO_DBG) as well as the stderr
+		 * debugDecoder ones: the halt logs only capture stdout, and this
+		 * LoadSeg + entry() jump is one of the few wild-jump candidates in
+		 * the silent stretch where two hard halts have landed. */
+		RADIO_DBG(printf("radio-startup: decoder module LoadSeg \"%s\"\n", path);)
 		seg = LoadSeg((STRPTR)path);
+		RADIO_DBG(printf("radio-startup: decoder module LoadSeg done seg=%p\n", (void *)seg);)
 		if (debugDecoder && ext && StrCaseCmp(ext, "aac") == 0)
 			fprintf(stderr, "AAC: after LoadSeg segment=%p\n", (void *)seg);
 		if (!seg) {
@@ -8424,7 +8438,9 @@ static int LoadDecoderModuleForExt(const char *ext,
 			fprintf(stderr, "decoder module discovery: entry pointer=%p\n", (void *)entry);
 		if (debugDecoder && ext && StrCaseCmp(ext, "aac") == 0)
 			fprintf(stderr, "AAC: before entry\n");
+		RADIO_DBG(printf("radio-startup: decoder module entry call entry=%p\n", (void *)entry);)
 		ops   = entry();
+		RADIO_DBG(printf("radio-startup: decoder module entry returned ops=%p\n", (void *)ops);)
 		if (debugDecoder && ext && StrCaseCmp(ext, "aac") == 0)
 			fprintf(stderr, "AAC: after entry ops=%p\n", (void *)ops);
 		if (debugDecoder)

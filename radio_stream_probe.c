@@ -42,6 +42,15 @@ struct Library *AmiSSLMasterBase __attribute__((weak));
 struct Library *AmiSSLBase __attribute__((weak));
 struct Library *AmiSSLExtBase __attribute__((weak));
 static int rb_probe_amissl_initialized = 0;
+/* Set when a probe hits a fatal SSL_read fault: this (parent/GUI) task's
+ * AmiSSL state is then never CleanupAmiSSL()'d again -- the state stays
+ * live and initialized for later probes instead (see
+ * rb_probe_cleanup_amissl()). */
+static int rb_probe_amissl_dirty = 0;
+/* Set when this file's own lazy fallback ran OpenAmiSSLTags() (no
+ * radio_stream.c around to track the opener task): that call already
+ * initialized this task, so InitAmiSSL()/CleanupAmiSSL() must not run. */
+static int rb_probe_opened_shared_here = 0;
 /* Cumulative per-task InitAmiSSL()/CleanupAmiSSL() debug counters for this
  * (parent/GUI) task's probe/favicon fetches. */
 static long rb_probe_amissl_init_count = 0;
@@ -182,16 +191,18 @@ static int rb_probe_ssl_read_retrying(RbProbeTransport *transport, char *dst, in
             RADIO_DBG(printf("rb-probe-ssl-read: session=%lu read failed ssl_error=%d lib_error=%08lx (%s)\n",
                 transport->session_id, ssl_err, ssl_lib_error, ssl_error_buf[0] ? ssl_error_buf : "none"));
             if (ssl_err == SSL_ERROR_SSL || ssl_lib_error != 0) {
-                /* Survivable now: the probe fails cleanly, its SSL objects
-                 * are freed normally, and HTTPS stays enabled -- see the
-                 * matching SSL_read fault handling in radio_stream.c's
-                 * Radio_Pump(). Only the repeated-fault fuse hard-poisons. */
+                /* Survivable, but this transport's SSL/SSL_CTX must never
+                 * be freed: SSL_free() after a fatal SSL_read error crashes
+                 * inside AmiSSL (see the matching handler in radio_stream.c's
+                 * Radio_Pump()). Quarantine the objects and skip this task's
+                 * next CleanupAmiSSL(); HTTPS itself stays enabled and the
+                 * repeated-fault fuse still hard-poisons eventually. */
+                transport->sslStatePoisoned = 1;
+                rb_probe_amissl_dirty = 1;
+                Radio_NoteTlsFaultHost(transport->host);
                 Radio_ReportTlsFault(ssl_err == SSL_ERROR_SSL ? "probe SSL_ERROR_SSL from SSL_read" : "probe fatal AmiSSL error queue from SSL_read");
                 ERR_clear_error();
-                if (Radio_IsTlsPoisoned()) {
-                    transport->sslStatePoisoned = 1;
-                    RADIO_DBG(printf("rb-probe-ssl-read: session=%lu SSL state marked poisoned (fault limit reached) -- will skip SSL_free/SSL_CTX_free/CleanupAmiSSL on close\n", transport->session_id));
-                }
+                RADIO_DBG(printf("rb-probe-ssl-read: session=%lu SSL state quarantined -- will skip SSL_free/SSL_CTX_free/CleanupAmiSSL on close\n", transport->session_id));
             }
         }
         return n;
@@ -542,14 +553,13 @@ static int rb_probe_ensure_amissl(void)
     if (!AmiSSLBase) {
         /* No shared instance to adopt either (Radio_NetworkInit() failed or
          * this is a standalone build without radio_stream.c) -- lazily open
-         * our own here as a last resort. */
+         * our own here as a last resort. No InitAmiSSLMaster(): the AmiSSL
+         * v5/v6 SDK replaces it (and OpenAmiSSL()/InitAmiSSL() for the
+         * calling task) with this single OpenAmiSSLTags() call. */
         RADIO_DBG(printf("radio-netinit: probe found no shared AmiSSL instance, opening its own\n");)
         if (!AmiSSLMasterBase) {
             AmiSSLMasterBase = OpenLibrary("amisslmaster.library", AMISSLMASTER_MIN_VERSION);
             if (!AmiSSLMasterBase) return -1;
-            if (!InitAmiSSLMaster(AMISSL_CURRENT_VERSION, TRUE)) {
-                CloseLibrary(AmiSSLMasterBase); AmiSSLMasterBase = NULL; return -1;
-            }
         }
         if (OpenAmiSSLTags(AMISSL_CURRENT_VERSION,
                            AmiSSL_UsesOpenSSLStructs, TRUE,
@@ -559,6 +569,17 @@ static int rb_probe_ensure_amissl(void)
                            AmiSSL_ErrNoPtr, (ULONG)&errno,
                            TAG_DONE) != 0)
             return -1;
+        rb_probe_opened_shared_here = 1;
+    }
+    if (Radio_AmiSslTaskIsOpener() || rb_probe_opened_shared_here) {
+        /* Per the AmiSSL v5/v6 SDK, the task that called OpenAmiSSLTags()
+         * is already initialized -- only OTHER subprocesses run the
+         * InitAmiSSL()/CleanupAmiSSL() pair. Probes run in the same
+         * (parent/GUI) task that ran Radio_NetworkInit()'s OpenAmiSSLTags(),
+         * so no per-task init is needed or allowed here. */
+        rb_probe_amissl_initialized = 1;
+        RADIO_DBG(printf("radio-resource: probe task is the OpenAmiSSLTags opener, InitAmiSSL not needed\n");)
+        return 0;
     }
     /* Deliberately using AmiSSL's own auto-allocated timer.device port
      * (not AmiSSL_TimerPort with one of our own) -- see the matching comment
@@ -582,19 +603,29 @@ static int rb_probe_ensure_amissl(void)
 /* amisslmaster.library and the shared AmiSSLBase/AmiSSLExtBase instance are
  * both opened once by radio_stream.c's Radio_NetworkInit() (or lazily here,
  * whichever runs first) and closed once by Radio_NetworkShutdown() at app
- * exit. The per-task AmiSSL context (InitAmiSSL() in
- * rb_probe_ensure_amissl()) is a different story: it must still be cleaned
- * up by this (parent/GUI) task after every probe/favicon fetch via
- * CleanupAmiSSL(), so a fresh InitAmiSSL() can run again next time --
- * skipping that per-task pairing, not the shared library close, is what
- * crashes inside SSL_CTX_new()/SSL_new() in a later task. */
+ * exit. Per the AmiSSL v5/v6 SDK the OpenAmiSSLTags() opener task (normally
+ * this parent/GUI task) is already initialized and never runs the
+ * InitAmiSSL()/CleanupAmiSSL() pair -- that pair is only for OTHER
+ * subprocesses sharing the instance, and then it must be properly paired
+ * per task or SSL_CTX_new()/SSL_new() crashes in a later task. */
 static void rb_probe_cleanup_amissl(void)
 {
     RADIO_DBG(printf("radio-ssl-diag: probe cleanup ENTER probe_init=%d base=%p ext=%p master=%p\n", rb_probe_amissl_initialized, (void *)AmiSSLBase, (void *)AmiSSLExtBase, (void *)AmiSSLMasterBase);)
-    if (rb_probe_amissl_initialized && Radio_IsTlsPoisoned()) {
-        RADIO_DBG(printf("radio-cleanup: probe CleanupAmiSSL skipped (poisoned) leaking per-task AmiSSL state to avoid crashing on corrupted AmiSSL internals\n");)
-        Radio_MarkTlsPoisoned("probe CleanupAmiSSL skipped for poisoned AmiSSL session");
-        rb_probe_amissl_initialized = 0;
+    if (rb_probe_amissl_initialized && (Radio_IsTlsPoisoned() || rb_probe_amissl_dirty)) {
+        /* Never CleanupAmiSSL() after a fault/poison. Crucially,
+         * rb_probe_amissl_initialized stays SET: this GUI task's per-task
+         * AmiSSL state was never released, so it is still live -- the next
+         * probe must reuse it rather than run a second InitAmiSSL() on top
+         * of the un-cleaned one. (Under hard poison no probe runs anyway.) */
+        RADIO_DBG(printf("radio-cleanup: probe CleanupAmiSSL skipped (%s) keeping per-task AmiSSL state live for reuse\n",
+            Radio_IsTlsPoisoned() ? "poisoned" : "quarantined");)
+    } else if (rb_probe_amissl_initialized &&
+               (Radio_AmiSslTaskIsOpener() || rb_probe_opened_shared_here)) {
+        /* The opener task's AmiSSL state belongs to OpenAmiSSLTags()/
+         * CloseAmiSSL(); the SDK reserves the InitAmiSSL()/CleanupAmiSSL()
+         * pair for other subprocesses. Keep initialized set -- there is
+         * nothing to release per probe. */
+        RADIO_DBG(printf("radio-cleanup: probe CleanupAmiSSL not needed (this task is the OpenAmiSSLTags opener)\n");)
     } else if (rb_probe_amissl_initialized) {
         CleanupAmiSSL(TAG_DONE);
         rb_probe_amissl_initialized = 0;
@@ -605,6 +636,7 @@ static void rb_probe_cleanup_amissl(void)
      * (see radio_stream.c's Radio_NetworkShutdown()) -- this function no
      * longer closes them itself. */
     RADIO_DBG(printf("radio-ssl-diag: probe cleanup EXIT  probe_init=%d base=%p ext=%p master=%p\n", rb_probe_amissl_initialized, (void *)AmiSSLBase, (void *)AmiSSLExtBase, (void *)AmiSSLMasterBase);)
+    Radio_DebugCheckExecMem("after probe AmiSSL cleanup");
 }
 
 #endif
@@ -618,6 +650,15 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *host
     struct sockaddr_in sa;
 
     if (!transport || !host) return RB_STREAM_PROBE_ERR_BAD_ARG;
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+    if (use_ssl && Radio_IsTlsFaultHost(host)) {
+        /* This host already triggered a fatal AmiSSL fault this run --
+         * the fault can corrupt memory inside the failing call itself,
+         * so don't give it a second chance until restart. */
+        RADIO_DBG(printf("rb-probe: refusing TLS to fault-blocked host \"%s\"\n", host);)
+        return RB_STREAM_PROBE_ERR_TLS_HANDSHAKE;
+    }
+#endif
     transport->sock = RB_PROBE_INVALID_SOCKET;
     transport->isSSL = 0;
     transport->session_id = rb_probe_next_session_id++;
@@ -694,6 +735,13 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *host
         }
         /* No CA bundle on classic AmigaOS; skip cert verification for streams. */
         SSL_CTX_set_verify(transport->ctx, SSL_VERIFY_NONE, NULL);
+#ifdef SSL_OP_IGNORE_UNEXPECTED_EOF
+        /* Treat an abrupt server disconnect as a clean end-of-stream
+         * instead of the fatal "unexpected eof" SSL_ERROR_SSL -- see the
+         * matching option (and rationale) in radio_stream.c's
+         * radio_ssl_connect(). */
+        SSL_CTX_set_options(transport->ctx, SSL_OP_IGNORE_UNEXPECTED_EOF);
+#endif
         transport->ssl = SSL_new(transport->ctx);
         if (!transport->ssl) {
             SSL_CTX_free(transport->ctx); transport->ctx = NULL;
@@ -731,19 +779,31 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *host
                 ERR_error_string_n(ssl_lib_error, ssl_error_buf, sizeof(ssl_error_buf));
             RADIO_DBG(printf("rb-probe TLS: SSL_connect rc=%d SSL_get_error=%d error=\"%s\" verify=disabled method=SSLv23_client_method\n",
                    ssl_connect_rc, ssl_error, ssl_error_buf[0] ? ssl_error_buf : "none");)
-            /* A handshake failure is a normal per-server outcome (protocol/
-             * cipher mismatch, TLS-version-only server, bad record) -- e.g.
-             * "0A000139 record layer failure" from a station AmiSSL simply
-             * cannot talk to. It neither poisons AmiSSL nor counts toward
-             * the fault fuse: probing an incompatible station must never
-             * disable HTTPS. Free the objects normally and drain the error
-             * queue so the failure cannot leak into a later session. */
+            if (ssl_error == SSL_ERROR_SSL || ssl_lib_error != 0) {
+                /* Fatal AmiSSL-level handshake failure: quarantine, exactly
+                 * like a fatal SSL_read fault. An f111.rndfnk.com run
+                 * disproved "handshake-failure frees are safe": SSL_connect
+                 * failed with "0A0C0103 internal error", the SSL/SSL_CTX
+                 * frees appeared to succeed, and CleanupAmiSSL() then looped
+                 * endless AN_BadFreeAddr alerts walking the damaged
+                 * internals. After ANY fatal AmiSSL error nothing of that
+                 * session may be freed again; HTTPS itself stays enabled. */
+                transport->sslStatePoisoned = 1;
+                rb_probe_amissl_dirty = 1;
+                Radio_NoteTlsFaultHost(transport->host);
+                Radio_ReportTlsFault(ssl_error == SSL_ERROR_SSL ? "probe SSL_ERROR_SSL from SSL_connect" : "probe fatal AmiSSL error queue from SSL_connect");
+            }
+            /* Drain the queue so this failure cannot masquerade as a later
+             * session's fault. */
             ERR_clear_error();
-            if (Radio_IsTlsPoisoned()) {
-                RADIO_DBG(printf("radio-cleanup: probe handshake-fail SSL_free/SSL_CTX_free skipped (poisoned) session=%lu ssl=%p ctx=%p\n", transport->session_id, (void *)transport->ssl, (void *)transport->ctx);)
+            if (transport->sslStatePoisoned || Radio_IsTlsPoisoned()) {
+                RADIO_DBG(printf("radio-cleanup: probe handshake-fail SSL_free/SSL_CTX_free skipped (quarantined/poisoned) session=%lu ssl=%p ctx=%p\n", transport->session_id, (void *)transport->ssl, (void *)transport->ctx);)
                 transport->ssl = NULL;
                 transport->ctx = NULL;
             } else {
+                /* Plain connect timeout (WANT_READ/WANT_WRITE budget
+                 * exhausted, empty error queue): the objects are healthy and
+                 * freeing them is the normal, safe path. */
                 rb_probe_debug_mem_report(transport->session_id, "before handshake-fail SSL_free");
                 SSL_free(transport->ssl); transport->ssl = NULL;
                 rb_probe_debug_mem_report(transport->session_id, "after handshake-fail SSL_free");
@@ -785,7 +845,6 @@ static void rb_probe_transport_close_mode(RbProbeTransport *transport, RbProbeCl
             transport->session_id, rb_probe_close_mode_name(mode), shutdown_called ? "called" : "skipped");)
         if (transport->ssl && (transport->sslStatePoisoned || Radio_IsTlsPoisoned())) {
             RADIO_DBG(printf("radio-cleanup: probe SSL_free skipped (poisoned) session=%lu ssl=%p leaking to avoid crashing on corrupted AmiSSL state\n", transport->session_id, (void *)transport->ssl);)
-            Radio_MarkTlsPoisoned("probe SSL_free skipped for poisoned AmiSSL session");
             transport->ssl = NULL;
             transport->sslHandshakeDone = 0;
         } else if (transport->ssl) {
@@ -797,7 +856,6 @@ static void rb_probe_transport_close_mode(RbProbeTransport *transport, RbProbeCl
         }
         if (transport->ctx && (transport->sslStatePoisoned || Radio_IsTlsPoisoned())) {
             RADIO_DBG(printf("radio-cleanup: probe SSL_CTX_free skipped (poisoned) session=%lu ctx=%p leaking to avoid crashing on corrupted AmiSSL state\n", transport->session_id, (void *)transport->ctx);)
-            Radio_MarkTlsPoisoned("probe SSL_CTX_free skipped for poisoned AmiSSL session");
             transport->ctx = NULL;
         } else if (transport->ctx) {
             rb_probe_debug_mem_report(transport->session_id, "before close SSL_CTX_free");
@@ -817,6 +875,7 @@ static void rb_probe_transport_close_mode(RbProbeTransport *transport, RbProbeCl
     }
     RADIO_DBG(printf("radio-cleanup: probe close mode=%s session=%lu complete open_socket_count_after=%ld\n",
         rb_probe_close_mode_name(mode), transport->session_id, rb_probe_open_socket_count);)
+    Radio_DebugCheckExecMem("after probe transport close");
 }
 
 /* Safe default used by every connect/handshake/send/recv/redirect/HTTP-error
@@ -1062,7 +1121,7 @@ const char *rb_probe_error_text(int rc)
     case RB_STREAM_PROBE_ERR_UNSUPPORTED_CONTENT_TYPE: return "Unsupported stream format";
     case RB_STREAM_PROBE_ERR_SERVER_CLOSED: return "Stream probe failed: server closed connection during probe";
     case RB_STREAM_PROBE_ERR_TLS_HANDSHAKE: return "TLS handshake failed";
-    case RB_STREAM_PROBE_ERR_TLS_POISONED: return "HTTPS disabled after fatal TLS/memory faults; reboot before using HTTPS.";
+    case RB_STREAM_PROBE_ERR_TLS_POISONED: return "HTTPS disabled after memory corruption; reboot before using HTTPS.";
     case RB_STREAM_PROBE_ERR_HTTP_STATUS: return "Stream unavailable (server returned an error status)";
     default: return "Stream probe failed";
     }
