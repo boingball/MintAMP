@@ -6019,17 +6019,29 @@ static void AmigaFreeGuarded(void **basePtr, unsigned long bytes, int chip,
 
 static void AmigaAudioCleanupTrace(const AmigaAudioPlayer *player, const char *msg)
 {
+	/* Same reasoning as PrintPlaybackCleanupStatus() above: --debug-cleanup
+	 * is never passed to the radio playback child, so player->debugCleanup
+	 * is always 0 there, and MiniAmp3Printf silently drops everything for
+	 * the child's whole lifetime regardless -- both gates need bypassing
+	 * under RADIO_DEBUG for this per-IORequest cleanup trace to ever be
+	 * visible in a radio session log. */
+#ifndef RADIO_DEBUG
 	if (!player || !player->debugCleanup) {
 		(void)msg;
 		return;
 	}
 	printf("debug-cleanup: %s", msg);
+#else
+	if (!player) { (void)msg; return; }
+	RadioDebugUnsuppressedPrintf("debug-cleanup: %s", msg);
+#endif
 }
 
 static void AmigaAudioCleanupTrace4(const AmigaAudioPlayer *player,
 	const char *fmt, unsigned long a, unsigned long b,
 	unsigned long c, unsigned long d)
 {
+#ifndef RADIO_DEBUG
 	if (!player || !player->debugCleanup) {
 		(void)fmt;
 		(void)a;
@@ -6040,6 +6052,11 @@ static void AmigaAudioCleanupTrace4(const AmigaAudioPlayer *player,
 	}
 	printf("debug-cleanup: ");
 	printf(fmt, a, b, c, d);
+#else
+	if (!player) { (void)fmt; (void)a; (void)b; (void)c; (void)d; return; }
+	RadioDebugUnsuppressedPrintf("debug-cleanup: ");
+	RadioDebugUnsuppressedPrintf(fmt, a, b, c, d);
+#endif
 }
 
 static unsigned long AmigaAudioDrainReplies(AmigaAudioPlayer *player)

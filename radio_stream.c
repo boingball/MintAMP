@@ -73,6 +73,13 @@ struct Library *AmiSSLMasterBase = NULL;
 struct Library *AmiSSLBase = NULL;
 struct Library *AmiSSLExtBase = NULL;
 static int radio_amissl_initialized = 0;
+/* Set alongside RadioStream::sslStatePoisoned (see Radio_Pump()'s
+ * SSL_ERROR_SSL handling) -- mirrors it at file scope so
+ * radio_ssl_global_cleanup() can skip CleanupAmiSSL() too, without needing
+ * an rs pointer at both of its call sites (Radio_Close() has one,
+ * Radio_NetworkShutdown() at final app exit does not). One task only ever
+ * runs one playback session, so a single flag is enough. */
+static int radio_amissl_task_poisoned = 0;
 #endif /* HAVE_AMISSL */
 #else
 #include <unistd.h>
@@ -177,6 +184,7 @@ struct RadioStream {
     SSL *ssl;
     SSL_CTX *ctx;
     int sslHandshakeDone;
+    int sslStatePoisoned; /* see radio_ssl_read()'s SSL_ERROR_SSL handling */
 #endif
 };
 
@@ -436,7 +444,17 @@ static void radio_ssl_global_cleanup(void)
 {
     RADIO_DBG(printf("radio-ssl-diag: cleanup ENTER initialized=%d base=%p ext=%p master=%p\n", radio_amissl_initialized, (void *)AmiSSLBase, (void *)AmiSSLExtBase, (void *)AmiSSLMasterBase););
     RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: AmiSSL global cleanup start initialized=%d base=%p master=%p\n", radio_amissl_initialized, (void *)AmiSSLBase, (void *)AmiSSLMasterBase));
-    if (radio_amissl_initialized) {
+    if (radio_amissl_initialized && radio_amissl_task_poisoned) {
+        /* The soak test that found the SSL_ERROR_SSL/ring-corruption chain
+         * also caught the *next* crash one step further down, right inside
+         * CleanupAmiSSL() itself, once SSL_free()/SSL_CTX_free() were
+         * already being skipped for this poisoned task -- confirming
+         * AmiSSL's corruption here isn't confined to the SSL/SSL_CTX
+         * objects. Skip this call too and just leave this task's per-task
+         * AmiSSL init state unreleased rather than crash on top of it. */
+        RADIO_DBG(printf("radio-cleanup: CleanupAmiSSL skipped (poisoned) leaking per-task AmiSSL state to avoid crashing on corrupted AmiSSL internals\n"););
+        radio_amissl_initialized = 0;
+    } else if (radio_amissl_initialized) {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: CleanupAmiSSL start\n"));
         CleanupAmiSSL(TAG_DONE);
         if (radio_amissl_init_count > 0) radio_amissl_init_count--;
@@ -447,6 +465,7 @@ static void radio_ssl_global_cleanup(void)
     } else {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: CleanupAmiSSL skipped\n"));
     }
+    radio_amissl_task_poisoned = 0;
     /* Keep the shared AmiSSL instance (AmiSSLBase/AmiSSLExtBase) *and*
      * amisslmaster.library open for the lifetime of the program now --
      * CloseAmiSSL() is called exactly once, from Radio_NetworkShutdown(),
@@ -509,33 +528,57 @@ static int radio_ssl_connect(RadioStream *rs)
     const SSL_METHOD *method;
     int set_fd_ok;
     if (radio_ssl_global_init(rs) != 0) return -1;
-    method = SSLv23_client_method();
-    if (!method) { set_error(rs, "AmiSSL init failed"); return -1; }
-    rs->ctx = SSL_CTX_new(method);
-    if (rs->ctx) { rs->ctxFreed = 0; radio_active_ssl_ctx_count++; RADIO_DBG(printf("radio-resource: session=%lu SSL_CTX allocated active_ssl_ctx_count=%ld\n", rs->session_id, radio_active_ssl_ctx_count)); }
-    if (!rs->ctx) { set_error(rs, "AmiSSL init failed"); return -1; }
-#ifdef RADIO_SSL_VERIFY_PEER
-    /* SSLCERTS=1 build: verify the server's certificate chain against
-     * AmiSSL's installed root CA bundle -- SSL_CTX_set_default_verify_paths()
-     * picks it up the same way it would on any other OpenSSL-based build --
-     * and the hostname against the certificate, instead of accepting
-     * anything.  Falls back to no verification if the cert store can't be
-     * loaded at all (e.g. AmiSSL's update pack with the root certs was
-     * never installed), rather than refusing to play: a missing/broken
-     * cert store shouldn't be able to break streaming outright. */
-    if (SSL_CTX_set_default_verify_paths(rs->ctx)) {
-        SSL_CTX_set_verify(rs->ctx, SSL_VERIFY_PEER, NULL);
-        RADIO_DBG(printf("radio-tls: cert verification enabled session=%lu host=%s\n", rs->session_id, rs->host););
-    } else {
-        SSL_CTX_set_verify(rs->ctx, SSL_VERIFY_NONE, NULL);
-        RADIO_DBG(printf("radio-tls: cert store unavailable, verification disabled session=%lu\n", rs->session_id););
+    /* rs->ctx persists across reconnects within this task (see
+     * radio_ssl_free_ctx(), only called once from Radio_Close()) -- a
+     * dropped stream can reconnect up to RADIO_RECONNECT_MAX (10) times,
+     * and rebuilding a whole new SSL_CTX (with its own cert-verify setup)
+     * on every one of those, on top of a fresh SSL_CTX per station switch,
+     * multiplies AmiSSL's create/destroy cycle count well beyond what's
+     * actually needed -- only a fresh SSL object is required per connection
+     * attempt, per normal OpenSSL practice. */
+    if (rs->ctx && rs->sslStatePoisoned) {
+        /* This ctx survived a prior SSL_ERROR_SSL on this same reconnecting
+         * session (see Radio_Pump()) and was deliberately leaked rather
+         * than freed, since AmiSSL's own internal state may already be
+         * corrupted. Reusing it for a fresh SSL_new() here would be exactly
+         * the "call back into corrupted AmiSSL state" this app is trying to
+         * avoid -- orphan it and force a brand new SSL_CTX for the retry
+         * instead, same as if this were the first connection attempt. */
+        RADIO_DBG(printf("radio-resource: session=%lu orphaning poisoned SSL_CTX %p instead of reusing it for reconnect\n", rs->session_id, (void *)rs->ctx));
+        if (radio_active_ssl_ctx_count > 0) radio_active_ssl_ctx_count--;
+        rs->ctx = NULL;
+        rs->ctxFreed = 1;
+        rs->sslStatePoisoned = 0;
     }
+    if (!rs->ctx) {
+        method = SSLv23_client_method();
+        if (!method) { set_error(rs, "AmiSSL init failed"); return -1; }
+        rs->ctx = SSL_CTX_new(method);
+        if (rs->ctx) { rs->ctxFreed = 0; radio_active_ssl_ctx_count++; RADIO_DBG(printf("radio-resource: session=%lu SSL_CTX allocated active_ssl_ctx_count=%ld\n", rs->session_id, radio_active_ssl_ctx_count)); }
+        if (!rs->ctx) { set_error(rs, "AmiSSL init failed"); return -1; }
+#ifdef RADIO_SSL_VERIFY_PEER
+        /* SSLCERTS=1 build: verify the server's certificate chain against
+         * AmiSSL's installed root CA bundle -- SSL_CTX_set_default_verify_paths()
+         * picks it up the same way it would on any other OpenSSL-based build --
+         * and the hostname against the certificate, instead of accepting
+         * anything.  Falls back to no verification if the cert store can't be
+         * loaded at all (e.g. AmiSSL's update pack with the root certs was
+         * never installed), rather than refusing to play: a missing/broken
+         * cert store shouldn't be able to break streaming outright. */
+        if (SSL_CTX_set_default_verify_paths(rs->ctx)) {
+            SSL_CTX_set_verify(rs->ctx, SSL_VERIFY_PEER, NULL);
+            RADIO_DBG(printf("radio-tls: cert verification enabled session=%lu host=%s\n", rs->session_id, rs->host););
+        } else {
+            SSL_CTX_set_verify(rs->ctx, SSL_VERIFY_NONE, NULL);
+            RADIO_DBG(printf("radio-tls: cert store unavailable, verification disabled session=%lu\n", rs->session_id););
+        }
 #else
-    /* No CA bundle path assumed by default; skip cert verification for
-     * streams.  Build with SSLCERTS=1 to verify against AmiSSL's
-     * installed root certs instead (see above). */
-    SSL_CTX_set_verify(rs->ctx, SSL_VERIFY_NONE, NULL);
+        /* No CA bundle path assumed by default; skip cert verification for
+         * streams.  Build with SSLCERTS=1 to verify against AmiSSL's
+         * installed root certs instead (see above). */
+        SSL_CTX_set_verify(rs->ctx, SSL_VERIFY_NONE, NULL);
 #endif
+    }
     rs->ssl = SSL_new(rs->ctx);
     if (rs->ssl) { rs->sslFreed = 0; radio_active_ssl_count++; RADIO_DBG(printf("radio-resource: session=%lu SSL allocated active_ssl_count=%ld\n", rs->session_id, radio_active_ssl_count)); }
     if (!rs->ssl) { radio_ssl_close_stream(rs); set_error(rs, "AmiSSL init failed"); return -1; }
@@ -568,7 +611,7 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
     int shutdown_called = 0;
     if (!rs) return;
     RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: HTTPS cleanup start mode=%s ssl=%p ctx=%p fd=%ld handshake=%d\n", radio_close_mode_name(mode), (void *)rs->ssl, (void *)rs->ctx, (long)rs->sock, rs->sslHandshakeDone));
-    if (mode == RADIO_CLOSE_GRACEFUL && rs->ssl && rs->sslHandshakeDone && rs->sock != RADIO_INVALID_SOCKET && !rs->socketClosed) {
+    if (mode == RADIO_CLOSE_GRACEFUL && !rs->sslStatePoisoned && rs->ssl && rs->sslHandshakeDone && rs->sock != RADIO_INVALID_SOCKET && !rs->socketClosed) {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_shutdown start ssl=%p\n", (void *)rs->ssl));
         SSL_shutdown(rs->ssl);
         shutdown_called = 1;
@@ -579,7 +622,17 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
     RADIO_DBG(printf("radio-cleanup: ssl-close mode=%s session=%lu status=%d sslHandshakeDone=%d ssl_shutdown=%s ssl=%p ctx=%p fd=%ld open_socket_count=%ld\n",
         radio_close_mode_name(mode), rs->session_id, (int)rs->status, rs->sslHandshakeDone,
         shutdown_called ? "called" : "skipped", (void *)rs->ssl, (void *)rs->ctx, (long)rs->sock, radio_open_socket_count););
-    if (rs->ssl && !rs->sslFreed) {
+    if (rs->ssl && !rs->sslFreed && rs->sslStatePoisoned) {
+        /* See the SSL_ERROR_SSL handling in Radio_Pump(): AmiSSL's own
+         * internal state may already be corrupted, so calling back into it
+         * here risks crashing on top of that instead of just leaking one
+         * SSL object. */
+        RADIO_DBG(printf("radio-cleanup: SSL_free skipped (poisoned) session=%lu ssl=%p leaking to avoid crashing on corrupted AmiSSL state\n", rs->session_id, (void *)rs->ssl));
+        rs->sslFreed = 1;
+        if (radio_active_ssl_count > 0) radio_active_ssl_count--;
+        rs->ssl = NULL;
+        rs->sslHandshakeDone = 0;
+    } else if (rs->ssl && !rs->sslFreed) {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_free start session=%lu ssl=%p ctx=%p fd=%ld\n", rs->session_id, (void *)rs->ssl, (void *)rs->ctx, (long)rs->sock));
         radio_debug_mem_report(rs->session_id, "before SSL_free");
         rs->ssl_free_count++;
@@ -593,7 +646,34 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
     } else {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_free skipped\n"));
     }
-    if (rs->ctx && !rs->ctxFreed) {
+    /* rs->ctx is deliberately NOT freed here -- it's reused across
+     * reconnects within this task (see radio_ssl_connect()). It's only
+     * freed once, by radio_ssl_free_ctx(), when this session is exiting for
+     * good (Radio_Close()). */
+    RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: HTTPS cleanup complete\n"));
+}
+
+/* Safe default used by every error/timeout/handshake-failure path: never
+ * attempts SSL_shutdown() on a session that may already be in an error or
+ * peer-closed state. */
+static void radio_ssl_close_stream(RadioStream *rs) { radio_ssl_close_stream_mode(rs, RADIO_CLOSE_ABORT); }
+
+/* Final, once-per-task free of the SSL_CTX kept alive across this session's
+ * reconnects (see radio_ssl_connect()). Called once from Radio_Close(). */
+static void radio_ssl_free_ctx(RadioStream *rs)
+{
+    if (!rs) return;
+    if (rs->ctx && !rs->ctxFreed && rs->sslStatePoisoned) {
+        /* See the SSL_ERROR_SSL handling in Radio_Pump(): the crash this
+         * mitigates was caught by the soak test landing right inside this
+         * exact call, immediately after a ring-buffer corruption was found
+         * that traces back to the same poisoned session -- so SSL_CTX_free()
+         * itself, not just SSL_free(), needs to be skipped once poisoned. */
+        RADIO_DBG(printf("radio-cleanup: SSL_CTX_free skipped (poisoned) session=%lu ctx=%p leaking to avoid crashing on corrupted AmiSSL state\n", rs->session_id, (void *)rs->ctx));
+        rs->ctxFreed = 1;
+        if (radio_active_ssl_ctx_count > 0) radio_active_ssl_ctx_count--;
+        rs->ctx = NULL;
+    } else if (rs->ctx && !rs->ctxFreed) {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_CTX_free start session=%lu ctx=%p fd=%ld\n", rs->session_id, (void *)rs->ctx, (long)rs->sock));
         radio_debug_mem_report(rs->session_id, "before SSL_CTX_free");
         rs->ssl_ctx_free_count++;
@@ -606,13 +686,7 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
     } else {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_CTX_free skipped\n"));
     }
-    RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: HTTPS cleanup complete\n"));
 }
-
-/* Safe default used by every error/timeout/handshake-failure path: never
- * attempts SSL_shutdown() on a session that may already be in an error or
- * peer-closed state. */
-static void radio_ssl_close_stream(RadioStream *rs) { radio_ssl_close_stream_mode(rs, RADIO_CLOSE_ABORT); }
 #endif /* AMIGA_M68K && HAVE_AMISSL */
 
 /* Drive a non-blocking connect() to completion by re-issuing connect() and
@@ -754,6 +828,19 @@ static int radio_ring_check_canary(RadioStream *rs, const char *where)
             rs->url));
         rs->stopping = 1;
         rs->status = RADIO_STATUS_STOPPING;
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+        /* One soak-test session hit this with no SSL_ERROR_SSL involved at
+         * all -- a perfectly healthy, actively-streaming connection whose
+         * ring buffer was found corrupted mid-stream, which later crashed
+         * inside an unprotected SSL_CTX_free() because nothing had marked
+         * this session poisoned. Any detected ring corruption, regardless
+         * of how it got there, means AmiSSL-adjacent heap state for this
+         * session may already be damaged -- so treat it exactly like the
+         * SSL_ERROR_SSL case and skip further SSL_free()/SSL_CTX_free()/
+         * CleanupAmiSSL() calls for it. */
+        rs->sslStatePoisoned = 1;
+        radio_amissl_task_poisoned = 1;
+#endif
         return -1;
     }
     return 0;
@@ -964,6 +1051,16 @@ static int process_bytes(RadioStream *rs, const unsigned char *b, int n)
 {
     int i;
     for (i = 0; i < n; i++) {
+        /* radio_ring_check_canary() (called from ring_write() below) sets
+         * rs->stopping the instant it finds the ring buffer corrupted --
+         * without this check, a single large read (up to sizeof(b), i.e.
+         * up to 1024 bytes) would keep calling ring_write() once per
+         * remaining byte in this same batch, re-detecting and re-logging
+         * the same corruption hundreds of times per Radio_Pump() cycle
+         * for as long as the connection kept delivering data, which is
+         * exactly what one soak test session did before it could even
+         * reach the stop/cleanup path. */
+        if (rs->stopping) break;
         if (rs->parseState == RADIO_PARSE_HEADER) {
             if (rs->headerLen >= RADIO_HEADER_MAX - 1) { set_error(rs,"HTTP header too large"); return -1; }
             rs->header[rs->headerLen++] = (char)b[i]; rs->header[rs->headerLen] = 0;
@@ -1037,6 +1134,28 @@ RadioStream *Radio_OpenWithHostAddr(const char *url, int haveHostAddr, unsigned 
     rs->size = RADIO_RING_BYTES;
     rs->ringAlloc = (unsigned char *)malloc(rs->size + 2UL * RADIO_RING_GUARD_BYTES);
     if (rs->ringAlloc) { rs->ring = rs->ringAlloc + RADIO_RING_GUARD_BYTES; radio_ring_set_canary(rs); }
+    /* Printed unconditionally (not RADIO_DBG-gated) so it's visible even if
+     * a build is run without the console attached to a log file -- this is
+     * the address to arm a live debugger watchpoint on when chasing the
+     * ring-corruption-with-no-detectable-trigger case: front guard is
+     * [ringAlloc, ringAlloc+16), rear guard is
+     * [ringAlloc+16+size, ringAlloc+32+size). */
+    if (rs->ringAlloc)
+        printf("radio-resource: session=%lu ring buffer allocated at %p (front guard %p..%p, data %p..%p, rear guard %p..%p)\n",
+            rs->session_id, (void *)rs->ringAlloc,
+            (void *)rs->ringAlloc, (void *)(rs->ringAlloc + RADIO_RING_GUARD_BYTES),
+            (void *)rs->ring, (void *)(rs->ring + rs->size),
+            (void *)(rs->ringAlloc + RADIO_RING_GUARD_BYTES + rs->size),
+            (void *)(rs->ringAlloc + 2UL * RADIO_RING_GUARD_BYTES + rs->size));
+    /* The soak test caught the ring's malloc-guard header already zeroed
+     * (magic=00000000) by session 4, in a run where headerDone was still 0
+     * -- meaning ring_write()/ring_read() were never even called this
+     * session, ruling those out as the source. Checking immediately after
+     * this fresh allocation (before anything touches the buffer) tells us
+     * whether malloc() is handing back an already-damaged block -- pointing
+     * at heap/free-list corruption from an earlier session -- or whether
+     * this allocation starts clean and something corrupts it afterward. */
+    MiniMem_CheckAll("after ring buffer allocated");
     if (rs->ring) { radio_active_stream_buffer_count++; radio_active_audio_buffer_count++; RADIO_DBG(printf("radio-resource: session=%lu stream/audio buffer allocated active_stream_buffer_count=%ld active_audio_buffer_count=%ld\n", rs->session_id, radio_active_stream_buffer_count, radio_active_audio_buffer_count)); }
     if (!rs->ring) {
         rs->size = 0;
@@ -1128,7 +1247,20 @@ void Radio_Close(RadioStream *rs)
     rs->stream_buffer_free_count++;
     rs->audio_buffer_free_count++;
     if (rs->stream_buffer_free_count > 1) radio_duplicate_cleanup_warning(rs, "stream buffer free", rs->stream_buffer_free_count);
-    else { if (rs->ringAlloc) { radio_ring_check_canary(rs, "before cleanup"); free(rs->ringAlloc); if (radio_active_stream_buffer_count > 0) radio_active_stream_buffer_count--; } }
+    else { if (rs->ringAlloc) {
+        /* radio_ring_check_canary() returning -1 means the guard bytes
+         * around this block are already corrupted -- in a HEAPGUARD debug
+         * build, MiniMem_Free() defensively refuses to free a block whose
+         * header doesn't look valid, but a release build has no such
+         * safety net: calling the real free() on an already-corrupted
+         * block risks smashing the allocator's own free-list instead of
+         * just leaking one buffer. Leak it deliberately instead. */
+        if (radio_ring_check_canary(rs, "before cleanup") == 0)
+            free(rs->ringAlloc);
+        else
+            RADIO_DBG(printf("radio-cleanup: session=%lu ring buffer free skipped (corrupted), leaking to avoid smashing the allocator\n", rs->session_id));
+        if (radio_active_stream_buffer_count > 0) radio_active_stream_buffer_count--;
+    } }
     if (rs->audio_buffer_free_count > 1) radio_duplicate_cleanup_warning(rs, "audio buffer free", rs->audio_buffer_free_count);
     else { if (radio_active_audio_buffer_count > 0) radio_active_audio_buffer_count--; }
     rs->decoder_free_count++;
@@ -1146,6 +1278,7 @@ void Radio_Close(RadioStream *rs)
      * by this task before it exits -- see the comment there. Each new
      * playback session runs in a freshly spawned child task/process, so
      * this always correctly runs once per task. */
+    radio_ssl_free_ctx(rs);
     rs->amissl_cleanup_count++;
     radio_ssl_global_cleanup();
 #endif
@@ -1279,6 +1412,25 @@ int Radio_Pump(RadioStream *rs)
                     ERR_error_string_n(ssl_lib_error, ssl_error_buf, sizeof(ssl_error_buf));
                 RADIO_DBG(printf("radio-ssl-read: session=%lu read failed ssl_error=%d lib_error=%08lx (%s)\n",
                     rs->session_id, e, ssl_lib_error, ssl_error_buf[0] ? ssl_error_buf : "none"));
+                if (e == SSL_ERROR_SSL) {
+                    /* A record-layer parse failure (e.g. "invalid record")
+                     * inside AmiSSL's own SSL_read() -- one soak-test run
+                     * caught exactly this, followed by an unrelated heap
+                     * allocation (this session's stream ring buffer) found
+                     * zeroed shortly after, and a crash inside the
+                     * following SSL_CTX_free() call. That points at AmiSSL's
+                     * record parser overrunning its own buffer on malformed
+                     * input and corrupting adjacent heap memory -- something
+                     * this app cannot fix inside a closed-source shared
+                     * library. Mark this session's SSL state as poisoned so
+                     * the close path below skips calling back into AmiSSL
+                     * (SSL_free()/SSL_CTX_free()) for it: leaking one SSL
+                     * and one SSL_CTX object is far cheaper than crashing on
+                     * top of already-corrupted AmiSSL-internal state. */
+                    rs->sslStatePoisoned = 1;
+                    radio_amissl_task_poisoned = 1;
+                    RADIO_DBG(printf("radio-ssl-read: session=%lu SSL state marked poisoned (SSL_ERROR_SSL) -- will skip SSL_free/SSL_CTX_free/CleanupAmiSSL on close\n", rs->session_id));
+                }
             }
         }
     } else
@@ -1326,7 +1478,18 @@ int Radio_Pump(RadioStream *rs)
     }
     if (radio_is_stopping(rs)) { close_current_socket(rs); rs->status = RADIO_STATUS_CLOSED; return 0; }
     if (rs->headerDone && rs->used >= RADIO_START_THRESHOLD) {
-        if (!rs->everPlayed) RADIO_DBG(printf("radio-stream: first decoder frame / playback buffer ready fd=%ld\n", (long)rs->sock);)
+        if (!rs->everPlayed) {
+            RADIO_DBG(printf("radio-stream: first decoder frame / playback buffer ready fd=%ld\n", (long)rs->sock);)
+            /* Narrows the corruption window seen on session 4 of the SSL/MP3
+             * soak test: the ring's own canary passed every ring_write()
+             * during buffering (those checks are silent on success), but was
+             * found zeroed by the time MP3InitDecoder() ran. This is the
+             * exact instant buffering completes, still inside radio_stream.c
+             * -- if this check ever fails, the corruption is happening
+             * somewhere in this file's own buffering/parse path, not in the
+             * decoder/audio-device setup that runs after this point. */
+            radio_ring_check_canary(rs, "buffering complete, before decoder handoff");
+        }
         rs->reconnectAttempts = 0; rs->reconnectDelay = 0; rs->everPlayed = 1; set_status(rs, RADIO_STATUS_PLAYING);
     } else if (rs->headerDone && rs->status != RADIO_STATUS_PLAYING)
         set_status(rs, RADIO_STATUS_BUFFERING);
