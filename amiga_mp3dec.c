@@ -6087,20 +6087,50 @@ static unsigned long AmigaAudioDrainReplies(AmigaAudioPlayer *player)
 	return drained;
 }
 
-static void AmigaAudioClearSent(AmigaAudioPlayer *player)
+/* AbortIO() is asynchronous on audio.device: an aborted CMD_WRITE still
+ * completes and posts a reply to the port afterwards.  Every submitted
+ * request must therefore be reaped with WaitIO() before CloseDevice()/
+ * DeleteIORequest(), or the device replies into freed memory -- exec then
+ * reports the damage later as recoverable AN_FreeTwice (01000009) /
+ * AN_BadFreeAddr (0100000F) alerts (observed as four alerts at app exit
+ * after a mid-play Stop aborted four queued writes and forgot them).  The
+ * old GetMsg()-drain only collected replies that had already arrived; it
+ * could not wait for the aborted ones still in flight.  The wait here is
+ * bounded so a wedged unit cannot hang Stop: a request that never
+ * completes keeps its sent[] flag and AmigaAudioClose() deliberately
+ * leaks its IORequest instead of deleting it. */
+static void AmigaAudioReapOutstanding(AmigaAudioPlayer *player)
 {
 	int i;
 	int ch;
 
-	for (i = 0; i < AMIGA_AUDIO_PLAYBACK_SLOTS; i++)
-		for (ch = 0; ch < 2; ch++)
+	for (i = 0; i < AMIGA_AUDIO_PLAYBACK_SLOTS; i++) {
+		for (ch = 0; ch < 2; ch++) {
+			struct IORequest *req = (struct IORequest *)player->req[i][ch];
+			if (!req || !player->sent[i][ch])
+				continue;
+#if defined(AMIGA_M68K)
+			{
+				int spins = 0;
+				while (!CheckIO(req) && spins < 50) {
+					Delay(1);
+					spins++;
+				}
+				if (!CheckIO(req)) {
+					AmigaAudioCleanupTrace4(player,
+						"request index=%ld channel=%ld never completed after AbortIO -- leaking IORequest\n",
+						(unsigned long)i, (unsigned long)ch, 0, 0);
+					continue;
+				}
+			}
+#endif
+			WaitIO(req);
 			player->sent[i][ch] = 0;
-}
-
-static void AmigaAudioDrainRepliesAndClearSent(AmigaAudioPlayer *player)
-{
-	AmigaAudioDrainReplies(player);
-	AmigaAudioClearSent(player);
+			AmigaAudioCleanupTrace4(player,
+				"request index=%ld channel=%ld reaped after abort\n",
+				(unsigned long)i, (unsigned long)ch, 0, 0);
+		}
+	}
 }
 
 static void AmigaAudioClose(AmigaAudioPlayer *player,
@@ -6149,9 +6179,17 @@ static void AmigaAudioClose(AmigaAudioPlayer *player,
 			}
 		}
 	}
-	/* Close audio.device before reaping: stops DMA hardware immediately.
-	 * Uses closeReq (not req[0][ch]) to avoid reusing the IORequest that may
-	 * still have a live CMD_WRITE pending on it. */
+	/* Reap every submitted request before CloseDevice(): AbortIO() only
+	 * *requests* cancellation -- the device still completes and replies each
+	 * aborted CMD_WRITE afterwards, so closing the unit and deleting the
+	 * IORequests with replies still in flight let audio.device write into
+	 * freed memory (the source of the recoverable AN_FreeTwice/
+	 * AN_BadFreeAddr alerts at app exit after a mid-play Stop).  Aborted
+	 * requests complete near-instantly, so this does not stall Stop; see
+	 * AmigaAudioReapOutstanding() for the bounded-wait escape hatch. */
+	AmigaAudioReapOutstanding(player);
+	/* CloseDevice after reaping: uses closeReq (not req[0][ch]) so it never
+	 * reuses an IORequest that carried a CMD_WRITE. */
 	for (ch = 0; ch < 2; ch++) {
 		if (player->deviceOpen[ch] && player->closeReq[ch]) {
 			CloseDevice((struct IORequest *)player->closeReq[ch]);
@@ -6163,23 +6201,11 @@ static void AmigaAudioClose(AmigaAudioPlayer *player,
 		}
 	}
 	gGuiPlaybackStatus.cleanupStage = GUIPLAY_CLEANUP_DEVICE_CLOSED;
-	/* CloseDevice stops DMA immediately.  In-flight CMD_WRITE replies are not
-	 * required before freeing chip buffers because the hardware is no longer
-	 * reading them; avoid WaitIO, which can block while Stop is in progress. */
 	{
 		unsigned long drained = AmigaAudioDrainReplies(player);
 		AmigaAudioCleanupTrace4(player, "reply drained=%ld\n",
 			drained, 0, 0, 0);
 	}
-	for (i = 0; i < AMIGA_AUDIO_PLAYBACK_SLOTS; i++) {
-		for (ch = 0; ch < 2; ch++) {
-			if (player->req[i][ch] && player->sent[i][ch])
-				AmigaAudioCleanupTrace4(player,
-					"request index=%ld channel=%ld sent cleared (DMA stopped)\n",
-					(unsigned long)i, (unsigned long)ch, 0, 0);
-		}
-	}
-	AmigaAudioClearSent(player);
 	for (i = 0; i < AMIGA_AUDIO_PLAYBACK_SLOTS; i++) {
 		for (ch = 0; ch < 2; ch++) {
 			if (player->splitBase[i][ch]) {
@@ -6219,9 +6245,24 @@ static void AmigaAudioClose(AmigaAudioPlayer *player,
 		}
 	}
 	gGuiPlaybackStatus.cleanupStage = GUIPLAY_CLEANUP_BUFFERS_FREED;
-	for (i = 0; i < AMIGA_AUDIO_PLAYBACK_SLOTS; i++) {
-		for (ch = 0; ch < 2; ch++) {
-			if (player->req[i][ch]) {
+	{
+		int leaked_requests = 0;
+		for (i = 0; i < AMIGA_AUDIO_PLAYBACK_SLOTS; i++) {
+			for (ch = 0; ch < 2; ch++) {
+				if (!player->req[i][ch])
+					continue;
+				if (player->sent[i][ch]) {
+					/* Never completed after AbortIO (see
+					 * AmigaAudioReapOutstanding()): the device may still
+					 * reply into it, so deleting it would recreate the
+					 * freed-memory alerts this cleanup exists to prevent.
+					 * Leak it (and the shared reply port below). */
+					AmigaAudioCleanupTrace4(player, "slot=%ld channel=%ld IORequest leaked (still owned by audio.device)\n",
+						(unsigned long)i, (unsigned long)ch, 0, 0);
+					player->req[i][ch] = NULL;
+					leaked_requests++;
+					continue;
+				}
 				DeleteIORequest((struct IORequest *)player->req[i][ch]);
 				AmigaAudioCleanupTrace4(player, "slot=%ld channel=%ld IORequest deleted\n",
 					(unsigned long)i, (unsigned long)ch, 0, 0);
@@ -6230,24 +6271,35 @@ static void AmigaAudioClose(AmigaAudioPlayer *player,
 					status->ioRequestsDeleted++;
 			}
 		}
-	}
-	for (ch = 0; ch < 2; ch++) {
-		if (player->closeReq[ch]) {
-			DeleteIORequest((struct IORequest *)player->closeReq[ch]);
-			AmigaAudioCleanupTrace4(player, "channel=%ld closeReq deleted\n",
-				(unsigned long)ch, 0, 0, 0);
-			player->closeReq[ch] = NULL;
-			if (status)
-				status->ioRequestsDeleted++;
+		for (ch = 0; ch < 2; ch++) {
+			if (player->closeReq[ch]) {
+				DeleteIORequest((struct IORequest *)player->closeReq[ch]);
+				AmigaAudioCleanupTrace4(player, "channel=%ld closeReq deleted\n",
+					(unsigned long)ch, 0, 0, 0);
+				player->closeReq[ch] = NULL;
+				if (status)
+					status->ioRequestsDeleted++;
+			}
+		}
+		if (player->port) {
+			if (leaked_requests) {
+				AmigaAudioCleanupTrace4(player, "message port leaked (%ld unreaped IORequests may still reply to it)\n",
+					(unsigned long)leaked_requests, 0, 0, 0);
+				player->port = NULL;
+			} else {
+				DeleteMsgPort(player->port);
+				AmigaAudioCleanupTrace(player, "message port deleted\n");
+				player->port = NULL;
+				if (status)
+					status->messagePortsDeleted++;
+			}
 		}
 	}
-	if (player->port) {
-		DeleteMsgPort(player->port);
-		AmigaAudioCleanupTrace(player, "message port deleted\n");
-		player->port = NULL;
-		if (status)
-			status->messagePortsDeleted++;
-	}
+	/* The leak decisions above are recorded; reset sent[] so a reused
+	 * player cannot mistake a future IORequest for a submitted one. */
+	for (i = 0; i < AMIGA_AUDIO_PLAYBACK_SLOTS; i++)
+		for (ch = 0; ch < 2; ch++)
+			player->sent[i][ch] = 0;
 	player->stereo = 0;
 	player->period = 0;
 	player->splitBytes = 0;
@@ -6651,6 +6703,8 @@ static int AmigaAudioDone(AmigaAudioPlayer *player, int index)
 	return CheckIO((struct IORequest *)player->req[index][0]) != 0;
 }
 
+static int AmigaAudioAbortOutstanding(AmigaAudioPlayer *player);
+
 static int AmigaAudioWaitOne(AmigaAudioPlayer *player, int index, int ch)
 {
 	struct IORequest *req;
@@ -6662,21 +6716,14 @@ static int AmigaAudioWaitOne(AmigaAudioPlayer *player, int index, int ch)
 		ULONG sigs = (1UL << player->port->mp_SigBit) | SIGBREAKF_CTRL_C;
 		ULONG got = Wait(sigs);
 		if (got & SIGBREAKF_CTRL_C) {
-			int cls;
 			gPlaybackInterrupted = 1;
 			player->stopping = 1;
-			if (!CheckIO(req))
-				AbortIO(req);
-			/* CloseDevice stops DMA immediately.  Pending CMD_WRITE
-			 * replies may not arrive until end-of-buffer, so do not
-			 * WaitIO here; drain the port and forget in-flight writes. */
-			for (cls = 0; cls < 2; cls++) {
-				if (player->deviceOpen[cls] && player->closeReq[cls]) {
-					CloseDevice((struct IORequest *)player->closeReq[cls]);
-					player->deviceOpen[cls] = 0;
-				}
-			}
-			AmigaAudioDrainRepliesAndClearSent(player);
+			/* Abort and reap the WHOLE ring, not just this request: the
+			 * old inline path aborted only req, then closed the device
+			 * and forgot every other in-flight write -- audio.device kept
+			 * replying into what cleanup later freed (the AN_FreeTwice/
+			 * AN_BadFreeAddr alerts at app exit). */
+			AmigaAudioAbortOutstanding(player);
 			return -1;
 		}
 	}
@@ -6708,15 +6755,18 @@ static int AmigaAudioAbortOutstanding(AmigaAudioPlayer *player)
 				AbortIO(req);
 		}
 	}
-	/* Close audio.device now: stops DMA hardware immediately.  Avoid WaitIO
-	 * after close; drain replies and clear sent flags instead. */
+	/* Reap the aborted requests before CloseDevice(): an aborted CMD_WRITE
+	 * still completes and replies, and closing/deleting under it is what
+	 * produced the AN_FreeTwice/AN_BadFreeAddr alerts at app exit.  See
+	 * AmigaAudioReapOutstanding(). */
+	AmigaAudioReapOutstanding(player);
 	for (ch = 0; ch < 2; ch++) {
 		if (player->deviceOpen[ch] && player->closeReq[ch]) {
 			CloseDevice((struct IORequest *)player->closeReq[ch]);
 			player->deviceOpen[ch] = 0;
 		}
 	}
-	AmigaAudioDrainRepliesAndClearSent(player);
+	AmigaAudioDrainReplies(player);
 	return -1;
 }
 

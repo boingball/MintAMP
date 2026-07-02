@@ -8,6 +8,7 @@
 
 #include "radio_browser_http.h"
 #include "radio_debug.h"
+#include "radio_stream.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -154,6 +155,16 @@ static int rb_http_transport_open(RbHttpTransport *transport, const char *host, 
     transport->sock = RB_HTTP_INVALID_SOCKET;
 
 #if defined(AMIGA_M68K) && !defined(RB_HTTP_EXTERNAL_SOCKETBASE)
+    if (!SocketBase) {
+        /* Adopt the app-wide bsdsocket.library opened by Radio_NetworkInit()
+         * first: this file's weak SocketBase does not reliably merge with
+         * radio_stream.c's strong definition under the m68k hunk linker (see
+         * the matching fix in radio_stream_probe.c), so without this the
+         * search path silently ran on its own second bsdsocket instance. */
+        void *shared_socket = NULL;
+        Radio_GetNetworkBases(&shared_socket, NULL, NULL);
+        if (shared_socket) SocketBase = (struct Library *)shared_socket;
+    }
     if (!SocketBase) {
         SocketBase = OpenLibrary("bsdsocket.library", 4);
         if (!SocketBase) return RB_HTTP_ERR_CONNECT;
