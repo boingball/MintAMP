@@ -1209,6 +1209,13 @@ static void BuildPlaybackArgs(MrApp *app, MrPlayArgs *args)
 			sprintf(num, "%lu", app->radioHostAddrBe);
 			AddArg(args, num);
 		}
+		if (!app->rbShowingFavourites && app->rbController.selected_index >= 0) {
+			const RadioBrowserStation *st = rb_controller_get_station(&app->rbController, app->rbController.selected_index);
+			if (st && st->codec[0]) {
+				AddArg(args, "--radio-codec-hint");
+				AddArg(args, st->codec);
+			}
+		}
 	}
 	/* --fast-mem preloads the *whole input* into Fast RAM up front
 	 * (InputSourcePreloadFastMemory() in amiga_mp3dec.c does an
