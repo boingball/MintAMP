@@ -65,6 +65,9 @@ void Radio_GetNetworkStats(long *active_stream_sessions, long *active_stream_tas
 void Radio_GetNetworkBases(void **socket_base, void **amissl_base, void **amissl_master_base);
 int Radio_IsMemoryPoisoned(void);
 void Radio_MarkMemoryPoisoned(const char *where);
+int Radio_IsTlsPoisoned(void);
+void Radio_MarkTlsPoisoned(const char *where);
+const char *Radio_TlsPoisonedMessage(void);
 int Radio_CheckMiniMem(const char *where);
 #else
 static RadioStream *Radio_OpenWithHostAddr(const char *url, int haveHostAddr, unsigned long hostAddrBe) { (void)url; (void)haveHostAddr; (void)hostAddrBe; return (RadioStream *)0; }
@@ -104,6 +107,9 @@ static void Radio_GetNetworkBases(void **socket_base, void **amissl_base, void *
 }
 static int Radio_IsMemoryPoisoned(void) { return 0; }
 static void Radio_MarkMemoryPoisoned(const char *where) { (void)where; }
+static int Radio_IsTlsPoisoned(void) { return 0; }
+static void Radio_MarkTlsPoisoned(const char *where) { (void)where; }
+static const char *Radio_TlsPoisonedMessage(void) { return "HTTPS subsystem poisoned after TLS error; restart app before using HTTPS again."; }
 static int Radio_CheckMiniMem(const char *where) { (void)where; return 0; }
 static const char *Radio_StatusText(RadioStatus status)
 {

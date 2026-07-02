@@ -215,6 +215,7 @@ static long radio_gui_listbrowser_node_count = 0;
 static long radio_gui_string_count = 0;
 static int radio_atexit_registered = 0;
 static int radioMemoryPoisoned = 0;
+int radioAmiSslPoisoned = 0;
 static unsigned long radio_poison_session_id = 0;
 static char radio_poison_url[256];
 
@@ -250,6 +251,26 @@ void Radio_MarkMemoryPoisoned(const char *where)
 int Radio_IsMemoryPoisoned(void)
 {
     return radioMemoryPoisoned;
+}
+
+const char *Radio_TlsPoisonedMessage(void)
+{
+    return "HTTPS subsystem poisoned after TLS error; restart app before using HTTPS again.";
+}
+
+void Radio_MarkTlsPoisoned(const char *where)
+{
+    if (!radioAmiSslPoisoned)
+        printf("%s\n", Radio_TlsPoisonedMessage());
+    radioAmiSslPoisoned = 1;
+    RADIO_DBG(printf("radio-tls: AmiSSL poisoned where=%s session=%lu url=\"%s\"\n",
+        where ? where : "", radio_poison_session_id,
+        radio_poison_url[0] ? radio_poison_url : ""));
+}
+
+int Radio_IsTlsPoisoned(void)
+{
+    return radioAmiSslPoisoned;
 }
 
 int Radio_CheckMiniMem(const char *where)
@@ -491,6 +512,7 @@ static void radio_ssl_global_cleanup(void)
          * objects. Skip this call too and just leave this task's per-task
          * AmiSSL init state unreleased rather than crash on top of it. */
         RADIO_DBG(printf("radio-cleanup: CleanupAmiSSL skipped (poisoned) leaking per-task AmiSSL state to avoid crashing on corrupted AmiSSL internals\n"););
+        Radio_MarkTlsPoisoned("CleanupAmiSSL skipped for poisoned AmiSSL session");
         radio_amissl_initialized = 0;
     } else if (radio_amissl_initialized) {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: CleanupAmiSSL start\n"));
@@ -676,6 +698,7 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
          * here risks crashing on top of that instead of just leaking one
          * SSL object. */
         RADIO_DBG(printf("radio-cleanup: SSL_free skipped (poisoned) session=%lu ssl=%p leaking to avoid crashing on corrupted AmiSSL state\n", rs->session_id, (void *)rs->ssl));
+        Radio_MarkTlsPoisoned("SSL_free skipped for poisoned AmiSSL session");
         rs->sslFreed = 1;
         if (radio_active_ssl_count > 0) radio_active_ssl_count--;
         rs->ssl = NULL;
@@ -718,6 +741,7 @@ static void radio_ssl_free_ctx(RadioStream *rs)
          * that traces back to the same poisoned session -- so SSL_CTX_free()
          * itself, not just SSL_free(), needs to be skipped once poisoned. */
         RADIO_DBG(printf("radio-cleanup: SSL_CTX_free skipped (poisoned) session=%lu ctx=%p leaking to avoid crashing on corrupted AmiSSL state\n", rs->session_id, (void *)rs->ctx));
+        Radio_MarkTlsPoisoned("SSL_CTX_free skipped for poisoned AmiSSL session");
         rs->ctxFreed = 1;
         if (radio_active_ssl_ctx_count > 0) radio_active_ssl_ctx_count--;
         rs->ctx = NULL;
@@ -932,6 +956,7 @@ static int radio_ring_check_canary(RadioStream *rs, const char *where)
          * CleanupAmiSSL() calls for it. */
         rs->sslStatePoisoned = 1;
         radio_amissl_task_poisoned = 1;
+        Radio_MarkTlsPoisoned("ring corruption during AmiSSL session");
 #endif
         return -1;
     }
@@ -1271,6 +1296,13 @@ RadioStream *Radio_OpenWithHostAddr(const char *url, int haveHostAddr, unsigned 
         RADIO_OPEN_DEBUG_PRINTF(("radio-open: refused stream start after memory poison session=%lu url=\"%s\"\n", rs->session_id, rs->url));
         return rs;
     }
+    if (url && !strncmp(url, "https://", 8) && Radio_IsTlsPoisoned()) {
+        rs->status = RADIO_STATUS_ERROR;
+        radio_copy_string(rs->url, sizeof(rs->url), url);
+        set_error(rs, Radio_TlsPoisonedMessage());
+        RADIO_OPEN_DEBUG_PRINTF(("radio-open: refused HTTPS stream start after AmiSSL poison session=%lu url=\"%s\"\n", rs->session_id, rs->url));
+        return rs;
+    }
     if (haveHostAddr) {
         memcpy(&rs->hostAddr, &hostAddrBe, sizeof(rs->hostAddr));
         rs->haveHostAddr = 1;
@@ -1591,7 +1623,7 @@ int Radio_Pump(RadioStream *rs)
                     ERR_error_string_n(ssl_lib_error, ssl_error_buf, sizeof(ssl_error_buf));
                 RADIO_DBG(printf("radio-ssl-read: session=%lu read failed ssl_error=%d lib_error=%08lx (%s)\n",
                     rs->session_id, e, ssl_lib_error, ssl_error_buf[0] ? ssl_error_buf : "none"));
-                if (e == SSL_ERROR_SSL) {
+                if (e == SSL_ERROR_SSL || ssl_lib_error != 0) {
                     /* A record-layer parse failure (e.g. "invalid record")
                      * inside AmiSSL's own SSL_read() -- one soak-test run
                      * caught exactly this, followed by an unrelated heap
@@ -1608,7 +1640,8 @@ int Radio_Pump(RadioStream *rs)
                      * top of already-corrupted AmiSSL-internal state. */
                     rs->sslStatePoisoned = 1;
                     radio_amissl_task_poisoned = 1;
-                    RADIO_DBG(printf("radio-ssl-read: session=%lu SSL state marked poisoned (SSL_ERROR_SSL) -- will skip SSL_free/SSL_CTX_free/CleanupAmiSSL on close\n", rs->session_id));
+                    Radio_MarkTlsPoisoned(e == SSL_ERROR_SSL ? "SSL_ERROR_SSL from SSL_read" : "fatal AmiSSL error queue from SSL_read");
+                    RADIO_DBG(printf("radio-ssl-read: session=%lu SSL state marked poisoned (SSL_ERROR_SSL/fatal lib_error) -- will skip SSL_free/SSL_CTX_free/CleanupAmiSSL on close\n", rs->session_id));
                 }
             }
         }

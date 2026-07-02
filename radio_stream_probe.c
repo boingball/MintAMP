@@ -7,6 +7,7 @@
 
 #include "radio_stream_probe.h"
 #include "radio_debug.h"
+#include "radio_stream.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -141,6 +142,7 @@ typedef struct RbProbeTransport {
     SSL *ssl;
     SSL_CTX *ctx;
     int sslHandshakeDone;
+    int sslStatePoisoned;
 #endif
 } RbProbeTransport;
 
@@ -166,6 +168,20 @@ static int rb_probe_ssl_read_retrying(RbProbeTransport *transport, char *dst, in
         if (ssl_err == SSL_ERROR_WANT_READ || ssl_err == SSL_ERROR_WANT_WRITE) {
             rb_probe_backoff_sleep();
             continue;
+        }
+        {
+            unsigned long ssl_lib_error = ERR_get_error();
+            char ssl_error_buf[160];
+            ssl_error_buf[0] = '\0';
+            if (ssl_lib_error != 0)
+                ERR_error_string_n(ssl_lib_error, ssl_error_buf, sizeof(ssl_error_buf));
+            RADIO_DBG(printf("rb-probe-ssl-read: session=%lu read failed ssl_error=%d lib_error=%08lx (%s)\n",
+                transport->session_id, ssl_err, ssl_lib_error, ssl_error_buf[0] ? ssl_error_buf : "none"));
+            if (ssl_err == SSL_ERROR_SSL || ssl_lib_error != 0) {
+                transport->sslStatePoisoned = 1;
+                Radio_MarkTlsPoisoned(ssl_err == SSL_ERROR_SSL ? "probe SSL_ERROR_SSL from SSL_read" : "probe fatal AmiSSL error queue from SSL_read");
+                RADIO_DBG(printf("rb-probe-ssl-read: session=%lu SSL state marked poisoned (SSL_ERROR_SSL/fatal lib_error) -- will skip SSL_free/SSL_CTX_free/CleanupAmiSSL on close\n", transport->session_id));
+            }
         }
         return n;
     }
@@ -529,7 +545,11 @@ static int rb_probe_ensure_amissl(void)
 static void rb_probe_cleanup_amissl(void)
 {
     RADIO_DBG(printf("radio-ssl-diag: probe cleanup ENTER probe_init=%d base=%p ext=%p master=%p\n", rb_probe_amissl_initialized, (void *)AmiSSLBase, (void *)AmiSSLExtBase, (void *)AmiSSLMasterBase);)
-    if (rb_probe_amissl_initialized) {
+    if (rb_probe_amissl_initialized && Radio_IsTlsPoisoned()) {
+        RADIO_DBG(printf("radio-cleanup: probe CleanupAmiSSL skipped (poisoned) leaking per-task AmiSSL state to avoid crashing on corrupted AmiSSL internals\n");)
+        Radio_MarkTlsPoisoned("probe CleanupAmiSSL skipped for poisoned AmiSSL session");
+        rb_probe_amissl_initialized = 0;
+    } else if (rb_probe_amissl_initialized) {
         CleanupAmiSSL(TAG_DONE);
         rb_probe_amissl_initialized = 0;
     }
@@ -558,6 +578,7 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *host
     transport->ssl = NULL;
     transport->ctx = NULL;
     transport->sslHandshakeDone = 0;
+    transport->sslStatePoisoned = 0;
 #endif
 
 #if defined(AMIGA_M68K) && !defined(RB_STREAM_PROBE_EXTERNAL_SOCKETBASE)
@@ -596,6 +617,11 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *host
         int sni_set;
         int tries;
 
+        if (Radio_IsTlsPoisoned()) {
+            RADIO_DBG(printf("rb-probe TLS: refused HTTPS after AmiSSL poison host=%s port=%d\n", host, port);)
+            rb_probe_transport_close(transport);
+            return RB_STREAM_PROBE_ERR_TLS_POISONED;
+        }
         ssl_connect_rc = 0;
         ssl_error = 0;
         ssl_lib_error = 0;
@@ -646,11 +672,22 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *host
                 ERR_error_string_n(ssl_lib_error, ssl_error_buf, sizeof(ssl_error_buf));
             RADIO_DBG(printf("rb-probe TLS: SSL_connect rc=%d SSL_get_error=%d error=\"%s\" verify=disabled method=SSLv23_client_method\n",
                    ssl_connect_rc, ssl_error, ssl_error_buf[0] ? ssl_error_buf : "none");)
-            rb_probe_debug_mem_report(transport->session_id, "before handshake-fail SSL_free");
-            SSL_free(transport->ssl); transport->ssl = NULL;
-            rb_probe_debug_mem_report(transport->session_id, "after handshake-fail SSL_free");
-            SSL_CTX_free(transport->ctx); transport->ctx = NULL;
-            rb_probe_debug_mem_report(transport->session_id, "after handshake-fail SSL_CTX_free");
+            if (ssl_error == SSL_ERROR_SSL || ssl_lib_error != 0) {
+                transport->sslStatePoisoned = 1;
+                Radio_MarkTlsPoisoned(ssl_error == SSL_ERROR_SSL ? "probe SSL_ERROR_SSL from SSL_connect" : "probe fatal AmiSSL error queue from SSL_connect");
+            }
+            if (transport->sslStatePoisoned) {
+                RADIO_DBG(printf("radio-cleanup: probe handshake-fail SSL_free/SSL_CTX_free skipped (poisoned) session=%lu ssl=%p ctx=%p\n", transport->session_id, (void *)transport->ssl, (void *)transport->ctx);)
+                Radio_MarkTlsPoisoned("probe handshake-fail cleanup skipped for poisoned AmiSSL session");
+                transport->ssl = NULL;
+                transport->ctx = NULL;
+            } else {
+                rb_probe_debug_mem_report(transport->session_id, "before handshake-fail SSL_free");
+                SSL_free(transport->ssl); transport->ssl = NULL;
+                rb_probe_debug_mem_report(transport->session_id, "after handshake-fail SSL_free");
+                SSL_CTX_free(transport->ctx); transport->ctx = NULL;
+                rb_probe_debug_mem_report(transport->session_id, "after handshake-fail SSL_CTX_free");
+            }
             rb_probe_transport_close(transport);
             return RB_STREAM_PROBE_ERR_TLS_HANDSHAKE;
         }
@@ -683,14 +720,23 @@ static void rb_probe_transport_close_mode(RbProbeTransport *transport, RbProbeCl
         }
         RADIO_DBG(printf("radio-cleanup: probe ssl_shutdown session=%lu mode=%s %s\n",
             transport->session_id, rb_probe_close_mode_name(mode), shutdown_called ? "called" : "skipped");)
-        if (transport->ssl) {
+        if (transport->ssl && transport->sslStatePoisoned) {
+            RADIO_DBG(printf("radio-cleanup: probe SSL_free skipped (poisoned) session=%lu ssl=%p leaking to avoid crashing on corrupted AmiSSL state\n", transport->session_id, (void *)transport->ssl);)
+            Radio_MarkTlsPoisoned("probe SSL_free skipped for poisoned AmiSSL session");
+            transport->ssl = NULL;
+            transport->sslHandshakeDone = 0;
+        } else if (transport->ssl) {
             rb_probe_debug_mem_report(transport->session_id, "before close SSL_free");
             SSL_free(transport->ssl);
             transport->ssl = NULL;
             transport->sslHandshakeDone = 0;
             rb_probe_debug_mem_report(transport->session_id, "after close SSL_free");
         }
-        if (transport->ctx) {
+        if (transport->ctx && transport->sslStatePoisoned) {
+            RADIO_DBG(printf("radio-cleanup: probe SSL_CTX_free skipped (poisoned) session=%lu ctx=%p leaking to avoid crashing on corrupted AmiSSL state\n", transport->session_id, (void *)transport->ctx);)
+            Radio_MarkTlsPoisoned("probe SSL_CTX_free skipped for poisoned AmiSSL session");
+            transport->ctx = NULL;
+        } else if (transport->ctx) {
             rb_probe_debug_mem_report(transport->session_id, "before close SSL_CTX_free");
             SSL_CTX_free(transport->ctx);
             transport->ctx = NULL;
@@ -935,6 +981,7 @@ const char *rb_probe_error_text(int rc)
     case RB_STREAM_PROBE_ERR_UNSUPPORTED_CONTENT_TYPE: return "Unsupported stream format";
     case RB_STREAM_PROBE_ERR_SERVER_CLOSED: return "Stream probe failed: server closed connection during probe";
     case RB_STREAM_PROBE_ERR_TLS_HANDSHAKE: return "TLS handshake failed";
+    case RB_STREAM_PROBE_ERR_TLS_POISONED: return "HTTPS subsystem poisoned after TLS error; restart app before using HTTPS again.";
     case RB_STREAM_PROBE_ERR_HTTP_STATUS: return "Stream unavailable (server returned an error status)";
     default: return "Stream probe failed";
     }
@@ -982,6 +1029,10 @@ static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
 
     if (!url || !info || !peek_len || peek_buf_size < 0 || (peek_buf_size > 0 && !peek_buf))
         return RB_STREAM_PROBE_ERR_BAD_ARG;
+    if (!strncmp(url, "https://", 8) && Radio_IsTlsPoisoned()) {
+        RADIO_DBG(printf("rb-probe: refused HTTPS probe after AmiSSL poison url=\"%s\"\n", url);)
+        return RB_STREAM_PROBE_ERR_TLS_POISONED;
+    }
     rb_probe_info_init(info);
     *peek_len = 0;
     if (rb_probe_url_looks_hls(url)) return RB_STREAM_PROBE_ERR_HLS_UNSUPPORTED;
@@ -1174,6 +1225,10 @@ static int rb_probe_fetch_binary_impl(const char *url, unsigned char *out_buf, i
     int redirects;
 
     if (!url || !out_buf || out_buf_size <= 0 || !out_len) return RB_STREAM_PROBE_ERR_BAD_ARG;
+    if (!strncmp(url, "https://", 8) && Radio_IsTlsPoisoned()) {
+        RADIO_DBG(printf("rb-probe: refused HTTPS fetch after AmiSSL poison url=\"%s\"\n", url);)
+        return RB_STREAM_PROBE_ERR_TLS_POISONED;
+    }
     *out_len = 0;
     if (out_content_type && out_content_type_size > 0) out_content_type[0] = '\0';
 
