@@ -486,6 +486,7 @@ static void radio_ssl_global_cleanup(void)
 static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode);
 static void radio_ssl_close_stream(RadioStream *rs);
 static void radio_abort_current_socket(RadioStream *rs);
+static void close_current_socket(RadioStream *rs);
 
 /* Poll SSL_connect on the non-blocking socket — same budget as radio_wait_connected. */
 static int radio_ssl_do_handshake(RadioStream *rs)
@@ -496,11 +497,21 @@ static int radio_ssl_do_handshake(RadioStream *rs)
         int r, e;
         if (radio_is_stopping(rs)) return -1;
         r = SSL_connect(rs->ssl);
-        if (r == 1) return 0;
+        if (r == 1) {
+            RADIO_DBG(printf("SSL_CONNECT_ATTEMPT session=%lu attempt=%d ret=%d err=0 fd=%ld ssl=%p ctx=%p handshake=%d\n", rs ? rs->session_id : 0, tries + 1, r, rs ? (long)rs->sock : -1L, rs ? (void *)rs->ssl : 0, rs ? (void *)rs->ctx : 0, rs ? rs->sslHandshakeDone : 0););
+            if (rs) rs->sslHandshakeDone = 1;
+            RADIO_DBG(printf("SSL_CONNECT_DONE session=%lu\n", rs ? rs->session_id : 0););
+            return 0;
+        }
         e = SSL_get_error(rs->ssl, r);
         last_error = e;
-        RADIO_DBG(printf("radio-tls: SSL_connect session=%lu ret=%d ssl_error=%d fd=%ld ssl=%p ctx=%p\n", rs ? rs->session_id : 0, r, e, rs ? (long)rs->sock : -1L, rs ? (void *)rs->ssl : 0, rs ? (void *)rs->ctx : 0););
-        if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
+        RADIO_DBG(printf("SSL_CONNECT_ATTEMPT session=%lu attempt=%d ret=%d err=%d fd=%ld ssl=%p ctx=%p handshake=%d\n", rs ? rs->session_id : 0, tries + 1, r, e, rs ? (long)rs->sock : -1L, rs ? (void *)rs->ssl : 0, rs ? (void *)rs->ctx : 0, rs ? rs->sslHandshakeDone : 0););
+        if (e == SSL_ERROR_WANT_READ) {
+            RADIO_DBG(printf("SSL_CONNECT_WANT_READ session=%lu attempt=%d retry\n", rs ? rs->session_id : 0, tries + 1););
+            radio_backoff_sleep(); continue;
+        }
+        if (e == SSL_ERROR_WANT_WRITE) {
+            RADIO_DBG(printf("SSL_CONNECT_WANT_WRITE session=%lu attempt=%d retry\n", rs ? rs->session_id : 0, tries + 1););
             radio_backoff_sleep(); continue;
         }
         /* SSL_ERROR_WANT_READ/WRITE just means "call again later" on a
@@ -514,7 +525,7 @@ static int radio_ssl_do_handshake(RadioStream *rs)
             ssl_error_buf[0] = '\0';
             if (ssl_lib_error != 0)
                 ERR_error_string_n(ssl_lib_error, ssl_error_buf, sizeof(ssl_error_buf));
-            RADIO_DBG(printf("radio-tls: SSL_connect failed session=%lu ssl_error=%d lib_error=%08lx (%s)\n",
+            RADIO_DBG(printf("SSL_CONNECT_FATAL session=%lu err=%d lib_error=%08lx (%s)\n",
                 rs ? rs->session_id : 0, e, ssl_lib_error, ssl_error_buf[0] ? ssl_error_buf : "none"););
         }
         return -1;
@@ -602,7 +613,6 @@ static int radio_ssl_connect(RadioStream *rs)
         radio_ssl_close_stream(rs);
         set_error(rs, "TLS handshake failed"); return -1;
     }
-    rs->sslHandshakeDone = 1;
     return 0;
 }
 
@@ -739,6 +749,13 @@ static int radio_send_all(RadioStream *rs, const char *buf, int len)
             return -1;
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
         if (rs->isSSL && rs->ssl) {
+            RADIO_DBG(printf("radio-ssl-write: session=%lu sslHandshakeDone=%d before SSL_write\n", rs->session_id, rs->sslHandshakeDone););
+            if (rs->sslHandshakeDone != 1) {
+                RADIO_DBG(printf("radio-ssl-write: ERROR session=%lu skipped SSL_write because handshake is incomplete sslHandshakeDone=%d\n", rs->session_id, rs->sslHandshakeDone););
+                set_error(rs, "TLS handshake incomplete");
+                close_current_socket(rs);
+                return -1;
+            }
             r = (int)SSL_write(rs->ssl, buf + sent, len - sent);
             if (r > 0) { sent += r; continue; }
             if (r < 0) {
@@ -796,7 +813,6 @@ static int ring_read(RadioStream *rs, unsigned char *p, int n) { int i=0; if (ra
 static int ci_starts(const char *s,const char *p){ while(*p) { if(tolower((unsigned char)*s++)!=tolower((unsigned char)*p++)) return 0; } return 1; }
 static int ci_equals(const char *a,const char *b){ while(*a&&*b){ if(tolower((unsigned char)*a++)!=tolower((unsigned char)*b++)) return 0; } return *a==0&&*b==0; }
 static char *trim(char *s){ char *e; while(*s&&isspace((unsigned char)*s))s++; e=s+strlen(s); while(e>s&&isspace((unsigned char)e[-1]))*--e=0; return s; }
-static void close_current_socket(RadioStream *rs);
 
 #define RADIO_RING_CANARY 0x5A
 #define RADIO_RING_GUARD_BYTES 16UL
@@ -927,10 +943,12 @@ static int connect_http(RadioStream *rs){
     RADIO_DBG(printf("radio-connect: session=%lu TCP connected, starting SSL/HTTP request phase isSSL=%d\n", rs->session_id, rs->isSSL););
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     if (rs->isSSL) {
+        rs->sslHandshakeDone = 0;
         if (radio_ssl_connect(rs) != 0) { close_current_socket(rs); return -1; }
         if (radio_is_stopping(rs)) { close_current_socket(rs); return -1; }
     }
 #endif
+    RADIO_DBG(printf("radio-http: session=%lu starting HTTP request phase isSSL=%d sslHandshakeDone=%d\n", rs->session_id, rs->isSSL, rs->sslHandshakeDone););
     n=snprintf(req,sizeof(req),"GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: BoingPlayer/0.1 AmigaOS\r\nIcy-MetaData: 1\r\nConnection: close\r\n\r\n",rs->path,rs->host);
     if(radio_send_all(rs,req,n)!=0){ close_current_socket(rs); set_error(rs, rs->isSSL ? "HTTPS read failed" : "cannot send HTTP request"); return -1; }
     reset_parser(rs);
@@ -1185,7 +1203,7 @@ RadioStream *Radio_OpenWithHostAddr(const char *url, int haveHostAddr, unsigned 
     }
     if (connect_http(rs) == 0) {
         rs->status = RADIO_STATUS_BUFFERING;
-        radio_debug_mem_report(rs->session_id, "after stream started");
+        radio_debug_mem_report(rs->session_id, "after HTTP request phase started");
     }
     else {
         close_current_socket(rs);
@@ -1389,6 +1407,13 @@ int Radio_Pump(RadioStream *rs)
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     if (rs->isSSL && rs->ssl) {
         int requested = (int)sizeof(b);
+        RADIO_DBG(printf("radio-ssl-read: session=%lu sslHandshakeDone=%d before SSL_read\n", rs->session_id, rs->sslHandshakeDone););
+        if (rs->sslHandshakeDone != 1) {
+            RADIO_DBG(printf("radio-ssl-read: ERROR session=%lu skipped SSL_read because handshake is incomplete sslHandshakeDone=%d\n", rs->session_id, rs->sslHandshakeDone););
+            set_error(rs, "TLS handshake incomplete");
+            close_current_socket(rs);
+            return -1;
+        }
         n = (int)SSL_read(rs->ssl, (char *)b, requested);
         RADIO_DBG(printf("radio-ssl-read: session=%lu ssl=%p ctx=%p fd=%ld dst=%p dst_cap=%d requested=%d returned=%d fill=%lu ring_free=%lu\n",
             rs->session_id, (void *)rs->ssl, (void *)rs->ctx, (long)rs->sock, (void *)b, (int)sizeof(b), requested, n, rs->used, rs->size > rs->used ? rs->size - rs->used : 0));
