@@ -1370,6 +1370,11 @@ static void StartPlayback(MrApp *app)
 
 	if (!MrVerifyAppMagic(app, "StartPlayback"))
 		return;
+	if (Radio_IsMemoryPoisoned()) {
+		SetStatus(app, "Memory corruption detected - restart app");
+		RADIO_DBG(printf("radio-memory: refusing StartPlayback after MiniMem/ring corruption url=\"%s\"\n", app->inputName);)
+		return;
+	}
 	if (!app->inputName[0]) {
 		SetStatus(app, "Pick an audio file first.");
 		return;
@@ -3591,7 +3596,7 @@ static void UpdateArtwork(MrApp *app, MrMp3Info *info)
 	}
 	if (app->artColorEnabled && app->artValid)
 		BuildArtColorPens(app);
-	MiniMem_CheckAll("after artwork fetch/decode");
+	Radio_CheckMiniMem("after artwork fetch/decode");
 	/* The panel (frame + thumbnail or "No art") is hand-drawn over the
 	 * placeholder gadget rather than via the button's own text. */
 	DrawArtPanel(app);
@@ -4240,7 +4245,7 @@ static void RadioDoSearch(MrApp *app)
 	printf("%s\n", filterMsg);
 #endif
 	rc = rb_controller_search(&app->rbController);
-	MiniMem_CheckAll("after radio browser JSON parse");
+	Radio_CheckMiniMem("after radio browser JSON parse");
 	app->rbSearchInProgress = 0;
 	app->rbShowingFavourites = FALSE;
 	RadioRefreshResults(app);
@@ -4449,7 +4454,7 @@ static void RadioDoProbeAndPlay(MrApp *app)
 		sprintf(msg, "Buffering - %.120s", app->rbFavouriteNames[app->rbSelectedFavourite]);
 		RadioSetStatus(app, msg);
 		StartPlayback(app);
-		MiniMem_CheckAll("after station switch");
+		Radio_CheckMiniMem("after station switch");
 		return;
 	}
 	if (app->rbController.selected_index < 0) {
@@ -4507,8 +4512,13 @@ static void RadioDoProbeAndPlay(MrApp *app)
 	sprintf(msg, "Buffering - %.140s", app->currentRadioStationName[0] ? app->currentRadioStationName : "Internet Radio");
 	RadioSetStatus(app, msg);
 	RADIO_DBG(printf("radio-ui: new stream start url=\"%s\"\n", info.final_url);)
+	if (Radio_IsMemoryPoisoned()) {
+		RadioSetStatus(app, "Memory corruption detected - restart app");
+		RADIO_DBG(printf("radio-memory: refusing station switch after MiniMem/ring corruption url=\"%s\"\n", info.final_url);)
+		return;
+	}
 	StartPlayback(app);
-	MiniMem_CheckAll("after station switch");
+	Radio_CheckMiniMem("after station switch");
 }
 
 static void CloseRadioWindow(MrApp *app)
@@ -5414,7 +5424,7 @@ int main(int argc, char **argv)
 	AppCloseDebug("end", &app);
 	CloseLibs();
 	RADIO_DBG(printf("app-close: CloseLibs done, returning from main\n");)
-	MiniMem_CheckAll("before app exit");
+	Radio_CheckMiniMem("before app exit");
 	MiniMem_ReportLeaks();
 	return 0;
 }

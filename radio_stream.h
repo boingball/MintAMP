@@ -63,6 +63,9 @@ void Radio_NetworkShutdown(void);
 void Radio_GetNetworkStats(long *active_stream_sessions, long *active_stream_tasks,
     long *open_socket_count, long *active_ssl_count, long *active_ssl_ctx_count);
 void Radio_GetNetworkBases(void **socket_base, void **amissl_base, void **amissl_master_base);
+int Radio_IsMemoryPoisoned(void);
+void Radio_MarkMemoryPoisoned(const char *where);
+int Radio_CheckMiniMem(const char *where);
 #else
 static RadioStream *Radio_OpenWithHostAddr(const char *url, int haveHostAddr, unsigned long hostAddrBe) { (void)url; (void)haveHostAddr; (void)hostAddrBe; return (RadioStream *)0; }
 static RadioStream *Radio_Open(const char *url) { (void)url; return (RadioStream *)0; }
@@ -99,6 +102,9 @@ static void Radio_GetNetworkBases(void **socket_base, void **amissl_base, void *
     if (amissl_base) *amissl_base = 0;
     if (amissl_master_base) *amissl_master_base = 0;
 }
+static int Radio_IsMemoryPoisoned(void) { return 0; }
+static void Radio_MarkMemoryPoisoned(const char *where) { (void)where; }
+static int Radio_CheckMiniMem(const char *where) { (void)where; return 0; }
 static const char *Radio_StatusText(RadioStatus status)
 {
     switch (status) {

@@ -10186,7 +10186,7 @@ int main(int argc, char **argv)
 		AmigaFreeNormalizedArgs(&normalized);
 		return 1;
 	}
-	MiniMem_CheckAll("after decoder init");
+	Radio_CheckMiniMem("after decoder init");
 
 	if (opt.play && opt.stereo)
 		fprintf(stderr, "Stereo playback needs significantly more CPU and may underrun on 030.\n");
@@ -10373,7 +10373,7 @@ int main(int argc, char **argv)
 #endif
 		printf("radio-teardown: MP3 path MP3FreeDecoder start\n");
 		MP3FreeDecoder(decoder);
-		MiniMem_CheckAll("after decoder cleanup");
+		Radio_CheckMiniMem("after decoder cleanup");
 		printf("radio-teardown: MP3 path InputSourceClose start\n");
 		InputSourceClose(&input);
 		CloseInputFile(&infile, opt.debugCleanup);
@@ -10733,7 +10733,7 @@ int main(int argc, char **argv)
 	}
 
 	MP3FreeDecoder(decoder);
-	MiniMem_CheckAll("after decoder cleanup");
+	Radio_CheckMiniMem("after decoder cleanup");
 	InputSourceClose(&input);
 	CloseInputFile(&infile, opt.debugCleanup);
 	if (outfile)
