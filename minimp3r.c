@@ -557,6 +557,8 @@ static void OpenRadioWindow(MrApp *app);
 static void HandleRadioWindow(MrApp *app);
 static void HandleDoneSignal(MrApp *app);
 static void RadioSetStatus(MrApp *app, const char *text);
+static int SetStatusIfChanged(MrApp *app, const char *text);
+static void SetStatus(MrApp *app, const char *text);
 static void RadioDoProbeAndPlay(MrApp *app);
 static void RadioSelectResult(MrApp *app, ULONG eventSelected);
 
