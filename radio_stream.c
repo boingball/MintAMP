@@ -963,28 +963,19 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
     RADIO_DBG(printf("radio-cleanup: ssl-close mode=%s session=%lu status=%d sslHandshakeDone=%d ssl_shutdown=%s ssl=%p ctx=%p fd=%ld open_socket_count=%ld\n",
         radio_close_mode_name(mode), rs->session_id, (int)rs->status, rs->sslHandshakeDone,
         shutdown_called ? "called" : "skipped", (void *)rs->ssl, (void *)rs->ctx, (long)rs->sock, radio_open_socket_count););
-    if (rs->ssl && !rs->sslFreed && (rs->sslStatePoisoned || Radio_IsTlsPoisoned())) {
-        /* See the SSL_ERROR_SSL handling in Radio_Pump(): AmiSSL's own
-         * internal state may already be corrupted, so calling back into it
-         * here risks crashing on top of that instead of just leaking one
-         * SSL object. The app-wide flag counts too: another task's poison
-         * means the same shared AmiSSL internals are suspect here. */
-        RADIO_DBG(printf("radio-cleanup: SSL_free skipped (poisoned) session=%lu ssl=%p leaking to avoid crashing on corrupted AmiSSL state\n", rs->session_id, (void *)rs->ssl));
+    if (rs->ssl && !rs->sslFreed) {
+        /* Debug containment: on classic AmiSSL the playback child can crash
+         * later even after apparently healthy SSL_free()/SSL_CTX_free()/
+         * CleanupAmiSSL() cycles. Do not call back into AmiSSL from the child
+         * close path; leak the per-session SSL object and let process exit
+         * reclaim only our own non-AmiSSL allocations. */
+        RADIO_DBG(printf("radio-cleanup: SSL_free skipped (playback quarantine) session=%lu ssl=%p leaking to avoid AmiSSL playback cleanup crash\n", rs->session_id, (void *)rs->ssl));
         rs->sslFreed = 1;
         if (radio_active_ssl_count > 0) radio_active_ssl_count--;
         rs->ssl = NULL;
         rs->sslHandshakeDone = 0;
-    } else if (rs->ssl && !rs->sslFreed) {
-        RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_free start session=%lu ssl=%p ctx=%p fd=%ld\n", rs->session_id, (void *)rs->ssl, (void *)rs->ctx, (long)rs->sock));
-        radio_debug_mem_report(rs->session_id, "before SSL_free");
-        rs->ssl_free_count++;
-        SSL_free(rs->ssl);
-        rs->sslFreed = 1;
-        if (radio_active_ssl_count > 0) radio_active_ssl_count--;
-        rs->ssl = NULL;
-        rs->sslHandshakeDone = 0;
-        radio_debug_mem_report(rs->session_id, "after SSL_free");
-        RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_free done\n"));
+        radio_amissl_task_poisoned = 1;
+        radio_tls_shutdown_quarantine = 1;
     } else {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_free skipped\n"));
     }
@@ -1005,27 +996,15 @@ static void radio_ssl_close_stream(RadioStream *rs) { radio_ssl_close_stream_mod
 static void radio_ssl_free_ctx(RadioStream *rs)
 {
     if (!rs) return;
-    if (rs->ctx && !rs->ctxFreed && (rs->sslStatePoisoned || Radio_IsTlsPoisoned())) {
-        /* See the SSL_ERROR_SSL handling in Radio_Pump(): the crash this
-         * mitigates was caught by the soak test landing right inside this
-         * exact call, immediately after a ring-buffer corruption was found
-         * that traces back to the same poisoned session -- so SSL_CTX_free()
-         * itself, not just SSL_free(), needs to be skipped once poisoned
-         * (again including app-wide poison from another task). */
-        RADIO_DBG(printf("radio-cleanup: SSL_CTX_free skipped (poisoned) session=%lu ctx=%p leaking to avoid crashing on corrupted AmiSSL state\n", rs->session_id, (void *)rs->ctx));
+    if (rs->ctx && !rs->ctxFreed) {
+        /* Same containment as SSL_free(): keep playback child away from
+         * AmiSSL ctx teardown. */
+        RADIO_DBG(printf("radio-cleanup: SSL_CTX_free skipped (playback quarantine) session=%lu ctx=%p leaking to avoid AmiSSL playback cleanup crash\n", rs->session_id, (void *)rs->ctx));
         rs->ctxFreed = 1;
         if (radio_active_ssl_ctx_count > 0) radio_active_ssl_ctx_count--;
         rs->ctx = NULL;
-    } else if (rs->ctx && !rs->ctxFreed) {
-        RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_CTX_free start session=%lu ctx=%p fd=%ld\n", rs->session_id, (void *)rs->ctx, (long)rs->sock));
-        radio_debug_mem_report(rs->session_id, "before SSL_CTX_free");
-        rs->ssl_ctx_free_count++;
-        SSL_CTX_free(rs->ctx);
-        rs->ctxFreed = 1;
-        if (radio_active_ssl_ctx_count > 0) radio_active_ssl_ctx_count--;
-        rs->ctx = NULL;
-        radio_debug_mem_report(rs->session_id, "after SSL_CTX_free");
-        RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_CTX_free done\n"));
+        radio_amissl_task_poisoned = 1;
+        radio_tls_shutdown_quarantine = 1;
     } else {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_CTX_free skipped\n"));
     }

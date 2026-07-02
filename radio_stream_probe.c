@@ -163,6 +163,7 @@ typedef struct RbProbeTransport {
     SSL_CTX *ctx;
     int sslHandshakeDone;
     int sslStatePoisoned;
+    int sslReadCloseSeen;
 #endif
 } RbProbeTransport;
 
@@ -185,6 +186,17 @@ static int rb_probe_ssl_read_retrying(RbProbeTransport *transport, char *dst, in
         if (n > 0) return n;
         ssl_err = SSL_get_error(transport->ssl, n);
         RADIO_DBG(printf("rb-probe-ssl-read: session=%lu SSL_get_error=%d ret=%d fd=%ld\n", transport->session_id, ssl_err, n, (long)transport->sock));
+#ifdef SSL_ERROR_ZERO_RETURN
+        if (ssl_err == SSL_ERROR_ZERO_RETURN) {
+            /* On classic AmiSSL this "clean" TLS close path can still leave
+             * probe SSL internals unsafe to free. The memcheck run after the
+             * shared-ctx patch corrupted immediately after SSL_free() on this
+             * path, so quarantine the per-probe SSL object instead. */
+            transport->sslReadCloseSeen = 1;
+            RADIO_DBG(printf("rb-probe-ssl-read: session=%lu SSL_ERROR_ZERO_RETURN seen -- will skip SSL_free on close\n", transport->session_id);)
+            return n;
+        }
+#endif
         if (ssl_err == SSL_ERROR_WANT_READ || ssl_err == SSL_ERROR_WANT_WRITE) {
             rb_probe_backoff_sleep();
             continue;
@@ -675,6 +687,7 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *host
     transport->ctx = NULL;
     transport->sslHandshakeDone = 0;
     transport->sslStatePoisoned = 0;
+    transport->sslReadCloseSeen = 0;
 #endif
 
 #if defined(AMIGA_M68K) && !defined(RB_STREAM_PROBE_EXTERNAL_SOCKETBASE)
@@ -861,12 +874,15 @@ static void rb_probe_transport_close_mode(RbProbeTransport *transport, RbProbeCl
         }
         RADIO_DBG(printf("radio-cleanup: probe ssl_shutdown session=%lu mode=%s %s\n",
             transport->session_id, rb_probe_close_mode_name(mode), shutdown_called ? "called" : "skipped");)
-        if (transport->ssl && (transport->sslStatePoisoned || Radio_IsTlsPoisoned())) {
-            RADIO_DBG(printf("radio-cleanup: probe SSL_free skipped (poisoned) session=%lu ssl=%p leaking to avoid crashing on corrupted AmiSSL state\n", transport->session_id, (void *)transport->ssl);)
+        if (transport->ssl && (transport->sslStatePoisoned || transport->sslReadCloseSeen || Radio_IsTlsPoisoned())) {
+            RADIO_DBG(printf("radio-cleanup: probe SSL_free skipped (%s) session=%lu ssl=%p leaking to avoid crashing on AmiSSL close/free path\n",
+                transport->sslStatePoisoned ? "poisoned" : (transport->sslReadCloseSeen ? "zero-return" : "tls-poisoned"),
+                transport->session_id, (void *)transport->ssl);)
             transport->ssl = NULL;
             transport->sslHandshakeDone = 0;
             transport->ctx = NULL;
-            rb_probe_shared_ctx = NULL;
+            if (transport->sslStatePoisoned || Radio_IsTlsPoisoned())
+                rb_probe_shared_ctx = NULL;
         } else if (transport->ssl) {
             rb_probe_debug_mem_report(transport->session_id, "before close SSL_free");
             SSL_free(transport->ssl);
