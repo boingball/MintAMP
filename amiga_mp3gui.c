@@ -5971,6 +5971,13 @@ static void BuildPlaybackArgs(HelixAmp3Gui *gui, HelixAmp3Args *args)
 			sprintf(num, "%lu", gui->radioHostAddrBe);
 			AddArg(args, num);
 		}
+		if (gui->rbController.selected_index >= 0) {
+			const RadioBrowserStation *st = rb_controller_get_station(&gui->rbController, gui->rbController.selected_index);
+			if (st && st->codec[0]) {
+				AddArg(args, "--radio-codec-hint");
+				AddArg(args, st->codec);
+			}
+		}
 	}
 	if (gui->fastMem)
 		AddArg(args, "--fast-mem");

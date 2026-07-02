@@ -883,6 +883,22 @@ static int rb_probe_url_has_mp3_hint(const RbProbeUrl *url)
            rb_probe_contains_nocase(url->path, "mp3");
 }
 
+static int rb_probe_url_has_aac_hint(const RbProbeUrl *url)
+{
+    if (!url) return 0;
+    return rb_probe_contains_nocase(url->path, ".aac") ||
+           rb_probe_contains_nocase(url->path, ".aacp") ||
+           rb_probe_contains_nocase(url->path, "aac");
+}
+
+static int rb_probe_content_type_is_aac(const char *content_type)
+{
+    return rb_probe_contains_nocase(content_type, "audio/aac") ||
+           rb_probe_contains_nocase(content_type, "audio/aacp") ||
+           rb_probe_contains_nocase(content_type, "audio/x-aac") ||
+           rb_probe_contains_nocase(content_type, "audio/mp4");
+}
+
 static RbStreamCodec rb_probe_detect_codec(const RbProbeUrl *url, const RbStreamInfo *info,
                                            const unsigned char *peek, int peek_len)
 {
@@ -892,6 +908,10 @@ static RbStreamCodec rb_probe_detect_codec(const RbProbeUrl *url, const RbStream
     }
     if (peek && peek_len >= 2 && peek[0] == 0xff && (peek[1] & 0xe0) == 0xe0 &&
         peek[1] != 0xf1 && peek[1] != 0xf9) {
+        if ((info && rb_probe_content_type_is_aac(info->content_type)) || rb_probe_url_has_aac_hint(url)) {
+            RADIO_DBG(printf("rb-probe codec conflict: AAC hint but first-byte sniff=MPEG/MP3; final=unsupported\n");)
+            return RB_STREAM_CODEC_UNKNOWN;
+        }
         RADIO_DBG(printf("rb-probe codec: initial byte sniff=MPEG frame sync final=MP3\n");)
         return RB_STREAM_CODEC_MP3;
     }
@@ -924,15 +944,13 @@ static RbStreamCodec rb_probe_detect_codec(const RbProbeUrl *url, const RbStream
     if (info && info->content_type[0]) {
         if (rb_probe_contains_nocase(info->content_type, "audio/mpeg") ||
             rb_probe_contains_nocase(info->content_type, "audio/mp3")) return RB_STREAM_CODEC_MP3;
-        if (rb_probe_contains_nocase(info->content_type, "audio/aac") ||
-            rb_probe_contains_nocase(info->content_type, "audio/aacp") ||
-            rb_probe_contains_nocase(info->content_type, "audio/x-aac")) return RB_STREAM_CODEC_AAC;
+        if (rb_probe_content_type_is_aac(info->content_type)) return RB_STREAM_CODEC_AAC;
         if (rb_probe_contains_nocase(info->content_type, "audio/ogg") ||
             rb_probe_contains_nocase(info->content_type, "application/ogg") ||
             rb_probe_contains_nocase(info->content_type, "audio/vorbis") ||
             rb_probe_contains_nocase(info->content_type, "audio/x-vorbis")) return RB_STREAM_CODEC_OGG;
     }
-    if (url && (rb_probe_contains_nocase(url->path, ".aac") || rb_probe_contains_nocase(url->path, ".aacp")))
+    if (rb_probe_url_has_aac_hint(url))
         return RB_STREAM_CODEC_AAC;
     if (url && (rb_probe_contains_nocase(url->path, ".ogg") || rb_probe_contains_nocase(url->path, ".oga")))
         return RB_STREAM_CODEC_OGG;
@@ -1174,7 +1192,7 @@ static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
         return rc;
     }
     RADIO_DBG(printf("rb-probe codec: final URL=%s content-type=%s URL codec hint=%s initial-bytes=%d\n",
-           current_url, info->content_type, rb_probe_url_has_mp3_hint(&parsed) ? "MP3" : "none", *peek_len);)
+           current_url, info->content_type, rb_probe_url_has_aac_hint(&parsed) ? "AAC" : (rb_probe_url_has_mp3_hint(&parsed) ? "MP3" : "none"), *peek_len);)
     info->codec = rb_probe_detect_codec(&parsed, info, peek_buf, *peek_len);
     RADIO_DBG(printf("rb-probe codec: final selected codec=%s\n",
            info->codec == RB_STREAM_CODEC_MP3 ? "MP3" : (info->codec == RB_STREAM_CODEC_AAC ? "AAC" : (info->codec == RB_STREAM_CODEC_OGG ? "OGG" : "unsupported")));)
@@ -1389,7 +1407,12 @@ static int rb_probe_selftest(void)
     if (rb_probe_detect_codec(&url, &info, NULL, 0) != RB_STREAM_CODEC_MP3) return 4;
     if (rb_probe_detect_codec(&url, &info, id3, (int)sizeof(id3)) != RB_STREAM_CODEC_MP3) return 5;
     if (rb_probe_detect_codec(&url, &info, mpeg, (int)sizeof(mpeg)) != RB_STREAM_CODEC_MP3) return 6;
-    if (!rb_probe_url_looks_hls("http://example.com/live.m3u8")) return 7;
+    rb_probe_copy_trim(info.content_type, (int)sizeof(info.content_type), "audio/aacp", 10);
+    if (rb_probe_detect_codec(&url, &info, mpeg, (int)sizeof(mpeg)) != RB_STREAM_CODEC_UNKNOWN) return 7;
+    rb_probe_info_init(&info);
+    rb_probe_copy_trim(info.content_type, (int)sizeof(info.content_type), "audio/mp4", 9);
+    if (rb_probe_detect_codec(&url, &info, NULL, 0) != RB_STREAM_CODEC_AAC) return 8;
+    if (!rb_probe_url_looks_hls("http://example.com/live.m3u8")) return 9;
     RADIO_DBG(printf("rb-probe selftest: ok\n");)
     return 0;
 }

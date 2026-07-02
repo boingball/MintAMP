@@ -383,6 +383,7 @@ typedef struct DecodeOptions {
 	int noMonoMSSideSkip;
 	int radioStream;
 	int haveRadioHostAddr;
+	const char *radioCodecHint;
 	unsigned long radioHostAddrBe;
 } DecodeOptions;
 
@@ -790,6 +791,7 @@ static void PrintUsage(const char *prog)
 	printf("  --debug-cleanup print playback resource cleanup diagnostics\n");
 	printf("  --debug-decoder print generic decoder module/rate diagnostics\n");
 	printf("  --test-aac FILE smoke-test ADTS AAC module loading and one-frame decode\n");
+	printf("  --radio-codec-hint CODEC  Radio Browser codec hint (MP3, AAC, AAC+)\n");
 	printf("  --debug-argv print argc/argv after Amiga argument normalization\n");
 	printf("  --show-argv  alias for --debug-argv\n");
 	printf("\n");
@@ -945,6 +947,10 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 				return -1;
 			opt->radioHostAddrBe = strtoul(argv[i], NULL, 0);
 			opt->haveRadioHostAddr = 1;
+		} else if (!strcmp(argv[i], "--radio-codec-hint")) {
+			if (++i >= argc)
+				return -1;
+			opt->radioCodecHint = argv[i];
 		} else if (!strcmp(argv[i], "--decode-then-play")) {
 			opt->play = 1;
 			opt->decodeThenPlay = 1;
@@ -4931,7 +4937,9 @@ static const char *RadioDecoderExtFromContentType(const char *contentType)
 	if (!contentType || !contentType[0])
 		return NULL;
 	if (StrCaseStarts(contentType, "audio/aac") ||
-		StrCaseStarts(contentType, "audio/aacp"))
+		StrCaseStarts(contentType, "audio/aacp") ||
+		StrCaseStarts(contentType, "audio/x-aac") ||
+		StrCaseStarts(contentType, "audio/mp4"))
 		return "aac";
 	if (StrCaseStarts(contentType, "audio/flac") ||
 		StrCaseStarts(contentType, "audio/x-flac"))
@@ -4961,10 +4969,14 @@ static int RadioUrlHasMp3Hint(const char *url)
 	return 0;
 }
 
-static const char *RadioDecoderExtFromUrlOrType(const char *url, const char *contentType)
+static const char *RadioDecoderExtFromUrlOrTypeHint(const char *url, const char *contentType, const char *codecHint)
 {
 	const char *ext = GetFileExtension(url);
 	const char *typeExt = RadioDecoderExtFromContentType(contentType);
+	if (codecHint && (StrCaseCmp(codecHint, "AAC") == 0 || StrCaseCmp(codecHint, "AAC+") == 0 || StrCaseCmp(codecHint, "AACP") == 0))
+		return "aac";
+	if (codecHint && StrCaseCmp(codecHint, "MP3") == 0 && !typeExt)
+		return "mp3";
 	if (typeExt)
 		return typeExt;
 	if (ext && (StrCaseCmp(ext, "aac") == 0 ||
@@ -4978,6 +4990,11 @@ static const char *RadioDecoderExtFromUrlOrType(const char *url, const char *con
 	if (RadioUrlHasMp3Hint(url))
 		return "mp3";
 	return NULL;
+}
+
+static const char *RadioDecoderExtFromUrlOrType(const char *url, const char *contentType)
+{
+	return RadioDecoderExtFromUrlOrTypeHint(url, contentType, NULL);
 }
 
 typedef struct FakeStereo {
@@ -8681,6 +8698,10 @@ static int PrimeRadioAacAdtsInput(InputSource *input, int debugDecoder)
 	input->prefixSize = total;
 	input->prefixPos = 0;
 
+	fprintf(stderr, "radio-aac-startup: first 16 audio bytes after ICY stripping=");
+	for (i = 0; i < 16 && (unsigned long)i < total; i++)
+		fprintf(stderr, "%s%02lx", i ? " " : "", (unsigned long)input->prefix[i]);
+	fprintf(stderr, "\n");
 	fprintf(stderr, "radio-aac-startup: first bytes available=%lu first32=",
 		total < 32UL ? total : 32UL);
 	for (i = 0; i < 32 && (unsigned long)i < total; i++)
@@ -10026,7 +10047,12 @@ int main(int argc, char **argv)
 		}
 		GuiPublishRadioMetadata(radio);
 		{
-			const char *radioExt = RadioDecoderExtFromUrlOrType(opt.inName, Radio_GetContentType(radio));
+			const char *radioExt;
+			fprintf(stderr, "radio-codec: Radio Browser codec=%s URL codec hint=%s HTTP content-type=%s\n",
+				opt.radioCodecHint ? opt.radioCodecHint : "(none)",
+				RadioUrlHasMp3Hint(opt.inName) ? "MP3" : "none", Radio_GetContentType(radio));
+			radioExt = RadioDecoderExtFromUrlOrTypeHint(opt.inName, Radio_GetContentType(radio), opt.radioCodecHint);
+			fprintf(stderr, "radio-codec: final selected decoder=%s\n", radioExt ? radioExt : "mp3");
 			if (radioExt && StrCaseCmp(radioExt, "mp3") != 0) {
 				int gret = AmigaGenericInputPlay(opt.inName, &input, radioExt, &opt, &stats, 1);
 				printf("radio-teardown: generic(AAC/FLAC) play returned, freeing resolvedOutName=%p\n", (void *)resolvedOutName);
