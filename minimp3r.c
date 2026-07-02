@@ -372,13 +372,6 @@ static volatile unsigned long gDoneRunId;
 #define MR_DONE_MAGIC 0x4d52444fUL
 #define MR_WINDOW_TITLE "Amiga MP3 Player"
 
-#define MR_FATAL_RADIO_POISON_STATUS "Memory corruption detected - restart required"
-
-static int MrEmergencyPoisoned(void)
-{
-	return Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned();
-}
-
 /* ------------------------------------------------------------------------- */
 /* Application state                                                         */
 /* ------------------------------------------------------------------------- */
@@ -651,22 +644,6 @@ static void AppCloseShutdown(MrApp *app)
 	app->shuttingDown = 1;
 	AppCloseDebug("begin", app);
 	AppCloseDebug("playback state", app);
-	if (MrEmergencyPoisoned()) {
-		SetStatus(app, MR_FATAL_RADIO_POISON_STATUS);
-		RadioSetStatus(app, MR_FATAL_RADIO_POISON_STATUS);
-		gPlaybackInterrupted = 1;
-		gPlayer.stopRequested = 1;
-		app->playbackActive = 0;
-		app->playbackDonePending = 0;
-		app->activeChildCount = 0;
-		app->activeStreamSessions = 0;
-		app->activeStreamTasks = 0;
-		app->streamState = MR_STREAM_ERROR;
-		app->queuedStreamUrl[0] = '\0';
-		app->playlistNextPending = 0;
-		AppCloseDebug("emergency poison shutdown: skip playback stop/wait", app);
-		return;
-	}
 	if (AppHasActivePlaybackChild(app)) {
 		AppCloseDebug("stop active playback if needed", app);
 		if (!StopPlaybackAndWait(app, 500, "Failed to stop previous stream")) {
@@ -1160,7 +1137,7 @@ static void UpdateChannelGadgetState(MrApp *app)
 
 static void UpdateNextButtonState(MrApp *app)
 {
-	int enabled = !MrEmergencyPoisoned() && app->playlistCount > 0 && app->playlistCurrent >= 0 &&
+	int enabled = app->playlistCount > 0 && app->playlistCurrent >= 0 &&
 		app->playlistCurrent + 1 < app->playlistCount &&
 		!app->playbackDonePending && !gPlayer.stopRequested;
 	int disabled = enabled ? FALSE : TRUE;
@@ -1174,17 +1151,13 @@ static void UpdateNextButtonState(MrApp *app)
 
 static void EnablePlayStop(MrApp *app, int playing)
 {
-	int poisoned = MrEmergencyPoisoned();
 	if (app->win) {
 		if (app->playGad)
 			SetGadgetAttrs((struct Gadget *)app->playGad, app->win, NULL,
-				GA_Disabled, (ULONG)((playing || poisoned) ? TRUE : FALSE), TAG_DONE);
+				GA_Disabled, (ULONG)(playing ? TRUE : FALSE), TAG_DONE);
 		if (app->stopGad)
 			SetGadgetAttrs((struct Gadget *)app->stopGad, app->win, NULL,
-				GA_Disabled, (ULONG)((!playing || poisoned) ? TRUE : FALSE), TAG_DONE);
-		if (app->radioGad)
-			SetGadgetAttrs((struct Gadget *)app->radioGad, app->win, NULL,
-				GA_Disabled, (ULONG)(poisoned ? TRUE : FALSE), TAG_DONE);
+				GA_Disabled, (ULONG)(playing ? FALSE : TRUE), TAG_DONE);
 	}
 	UpdateNextButtonState(app);
 }
@@ -1406,8 +1379,8 @@ static void StartPlayback(MrApp *app)
 
 	if (!MrVerifyAppMagic(app, "StartPlayback"))
 		return;
-	if (MrEmergencyPoisoned()) {
-		SetStatus(app, MR_FATAL_RADIO_POISON_STATUS);
+	if (Radio_IsMemoryPoisoned()) {
+		SetStatus(app, "Memory corruption detected - restart app");
 		RADIO_DBG(printf("radio-memory: refusing StartPlayback after MiniMem/ring corruption url=\"%s\"\n", app->inputName);)
 		return;
 	}
@@ -1671,9 +1644,9 @@ static void FinalizePlayback(MrApp *app)
 	RADIO_DBG(printf("radio-done: streamStateAfterFinalize=%s guiStatus=\"%s\"\n",
 		MrStreamStateName(app->streamState), finalStatus);)
 	RADIO_DBG(printf("radio-guard: after FinalizePlayback\n");)
-	if (MrEmergencyPoisoned()) {
+	if (Radio_IsMemoryPoisoned()) {
 		if (app->queuedStreamUrl[0] || app->playlistNextPending)
-			SetStatus(app, MR_FATAL_RADIO_POISON_STATUS);
+			SetStatus(app, "Memory corruption detected - restart app");
 		app->queuedStreamUrl[0] = '\0';
 		app->playlistNextPending = 0;
 		RADIO_DBG(printf("radio-memory: queued/next stream suppressed after memory poison session=%lu\n", gPlayer.sessionId);)
@@ -3568,10 +3541,6 @@ static int LoadRadioFaviconImage(MrApp *app)
 	static unsigned char response[MR_FAVICON_MAX_BYTES];
 	int bytes = 0;
 	int rc;
-	if (MrEmergencyPoisoned()) {
-		RADIO_DBG(printf("radio-art: favicon fetch skipped after poison\n");)
-		return 0;
-	}
 	if (!app || !app->currentRadioFavicon[0]) {
 		RADIO_DBG(printf("radio-art: no favicon URL for current station\n");)
 		return 0;
@@ -3631,10 +3600,6 @@ static void UpdateArtwork(MrApp *app, MrMp3Info *info)
 {
 	ReleaseArtColorPens(app);
 	app->artValid = 0;
-	if (MrEmergencyPoisoned()) {
-		DrawArtPanel(app);
-		return;
-	}
 	if (app->artEnabled && LoadArtworkCache(app)) {
 		/* cache hit */
 	} else if (app->artEnabled && info && info->artData && info->artBytes > 4 &&
@@ -4257,10 +4222,6 @@ static void RadioDoSearch(MrApp *app)
 	int rc;
 	char filterMsg[192];
 
-	if (MrEmergencyPoisoned()) {
-		RadioSetStatus(app, MR_FATAL_RADIO_POISON_STATUS);
-		return;
-	}
 	if (app->rbSearchInProgress) {
 		RadioSetStatus(app, "Search already running.");
 		return;
@@ -4461,7 +4422,6 @@ static void RadioDoProbeAndPlay(MrApp *app)
 	int rc;
 	const RadioBrowserStation *st;
 	char msg[512];
-	if (MrEmergencyPoisoned()) { RadioSetStatus(app, MR_FATAL_RADIO_POISON_STATUS); return; }
 	RADIO_DBG(printf("radio-ui: play requested currentActive=%d donePending=%d stopRequested=%d state=%s input=\"%s\"\n",
 		app->playbackActive, app->playbackDonePending, gPlayer.stopRequested, MrStreamStateName(app->streamState), app->inputName);)
 	if (app->streamState == MR_STREAM_STARTING) { RadioSetStatus(app, "Still starting previous stream"); return; }
@@ -4569,8 +4529,8 @@ static void RadioDoProbeAndPlay(MrApp *app)
 	sprintf(msg, "Buffering - %.140s", app->currentRadioStationName[0] ? app->currentRadioStationName : "Internet Radio");
 	RadioSetStatus(app, msg);
 	RADIO_DBG(printf("radio-ui: new stream start url=\"%s\"\n", info.final_url);)
-	if (MrEmergencyPoisoned()) {
-		RadioSetStatus(app, MR_FATAL_RADIO_POISON_STATUS);
+	if (Radio_IsMemoryPoisoned()) {
+		RadioSetStatus(app, "Memory corruption detected - restart app");
 		RADIO_DBG(printf("radio-memory: refusing station switch after MiniMem/ring corruption url=\"%s\"\n", info.final_url);)
 		return;
 	}
@@ -4611,7 +4571,6 @@ static void OpenRadioWindow(MrApp *app)
 	struct NewGadget ng;
 	struct Gadget *gad;
 	static STRPTR codecs[] = { (STRPTR)"All", (STRPTR)"MP3", (STRPTR)"AAC", (STRPTR)"AAC+", NULL };
-	if (MrEmergencyPoisoned()) { SetStatus(app, MR_FATAL_RADIO_POISON_STATUS); return; }
 	if (app->rbWin || !app->win || !GadToolsBase) return;
 	if (app->rbController.limit <= 0) {
 		rb_controller_init(&app->rbController);
@@ -4688,7 +4647,6 @@ static void HandleRadioWindow(MrApp *app)
 {
 	struct IntuiMessage *msg;
 	if (!app->rbWin) return;
-	if (MrEmergencyPoisoned()) { RadioSetStatus(app, MR_FATAL_RADIO_POISON_STATUS); return; }
 	while ((msg = GT_GetIMsg(app->rbWin->UserPort)) != NULL) {
 		ULONG cls = msg->Class;
 		UWORD code = msg->Code;
@@ -5368,11 +5326,6 @@ int main(int argc, char **argv)
 		if (sigs & SIGBREAKF_CTRL_C)
 			done = 1;
 
-		if (MrEmergencyPoisoned()) {
-			SetStatus(&app, MR_FATAL_RADIO_POISON_STATUS);
-			EnablePlayStop(&app, 0);
-		}
-
 		if (sigs & doneSig)
 			HandleDoneSignal(&app);
 
@@ -5396,10 +5349,6 @@ int main(int argc, char **argv)
 			ULONG result;
 			UWORD code = 0;
 			while ((result = RA_HandleInput(app.winObj, &code)) != WMHI_LASTMSG) {
-				if (MrEmergencyPoisoned() && (result & WMHI_CLASSMASK) != WMHI_CLOSEWINDOW) {
-					SetStatus(&app, MR_FATAL_RADIO_POISON_STATUS);
-					continue;
-				}
 				switch (result & WMHI_CLASSMASK) {
 				case WMHI_CLOSEWINDOW:
 					done = 1;
@@ -5487,18 +5436,13 @@ int main(int argc, char **argv)
 	 * socket ("Search failed" with the network otherwise up). */
 	AppCloseDebug("close SocketBase fallback", &app);
 	AppCloseDebug("AmiSSL shutdown fallback", &app);
-	if (!MrEmergencyPoisoned())
-		Radio_NetworkShutdown();
-	else
-		RADIO_DBG(printf("app-close: Radio_NetworkShutdown skipped after poison\n"));
+	Radio_NetworkShutdown();
 	RADIO_DBG(printf("app-close: Radio_NetworkShutdown done\n");)
 	AppCloseDebug("end", &app);
 	CloseLibs();
 	RADIO_DBG(printf("app-close: CloseLibs done, returning from main\n");)
-	if (!MrEmergencyPoisoned()) {
-		Radio_CheckMiniMem("before app exit");
-		MiniMem_ReportLeaks();
-	}
+	Radio_CheckMiniMem("before app exit");
+	MiniMem_ReportLeaks();
 	return 0;
 }
 

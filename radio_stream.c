@@ -243,7 +243,7 @@ static void radio_debug_mem_report(unsigned long session_id, const char *where)
 void Radio_MarkMemoryPoisoned(const char *where)
 {
     radioMemoryPoisoned = 1;
-    printf("radio-memory: Memory corruption detected - restart required (where=%s session=%lu url=\"%s\")\n",
+    printf("radio-memory: Memory corruption detected - restart app (where=%s session=%lu url=\"%s\")\n",
         where ? where : "", radio_poison_session_id,
         radio_poison_url[0] ? radio_poison_url : "");
 }
@@ -255,7 +255,7 @@ int Radio_IsMemoryPoisoned(void)
 
 const char *Radio_TlsPoisonedMessage(void)
 {
-    return "Memory corruption detected - restart required";
+    return "HTTPS subsystem poisoned after TLS error; restart app before using HTTPS again.";
 }
 
 void Radio_MarkTlsPoisoned(const char *where)
@@ -503,7 +503,7 @@ static void radio_ssl_global_cleanup(void)
 {
     RADIO_DBG(printf("radio-ssl-diag: cleanup ENTER initialized=%d base=%p ext=%p master=%p\n", radio_amissl_initialized, (void *)AmiSSLBase, (void *)AmiSSLExtBase, (void *)AmiSSLMasterBase););
     RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: AmiSSL global cleanup start initialized=%d base=%p master=%p\n", radio_amissl_initialized, (void *)AmiSSLBase, (void *)AmiSSLMasterBase));
-    if (radio_amissl_initialized && (radio_amissl_task_poisoned || Radio_IsTlsPoisoned())) {
+    if (radio_amissl_initialized && radio_amissl_task_poisoned) {
         /* The soak test that found the SSL_ERROR_SSL/ring-corruption chain
          * also caught the *next* crash one step further down, right inside
          * CleanupAmiSSL() itself, once SSL_free()/SSL_CTX_free() were
@@ -681,7 +681,7 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
     int shutdown_called = 0;
     if (!rs) return;
     RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: HTTPS cleanup start mode=%s ssl=%p ctx=%p fd=%ld handshake=%d\n", radio_close_mode_name(mode), (void *)rs->ssl, (void *)rs->ctx, (long)rs->sock, rs->sslHandshakeDone));
-    if (mode == RADIO_CLOSE_GRACEFUL && !rs->sslStatePoisoned && !Radio_IsTlsPoisoned() && rs->ssl && rs->sslHandshakeDone && rs->sock != RADIO_INVALID_SOCKET && !rs->socketClosed) {
+    if (mode == RADIO_CLOSE_GRACEFUL && !rs->sslStatePoisoned && rs->ssl && rs->sslHandshakeDone && rs->sock != RADIO_INVALID_SOCKET && !rs->socketClosed) {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_shutdown start ssl=%p\n", (void *)rs->ssl));
         SSL_shutdown(rs->ssl);
         shutdown_called = 1;
@@ -692,7 +692,7 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
     RADIO_DBG(printf("radio-cleanup: ssl-close mode=%s session=%lu status=%d sslHandshakeDone=%d ssl_shutdown=%s ssl=%p ctx=%p fd=%ld open_socket_count=%ld\n",
         radio_close_mode_name(mode), rs->session_id, (int)rs->status, rs->sslHandshakeDone,
         shutdown_called ? "called" : "skipped", (void *)rs->ssl, (void *)rs->ctx, (long)rs->sock, radio_open_socket_count););
-    if (rs->ssl && !rs->sslFreed && (rs->sslStatePoisoned || Radio_IsTlsPoisoned())) {
+    if (rs->ssl && !rs->sslFreed && rs->sslStatePoisoned) {
         /* See the SSL_ERROR_SSL handling in Radio_Pump(): AmiSSL's own
          * internal state may already be corrupted, so calling back into it
          * here risks crashing on top of that instead of just leaking one
@@ -734,7 +734,7 @@ static void radio_ssl_close_stream(RadioStream *rs) { radio_ssl_close_stream_mod
 static void radio_ssl_free_ctx(RadioStream *rs)
 {
     if (!rs) return;
-    if (rs->ctx && !rs->ctxFreed && (rs->sslStatePoisoned || Radio_IsTlsPoisoned())) {
+    if (rs->ctx && !rs->ctxFreed && rs->sslStatePoisoned) {
         /* See the SSL_ERROR_SSL handling in Radio_Pump(): the crash this
          * mitigates was caught by the soak test landing right inside this
          * exact call, immediately after a ring-buffer corruption was found
@@ -942,7 +942,7 @@ static int radio_ring_check_canary(RadioStream *rs, const char *where)
             rs->url));
         rs->stopping = 1;
         rs->status = RADIO_STATUS_ERROR;
-        set_error(rs, "Memory corruption detected - restart required");
+        set_error(rs, "Memory corruption detected - restart app");
         Radio_MarkMemoryPoisoned(where);
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
         /* One soak-test session hit this with no SSL_ERROR_SSL involved at
@@ -1289,10 +1289,10 @@ RadioStream *Radio_OpenWithHostAddr(const char *url, int haveHostAddr, unsigned 
     if (!radio_atexit_registered) { atexit(radio_app_exit_report); radio_atexit_registered = 1; }
     radio_reset_session_state(rs);
     rs->session_id = radio_next_session_id++;
-    if (radioMemoryPoisoned || Radio_IsTlsPoisoned()) {
+    if (radioMemoryPoisoned) {
         rs->status = RADIO_STATUS_ERROR;
         radio_copy_string(rs->url, sizeof(rs->url), url ? url : "");
-        set_error(rs, "Memory corruption detected - restart required");
+        set_error(rs, "Memory corruption detected - restart app");
         RADIO_OPEN_DEBUG_PRINTF(("radio-open: refused stream start after memory poison session=%lu url=\"%s\"\n", rs->session_id, rs->url));
         return rs;
     }
@@ -1319,7 +1319,7 @@ RadioStream *Radio_OpenWithHostAddr(const char *url, int haveHostAddr, unsigned 
     radio_poison_session_id = rs->session_id;
     radio_copy_string(radio_poison_url, sizeof(radio_poison_url), url ? url : "");
     if (Radio_CheckMiniMem("before ring buffer allocated") > 0) {
-        set_error(rs, "Memory corruption detected - restart required");
+        set_error(rs, "Memory corruption detected - restart app");
         RADIO_OPEN_DEBUG_PRINTF(("radio-open: refused ring allocation after MiniMem corruption session=%lu url=\"%s\"\n", rs->session_id, radio_poison_url));
         return rs;
     }
@@ -1351,7 +1351,7 @@ RadioStream *Radio_OpenWithHostAddr(const char *url, int haveHostAddr, unsigned 
      * at heap/free-list corruption from an earlier session -- or whether
      * this allocation starts clean and something corrupts it afterward. */
     if (Radio_CheckMiniMem("after ring buffer allocated") > 0) {
-        set_error(rs, "Memory corruption detected - restart required");
+        set_error(rs, "Memory corruption detected - restart app");
         return rs;
     }
     if (rs->ring) { rs->audioInitialized = 1; radio_active_stream_buffer_count++; radio_active_audio_buffer_count++; RADIO_DBG(printf("radio-resource: session=%lu stream/audio buffer allocated active_stream_buffer_count=%ld active_audio_buffer_count=%ld\n", rs->session_id, radio_active_stream_buffer_count, radio_active_audio_buffer_count)); }
@@ -1444,11 +1444,7 @@ void Radio_Close(RadioStream *rs)
     rs->status = RADIO_STATUS_CLOSED;
     rs->stream_buffer_free_count++;
     rs->audio_buffer_free_count++;
-    if (Radio_IsMemoryPoisoned()) {
-        RADIO_DBG(printf("radio-cleanup: session=%lu emergency shutdown: ring/audio buffers quarantined after memory poison\n", rs->session_id));
-        rs->stream_buffer_free_count = 1;
-        rs->audio_buffer_free_count = 1;
-    } else if (rs->stream_buffer_free_count > 1) radio_duplicate_cleanup_warning(rs, "stream buffer free", rs->stream_buffer_free_count);
+    if (rs->stream_buffer_free_count > 1) radio_duplicate_cleanup_warning(rs, "stream buffer free", rs->stream_buffer_free_count);
     else { if (rs->ringAlloc) {
         /* radio_ring_check_canary() returning -1 means the guard bytes
          * around this block are already corrupted -- in a HEAPGUARD debug
@@ -1552,10 +1548,6 @@ void Radio_NetworkInit(void)
 void Radio_NetworkShutdown(void)
 {
 #if defined(AMIGA_M68K)
-    if (Radio_IsTlsPoisoned() || Radio_IsMemoryPoisoned()) {
-        RADIO_DBG(printf("radio-netshutdown: emergency shutdown, leaving network/TLS libraries open after poison to avoid cleanup crash\n"));
-        return;
-    }
 #if defined(HAVE_AMISSL)
     if (radio_amissl_initialized)
         radio_ssl_global_cleanup();           /* closes any still-open per-task AmiSSL */
@@ -1715,8 +1707,8 @@ int Radio_Pump(RadioStream *rs)
         set_status(rs, RADIO_STATUS_BUFFERING);
     return n;
 }
-int Radio_ReadAudio(RadioStream *rs,unsigned char *buf,int maxBytes){ int got; if(!rs||!buf||maxBytes<=0)return 0; if(Radio_IsMemoryPoisoned()||Radio_IsTlsPoisoned()) return 0; if(radio_is_stopping(rs)) return 0; while(!radio_is_stopping(rs) && rs->status!=RADIO_STATUS_PLAYING && rs->used<RADIO_START_THRESHOLD && rs->status!=RADIO_STATUS_ERROR) { if(Radio_Pump(rs)<=0 && !rs->everPlayed && (++rs->zeroBytePumps>=RADIO_ZERO_BYTE_PUMP_MAX || radio_note_start_wait(rs,"radio stream did not buffer audio")<0)) { if(rs->status!=RADIO_STATUS_ERROR) set_error(rs,"radio stream did not buffer audio"); break; } } while(!radio_is_stopping(rs) && rs->used==0 && rs->status!=RADIO_STATUS_ERROR) { if(Radio_Pump(rs)<=0 && !rs->everPlayed && (++rs->zeroBytePumps>=RADIO_ZERO_BYTE_PUMP_MAX || radio_note_start_wait(rs,"radio stream did not deliver audio")<0)) { if(rs->status!=RADIO_STATUS_ERROR) set_error(rs,"radio stream did not deliver audio"); break; } } if(radio_is_stopping(rs)||!rs->headerDone||!rs->decoderStarted||rs->status==RADIO_STATUS_ERROR) return 0; got=ring_read(rs,buf,maxBytes); if(!rs->everPlayed && rs->status==RADIO_STATUS_PLAYING && rs->used<RADIO_LOW_WATER_BYTES) set_status(rs,RADIO_STATUS_BUFFERING); if(rs->status==RADIO_STATUS_BUFFERING && rs->used>=RADIO_START_THRESHOLD) set_status(rs,RADIO_STATUS_PLAYING); return got; }
-int Radio_ReadStartupAudio(RadioStream *rs,unsigned char *buf,int maxBytes,unsigned long timeoutMs){ clock_t start; int got; if(!rs||!buf||maxBytes<=0)return 0; if(Radio_IsMemoryPoisoned()||Radio_IsTlsPoisoned()) return 0; start=clock(); while(!radio_is_stopping(rs)&&rs->used==0&&rs->status!=RADIO_STATUS_ERROR){ if(Radio_Pump(rs)<0)break; if(timeoutMs>0 && (unsigned long)((clock()-start)*1000UL/CLOCKS_PER_SEC)>=timeoutMs){ set_error(rs,"AAC stream start timeout"); close_current_socket(rs); break; } } if(radio_is_stopping(rs)||!rs->headerDone||!rs->decoderStarted||rs->status==RADIO_STATUS_ERROR) return 0; got=ring_read(rs,buf,maxBytes); if(!rs->everPlayed&&rs->headerDone&&rs->status!=RADIO_STATUS_PLAYING&&rs->status!=RADIO_STATUS_ERROR) set_status(rs,RADIO_STATUS_BUFFERING); return got; }
+int Radio_ReadAudio(RadioStream *rs,unsigned char *buf,int maxBytes){ int got; if(!rs||!buf||maxBytes<=0)return 0; if(radio_is_stopping(rs)) return 0; while(!radio_is_stopping(rs) && rs->status!=RADIO_STATUS_PLAYING && rs->used<RADIO_START_THRESHOLD && rs->status!=RADIO_STATUS_ERROR) { if(Radio_Pump(rs)<=0 && !rs->everPlayed && (++rs->zeroBytePumps>=RADIO_ZERO_BYTE_PUMP_MAX || radio_note_start_wait(rs,"radio stream did not buffer audio")<0)) { if(rs->status!=RADIO_STATUS_ERROR) set_error(rs,"radio stream did not buffer audio"); break; } } while(!radio_is_stopping(rs) && rs->used==0 && rs->status!=RADIO_STATUS_ERROR) { if(Radio_Pump(rs)<=0 && !rs->everPlayed && (++rs->zeroBytePumps>=RADIO_ZERO_BYTE_PUMP_MAX || radio_note_start_wait(rs,"radio stream did not deliver audio")<0)) { if(rs->status!=RADIO_STATUS_ERROR) set_error(rs,"radio stream did not deliver audio"); break; } } if(radio_is_stopping(rs)||!rs->headerDone||!rs->decoderStarted||rs->status==RADIO_STATUS_ERROR) return 0; got=ring_read(rs,buf,maxBytes); if(!rs->everPlayed && rs->status==RADIO_STATUS_PLAYING && rs->used<RADIO_LOW_WATER_BYTES) set_status(rs,RADIO_STATUS_BUFFERING); if(rs->status==RADIO_STATUS_BUFFERING && rs->used>=RADIO_START_THRESHOLD) set_status(rs,RADIO_STATUS_PLAYING); return got; }
+int Radio_ReadStartupAudio(RadioStream *rs,unsigned char *buf,int maxBytes,unsigned long timeoutMs){ clock_t start; int got; if(!rs||!buf||maxBytes<=0)return 0; start=clock(); while(!radio_is_stopping(rs)&&rs->used==0&&rs->status!=RADIO_STATUS_ERROR){ if(Radio_Pump(rs)<0)break; if(timeoutMs>0 && (unsigned long)((clock()-start)*1000UL/CLOCKS_PER_SEC)>=timeoutMs){ set_error(rs,"AAC stream start timeout"); close_current_socket(rs); break; } } if(radio_is_stopping(rs)||!rs->headerDone||!rs->decoderStarted||rs->status==RADIO_STATUS_ERROR) return 0; got=ring_read(rs,buf,maxBytes); if(!rs->everPlayed&&rs->headerDone&&rs->status!=RADIO_STATUS_PLAYING&&rs->status!=RADIO_STATUS_ERROR) set_status(rs,RADIO_STATUS_BUFFERING); return got; }
 void Radio_FailStartup(RadioStream *rs,const char *message){ if(!rs)return; set_error(rs,message&&message[0]?message:"AAC stream start timeout"); rs->stopping=1; rs->reconnectAttempts=RADIO_RECONNECT_MAX; rs->reconnectDelay=0; close_current_socket(rs); }
 RadioStatus Radio_GetStatus(RadioStream *rs){ return rs?rs->status:RADIO_STATUS_CLOSED; }
 const char *Radio_GetTitle(RadioStream *rs){ return rs?rs->title:""; }
