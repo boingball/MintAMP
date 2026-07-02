@@ -56,6 +56,15 @@ unsigned char pjpeg_decode_init(pjpeg_image_info_t *pInfo,
     unsigned char reduce);
 unsigned char pjpeg_decode_mcu(void);
 
+/* Releases the whole-file buffer pjpeg_decode_init() allocated to hold the
+ * source JPEG.  pjpeg_decode_init() only frees the *previous* session's
+ * buffer (so it can keep decoding a session already in progress), so the
+ * caller must call this once it is done calling pjpeg_decode_mcu() --
+ * whether decoding finished, failed partway, or was never started because
+ * pjpeg_decode_init() itself failed after buffering the file.  Safe to call
+ * even if nothing was ever allocated. */
+void pjpeg_decode_free(void);
+
 #ifdef __cplusplus
 }
 #endif

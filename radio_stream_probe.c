@@ -7,16 +7,19 @@
 
 #include "radio_stream_probe.h"
 #include "radio_debug.h"
+#include "radio_stream.h"
 
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
+#include "miniamp_memguard.h"
 
 #if defined(AMIGA_M68K)
 #include <exec/types.h>
 #include <exec/libraries.h>
 #include <proto/exec.h>
+#include <proto/dos.h>
 #include <proto/bsdsocket.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -39,6 +42,26 @@ struct Library *AmiSSLMasterBase __attribute__((weak));
 struct Library *AmiSSLBase __attribute__((weak));
 struct Library *AmiSSLExtBase __attribute__((weak));
 static int rb_probe_amissl_initialized = 0;
+/* Set when a probe hits a fatal SSL_read fault: this (parent/GUI) task's
+ * AmiSSL state is then never CleanupAmiSSL()'d again -- the state stays
+ * live and initialized for later probes instead (see
+ * rb_probe_cleanup_amissl()). */
+static int rb_probe_amissl_dirty = 0;
+/* Set when this file's own lazy fallback ran OpenAmiSSLTags() (no
+ * radio_stream.c around to track the opener task): that call already
+ * initialized this task, so InitAmiSSL()/CleanupAmiSSL() must not run. */
+static int rb_probe_opened_shared_here = 0;
+/* One SSL_CTX shared by every HTTPS probe in this run.
+ * Do not free it per probe: repeated SSL_CTX_new()/SSL_CTX_free() churn on
+ * classic AmiSSL has correlated with delayed exec heap corruption during
+ * station/favicon probe cycles. SSL_new()/SSL_free() remains per connection.
+ * If a TLS fault poisons a transport, orphan this ctx and rebuild on the next
+ * clean probe instead of freeing it through possibly damaged AmiSSL state. */
+static SSL_CTX *rb_probe_shared_ctx = NULL;
+/* Cumulative per-task InitAmiSSL()/CleanupAmiSSL() debug counters for this
+ * (parent/GUI) task's probe/favicon fetches. */
+static long rb_probe_amissl_init_count = 0;
+static long rb_probe_amissl_cleanup_count = 0;
 #endif /* HAVE_AMISSL */
 #else
 #include <unistd.h>
@@ -52,6 +75,22 @@ static int rb_probe_amissl_initialized = 0;
 #define rb_probe_close_socket(s) close(s)
 #endif
 
+
+/* AvailMem() bracketing around SSL_free()/SSL_CTX_free() specifically (see
+ * the matching radio_debug_mem_report() in radio_stream.c) -- narrows any
+ * memory movement on a failed probe TLS handshake down to exactly those two
+ * AmiSSL calls instead of the whole probe. */
+static void rb_probe_debug_mem_report(unsigned long session_id, const char *where)
+{
+#if defined(AMIGA_M68K)
+    RADIO_DBG(printf("rb-probe-mem: session=%lu %s AvailMem(any)=%lu fast=%lu chip=%lu\n",
+        session_id, where ? where : "", (unsigned long)AvailMem(MEMF_ANY),
+        (unsigned long)AvailMem(MEMF_FAST), (unsigned long)AvailMem(MEMF_CHIP)));
+#else
+    RADIO_DBG(printf("rb-probe-mem: session=%lu %s AvailMem(any)=n/a fast=n/a chip=n/a\n",
+        session_id, where ? where : ""));
+#endif
+}
 
 static void rb_probe_format_ipv4_be(unsigned long addr_be, char *out, int out_size)
 {
@@ -78,14 +117,21 @@ static void rb_probe_format_ipv4_be(unsigned long addr_be, char *out, int out_si
 static unsigned long rb_probe_next_session_id = 1;
 static long rb_probe_open_socket_count = 0;
 
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+static void rb_probe_backoff_sleep(void)
+{
+    Delay(2); /* ~40ms (2 ticks @ 50Hz), same budget as radio_stream.c's handshake poll */
+}
+#endif
+
 #if defined(AMIGA_M68K) && !defined(RB_STREAM_PROBE_EXTERNAL_SOCKETBASE)
+/* bsdsocket.library is now opened once by Radio_NetworkInit() at app startup
+ * and closed once by Radio_NetworkShutdown() at app exit (see radio_stream.c)
+ * instead of per-probe -- this is now a deliberate no-op, kept so its call
+ * sites below don't all need to be removed individually. */
 static void rb_probe_release_idle_socketbase(void)
 {
-    if (rb_probe_open_socket_count == 0 && SocketBase) {
-        CloseLibrary(SocketBase);
-        SocketBase = NULL;
-        RADIO_DBG(printf("radio-socket: probe SocketBase closed after idle cleanup\n");)
-    }
+    (void)rb_probe_open_socket_count;
 }
 #endif
 
@@ -116,8 +162,73 @@ typedef struct RbProbeTransport {
     SSL *ssl;
     SSL_CTX *ctx;
     int sslHandshakeDone;
+    int sslStatePoisoned;
+    int sslReadCloseSeen;
 #endif
 } RbProbeTransport;
+
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+/* SSL_read() can legitimately need several calls (WANT_READ/WANT_WRITE) even
+ * on a nominally blocking socket -- same reasoning as the SSL_connect() retry
+ * in rb_probe_transport_open().  dst_cap and fill are only for the debug
+ * print (the buffer capacity and bytes already filled at the call site). */
+static int rb_probe_ssl_read_retrying(RbProbeTransport *transport, char *dst, int want, int dst_cap, int fill)
+{
+    int n;
+    int tries;
+
+    for (tries = 0; tries < 150; tries++) {
+        int ssl_err;
+
+        n = (int)SSL_read(transport->ssl, dst, want);
+        RADIO_DBG(printf("rb-probe-ssl-read: session=%lu ssl=%p ctx=%p fd=%ld dst=%p dst_cap=%d requested=%d returned=%d fill=%d ring_free=0\n",
+            transport->session_id, (void *)transport->ssl, (void *)transport->ctx, (long)transport->sock, (void *)dst, dst_cap, want, n, fill));
+        if (n > 0) return n;
+        ssl_err = SSL_get_error(transport->ssl, n);
+        RADIO_DBG(printf("rb-probe-ssl-read: session=%lu SSL_get_error=%d ret=%d fd=%ld\n", transport->session_id, ssl_err, n, (long)transport->sock));
+#ifdef SSL_ERROR_ZERO_RETURN
+        if (ssl_err == SSL_ERROR_ZERO_RETURN) {
+            /* On classic AmiSSL this "clean" TLS close path can still leave
+             * probe SSL internals unsafe to free. The memcheck run after the
+             * shared-ctx patch corrupted immediately after SSL_free() on this
+             * path, so quarantine the per-probe SSL object instead. */
+            transport->sslReadCloseSeen = 1;
+            RADIO_DBG(printf("rb-probe-ssl-read: session=%lu SSL_ERROR_ZERO_RETURN seen -- will skip SSL_free on close\n", transport->session_id);)
+            return n;
+        }
+#endif
+        if (ssl_err == SSL_ERROR_WANT_READ || ssl_err == SSL_ERROR_WANT_WRITE) {
+            rb_probe_backoff_sleep();
+            continue;
+        }
+        {
+            unsigned long ssl_lib_error = ERR_get_error();
+            char ssl_error_buf[160];
+            ssl_error_buf[0] = '\0';
+            if (ssl_lib_error != 0)
+                ERR_error_string_n(ssl_lib_error, ssl_error_buf, sizeof(ssl_error_buf));
+            RADIO_DBG(printf("rb-probe-ssl-read: session=%lu read failed ssl_error=%d lib_error=%08lx (%s)\n",
+                transport->session_id, ssl_err, ssl_lib_error, ssl_error_buf[0] ? ssl_error_buf : "none"));
+            if (ssl_err == SSL_ERROR_SSL || ssl_lib_error != 0) {
+                /* Survivable, but this transport's SSL/SSL_CTX must never
+                 * be freed: SSL_free() after a fatal SSL_read error crashes
+                 * inside AmiSSL (see the matching handler in radio_stream.c's
+                 * Radio_Pump()). Quarantine the objects and skip this task's
+                 * next CleanupAmiSSL(); HTTPS itself stays enabled and the
+                 * repeated-fault fuse still hard-poisons eventually. */
+                transport->sslStatePoisoned = 1;
+                rb_probe_amissl_dirty = 1;
+                Radio_NoteTlsFaultHost(transport->host);
+                Radio_ReportTlsFault(ssl_err == SSL_ERROR_SSL ? "probe SSL_ERROR_SSL from SSL_read" : "probe fatal AmiSSL error queue from SSL_read");
+                ERR_clear_error();
+                RADIO_DBG(printf("rb-probe-ssl-read: session=%lu SSL state quarantined -- will skip SSL_free/SSL_CTX_free/CleanupAmiSSL on close\n", transport->session_id));
+            }
+        }
+        return n;
+    }
+    return n;
+}
+#endif
 
 static int rb_probe_ascii_starts_nocase(const char *s, const char *prefix)
 {
@@ -409,61 +520,142 @@ static int rb_probe_resolve_location(const RbProbeUrl *base, const char *locatio
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
 static int rb_probe_ensure_amissl(void)
 {
+    if (Radio_IsTlsPoisoned()) {
+        /* AmiSSL cleanup has already been skipped/leaked for this run --
+         * never call back into it (callers also refuse HTTPS up front; this
+         * is the belt-and-braces check on the transport path itself). */
+        return -1;
+    }
+    if (!SocketBase) {
+        /* Probes run in the same parent/GUI task that ran Radio_NetworkInit()
+         * -- adopt its bsdsocket.library rather than opening a second one.
+         * (This file's weak SocketBase does not reliably merge with
+         * radio_stream.c's strong definition under the m68k hunk linker, so
+         * the value has to come through a function call.) */
+        void *shared_socket = NULL;
+        Radio_GetNetworkBases(&shared_socket, NULL, NULL);
+        if (shared_socket) SocketBase = (struct Library *)shared_socket;
+    }
     if (!SocketBase) {
         SocketBase = OpenLibrary("bsdsocket.library", 4);
         if (!SocketBase) return -1;
     }
-    if (AmiSSLBase && rb_probe_amissl_initialized) return 0;
-    if (!AmiSSLMasterBase) {
-        AmiSSLMasterBase = OpenLibrary("amisslmaster.library", AMISSLMASTER_MIN_VERSION);
-        if (!AmiSSLMasterBase) return -1;
-        if (!InitAmiSSLMaster(AMISSL_CURRENT_VERSION, TRUE)) {
-            CloseLibrary(AmiSSLMasterBase); AmiSSLMasterBase = NULL; return -1;
+    if (!AmiSSLBase) {
+        /* Same story for the shared AmiSSL instance: adopt the one
+         * Radio_NetworkInit()/radio_stream.c opened instead of running
+         * OpenLibrary(amisslmaster)/InitAmiSSLMaster()/OpenAmiSSLTags() a
+         * SECOND time in this task -- exactly that repeated open is what
+         * raised a recoverable alert on the first Play and can wedge AmiSSL
+         * outright. */
+        void *shared_base = NULL, *shared_ext = NULL, *shared_master = NULL;
+        Radio_GetAmiSslShared(&shared_base, &shared_ext, &shared_master);
+        if (shared_base) {
+            AmiSSLBase = (struct Library *)shared_base;
+            AmiSSLExtBase = (struct Library *)shared_ext;
+            AmiSSLMasterBase = (struct Library *)shared_master;
+            RADIO_DBG(printf("radio-netinit: probe adopted shared AmiSSL instance base=%p ext=%p master=%p\n", (void *)AmiSSLBase, (void *)AmiSSLExtBase, (void *)AmiSSLMasterBase);)
         }
     }
-    if (OpenAmiSSLTags(AMISSL_CURRENT_VERSION,
-                       AmiSSL_UsesOpenSSLStructs, TRUE,
-                       AmiSSL_GetAmiSSLBase, (ULONG)&AmiSSLBase,
-                       AmiSSL_GetAmiSSLExtBase, (ULONG)&AmiSSLExtBase,
-                       AmiSSL_SocketBase, (ULONG)SocketBase,
-                       AmiSSL_ErrNoPtr, (ULONG)&errno,
-                       TAG_DONE) != 0)
-        return -1;
+    /* rb_probe_amissl_initialized (this file's own flag, NOT AmiSSLBase) is
+     * "have I, this task, called InitAmiSSL() yet" -- AmiSSLBase now stays
+     * open for the whole app's lifetime (see radio_stream.c's
+     * Radio_NetworkInit()/Radio_NetworkShutdown()) instead of being opened
+     * and closed on every probe. Checking AmiSSLBase itself here would be
+     * wrong now: it stays non-NULL across every task, so it can no longer
+     * answer "has *this* task called InitAmiSSL()" the way it used to when
+     * the library was opened and closed per probe.
+     *
+     * Each task must still call its own InitAmiSSL(), paired with its own
+     * CleanupAmiSSL() -- that part of the per-task contract is unchanged;
+     * only the library-level open/close moved to app startup/shutdown. */
+    if (rb_probe_amissl_initialized) return 0;
+    if (!AmiSSLBase) {
+        /* No shared instance to adopt either (Radio_NetworkInit() failed or
+         * this is a standalone build without radio_stream.c) -- lazily open
+         * our own here as a last resort. No InitAmiSSLMaster(): the AmiSSL
+         * v5/v6 SDK replaces it (and OpenAmiSSL()/InitAmiSSL() for the
+         * calling task) with this single OpenAmiSSLTags() call. */
+        RADIO_DBG(printf("radio-netinit: probe found no shared AmiSSL instance, opening its own\n");)
+        if (!AmiSSLMasterBase) {
+            AmiSSLMasterBase = OpenLibrary("amisslmaster.library", AMISSLMASTER_MIN_VERSION);
+            if (!AmiSSLMasterBase) return -1;
+        }
+        if (OpenAmiSSLTags(AMISSL_CURRENT_VERSION,
+                           AmiSSL_UsesOpenSSLStructs, TRUE,
+                           AmiSSL_GetAmiSSLBase, (ULONG)&AmiSSLBase,
+                           AmiSSL_GetAmiSSLExtBase, (ULONG)&AmiSSLExtBase,
+                           AmiSSL_SocketBase, (ULONG)SocketBase,
+                           AmiSSL_ErrNoPtr, (ULONG)&errno,
+                           TAG_DONE) != 0)
+            return -1;
+        rb_probe_opened_shared_here = 1;
+    }
+    if (Radio_AmiSslTaskIsOpener() || rb_probe_opened_shared_here) {
+        /* Per the AmiSSL v5/v6 SDK, the task that called OpenAmiSSLTags()
+         * is already initialized -- only OTHER subprocesses run the
+         * InitAmiSSL()/CleanupAmiSSL() pair. Probes run in the same
+         * (parent/GUI) task that ran Radio_NetworkInit()'s OpenAmiSSLTags(),
+         * so no per-task init is needed or allowed here. */
+        rb_probe_amissl_initialized = 1;
+        RADIO_DBG(printf("radio-resource: probe task is the OpenAmiSSLTags opener, InitAmiSSL not needed\n");)
+        return 0;
+    }
+    /* Deliberately using AmiSSL's own auto-allocated timer.device port
+     * (not AmiSSL_TimerPort with one of our own) -- see the matching comment
+     * in radio_stream.c: a caller-supplied port was tried and reverted after
+     * it correlated with the playback child going unresponsive to a stop
+     * signal while mid-SSL_connect(). */
     if (InitAmiSSL(AmiSSL_SocketBase, (ULONG)SocketBase,
                    AmiSSL_ErrNoPtr, (ULONG)&errno,
                    TAG_DONE) != 0) {
-        CloseAmiSSL(); AmiSSLBase = NULL; AmiSSLExtBase = NULL; return -1;
+        /* Do NOT CloseAmiSSL() here: this task may not be the one that
+         * opened the shared library -- only Radio_NetworkShutdown()
+         * closes it, once, at final app shutdown. */
+        return -1;
     }
     rb_probe_amissl_initialized = 1;
+    rb_probe_amissl_init_count++;
+    RADIO_DBG(printf("radio-resource: probe AmiSSL init count=%ld cleanup count=%ld\n", rb_probe_amissl_init_count, rb_probe_amissl_cleanup_count);)
     return 0;
 }
 
+/* amisslmaster.library and the shared AmiSSLBase/AmiSSLExtBase instance are
+ * both opened once by radio_stream.c's Radio_NetworkInit() (or lazily here,
+ * whichever runs first) and closed once by Radio_NetworkShutdown() at app
+ * exit. Per the AmiSSL v5/v6 SDK the OpenAmiSSLTags() opener task (normally
+ * this parent/GUI task) is already initialized and never runs the
+ * InitAmiSSL()/CleanupAmiSSL() pair -- that pair is only for OTHER
+ * subprocesses sharing the instance, and then it must be properly paired
+ * per task or SSL_CTX_new()/SSL_new() crashes in a later task. */
 static void rb_probe_cleanup_amissl(void)
 {
     RADIO_DBG(printf("radio-ssl-diag: probe cleanup ENTER probe_init=%d base=%p ext=%p master=%p\n", rb_probe_amissl_initialized, (void *)AmiSSLBase, (void *)AmiSSLExtBase, (void *)AmiSSLMasterBase);)
-    if (rb_probe_amissl_initialized) {
+    if (rb_probe_amissl_initialized && (Radio_IsTlsPoisoned() || rb_probe_amissl_dirty)) {
+        /* Never CleanupAmiSSL() after a fault/poison. Crucially,
+         * rb_probe_amissl_initialized stays SET: this GUI task's per-task
+         * AmiSSL state was never released, so it is still live -- the next
+         * probe must reuse it rather than run a second InitAmiSSL() on top
+         * of the un-cleaned one. (Under hard poison no probe runs anyway.) */
+        RADIO_DBG(printf("radio-cleanup: probe CleanupAmiSSL skipped (%s) keeping per-task AmiSSL state live for reuse\n",
+            Radio_IsTlsPoisoned() ? "poisoned" : "quarantined");)
+    } else if (rb_probe_amissl_initialized &&
+               (Radio_AmiSslTaskIsOpener() || rb_probe_opened_shared_here)) {
+        /* The opener task's AmiSSL state belongs to OpenAmiSSLTags()/
+         * CloseAmiSSL(); the SDK reserves the InitAmiSSL()/CleanupAmiSSL()
+         * pair for other subprocesses. Keep initialized set -- there is
+         * nothing to release per probe. */
+        RADIO_DBG(printf("radio-cleanup: probe CleanupAmiSSL not needed (this task is the OpenAmiSSLTags opener)\n");)
+    } else if (rb_probe_amissl_initialized) {
         CleanupAmiSSL(TAG_DONE);
         rb_probe_amissl_initialized = 0;
+        rb_probe_amissl_cleanup_count++;
+        RADIO_DBG(printf("radio-resource: probe AmiSSL cleaned up init count=%ld cleanup count=%ld\n", rb_probe_amissl_init_count, rb_probe_amissl_cleanup_count);)
     }
-    if (AmiSSLBase) {
-        CloseAmiSSL();
-        AmiSSLBase = NULL;
-        AmiSSLExtBase = NULL;
-    }
+    /* AmiSSLBase/AmiSSLExtBase are shared for the whole app's lifetime now
+     * (see radio_stream.c's Radio_NetworkShutdown()) -- this function no
+     * longer closes them itself. */
     RADIO_DBG(printf("radio-ssl-diag: probe cleanup EXIT  probe_init=%d base=%p ext=%p master=%p\n", rb_probe_amissl_initialized, (void *)AmiSSLBase, (void *)AmiSSLExtBase, (void *)AmiSSLMasterBase);)
-    /* Deliberately keep amisslmaster.library open for the lifetime of the
-     * program.  AmiSSL requires InitAmiSSLMaster() to run exactly once; only the
-     * per-task OpenAmiSSL()/CloseAmiSSL() pair above may repeat.  Closing and
-     * re-opening the master library on every probe/stream stop (the probe and
-     * the playback child each ran their own full teardown) re-ran
-     * InitAmiSSLMaster() several times within a single stop->probe->start cycle,
-     * which wedged the next HTTPS connection and froze the machine when the user
-     * pressed Play on an already-playing stream.  The master base is shared with
-     * radio_stream.c via the weak AmiSSLBase/AmiSSLMasterBase symbols and is
-     * reclaimed by the OS at program exit. */
-#if !defined(RB_STREAM_PROBE_EXTERNAL_SOCKETBASE)
-    rb_probe_release_idle_socketbase();
-#endif
+    Radio_DebugCheckExecMem("after probe AmiSSL cleanup");
 }
 
 #endif
@@ -477,6 +669,15 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *host
     struct sockaddr_in sa;
 
     if (!transport || !host) return RB_STREAM_PROBE_ERR_BAD_ARG;
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+    if (use_ssl && Radio_IsTlsFaultHost(host)) {
+        /* This host already triggered a fatal AmiSSL fault this run --
+         * the fault can corrupt memory inside the failing call itself,
+         * so don't give it a second chance until restart. */
+        RADIO_DBG(printf("rb-probe: refusing TLS to fault-blocked host \"%s\"\n", host);)
+        return RB_STREAM_PROBE_ERR_TLS_HANDSHAKE;
+    }
+#endif
     transport->sock = RB_PROBE_INVALID_SOCKET;
     transport->isSSL = 0;
     transport->session_id = rb_probe_next_session_id++;
@@ -485,9 +686,19 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *host
     transport->ssl = NULL;
     transport->ctx = NULL;
     transport->sslHandshakeDone = 0;
+    transport->sslStatePoisoned = 0;
+    transport->sslReadCloseSeen = 0;
 #endif
 
 #if defined(AMIGA_M68K) && !defined(RB_STREAM_PROBE_EXTERNAL_SOCKETBASE)
+    if (!SocketBase) {
+        /* Adopt the app-wide bsdsocket.library first (see
+         * rb_probe_ensure_amissl(): weak SocketBase does not reliably merge
+         * with radio_stream.c's strong definition). */
+        void *shared_socket = NULL;
+        Radio_GetNetworkBases(&shared_socket, NULL, NULL);
+        if (shared_socket) SocketBase = (struct Library *)shared_socket;
+    }
     if (!SocketBase) {
         SocketBase = OpenLibrary("bsdsocket.library", 4);
         if (!SocketBase) return RB_STREAM_PROBE_ERR_CONNECT;
@@ -521,7 +732,13 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *host
         unsigned long ssl_lib_error;
         char ssl_error_buf[160];
         int sni_set;
+        int tries;
 
+        if (Radio_IsTlsPoisoned()) {
+            RADIO_DBG(printf("rb-probe TLS: refused HTTPS after AmiSSL poison host=%s port=%d\n", host, port);)
+            rb_probe_transport_close(transport);
+            return RB_STREAM_PROBE_ERR_TLS_POISONED;
+        }
         ssl_connect_rc = 0;
         ssl_error = 0;
         ssl_lib_error = 0;
@@ -531,16 +748,33 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *host
             rb_probe_transport_close(transport);
             return RB_STREAM_PROBE_ERR_CONNECT;
         }
-        transport->ctx = SSL_CTX_new(SSLv23_client_method());
+        if (!rb_probe_shared_ctx) {
+            Radio_DebugCheckExecMem("before probe SSL_CTX_new");
+            rb_probe_shared_ctx = SSL_CTX_new(SSLv23_client_method());
+            Radio_DebugCheckExecMem("after probe SSL_CTX_new");
+            if (rb_probe_shared_ctx) {
+                /* No CA bundle on classic AmigaOS; skip cert verification for streams. */
+                SSL_CTX_set_verify(rb_probe_shared_ctx, SSL_VERIFY_NONE, NULL);
+#ifdef SSL_OP_IGNORE_UNEXPECTED_EOF
+                /* Treat an abrupt server disconnect as a clean end-of-stream
+                 * instead of the fatal "unexpected eof" SSL_ERROR_SSL -- see the
+                 * matching option (and rationale) in radio_stream.c's
+                 * radio_ssl_connect(). */
+                SSL_CTX_set_options(rb_probe_shared_ctx, SSL_OP_IGNORE_UNEXPECTED_EOF);
+#endif
+            }
+        }
+        transport->ctx = rb_probe_shared_ctx;
         if (!transport->ctx) {
             rb_probe_transport_close(transport);
             return RB_STREAM_PROBE_ERR_CONNECT;
         }
-        /* No CA bundle on classic AmigaOS; skip cert verification for streams. */
-        SSL_CTX_set_verify(transport->ctx, SSL_VERIFY_NONE, NULL);
+        Radio_DebugCheckExecMem("before probe SSL_new");
         transport->ssl = SSL_new(transport->ctx);
+        Radio_DebugCheckExecMem("after probe SSL_new");
         if (!transport->ssl) {
-            SSL_CTX_free(transport->ctx); transport->ctx = NULL;
+            /* transport->ctx is the shared per-run ctx. Never free it here. */
+            transport->ctx = NULL;
             rb_probe_transport_close(transport);
             return RB_STREAM_PROBE_ERR_CONNECT;
         }
@@ -552,16 +786,61 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *host
 #endif
         RADIO_DBG(printf("rb-probe TLS: host=%s port=%d sni=%s verify=disabled method=SSLv23_client_method\n",
                host, port, sni_set > 0 ? host : (sni_set == 0 ? "not-set" : "unavailable"));)
-        ssl_connect_rc = SSL_connect(transport->ssl);
-        if (ssl_connect_rc != 1) {
+        /* SSL_connect() can legitimately need several calls (WANT_READ/
+         * WANT_WRITE) even on a nominally blocking socket -- retry with the
+         * same budget radio_stream.c's radio_ssl_do_handshake() uses instead
+         * of treating the first WANT_READ/WRITE as a hard failure. */
+        /* Clean error queue first: a stale entry from an earlier failure
+         * must not be misread as this connection's fatal error below. */
+        ERR_clear_error();
+        for (tries = 0; tries < 150; tries++) {
+            ssl_connect_rc = SSL_connect(transport->ssl);
+            if (ssl_connect_rc == 1) break;
             ssl_error = SSL_get_error(transport->ssl, ssl_connect_rc);
+            if (ssl_error == SSL_ERROR_WANT_READ || ssl_error == SSL_ERROR_WANT_WRITE) {
+                rb_probe_backoff_sleep();
+                continue;
+            }
+            break;
+        }
+        if (ssl_connect_rc != 1) {
             ssl_lib_error = ERR_get_error();
             if (ssl_lib_error != 0)
                 ERR_error_string_n(ssl_lib_error, ssl_error_buf, sizeof(ssl_error_buf));
             RADIO_DBG(printf("rb-probe TLS: SSL_connect rc=%d SSL_get_error=%d error=\"%s\" verify=disabled method=SSLv23_client_method\n",
                    ssl_connect_rc, ssl_error, ssl_error_buf[0] ? ssl_error_buf : "none");)
-            SSL_free(transport->ssl); transport->ssl = NULL;
-            SSL_CTX_free(transport->ctx); transport->ctx = NULL;
+            if (ssl_error == SSL_ERROR_SSL || ssl_lib_error != 0) {
+                /* Fatal AmiSSL-level handshake failure: quarantine, exactly
+                 * like a fatal SSL_read fault. An f111.rndfnk.com run
+                 * disproved "handshake-failure frees are safe": SSL_connect
+                 * failed with "0A0C0103 internal error", the SSL/SSL_CTX
+                 * frees appeared to succeed, and CleanupAmiSSL() then looped
+                 * endless AN_BadFreeAddr alerts walking the damaged
+                 * internals. After ANY fatal AmiSSL error nothing of that
+                 * session may be freed again; HTTPS itself stays enabled. */
+                transport->sslStatePoisoned = 1;
+                rb_probe_amissl_dirty = 1;
+                Radio_NoteTlsFaultHost(transport->host);
+                Radio_ReportTlsFault(ssl_error == SSL_ERROR_SSL ? "probe SSL_ERROR_SSL from SSL_connect" : "probe fatal AmiSSL error queue from SSL_connect");
+            }
+            /* Drain the queue so this failure cannot masquerade as a later
+             * session's fault. */
+            ERR_clear_error();
+            if (transport->sslStatePoisoned || Radio_IsTlsPoisoned()) {
+                RADIO_DBG(printf("radio-cleanup: probe handshake-fail SSL_free/SSL_CTX_free skipped (quarantined/poisoned) session=%lu ssl=%p ctx=%p\n", transport->session_id, (void *)transport->ssl, (void *)transport->ctx);)
+                transport->ssl = NULL;
+                transport->ctx = NULL;
+                rb_probe_shared_ctx = NULL;
+            } else {
+                /* Plain connect timeout (WANT_READ/WANT_WRITE budget
+                 * exhausted, empty error queue): the SSL object is healthy
+                 * and freeing it is the normal, safe path. The ctx is the
+                 * shared per-run one and stays alive. */
+                rb_probe_debug_mem_report(transport->session_id, "before handshake-fail SSL_free");
+                SSL_free(transport->ssl); transport->ssl = NULL;
+                rb_probe_debug_mem_report(transport->session_id, "after handshake-fail SSL_free");
+                transport->ctx = NULL;
+            }
             rb_probe_transport_close(transport);
             return RB_STREAM_PROBE_ERR_TLS_HANDSHAKE;
         }
@@ -588,21 +867,32 @@ static void rb_probe_transport_close_mode(RbProbeTransport *transport, RbProbeCl
     if (transport->sock != RB_PROBE_INVALID_SOCKET) {
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
         int shutdown_called = 0;
-        if (mode == RB_PROBE_CLOSE_GRACEFUL && transport->ssl && transport->sslHandshakeDone) {
+        if (mode == RB_PROBE_CLOSE_GRACEFUL && transport->ssl && transport->sslHandshakeDone &&
+            !transport->sslStatePoisoned && !Radio_IsTlsPoisoned()) {
             SSL_shutdown(transport->ssl);
             shutdown_called = 1;
         }
         RADIO_DBG(printf("radio-cleanup: probe ssl_shutdown session=%lu mode=%s %s\n",
             transport->session_id, rb_probe_close_mode_name(mode), shutdown_called ? "called" : "skipped");)
-        if (transport->ssl) {
+        if (transport->ssl && (transport->sslStatePoisoned || transport->sslReadCloseSeen || Radio_IsTlsPoisoned())) {
+            RADIO_DBG(printf("radio-cleanup: probe SSL_free skipped (%s) session=%lu ssl=%p leaking to avoid crashing on AmiSSL close/free path\n",
+                transport->sslStatePoisoned ? "poisoned" : (transport->sslReadCloseSeen ? "zero-return" : "tls-poisoned"),
+                transport->session_id, (void *)transport->ssl);)
+            transport->ssl = NULL;
+            transport->sslHandshakeDone = 0;
+            transport->ctx = NULL;
+            if (transport->sslStatePoisoned || Radio_IsTlsPoisoned())
+                rb_probe_shared_ctx = NULL;
+        } else if (transport->ssl) {
+            rb_probe_debug_mem_report(transport->session_id, "before close SSL_free");
             SSL_free(transport->ssl);
             transport->ssl = NULL;
             transport->sslHandshakeDone = 0;
+            rb_probe_debug_mem_report(transport->session_id, "after close SSL_free");
         }
-        if (transport->ctx) {
-            SSL_CTX_free(transport->ctx);
-            transport->ctx = NULL;
-        }
+        /* transport->ctx is rb_probe_shared_ctx. It is deliberately kept for
+         * the run and never SSL_CTX_free()'d from a per-probe close path. */
+        transport->ctx = NULL;
 #endif
          {
             long closing_fd = (long)transport->sock;
@@ -615,6 +905,7 @@ static void rb_probe_transport_close_mode(RbProbeTransport *transport, RbProbeCl
     }
     RADIO_DBG(printf("radio-cleanup: probe close mode=%s session=%lu complete open_socket_count_after=%ld\n",
         rb_probe_close_mode_name(mode), transport->session_id, rb_probe_open_socket_count);)
+    Radio_DebugCheckExecMem("after probe transport close");
 }
 
 /* Safe default used by every connect/handshake/send/recv/redirect/HTTP-error
@@ -744,6 +1035,22 @@ static int rb_probe_url_has_mp3_hint(const RbProbeUrl *url)
            rb_probe_contains_nocase(url->path, "mp3");
 }
 
+static int rb_probe_url_has_aac_hint(const RbProbeUrl *url)
+{
+    if (!url) return 0;
+    return rb_probe_contains_nocase(url->path, ".aac") ||
+           rb_probe_contains_nocase(url->path, ".aacp") ||
+           rb_probe_contains_nocase(url->path, "aac");
+}
+
+static int rb_probe_content_type_is_aac(const char *content_type)
+{
+    return rb_probe_contains_nocase(content_type, "audio/aac") ||
+           rb_probe_contains_nocase(content_type, "audio/aacp") ||
+           rb_probe_contains_nocase(content_type, "audio/x-aac") ||
+           rb_probe_contains_nocase(content_type, "audio/mp4");
+}
+
 static RbStreamCodec rb_probe_detect_codec(const RbProbeUrl *url, const RbStreamInfo *info,
                                            const unsigned char *peek, int peek_len)
 {
@@ -753,6 +1060,10 @@ static RbStreamCodec rb_probe_detect_codec(const RbProbeUrl *url, const RbStream
     }
     if (peek && peek_len >= 2 && peek[0] == 0xff && (peek[1] & 0xe0) == 0xe0 &&
         peek[1] != 0xf1 && peek[1] != 0xf9) {
+        if ((info && rb_probe_content_type_is_aac(info->content_type)) || rb_probe_url_has_aac_hint(url)) {
+            RADIO_DBG(printf("rb-probe codec conflict: AAC hint but first-byte sniff=MPEG/MP3; final=unsupported\n");)
+            return RB_STREAM_CODEC_UNKNOWN;
+        }
         RADIO_DBG(printf("rb-probe codec: initial byte sniff=MPEG frame sync final=MP3\n");)
         return RB_STREAM_CODEC_MP3;
     }
@@ -761,21 +1072,37 @@ static RbStreamCodec rb_probe_detect_codec(const RbProbeUrl *url, const RbStream
         return RB_STREAM_CODEC_AAC;
     }
     if (peek && peek_len >= 4 && peek[0] == 'O' && peek[1] == 'g' && peek[2] == 'g' && peek[3] == 'S') {
+        /* "OggS" is just the container magic -- Vorbis, Opus, Speex and
+         * FLAC-in-Ogg all start a page with it. The only codec this app can
+         * actually decode inside an Ogg container is Vorbis (via Tremor);
+         * an Opus (or other) payload handed to ogg.decoder isn't a format
+         * error Tremor is guaranteed to reject cleanly, so catch it here
+         * instead of letting ov_open_callbacks() ever see it. Every Opus
+         * stream's very first page carries an "OpusHead" identification
+         * packet, which -- unlike Vorbis's packet-type-prefixed "vorbis"
+         * string -- is safe to substring-search for regardless of the exact
+         * page header length (segment table size varies). */
+        int i;
+        for (i = 0; i + 8 <= peek_len; i++) {
+            if (peek[i] == 'O' && peek[i + 1] == 'p' && peek[i + 2] == 'u' && peek[i + 3] == 's' &&
+                peek[i + 4] == 'H' && peek[i + 5] == 'e' && peek[i + 6] == 'a' && peek[i + 7] == 'd') {
+                RADIO_DBG(printf("rb-probe codec: initial byte sniff=OggS+OpusHead final=unsupported (Opus-in-Ogg)\n");)
+                return RB_STREAM_CODEC_UNKNOWN;
+            }
+        }
         RADIO_DBG(printf("rb-probe codec: initial byte sniff=OggS final=OGG\n");)
         return RB_STREAM_CODEC_OGG;
     }
     if (info && info->content_type[0]) {
         if (rb_probe_contains_nocase(info->content_type, "audio/mpeg") ||
             rb_probe_contains_nocase(info->content_type, "audio/mp3")) return RB_STREAM_CODEC_MP3;
-        if (rb_probe_contains_nocase(info->content_type, "audio/aac") ||
-            rb_probe_contains_nocase(info->content_type, "audio/aacp") ||
-            rb_probe_contains_nocase(info->content_type, "audio/x-aac")) return RB_STREAM_CODEC_AAC;
+        if (rb_probe_content_type_is_aac(info->content_type)) return RB_STREAM_CODEC_AAC;
         if (rb_probe_contains_nocase(info->content_type, "audio/ogg") ||
             rb_probe_contains_nocase(info->content_type, "application/ogg") ||
             rb_probe_contains_nocase(info->content_type, "audio/vorbis") ||
             rb_probe_contains_nocase(info->content_type, "audio/x-vorbis")) return RB_STREAM_CODEC_OGG;
     }
-    if (url && (rb_probe_contains_nocase(url->path, ".aac") || rb_probe_contains_nocase(url->path, ".aacp")))
+    if (rb_probe_url_has_aac_hint(url))
         return RB_STREAM_CODEC_AAC;
     if (url && (rb_probe_contains_nocase(url->path, ".ogg") || rb_probe_contains_nocase(url->path, ".oga")))
         return RB_STREAM_CODEC_OGG;
@@ -824,6 +1151,7 @@ const char *rb_probe_error_text(int rc)
     case RB_STREAM_PROBE_ERR_UNSUPPORTED_CONTENT_TYPE: return "Unsupported stream format";
     case RB_STREAM_PROBE_ERR_SERVER_CLOSED: return "Stream probe failed: server closed connection during probe";
     case RB_STREAM_PROBE_ERR_TLS_HANDSHAKE: return "TLS handshake failed";
+    case RB_STREAM_PROBE_ERR_TLS_POISONED: return "HTTPS disabled after memory corruption; reboot before using HTTPS.";
     case RB_STREAM_PROBE_ERR_HTTP_STATUS: return "Stream unavailable (server returned an error status)";
     default: return "Stream probe failed";
     }
@@ -871,6 +1199,10 @@ static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
 
     if (!url || !info || !peek_len || peek_buf_size < 0 || (peek_buf_size > 0 && !peek_buf))
         return RB_STREAM_PROBE_ERR_BAD_ARG;
+    if (!strncmp(url, "https://", 8) && Radio_IsTlsPoisoned()) {
+        RADIO_DBG(printf("rb-probe: refused HTTPS probe after AmiSSL poison url=\"%s\"\n", url);)
+        return RB_STREAM_PROBE_ERR_TLS_POISONED;
+    }
     rb_probe_info_init(info);
     *peek_len = 0;
     if (rb_probe_url_looks_hls(url)) return RB_STREAM_PROBE_ERR_HLS_UNSUPPORTED;
@@ -918,13 +1250,7 @@ static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
             if (transport.isSSL && transport.ssl) {
                 int capacity = RB_PROBE_HEADER_BUF - total;
                 if (want > capacity) want = capacity;
-                n = (int)SSL_read(transport.ssl, (char *)header_buf + total, want);
-                RADIO_DBG(printf("rb-probe-ssl-read: session=%lu ssl=%p ctx=%p fd=%ld dst=%p dst_cap=%d requested=%d returned=%d fill=%d ring_free=0\n",
-                    transport.session_id, (void *)transport.ssl, (void *)transport.ctx, (long)transport.sock, (void *)(header_buf + total), capacity, want, n, total));
-                if (n <= 0) {
-                    int ssl_err = SSL_get_error(transport.ssl, n);
-                    RADIO_DBG(printf("rb-probe-ssl-read: session=%lu SSL_get_error=%d ret=%d fd=%ld\n", transport.session_id, ssl_err, n, (long)transport.sock));
-                }
+                n = rb_probe_ssl_read_retrying(&transport, (char *)header_buf + total, want, capacity, total);
             } else
 #endif
             n = (int)recv(transport.sock, (char *)header_buf + total, want, 0);
@@ -991,13 +1317,7 @@ static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
         if (transport.isSSL && transport.ssl) {
             int capacity2 = peek_buf_size - *peek_len;
             if (want2 > capacity2) want2 = capacity2;
-            n2 = (int)SSL_read(transport.ssl, (char *)peek_buf + *peek_len, want2);
-            RADIO_DBG(printf("rb-probe-ssl-read: session=%lu ssl=%p ctx=%p fd=%ld dst=%p dst_cap=%d requested=%d returned=%d fill=%d ring_free=0\n",
-                transport.session_id, (void *)transport.ssl, (void *)transport.ctx, (long)transport.sock, (void *)(peek_buf + *peek_len), capacity2, want2, n2, *peek_len));
-            if (n2 <= 0) {
-                int ssl_err2 = SSL_get_error(transport.ssl, n2);
-                RADIO_DBG(printf("rb-probe-ssl-read: session=%lu SSL_get_error=%d ret=%d fd=%ld\n", transport.session_id, ssl_err2, n2, (long)transport.sock));
-            }
+            n2 = rb_probe_ssl_read_retrying(&transport, (char *)peek_buf + *peek_len, want2, capacity2, *peek_len);
         } else
 #endif
         n2 = (int)recv(transport.sock, (char *)peek_buf + *peek_len, want2, 0);
@@ -1024,7 +1344,7 @@ static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
         return rc;
     }
     RADIO_DBG(printf("rb-probe codec: final URL=%s content-type=%s URL codec hint=%s initial-bytes=%d\n",
-           current_url, info->content_type, rb_probe_url_has_mp3_hint(&parsed) ? "MP3" : "none", *peek_len);)
+           current_url, info->content_type, rb_probe_url_has_aac_hint(&parsed) ? "AAC" : (rb_probe_url_has_mp3_hint(&parsed) ? "MP3" : "none"), *peek_len);)
     info->codec = rb_probe_detect_codec(&parsed, info, peek_buf, *peek_len);
     RADIO_DBG(printf("rb-probe codec: final selected codec=%s\n",
            info->codec == RB_STREAM_CODEC_MP3 ? "MP3" : (info->codec == RB_STREAM_CODEC_AAC ? "AAC" : (info->codec == RB_STREAM_CODEC_OGG ? "OGG" : "unsupported")));)
@@ -1075,6 +1395,10 @@ static int rb_probe_fetch_binary_impl(const char *url, unsigned char *out_buf, i
     int redirects;
 
     if (!url || !out_buf || out_buf_size <= 0 || !out_len) return RB_STREAM_PROBE_ERR_BAD_ARG;
+    if (!strncmp(url, "https://", 8) && Radio_IsTlsPoisoned()) {
+        RADIO_DBG(printf("rb-probe: refused HTTPS fetch after AmiSSL poison url=\"%s\"\n", url);)
+        return RB_STREAM_PROBE_ERR_TLS_POISONED;
+    }
     *out_len = 0;
     if (out_content_type && out_content_type_size > 0) out_content_type[0] = '\0';
 
@@ -1115,7 +1439,7 @@ static int rb_probe_fetch_binary_impl(const char *url, unsigned char *out_buf, i
             }
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
             if (transport.isSSL && transport.ssl)
-                n = (int)SSL_read(transport.ssl, (char *)header_buf + total, want);
+                n = rb_probe_ssl_read_retrying(&transport, (char *)header_buf + total, want, RB_PROBE_HEADER_BUF - total, total);
             else
 #endif
             n = (int)recv(transport.sock, (char *)header_buf + total, want, 0);
@@ -1168,7 +1492,7 @@ static int rb_probe_fetch_binary_impl(const char *url, unsigned char *out_buf, i
         if (want > RB_PROBE_READ_CHUNK) want = RB_PROBE_READ_CHUNK;
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
         if (transport.isSSL && transport.ssl)
-            n = (int)SSL_read(transport.ssl, (char *)out_buf + *out_len, want);
+            n = rb_probe_ssl_read_retrying(&transport, (char *)out_buf + *out_len, want, out_buf_size - *out_len, *out_len);
         else
 #endif
         n = (int)recv(transport.sock, (char *)out_buf + *out_len, want, 0);
@@ -1235,7 +1559,12 @@ static int rb_probe_selftest(void)
     if (rb_probe_detect_codec(&url, &info, NULL, 0) != RB_STREAM_CODEC_MP3) return 4;
     if (rb_probe_detect_codec(&url, &info, id3, (int)sizeof(id3)) != RB_STREAM_CODEC_MP3) return 5;
     if (rb_probe_detect_codec(&url, &info, mpeg, (int)sizeof(mpeg)) != RB_STREAM_CODEC_MP3) return 6;
-    if (!rb_probe_url_looks_hls("http://example.com/live.m3u8")) return 7;
+    rb_probe_copy_trim(info.content_type, (int)sizeof(info.content_type), "audio/aacp", 10);
+    if (rb_probe_detect_codec(&url, &info, mpeg, (int)sizeof(mpeg)) != RB_STREAM_CODEC_UNKNOWN) return 7;
+    rb_probe_info_init(&info);
+    rb_probe_copy_trim(info.content_type, (int)sizeof(info.content_type), "audio/mp4", 9);
+    if (rb_probe_detect_codec(&url, &info, NULL, 0) != RB_STREAM_CODEC_AAC) return 8;
+    if (!rb_probe_url_looks_hls("http://example.com/live.m3u8")) return 9;
     RADIO_DBG(printf("rb-probe selftest: ok\n");)
     return 0;
 }

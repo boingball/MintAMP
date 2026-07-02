@@ -11,6 +11,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include "miniamp_memguard.h"
 
 #define PJPG_MAX_COMPONENTS 3
 #define PJPG_MAX_TABLES 4
@@ -781,10 +782,7 @@ unsigned char pjpeg_decode_init(pjpeg_image_info_t *pInfo,
 	gReduce = reduce ? 1 : 0;
 	if (!pInfo || !pNeed_bytes_callback)
 		return PJPG_NOT_JPEG;
-	if (gJpegData) {
-		free(gJpegData);
-		gJpegData = 0;
-	}
+	pjpeg_decode_free();
 	memset(pInfo, 0, sizeof(*pInfo));
 	memset(gQuantValid, 0, sizeof(gQuantValid));
 	memset(gHuff, 0, sizeof(gHuff));
@@ -898,4 +896,12 @@ unsigned char pjpeg_decode_mcu(void)
 	if (gRestartInterval)
 		gRestartLeft--;
 	return 0;
+}
+
+void pjpeg_decode_free(void)
+{
+	if (gJpegData) {
+		free(gJpegData);
+		gJpegData = 0;
+	}
 }

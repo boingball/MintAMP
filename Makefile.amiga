@@ -46,6 +46,15 @@ ifneq ($(filter 1 yes true on,$(DEBUG)),)
 DEBUG_CPPFLAGS := -DRADIO_DEBUG
 endif
 
+# Debug-only heap guard for MiniAMP3's own allocations (front/rear guard
+# bytes, double-free and leak detection -- see miniamp_memguard.c).
+# Independent of DEBUG=1 above; combine as e.g. `make ... DEBUG=1 HEAPGUARD=1`.
+# Never affects a normal (release) build: without this, miniamp_memguard.c
+# compiles to nothing and malloc/calloc/realloc/free are untouched.
+ifneq ($(filter 1 yes true on,$(HEAPGUARD)),)
+DEBUG_CPPFLAGS += -DMINIAMP_DEBUG_ALLOC
+endif
+
 # PNG favicon decoding for minimp3r's radio artwork (lvandeve/lodepng,
 # vendored as lodepng.c/.h).  Decoder-only, no encoder/disk-IO/ancillary
 # chunk support compiled in -- minimp3r feeds it an in-memory buffer
@@ -55,8 +64,10 @@ endif
 PNG_CPPFLAGS := -DENABLE_PNG_ARTWORK -DLODEPNG_NO_COMPILE_ENCODER \
 	-DLODEPNG_NO_COMPILE_DISK -DLODEPNG_NO_COMPILE_ANCILLARY_CHUNKS
 
-SOURCES := amiga_mp3dec.c $(RADIO_SOURCES) $(DECODER_SOURCES)
-GUI_SOURCES := amiga_mp3gui.c picojpeg.c $(RADIO_SOURCES) \
+SOURCES := amiga_mp3dec.c miniamp_memguard.c $(RADIO_SOURCES) $(DECODER_SOURCES)
+# miniamp_memguard.c compiles to nothing unless HEAPGUARD=1 (see
+# MINIAMP_DEBUG_ALLOC above), so it's harmless to always list it.
+GUI_SOURCES := amiga_mp3gui.c picojpeg.c miniamp_memguard.c $(RADIO_SOURCES) \
 	radio_browser_controller.c radio_browser.c radio_browser_url.c \
 	radio_browser_http.c radio_browser_json.c radio_stream_probe.c
 # The GUI uses gadtools.library via proto/gadtools.h; no linker flag is needed.
@@ -65,7 +76,7 @@ GUI_SOURCES := amiga_mp3gui.c picojpeg.c $(RADIO_SOURCES) \
 # ReAction classes are opened at runtime, so no extra linker flag is needed.
 # lodepng.c is only needed here -- the radio favicon artwork feature (and its
 # PNG support) is minimp3r-only, not wired into the GadTools frontend above.
-GUIR_SOURCES := minimp3r.c picojpeg.c lodepng.c $(RADIO_SOURCES) \
+GUIR_SOURCES := minimp3r.c picojpeg.c lodepng.c miniamp_memguard.c $(RADIO_SOURCES) \
 	radio_browser_controller.c radio_browser.c radio_browser_url.c \
 	radio_browser_http.c radio_browser_json.c radio_stream_probe.c
 

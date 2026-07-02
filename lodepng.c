@@ -37,6 +37,12 @@ Rename this file to lodepng.cpp to use it for C++, or to lodepng.c to use it for
 
 #ifdef LODEPNG_COMPILE_ALLOCATORS
 #include <stdlib.h> /* allocations */
+/* Debug-only heap guard for MiniAMP3 (see miniamp_memguard.h).  This only
+ * redirects the raw malloc()/realloc()/free() calls inside the three
+ * lodepng_malloc/lodepng_realloc/lodepng_free wrappers just below --
+ * everything else in this file calls those wrappers, not the C library
+ * functions directly, so the rest of lodepng's internals are untouched. */
+#include "miniamp_memguard.h"
 #endif /* LODEPNG_COMPILE_ALLOCATORS */
 
 #if defined(_MSC_VER) && (_MSC_VER >= 1310) /*Visual Studio: A few warning types are not desired here.*/

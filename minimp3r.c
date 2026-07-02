@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "radio_debug.h"
+#include "miniamp_memguard.h"
 
 #if defined(AMIGA_M68K)
 
@@ -549,6 +550,8 @@ static void OpenRadioWindow(MrApp *app);
 static void HandleRadioWindow(MrApp *app);
 static void HandleDoneSignal(MrApp *app);
 static void RadioSetStatus(MrApp *app, const char *text);
+static int SetStatusIfChanged(MrApp *app, const char *text);
+static void SetStatus(MrApp *app, const char *text);
 static void RadioDoProbeAndPlay(MrApp *app);
 static void RadioSelectResult(MrApp *app, ULONG eventSelected);
 
@@ -1208,6 +1211,13 @@ static void BuildPlaybackArgs(MrApp *app, MrPlayArgs *args)
 			sprintf(num, "%lu", app->radioHostAddrBe);
 			AddArg(args, num);
 		}
+		if (!app->rbShowingFavourites && app->rbController.selected_index >= 0) {
+			const RadioBrowserStation *st = rb_controller_get_station(&app->rbController, app->rbController.selected_index);
+			if (st && st->codec[0]) {
+				AddArg(args, "--radio-codec-hint");
+				AddArg(args, st->codec);
+			}
+		}
 	}
 	/* --fast-mem preloads the *whole input* into Fast RAM up front
 	 * (InputSourcePreloadFastMemory() in amiga_mp3dec.c does an
@@ -1369,6 +1379,11 @@ static void StartPlayback(MrApp *app)
 
 	if (!MrVerifyAppMagic(app, "StartPlayback"))
 		return;
+	if (Radio_IsMemoryPoisoned()) {
+		SetStatus(app, "Memory corruption detected - restart app");
+		RADIO_DBG(printf("radio-memory: refusing StartPlayback after MiniMem/ring corruption url=\"%s\"\n", app->inputName);)
+		return;
+	}
 	if (!app->inputName[0]) {
 		SetStatus(app, "Pick an audio file first.");
 		return;
@@ -1629,6 +1644,14 @@ static void FinalizePlayback(MrApp *app)
 	RADIO_DBG(printf("radio-done: streamStateAfterFinalize=%s guiStatus=\"%s\"\n",
 		MrStreamStateName(app->streamState), finalStatus);)
 	RADIO_DBG(printf("radio-guard: after FinalizePlayback\n");)
+	if (Radio_IsMemoryPoisoned()) {
+		if (app->queuedStreamUrl[0] || app->playlistNextPending)
+			SetStatus(app, "Memory corruption detected - restart app");
+		app->queuedStreamUrl[0] = '\0';
+		app->playlistNextPending = 0;
+		RADIO_DBG(printf("radio-memory: queued/next stream suppressed after memory poison session=%lu\n", gPlayer.sessionId);)
+		return;
+	}
 	if (app->queuedStreamUrl[0]) {
 		app->queuedStreamUrl[0] = '\0';
 		RadioSetStatus(app, "Starting queued stream...");
@@ -1866,19 +1889,23 @@ static void CloseTimer(MrApp *app)
 
 static void CloseLibs(void)
 {
-	if (GadToolsBase)  { CloseLibrary(GadToolsBase);  GadToolsBase = NULL; }
-	if (LabelBase)     { CloseLibrary(LabelBase);     LabelBase = NULL; }
-	if (StringBase)    { CloseLibrary(StringBase);    StringBase = NULL; }
-	if (FuelGaugeBase) { CloseLibrary(FuelGaugeBase); FuelGaugeBase = NULL; }
-	if (CheckBoxBase)  { CloseLibrary(CheckBoxBase);  CheckBoxBase = NULL; }
-	if (SliderBase)    { CloseLibrary(SliderBase);    SliderBase = NULL; }
-	if (ChooserBase)   { CloseLibrary(ChooserBase);   ChooserBase = NULL; }
-	if (GetFileBase)   { CloseLibrary(GetFileBase);   GetFileBase = NULL; }
-	if (ButtonBase)    { CloseLibrary(ButtonBase);    ButtonBase = NULL; }
-	if (LayoutBase)    { CloseLibrary(LayoutBase);    LayoutBase = NULL; }
-	if (WindowBase)    { CloseLibrary(WindowBase);    WindowBase = NULL; }
-	if (UtilityBase)   { CloseLibrary(UtilityBase);   UtilityBase = NULL; }
-	if (IntuitionBase) { CloseLibrary((struct Library *)IntuitionBase); IntuitionBase = NULL; }
+	RADIO_DBG(printf("app-close: CloseLibs enter GadTools=%p Label=%p String=%p FuelGauge=%p CheckBox=%p Slider=%p Chooser=%p GetFile=%p Button=%p Layout=%p Window=%p Utility=%p Intuition=%p\n",
+		GadToolsBase, LabelBase, StringBase, FuelGaugeBase, CheckBoxBase, SliderBase,
+		ChooserBase, GetFileBase, ButtonBase, LayoutBase, WindowBase, UtilityBase, IntuitionBase);)
+	if (GadToolsBase)  { CloseLibrary(GadToolsBase);  GadToolsBase = NULL; RADIO_DBG(printf("app-close: CloseLibs GadTools done\n");) }
+	if (LabelBase)     { CloseLibrary(LabelBase);     LabelBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Label done\n");) }
+	if (StringBase)    { CloseLibrary(StringBase);    StringBase = NULL; RADIO_DBG(printf("app-close: CloseLibs String done\n");) }
+	if (FuelGaugeBase) { CloseLibrary(FuelGaugeBase); FuelGaugeBase = NULL; RADIO_DBG(printf("app-close: CloseLibs FuelGauge done\n");) }
+	if (CheckBoxBase)  { CloseLibrary(CheckBoxBase);  CheckBoxBase = NULL; RADIO_DBG(printf("app-close: CloseLibs CheckBox done\n");) }
+	if (SliderBase)    { CloseLibrary(SliderBase);    SliderBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Slider done\n");) }
+	if (ChooserBase)   { CloseLibrary(ChooserBase);   ChooserBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Chooser done\n");) }
+	if (GetFileBase)   { CloseLibrary(GetFileBase);   GetFileBase = NULL; RADIO_DBG(printf("app-close: CloseLibs GetFile done\n");) }
+	if (ButtonBase)    { CloseLibrary(ButtonBase);    ButtonBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Button done\n");) }
+	if (LayoutBase)    { CloseLibrary(LayoutBase);    LayoutBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Layout done\n");) }
+	if (WindowBase)    { CloseLibrary(WindowBase);    WindowBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Window done\n");) }
+	if (UtilityBase)   { CloseLibrary(UtilityBase);   UtilityBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Utility done\n");) }
+	if (IntuitionBase) { CloseLibrary((struct Library *)IntuitionBase); IntuitionBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Intuition done\n");) }
+	RADIO_DBG(printf("app-close: CloseLibs exit\n");)
 }
 
 static int OpenLibs(void)
@@ -2304,24 +2331,33 @@ static int MrOpenWindow(MrApp *app)
 
 static void MrCloseWindow(MrApp *app)
 {
+	RADIO_DBG(printf("app-close: MrCloseWindow enter rbWin=%p plWin=%p menuStrip=%p visualInfo=%p winObj=%p\n",
+		app->rbWin, app->plWin, app->menuStrip, app->visualInfo, app->winObj);)
 	CloseRadioWindow(app);
+	RADIO_DBG(printf("app-close: CloseRadioWindow done\n");)
 	ClosePlaylistWindow(app);
+	RADIO_DBG(printf("app-close: ClosePlaylistWindow done\n");)
 	if (app->win && app->menuStrip) {
 		ClearMenuStrip(app->win);
+		RADIO_DBG(printf("app-close: ClearMenuStrip done\n");)
 	}
 	if (app->menuStrip) {
 		FreeMenus(app->menuStrip);
 		app->menuStrip = NULL;
+		RADIO_DBG(printf("app-close: FreeMenus done\n");)
 	}
 	if (app->visualInfo) {
 		FreeVisualInfo(app->visualInfo);
 		app->visualInfo = NULL;
+		RADIO_DBG(printf("app-close: FreeVisualInfo done\n");)
 	}
 	if (app->winObj) {
 		DisposeObject(app->winObj);	/* disposes the whole gadget tree too */
 		app->winObj = NULL;
 		app->win = NULL;
+		RADIO_DBG(printf("app-close: DisposeObject(winObj) done\n");)
 	}
+	RADIO_DBG(printf("app-close: MrCloseWindow exit\n");)
 }
 
 
@@ -2892,6 +2928,7 @@ static int DecodeJpegToGrey(const unsigned char *jpegData, unsigned long jpegByt
 	memset(greyCount, 0, sizeof(greyCount));
 	status = pjpeg_decode_init(&info, MrPjpegCb, &src, 0);
 	if (status != 0) {
+		pjpeg_decode_free();
 		if (MrJpegHasSof2(jpegData, jpegBytes)) {
 			RADIO_DBG(printf("radio-art: progressive JPEG detected\n");)
 			if (DecodeProgressiveJpegDcPreviewToGrey(jpegData, jpegBytes, greyOut, rgbOut, outW, outH) == 0)
@@ -2904,6 +2941,7 @@ static int DecodeJpegToGrey(const unsigned char *jpegData, unsigned long jpegByt
 	}
 	if (info.m_width <= 0 || info.m_height <= 0 ||
 		info.m_width > MR_MAX_JPEG_DIM || info.m_height > MR_MAX_JPEG_DIM) {
+		pjpeg_decode_free();
 		RADIO_DBG(printf("radio-art: jpeg dimensions out of range %dx%d (max %d)\n",
 			(int)info.m_width, (int)info.m_height, MR_MAX_JPEG_DIM);)
 		return -1;
@@ -2917,6 +2955,7 @@ static int DecodeJpegToGrey(const unsigned char *jpegData, unsigned long jpegByt
 		status = pjpeg_decode_mcu();
 		if (status == PJPG_NO_MORE_BLOCKS) break;
 		if (status != 0) {
+			pjpeg_decode_free();
 			RADIO_DBG(printf("radio-art: pjpeg_decode_mcu failed at mcu=%d status=%d (%s)\n",
 				mcuIndex, (int)status, PjpegStatusName((int)status));)
 			return -1;
@@ -2948,6 +2987,7 @@ static int DecodeJpegToGrey(const unsigned char *jpegData, unsigned long jpegByt
 				rgbOut[i * 3 + 2] = (unsigned char)((bAccum[i] + (c / 2)) / c);
 			}
 		}
+	pjpeg_decode_free();
 	return 0;
 }
 
@@ -3140,37 +3180,10 @@ static void CleanArtworkCache(MrApp *app)
 }
 
 
-static int MrUrlIsJpeg(const char *url)
-{
-	const char *q, *dot;
-	int len;
-	if (!url || !url[0]) return 0;
-	q = strchr(url, '?');
-	len = (int)(q ? (q - url) : (int)strlen(url));
-	dot = url + len;
-	while (dot > url && dot[-1] != '/' && dot[-1] != ':') dot--;
-	while (*dot && dot < url + len && *dot != '.') dot++;
-	return (dot < url + len) &&
-		(ContainsTextNoCase(dot, ".jpg") || ContainsTextNoCase(dot, ".jpeg"));
-}
-
-static int MrUrlIsPng(const char *url)
-{
-	const char *q, *dot;
-	int len;
-	if (!url || !url[0]) return 0;
-	q = strchr(url, '?');
-	len = (int)(q ? (q - url) : (int)strlen(url));
-	dot = url + len;
-	while (dot > url && dot[-1] != '/' && dot[-1] != ':') dot--;
-	while (*dot && dot < url + len && *dot != '.') dot++;
-	return (dot < url + len) && ContainsTextNoCase(dot, ".png");
-}
-
 /* Uppercased file extension (without the dot) of a URL's path, e.g. "PNG"
  * for ".../icon.png?x=1".  Empty if there's no recognizable extension.
  * Used only to label the artwork placeholder so it's visible at a glance
- * which favicon type was rejected (".ico", ".png", ...). */
+ * which favicon type was rejected (".webp", ".svg", ...). */
 static void MrUrlExtensionUpper(const char *url, char *out, int outSize)
 {
 	const char *q, *dot;
@@ -3197,23 +3210,24 @@ static void MrUrlExtensionUpper(const char *url, char *out, int outSize)
 }
 
 #if ENABLE_RADIO_ARTWORK
-static int MrContentTypeIsJpeg(const char *contentType)
-{
-	return contentType && (ContainsTextNoCase(contentType, "image/jpeg") ||
-		ContainsTextNoCase(contentType, "image/jpg"));
-}
-
 static int MrIsJpegMagic(const unsigned char *data, int bytes)
 {
 	return bytes >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF;
 }
 
-#if ENABLE_PNG_ARTWORK
-static int MrContentTypeIsPng(const char *contentType)
-{
-	return contentType && ContainsTextNoCase(contentType, "image/png");
-}
+/* Shared downsample scratch space for the PNG and ICO favicon decoders
+ * below.  They're never active concurrently -- LoadRadioFaviconImage runs
+ * at most one decode path per favicon -- so sharing these buffers instead
+ * of each decoder declaring its own saves ~72KB of BSS that duplicating
+ * them would otherwise cost. */
+static unsigned char sArtXMap[MR_MAX_JPEG_DIM], sArtYMap[MR_MAX_JPEG_DIM];
+static unsigned long sArtGreyAccum[MR_ART_W * MR_ART_H];
+static unsigned long sArtRAccum[MR_ART_W * MR_ART_H];
+static unsigned long sArtGAccum[MR_ART_W * MR_ART_H];
+static unsigned long sArtBAccum[MR_ART_W * MR_ART_H];
+static unsigned short sArtGreyCount[MR_ART_W * MR_ART_H];
 
+#if ENABLE_PNG_ARTWORK
 static int MrIsPngMagic(const unsigned char *data, int bytes)
 {
 	static const unsigned char sig[8] = { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
@@ -3233,12 +3247,12 @@ static int DecodePngToGrey(const unsigned char *pngData, unsigned long pngBytes,
 	LodePNGState state;
 	unsigned pw = 0, ph = 0, err;
 	unsigned char *image;
-	static unsigned char xMap[MR_MAX_JPEG_DIM], yMap[MR_MAX_JPEG_DIM];
-	static unsigned long greyAccum[MR_ART_W * MR_ART_H];
-	static unsigned long rAccum[MR_ART_W * MR_ART_H];
-	static unsigned long gAccum[MR_ART_W * MR_ART_H];
-	static unsigned long bAccum[MR_ART_W * MR_ART_H];
-	static unsigned short greyCount[MR_ART_W * MR_ART_H];
+	unsigned char *xMap = sArtXMap, *yMap = sArtYMap;
+	unsigned long *greyAccum = sArtGreyAccum;
+	unsigned long *rAccum = sArtRAccum;
+	unsigned long *gAccum = sArtGAccum;
+	unsigned long *bAccum = sArtBAccum;
+	unsigned short *greyCount = sArtGreyCount;
 	unsigned x, y;
 	int i;
 
@@ -3273,11 +3287,11 @@ static int DecodePngToGrey(const unsigned char *pngData, unsigned long pngBytes,
 	memset(greyOut, 0x80, (size_t)(outW * outH));
 	if (rgbOut)
 		memset(rgbOut, 0x80, (size_t)(outW * outH * 3));
-	memset(greyAccum, 0, sizeof(greyAccum));
-	memset(rAccum, 0, sizeof(rAccum));
-	memset(gAccum, 0, sizeof(gAccum));
-	memset(bAccum, 0, sizeof(bAccum));
-	memset(greyCount, 0, sizeof(greyCount));
+	memset(greyAccum, 0, sizeof(sArtGreyAccum));
+	memset(rAccum, 0, sizeof(sArtRAccum));
+	memset(gAccum, 0, sizeof(sArtGAccum));
+	memset(bAccum, 0, sizeof(sArtBAccum));
+	memset(greyCount, 0, sizeof(sArtGreyCount));
 
 	for (x = 0; x < pw; x++) xMap[x] = (unsigned char)(((unsigned long)x * (unsigned long)outW) / pw);
 	for (y = 0; y < ph; y++) yMap[y] = (unsigned char)(((unsigned long)y * (unsigned long)outH) / ph);
@@ -3312,6 +3326,202 @@ static int DecodePngToGrey(const unsigned char *pngData, unsigned long pngBytes,
 }
 #endif /* ENABLE_PNG_ARTWORK */
 
+static int MrIsIcoMagic(const unsigned char *data, int bytes)
+{
+	/* ICONDIR: 2 bytes reserved (0), 2 bytes type (1 = icon, 2 = cursor). */
+	return bytes >= 6 && data[0] == 0 && data[1] == 0 &&
+		data[2] == 1 && data[3] == 0;
+}
+
+static unsigned IcoLE16(const unsigned char *p)
+{
+	return (unsigned)p[0] | ((unsigned)p[1] << 8);
+}
+
+static unsigned long IcoLE32(const unsigned char *p)
+{
+	return (unsigned long)p[0] | ((unsigned long)p[1] << 8) |
+		((unsigned long)p[2] << 16) | ((unsigned long)p[3] << 24);
+}
+
+typedef struct IcoEntry {
+	unsigned width, height, bitCount;
+	unsigned long size, offset;
+} IcoEntry;
+
+/* Decodes the raw BITMAPINFOHEADER-style DIB embedded in a legacy
+ * (non-PNG) ICO entry into the same downsampled grey/RGB thumbnail
+ * buffers DecodePngToGrey()/DecodeJpegToGrey() produce.  Only the depths
+ * real-world icon tools actually emit are supported (32/24/8bpp,
+ * uncompressed); 4bpp/1bpp and RLE-compressed DIBs are rejected.  The AND
+ * (transparency) mask that follows the pixel data is ignored, the same
+ * tradeoff DecodePngToGrey makes with alpha -- favicons are rarely
+ * meaningfully transparent. */
+static int DecodeIcoDibToGrey(const unsigned char *dib, unsigned long dibBytes,
+	unsigned char *greyOut, unsigned char *rgbOut, int outW, int outH)
+{
+	unsigned long headerSize;
+	long width, height;
+	unsigned bitCount;
+	unsigned long compression, paletteEntries, rowBytes;
+	const unsigned char *palette;
+	const unsigned char *pixels;
+	unsigned char *xMap = sArtXMap, *yMap = sArtYMap;
+	unsigned long *greyAccum = sArtGreyAccum;
+	unsigned long *rAccum = sArtRAccum;
+	unsigned long *gAccum = sArtGAccum;
+	unsigned long *bAccum = sArtBAccum;
+	unsigned short *greyCount = sArtGreyCount;
+	long x, y;
+	int i;
+
+	if (!dib || dibBytes < 40 || !greyOut || outW <= 0 || outW > MR_ART_W ||
+		outH <= 0 || outH > MR_ART_H)
+		return -1;
+	headerSize = IcoLE32(dib);
+	if (headerSize < 40 || headerSize > dibBytes)
+		return -1;
+	width = (long)IcoLE32(dib + 4);
+	/* Height counts the XOR colour rows plus the AND mask rows stacked
+	 * together, so the actual image height is half the field's value. */
+	height = (long)IcoLE32(dib + 8) / 2;
+	bitCount = IcoLE16(dib + 14);
+	compression = IcoLE32(dib + 16);
+	if (width <= 0 || height <= 0 || width > 256 || height > 256 ||
+		compression != 0 /* BI_RGB, uncompressed */)
+		return -1;
+	if (bitCount != 32 && bitCount != 24 && bitCount != 8)
+		return -1;
+
+	paletteEntries = (bitCount == 8) ? 256UL : 0UL;
+	palette = dib + headerSize;
+	pixels = palette + paletteEntries * 4UL;
+	rowBytes = (((unsigned long)width * bitCount + 31UL) / 32UL) * 4UL;
+	if ((unsigned long)(pixels - dib) + rowBytes * (unsigned long)height > dibBytes)
+		return -1;
+
+	memset(greyOut, 0x80, (size_t)(outW * outH));
+	if (rgbOut)
+		memset(rgbOut, 0x80, (size_t)(outW * outH * 3));
+	memset(greyAccum, 0, sizeof(sArtGreyAccum));
+	memset(rAccum, 0, sizeof(sArtRAccum));
+	memset(gAccum, 0, sizeof(sArtGAccum));
+	memset(bAccum, 0, sizeof(sArtBAccum));
+	memset(greyCount, 0, sizeof(sArtGreyCount));
+	for (x = 0; x < width; x++)
+		xMap[x] = (unsigned char)((x * outW) / width);
+	for (y = 0; y < height; y++)
+		yMap[y] = (unsigned char)((y * outH) / height);
+
+	/* DIB pixel rows are stored bottom-up. */
+	for (y = 0; y < height; y++) {
+		const unsigned char *row = pixels +
+			(unsigned long)(height - 1 - y) * rowBytes;
+		int dstY = yMap[y];
+		for (x = 0; x < width; x++) {
+			unsigned char r, g, b;
+			int dst;
+
+			if (bitCount == 8) {
+				const unsigned char *pal = palette + 4 * row[x];
+				b = pal[0]; g = pal[1]; r = pal[2];
+			} else {
+				const unsigned char *px = row + (bitCount == 32 ? 4 : 3) * x;
+				b = px[0]; g = px[1]; r = px[2];
+			}
+			dst = dstY * outW + xMap[x];
+			greyAccum[dst] += (77UL * r + 150UL * g + 29UL * b + 128UL) >> 8;
+			rAccum[dst] += r; gAccum[dst] += g; bAccum[dst] += b;
+			if (greyCount[dst] != 0xffff) greyCount[dst]++;
+		}
+	}
+	for (i = 0; i < outW * outH; i++)
+		if (greyCount[i]) {
+			unsigned short c = greyCount[i];
+			greyOut[i] = (unsigned char)((greyAccum[i] + (c / 2)) / c);
+			if (rgbOut) {
+				rgbOut[i * 3    ] = (unsigned char)((rAccum[i] + (c / 2)) / c);
+				rgbOut[i * 3 + 1] = (unsigned char)((gAccum[i] + (c / 2)) / c);
+				rgbOut[i * 3 + 2] = (unsigned char)((bAccum[i] + (c / 2)) / c);
+			}
+		}
+	return 0;
+}
+
+static int IcoEntryCompare(const void *pa, const void *pb)
+{
+	const IcoEntry *a = (const IcoEntry *)pa;
+	const IcoEntry *b = (const IcoEntry *)pb;
+	unsigned long areaA = (unsigned long)a->width * (unsigned long)a->height;
+	unsigned long areaB = (unsigned long)b->width * (unsigned long)b->height;
+
+	if (areaA != areaB) return areaA > areaB ? -1 : 1;
+	return (int)b->bitCount - (int)a->bitCount;
+}
+
+/* ICO files are a directory of one or more embedded images at different
+ * sizes/depths; each entry's payload is either a full PNG (the 256px
+ * entry in modern multi-res icons almost always is) or a raw
+ * BITMAPINFOHEADER DIB with no BITMAPFILEHEADER.  Entries are tried
+ * largest-first, since that gives the best quality once downsampled to
+ * the ART_W x ART_H thumbnail, falling through to smaller/other entries
+ * if the chosen one can't be decoded (e.g. a 4bpp/1bpp legacy DIB). */
+static int DecodeIcoToGrey(const unsigned char *icoData, unsigned long icoBytes,
+	unsigned char *greyOut, unsigned char *rgbOut, int outW, int outH)
+{
+	unsigned count, i, n;
+	IcoEntry entries[64];
+
+	if (!icoData || icoBytes < 6 || !MrIsIcoMagic(icoData, (int)icoBytes))
+		return -1;
+	count = IcoLE16(icoData + 4);
+	if (count == 0)
+		return -1;
+	if (count > 64)
+		count = 64;
+	n = 0;
+	for (i = 0; i < count; i++) {
+		const unsigned char *e = icoData + 6 + (unsigned long)i * 16UL;
+		unsigned w, h;
+		unsigned long size, offset;
+
+		if (6UL + (unsigned long)(i + 1) * 16UL > icoBytes)
+			break;
+		w = e[0] ? e[0] : 256;
+		h = e[1] ? e[1] : 256;
+		size = IcoLE32(e + 8);
+		offset = IcoLE32(e + 12);
+		if (size < 8 || offset > icoBytes || size > icoBytes - offset)
+			continue;
+		entries[n].width = w;
+		entries[n].height = h;
+		entries[n].bitCount = IcoLE16(e + 6);
+		entries[n].size = size;
+		entries[n].offset = offset;
+		n++;
+	}
+	if (n == 0)
+		return -1;
+	qsort(entries, n, sizeof(entries[0]), IcoEntryCompare);
+	for (i = 0; i < n; i++) {
+		const unsigned char *payload = icoData + entries[i].offset;
+		unsigned long payloadBytes = entries[i].size;
+
+#if ENABLE_PNG_ARTWORK
+		if (MrIsPngMagic(payload, (int)payloadBytes)) {
+			if (DecodePngToGrey(payload, payloadBytes, greyOut, rgbOut,
+				outW, outH) == 0)
+				return 0;
+			continue;
+		}
+#endif
+		if (DecodeIcoDibToGrey(payload, payloadBytes, greyOut, rgbOut,
+			outW, outH) == 0)
+			return 0;
+	}
+	return -1;
+}
+
 /* Favicon artwork is fetched from the Radio Browser station's "favicon"
  * field only, never from the MP3/ICY stream, and only once playback has
  * already started picking a station (see RadioDoProbeAndPlay).  The fetch
@@ -3321,9 +3531,10 @@ static int DecodePngToGrey(const unsigned char *pngData, unsigned long pngBytes,
  * into -- so this never touches the MP3 stream's SSL read loop.  Any
  * failure here (bad URL, unsupported TLS, oversized body, unsupported
  * format, broken decode) just leaves artValid 0 and never affects
- * playback.  JPEG and PNG are tried in that order based on URL extension
- * or Content-Type, each independently confirmed via magic bytes before
- * decoding; anything else (ICO, WebP, SVG, ...) is silently rejected. */
+ * playback.  JPEG, PNG and ICO are tried in that order based on URL
+ * extension or Content-Type, each independently confirmed via magic
+ * bytes before decoding; anything else (WebP, SVG, ...) is silently
+ * rejected. */
 static int LoadRadioFaviconImage(MrApp *app)
 {
 	char contentType[64];
@@ -3345,12 +3556,12 @@ static int LoadRadioFaviconImage(MrApp *app)
 	if (bytes <= 8)
 		return 0;
 
-	if (MrUrlIsJpeg(app->currentRadioFavicon) || MrContentTypeIsJpeg(contentType)) {
-		if (!MrIsJpegMagic(response, bytes)) {
-			RADIO_DBG(printf("radio-art: rejected, claimed JPEG but first bytes are not FF D8 FF (%02X %02X %02X)\n",
-				response[0], response[1], response[2]);)
-			return 0;
-		}
+	/* Dispatch purely on the actual bytes fetched, not the URL extension or
+	 * declared Content-Type: plenty of real sites serve a PNG (or other
+	 * format) under a "favicon.ico" URL and/or an "image/vnd.microsoft.icon"
+	 * Content-Type, so trusting either would reject content we can in fact
+	 * decode (and can't be trusted to guard against content we can't). */
+	if (MrIsJpegMagic(response, bytes)) {
 		if (DecodeJpegToGrey(response, (unsigned long)bytes, app->artGreyBuf, app->artRGBBuf,
 			MR_ART_W, MR_ART_H, 0) != 0) {
 			RADIO_DBG(printf("radio-art: picojpeg decode failed\n");)
@@ -3360,11 +3571,7 @@ static int LoadRadioFaviconImage(MrApp *app)
 		return 1;
 	}
 #if ENABLE_PNG_ARTWORK
-	if (MrUrlIsPng(app->currentRadioFavicon) || MrContentTypeIsPng(contentType)) {
-		if (!MrIsPngMagic(response, bytes)) {
-			RADIO_DBG(printf("radio-art: rejected, claimed PNG but signature bytes don't match\n");)
-			return 0;
-		}
+	if (MrIsPngMagic(response, bytes)) {
 		if (DecodePngToGrey(response, (unsigned long)bytes, app->artGreyBuf, app->artRGBBuf,
 			MR_ART_W, MR_ART_H) != 0) {
 			RADIO_DBG(printf("radio-art: lodepng decode failed\n");)
@@ -3374,7 +3581,17 @@ static int LoadRadioFaviconImage(MrApp *app)
 		return 1;
 	}
 #endif
-	RADIO_DBG(printf("radio-art: rejected, unsupported favicon type (url and content-type don't look like JPEG or PNG)\n");)
+	if (MrIsIcoMagic(response, bytes)) {
+		if (DecodeIcoToGrey(response, (unsigned long)bytes, app->artGreyBuf, app->artRGBBuf,
+			MR_ART_W, MR_ART_H) != 0) {
+			RADIO_DBG(printf("radio-art: ico decode failed\n");)
+			return 0;
+		}
+		app->artValid = 1;
+		return 1;
+	}
+	RADIO_DBG(printf("radio-art: rejected, unsupported favicon format (first bytes %02X %02X %02X %02X don't match JPEG/PNG/ICO)\n",
+		response[0], response[1], response[2], response[3]);)
 	return 0;
 }
 #endif /* ENABLE_RADIO_ARTWORK */
@@ -3396,6 +3613,7 @@ static void UpdateArtwork(MrApp *app, MrMp3Info *info)
 	}
 	if (app->artColorEnabled && app->artValid)
 		BuildArtColorPens(app);
+	Radio_CheckMiniMem("after artwork fetch/decode");
 	/* The panel (frame + thumbnail or "No art") is hand-drawn over the
 	 * placeholder gadget rather than via the button's own text. */
 	DrawArtPanel(app);
@@ -4044,6 +4262,7 @@ static void RadioDoSearch(MrApp *app)
 	printf("%s\n", filterMsg);
 #endif
 	rc = rb_controller_search(&app->rbController);
+	Radio_CheckMiniMem("after radio browser JSON parse");
 	app->rbSearchInProgress = 0;
 	app->rbShowingFavourites = FALSE;
 	RadioRefreshResults(app);
@@ -4252,6 +4471,7 @@ static void RadioDoProbeAndPlay(MrApp *app)
 		sprintf(msg, "Buffering - %.120s", app->rbFavouriteNames[app->rbSelectedFavourite]);
 		RadioSetStatus(app, msg);
 		StartPlayback(app);
+		Radio_CheckMiniMem("after station switch");
 		return;
 	}
 	if (app->rbController.selected_index < 0) {
@@ -4309,7 +4529,13 @@ static void RadioDoProbeAndPlay(MrApp *app)
 	sprintf(msg, "Buffering - %.140s", app->currentRadioStationName[0] ? app->currentRadioStationName : "Internet Radio");
 	RadioSetStatus(app, msg);
 	RADIO_DBG(printf("radio-ui: new stream start url=\"%s\"\n", info.final_url);)
+	if (Radio_IsMemoryPoisoned()) {
+		RadioSetStatus(app, "Memory corruption detected - restart app");
+		RADIO_DBG(printf("radio-memory: refusing station switch after MiniMem/ring corruption url=\"%s\"\n", info.final_url);)
+		return;
+	}
 	StartPlayback(app);
+	Radio_CheckMiniMem("after station switch");
 }
 
 static void CloseRadioWindow(MrApp *app)
@@ -5051,6 +5277,11 @@ int main(int argc, char **argv)
 		CloseLibs();
 		return 1;
 	}
+	/* Open bsdsocket.library/AmiSSL once for the whole app run; every probe,
+	 * favicon fetch, browser search and stream still opens/closes its own
+	 * socket and, for HTTPS, its own SSL/SSL_CTX -- only the shared libraries
+	 * stay open until Radio_NetworkShutdown() at final app exit. */
+	Radio_NetworkInit();
 
 	LoadSettings(&app);
 
@@ -5186,8 +5417,10 @@ int main(int argc, char **argv)
 
 	SyncFromGadgets(&app);
 	SaveSettings(&app);
+	RADIO_DBG(printf("app-close: SaveSettings done\n");)
 	MrCloseWindow(&app);
 	CloseTimer(&app);
+	RADIO_DBG(printf("app-close: CloseTimer done\n");)
 	if (app.donePort) {
 		struct Message *m;
 		while ((m = GetMsg(app.donePort)) != NULL)
@@ -5195,6 +5428,7 @@ int main(int argc, char **argv)
 		DeleteMsgPort(app.donePort);
 		app.donePort = NULL;
 	}
+	RADIO_DBG(printf("app-close: donePort drained\n");)
 	/* Every playback child has been stopped and reaped above, so it is now safe
 	 * to release the shared network libraries (AmiSSL master + bsdsocket.library)
 	 * that the probe/search/streams opened.  Without this the app left
@@ -5203,8 +5437,12 @@ int main(int argc, char **argv)
 	AppCloseDebug("close SocketBase fallback", &app);
 	AppCloseDebug("AmiSSL shutdown fallback", &app);
 	Radio_NetworkShutdown();
+	RADIO_DBG(printf("app-close: Radio_NetworkShutdown done\n");)
 	AppCloseDebug("end", &app);
 	CloseLibs();
+	RADIO_DBG(printf("app-close: CloseLibs done, returning from main\n");)
+	Radio_CheckMiniMem("before app exit");
+	MiniMem_ReportLeaks();
 	return 0;
 }
 

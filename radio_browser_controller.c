@@ -8,9 +8,27 @@
 #include "radio_browser_controller.h"
 #include "radio_browser_url.h"
 #include "radio_browser_http.h"
+#include "radio_debug.h"
 
 #include <stdio.h>
 #include <string.h>
+
+/* Radio Browser is a mirror network and clients are expected to fail over:
+ * a single hardcoded mirror meant one slow/dead mirror turned every search
+ * into "Search failed" for the rest of the app's life.  Each search tries
+ * the last mirror that worked first, then rotates through the others;
+ * whichever answers becomes the preferred mirror for the next search.
+ * "all.api.radio-browser.info" is the project's round-robin DNS record and
+ * doubles as a catch-all for mirrors this list doesn't know about. */
+static const char *rb_controller_hosts[] = {
+    RB_CONTROLLER_DEFAULT_HOST,
+    "de2.api.radio-browser.info",
+    "fi1.api.radio-browser.info",
+    "all.api.radio-browser.info"
+};
+#define RB_CONTROLLER_HOST_COUNT \
+    ((int)(sizeof(rb_controller_hosts) / sizeof(rb_controller_hosts[0])))
+static int rb_controller_preferred_host = 0;
 
 static int rb_controller_starts_with(const char *s, const char *prefix)
 {
@@ -89,18 +107,39 @@ int rb_controller_search(RadioBrowserController *controller)
                                  rb_controller_optional_string(controller->codec),
                                  rb_controller_optional_string(controller->countrycode),
                                  controller->max_bitrate, limit, controller->offset);
-    count = rb_search_stations(RB_CONTROLLER_DEFAULT_HOST,
-                               rb_controller_optional_string(controller->name),
-                               rb_controller_optional_string(controller->tag),
-                               rb_controller_optional_string(controller->codec),
-                               rb_controller_optional_string(controller->countrycode),
-                               controller->max_bitrate,
-                               limit,
-                               controller->offset,
-                               controller->stations,
-                               RB_CONTROLLER_MAX_STATIONS,
-                               controller->json_buffer,
-                               RB_CONTROLLER_JSON_BUFFER_SIZE);
+    {
+        int attempt;
+        count = RB_HTTP_ERR_CONNECT;
+        for (attempt = 0; attempt < RB_CONTROLLER_HOST_COUNT; attempt++) {
+            int host_index = (rb_controller_preferred_host + attempt) % RB_CONTROLLER_HOST_COUNT;
+            const char *host = rb_controller_hosts[host_index];
+            count = rb_search_stations(host,
+                                       rb_controller_optional_string(controller->name),
+                                       rb_controller_optional_string(controller->tag),
+                                       rb_controller_optional_string(controller->codec),
+                                       rb_controller_optional_string(controller->countrycode),
+                                       controller->max_bitrate,
+                                       limit,
+                                       controller->offset,
+                                       controller->stations,
+                                       RB_CONTROLLER_MAX_STATIONS,
+                                       controller->json_buffer,
+                                       RB_CONTROLLER_JSON_BUFFER_SIZE);
+            RADIO_DBG(printf("rb-controller: search host=%s attempt=%d/%d rc=%d\n",
+                host, attempt + 1, RB_CONTROLLER_HOST_COUNT, count);)
+            if (count >= 0) {
+                rb_controller_preferred_host = host_index;
+                break;
+            }
+            /* -100 is this client's own response buffer overflowing -- every
+             * mirror would answer the same, so don't burn time retrying.
+             * Everything else (timeout/DNS/connect/read/status, and -101
+             * parse failures from a mirror serving an error page) is worth
+             * trying the next mirror for. */
+            if (count == -100)
+                break;
+        }
+    }
     if (count < 0) {
         if (count == -100) {
             rb_controller_set_error(controller, "Search result too large");
