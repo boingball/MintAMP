@@ -51,6 +51,13 @@ static int rb_probe_amissl_dirty = 0;
  * radio_stream.c around to track the opener task): that call already
  * initialized this task, so InitAmiSSL()/CleanupAmiSSL() must not run. */
 static int rb_probe_opened_shared_here = 0;
+/* One SSL_CTX shared by every HTTPS probe in this run.
+ * Do not free it per probe: repeated SSL_CTX_new()/SSL_CTX_free() churn on
+ * classic AmiSSL has correlated with delayed exec heap corruption during
+ * station/favicon probe cycles. SSL_new()/SSL_free() remains per connection.
+ * If a TLS fault poisons a transport, orphan this ctx and rebuild on the next
+ * clean probe instead of freeing it through possibly damaged AmiSSL state. */
+static SSL_CTX *rb_probe_shared_ctx = NULL;
 /* Cumulative per-task InitAmiSSL()/CleanupAmiSSL() debug counters for this
  * (parent/GUI) task's probe/favicon fetches. */
 static long rb_probe_amissl_init_count = 0;
@@ -728,23 +735,33 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *host
             rb_probe_transport_close(transport);
             return RB_STREAM_PROBE_ERR_CONNECT;
         }
-        transport->ctx = SSL_CTX_new(SSLv23_client_method());
+        if (!rb_probe_shared_ctx) {
+            Radio_DebugCheckExecMem("before probe SSL_CTX_new");
+            rb_probe_shared_ctx = SSL_CTX_new(SSLv23_client_method());
+            Radio_DebugCheckExecMem("after probe SSL_CTX_new");
+            if (rb_probe_shared_ctx) {
+                /* No CA bundle on classic AmigaOS; skip cert verification for streams. */
+                SSL_CTX_set_verify(rb_probe_shared_ctx, SSL_VERIFY_NONE, NULL);
+#ifdef SSL_OP_IGNORE_UNEXPECTED_EOF
+                /* Treat an abrupt server disconnect as a clean end-of-stream
+                 * instead of the fatal "unexpected eof" SSL_ERROR_SSL -- see the
+                 * matching option (and rationale) in radio_stream.c's
+                 * radio_ssl_connect(). */
+                SSL_CTX_set_options(rb_probe_shared_ctx, SSL_OP_IGNORE_UNEXPECTED_EOF);
+#endif
+            }
+        }
+        transport->ctx = rb_probe_shared_ctx;
         if (!transport->ctx) {
             rb_probe_transport_close(transport);
             return RB_STREAM_PROBE_ERR_CONNECT;
         }
-        /* No CA bundle on classic AmigaOS; skip cert verification for streams. */
-        SSL_CTX_set_verify(transport->ctx, SSL_VERIFY_NONE, NULL);
-#ifdef SSL_OP_IGNORE_UNEXPECTED_EOF
-        /* Treat an abrupt server disconnect as a clean end-of-stream
-         * instead of the fatal "unexpected eof" SSL_ERROR_SSL -- see the
-         * matching option (and rationale) in radio_stream.c's
-         * radio_ssl_connect(). */
-        SSL_CTX_set_options(transport->ctx, SSL_OP_IGNORE_UNEXPECTED_EOF);
-#endif
+        Radio_DebugCheckExecMem("before probe SSL_new");
         transport->ssl = SSL_new(transport->ctx);
+        Radio_DebugCheckExecMem("after probe SSL_new");
         if (!transport->ssl) {
-            SSL_CTX_free(transport->ctx); transport->ctx = NULL;
+            /* transport->ctx is the shared per-run ctx. Never free it here. */
+            transport->ctx = NULL;
             rb_probe_transport_close(transport);
             return RB_STREAM_PROBE_ERR_CONNECT;
         }
@@ -800,15 +817,16 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *host
                 RADIO_DBG(printf("radio-cleanup: probe handshake-fail SSL_free/SSL_CTX_free skipped (quarantined/poisoned) session=%lu ssl=%p ctx=%p\n", transport->session_id, (void *)transport->ssl, (void *)transport->ctx);)
                 transport->ssl = NULL;
                 transport->ctx = NULL;
+                rb_probe_shared_ctx = NULL;
             } else {
                 /* Plain connect timeout (WANT_READ/WANT_WRITE budget
-                 * exhausted, empty error queue): the objects are healthy and
-                 * freeing them is the normal, safe path. */
+                 * exhausted, empty error queue): the SSL object is healthy
+                 * and freeing it is the normal, safe path. The ctx is the
+                 * shared per-run one and stays alive. */
                 rb_probe_debug_mem_report(transport->session_id, "before handshake-fail SSL_free");
                 SSL_free(transport->ssl); transport->ssl = NULL;
                 rb_probe_debug_mem_report(transport->session_id, "after handshake-fail SSL_free");
-                SSL_CTX_free(transport->ctx); transport->ctx = NULL;
-                rb_probe_debug_mem_report(transport->session_id, "after handshake-fail SSL_CTX_free");
+                transport->ctx = NULL;
             }
             rb_probe_transport_close(transport);
             return RB_STREAM_PROBE_ERR_TLS_HANDSHAKE;
@@ -847,6 +865,8 @@ static void rb_probe_transport_close_mode(RbProbeTransport *transport, RbProbeCl
             RADIO_DBG(printf("radio-cleanup: probe SSL_free skipped (poisoned) session=%lu ssl=%p leaking to avoid crashing on corrupted AmiSSL state\n", transport->session_id, (void *)transport->ssl);)
             transport->ssl = NULL;
             transport->sslHandshakeDone = 0;
+            transport->ctx = NULL;
+            rb_probe_shared_ctx = NULL;
         } else if (transport->ssl) {
             rb_probe_debug_mem_report(transport->session_id, "before close SSL_free");
             SSL_free(transport->ssl);
@@ -854,15 +874,9 @@ static void rb_probe_transport_close_mode(RbProbeTransport *transport, RbProbeCl
             transport->sslHandshakeDone = 0;
             rb_probe_debug_mem_report(transport->session_id, "after close SSL_free");
         }
-        if (transport->ctx && (transport->sslStatePoisoned || Radio_IsTlsPoisoned())) {
-            RADIO_DBG(printf("radio-cleanup: probe SSL_CTX_free skipped (poisoned) session=%lu ctx=%p leaking to avoid crashing on corrupted AmiSSL state\n", transport->session_id, (void *)transport->ctx);)
-            transport->ctx = NULL;
-        } else if (transport->ctx) {
-            rb_probe_debug_mem_report(transport->session_id, "before close SSL_CTX_free");
-            SSL_CTX_free(transport->ctx);
-            transport->ctx = NULL;
-            rb_probe_debug_mem_report(transport->session_id, "after close SSL_CTX_free");
-        }
+        /* transport->ctx is rb_probe_shared_ctx. It is deliberately kept for
+         * the run and never SSL_CTX_free()'d from a per-probe close path. */
+        transport->ctx = NULL;
 #endif
          {
             long closing_fd = (long)transport->sock;
