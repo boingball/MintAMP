@@ -1635,6 +1635,14 @@ static void FinalizePlayback(MrApp *app)
 	RADIO_DBG(printf("radio-done: streamStateAfterFinalize=%s guiStatus=\"%s\"\n",
 		MrStreamStateName(app->streamState), finalStatus);)
 	RADIO_DBG(printf("radio-guard: after FinalizePlayback\n");)
+	if (Radio_IsMemoryPoisoned()) {
+		if (app->queuedStreamUrl[0] || app->playlistNextPending)
+			SetStatus(app, "Memory corruption detected - restart app");
+		app->queuedStreamUrl[0] = '\0';
+		app->playlistNextPending = 0;
+		RADIO_DBG(printf("radio-memory: queued/next stream suppressed after memory poison session=%lu\n", gPlayer.sessionId);)
+		return;
+	}
 	if (app->queuedStreamUrl[0]) {
 		app->queuedStreamUrl[0] = '\0';
 		RadioSetStatus(app, "Starting queued stream...");
