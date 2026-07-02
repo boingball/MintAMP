@@ -145,6 +145,15 @@ typedef enum {
     RADIO_CLOSE_GRACEFUL = 0,
     RADIO_CLOSE_ABORT = 1
 } RadioCloseMode;
+
+typedef enum {
+    STREAM_ALLOCATED = 1u << 0,
+    TRANSPORT_CONNECTED = 1u << 1,
+    TLS_DONE = 1u << 2,
+    HEADER_DONE = 1u << 3,
+    DECODER_STARTED = 1u << 4,
+    PLAYBACK_STARTED = 1u << 5
+} RadioStreamStateFlag;
 static const char *radio_close_mode_name(RadioCloseMode mode) { return mode == RADIO_CLOSE_GRACEFUL ? "graceful" : "abort"; }
 
 #define RADIO_STREAM_MAGIC 0x52535452UL
@@ -155,6 +164,8 @@ struct RadioStream {
     RadioStatus status;
     char url[256], host[128], path[192];
     int port, bitrate, metaint, audioUntilMeta, headerDone;
+    unsigned int streamStateFlags;
+    int decoderStarted, playbackStarted, audioInitialized;
     char contentType[64], title[128], stationName[128], genre[64], streamUrl[128], error[128];
     unsigned char *ring;
     unsigned char *ringAlloc;
@@ -273,6 +284,7 @@ static void radio_app_exit_report(void)
 }
 
 static int radio_is_stopping(const RadioStream *rs) { return !rs || rs->stopping || rs->status == RADIO_STATUS_STOPPING || rs->status == RADIO_STATUS_CLOSED; }
+static void close_current_socket(RadioStream *rs);
 static int radio_contains_nocase(const char *s, const char *needle)
 {
     int n, i;
@@ -304,6 +316,8 @@ static void radio_reset_session_state(RadioStream *rs)
     rs->sslHandshakeDone = 0;
 #endif
     rs->bitrate = rs->metaint = rs->audioUntilMeta = rs->headerDone = 0;
+    rs->streamStateFlags = 0;
+    rs->decoderStarted = rs->playbackStarted = rs->audioInitialized = 0;
     rs->contentType[0] = rs->title[0] = rs->stationName[0] = rs->genre[0] = rs->streamUrl[0] = rs->error[0] = 0;
     rs->rpos = rs->wpos = rs->used = 0;
     rs->headerLen = 0; rs->header[0] = 0;
@@ -867,7 +881,7 @@ static int ring_write(RadioStream *rs, const unsigned char *p, int n)
     }
     return written;
 }
-static int ring_read(RadioStream *rs, unsigned char *p, int n) { int i=0; if (radio_ring_check_canary(rs, "before ring_read") < 0) return 0; while (i<n && rs->used) { p[i++]=rs->ring[rs->rpos++]; if(rs->rpos>=rs->size)rs->rpos=0; rs->used--; } radio_ring_check_canary(rs, "after ring_read"); return i; }
+static int ring_read(RadioStream *rs, unsigned char *p, int n) { int i=0; if(!rs||!p||n<=0)return 0; if(!rs->headerDone||!rs->decoderStarted){ RADIO_DBG(printf("radio-guard: ring_read refused session=%lu headerDone=%d decoderStarted=%d firstData=%d status=%d used=%lu\n", rs->session_id, rs->headerDone, rs->decoderStarted, rs->firstDataLogged, (int)rs->status, rs->used);); return 0; } if (radio_ring_check_canary(rs, "before ring_read") < 0) return 0; while (i<n && rs->used) { p[i++]=rs->ring[rs->rpos++]; if(rs->rpos>=rs->size)rs->rpos=0; rs->used--; } radio_ring_check_canary(rs, "after ring_read"); return i; }
 static int ci_starts(const char *s,const char *p){ while(*p) { if(tolower((unsigned char)*s++)!=tolower((unsigned char)*p++)) return 0; } return 1; }
 static int ci_equals(const char *a,const char *b){ while(*a&&*b){ if(tolower((unsigned char)*a++)!=tolower((unsigned char)*b++)) return 0; } return *a==0&&*b==0; }
 static char *trim(char *s){ char *e; while(*s&&isspace((unsigned char)*s))s++; e=s+strlen(s); while(e>s&&isspace((unsigned char)e[-1]))*--e=0; return s; }
@@ -1001,12 +1015,14 @@ static int connect_http(RadioStream *rs){
     cr=connect(rs->sock,(struct sockaddr*)&sa,sizeof(sa));
     RADIO_DBG(printf("radio-connect: session=%lu initial connect() cr=%d errno=%ld\n", rs->session_id, cr, cr < 0 ? radio_sock_errno() : 0L););
     if(cr<0 && radio_wait_connected(rs,&sa)!=0){ close_current_socket(rs); set_error(rs,"TCP connect failed"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: connect failed to %s:%d\n", rs->host, rs->port)); return -1; }
+    rs->streamStateFlags |= TRANSPORT_CONNECTED;
     if (radio_is_stopping(rs)) { close_current_socket(rs); return -1; }
     RADIO_DBG(printf("radio-connect: session=%lu TCP connected, starting SSL/HTTP request phase isSSL=%d\n", rs->session_id, rs->isSSL););
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     if (rs->isSSL) {
         rs->sslHandshakeDone = 0;
         if (radio_ssl_connect(rs) != 0) { close_current_socket(rs); return -1; }
+        rs->streamStateFlags |= TLS_DONE;
         if (radio_is_stopping(rs)) { close_current_socket(rs); return -1; }
     }
 #endif
@@ -1014,6 +1030,8 @@ static int connect_http(RadioStream *rs){
     n=snprintf(req,sizeof(req),"GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: BoingPlayer/0.1 AmigaOS\r\nIcy-MetaData: 1\r\nConnection: close\r\n\r\n",rs->path,rs->host);
     if(radio_send_all(rs,req,n)!=0){ close_current_socket(rs); set_error(rs, rs->isSSL ? "HTTPS read failed" : "cannot send HTTP request"); return -1; }
     reset_parser(rs);
+    rs->decoderStarted = rs->playbackStarted = 0;
+    rs->streamStateFlags &= (STREAM_ALLOCATED | TRANSPORT_CONNECTED | TLS_DONE);
     return 0;
 }
 
@@ -1139,7 +1157,7 @@ static int process_bytes(RadioStream *rs, const unsigned char *b, int n)
             rs->header[rs->headerLen++] = (char)b[i++]; rs->header[rs->headerLen] = 0;
             if (rs->headerLen >= 4 && !memcmp(rs->header + rs->headerLen - 4, "\r\n\r\n", 4)) {
                 RADIO_DBG(printf("radio-http-diag: session=%lu raw HTTP response header (%d bytes) follows:\n%s--- end of header ---\n", rs->session_id, rs->headerLen, rs->header););
-                rs->headerDone = 1; parse_headers(rs, rs->header); if (rs->status == RADIO_STATUS_ERROR) return -1; rs->parseState = RADIO_PARSE_AUDIO;
+                rs->headerDone = 1; rs->streamStateFlags |= HEADER_DONE; parse_headers(rs, rs->header); if (rs->status == RADIO_STATUS_ERROR) return -1; rs->parseState = RADIO_PARSE_AUDIO;
             }
             continue;
         }
@@ -1207,6 +1225,7 @@ static int process_bytes(RadioStream *rs, const unsigned char *b, int n)
                 rs->session_id, rs->metaint, rs->audioUntilMeta, avail, wanted, rs->used,
                 rs->size > rs->used ? rs->size - rs->used : 0, rs->wpos, rs->url););
             wrote = ring_write(rs, b + i, wanted);
+            if (wrote > 0 && rs->headerDone && !rs->decoderStarted) { rs->decoderStarted = 1; rs->streamStateFlags |= DECODER_STARTED; radio_active_decoder_count++; RADIO_DBG(printf("radio-resource: session=%lu decoder path started active_decoder_count=%ld\n", rs->session_id, radio_active_decoder_count);); }
             i += wrote;
             if (rs->metaint > 0) rs->audioUntilMeta -= wrote;
             RADIO_DBG(printf("radio-icy: audio write done session=%lu wrote=%d audio_until_meta_after=%d src_avail_after=%d fill_after=%lu ring_free_after=%lu wpos_after=%lu url=\"%s\"\n",
@@ -1258,8 +1277,8 @@ RadioStream *Radio_OpenWithHostAddr(const char *url, int haveHostAddr, unsigned 
     }
     radio_active_stream_sessions++;
     radio_active_stream_tasks++;
-    radio_active_decoder_count++;
-    RADIO_DBG(printf("radio-resource: session=%lu stream session/task/decoder allocated active_stream_sessions=%ld active_stream_tasks=%ld active_decoder_count=%ld\n", rs->session_id, radio_active_stream_sessions, radio_active_stream_tasks, radio_active_decoder_count););
+    rs->streamStateFlags |= STREAM_ALLOCATED;
+    RADIO_DBG(printf("radio-resource: session=%lu stream session/task allocated active_stream_sessions=%ld active_stream_tasks=%ld active_decoder_count=%ld\n", rs->session_id, radio_active_stream_sessions, radio_active_stream_tasks, radio_active_decoder_count););
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     RADIO_DBG(printf("radio-ssl-diag: Radio_Open session=%lu url=\"%s\" inherited AmiSSL state: initialized=%d base=%p ext=%p master=%p ssl_count=%ld ssl_ctx_count=%ld\n",
         rs->session_id, url ? url : "(null)", radio_amissl_initialized, (void *)AmiSSLBase, (void *)AmiSSLExtBase, (void *)AmiSSLMasterBase, radio_active_ssl_count, radio_active_ssl_ctx_count));
@@ -1303,7 +1322,7 @@ RadioStream *Radio_OpenWithHostAddr(const char *url, int haveHostAddr, unsigned 
         set_error(rs, "Memory corruption detected - restart app");
         return rs;
     }
-    if (rs->ring) { radio_active_stream_buffer_count++; radio_active_audio_buffer_count++; RADIO_DBG(printf("radio-resource: session=%lu stream/audio buffer allocated active_stream_buffer_count=%ld active_audio_buffer_count=%ld\n", rs->session_id, radio_active_stream_buffer_count, radio_active_audio_buffer_count)); }
+    if (rs->ring) { rs->audioInitialized = 1; radio_active_stream_buffer_count++; radio_active_audio_buffer_count++; RADIO_DBG(printf("radio-resource: session=%lu stream/audio buffer allocated active_stream_buffer_count=%ld active_audio_buffer_count=%ld\n", rs->session_id, radio_active_stream_buffer_count, radio_active_audio_buffer_count)); }
     if (!rs->ring) {
         rs->size = 0;
         set_error(rs, "not enough memory for radio buffer");
@@ -1408,11 +1427,17 @@ void Radio_Close(RadioStream *rs)
             RADIO_DBG(printf("radio-cleanup: session=%lu url=\"%s\" ring buffer free skipped (corrupted), quarantining/leaking to avoid smashing the allocator\n", rs->session_id, rs->url));
         if (radio_active_stream_buffer_count > 0) radio_active_stream_buffer_count--;
     } }
-    if (rs->audio_buffer_free_count > 1) radio_duplicate_cleanup_warning(rs, "audio buffer free", rs->audio_buffer_free_count);
-    else { if (radio_active_audio_buffer_count > 0) radio_active_audio_buffer_count--; }
-    rs->decoder_free_count++;
-    if (rs->decoder_free_count > 1) radio_duplicate_cleanup_warning(rs, "decoder free", rs->decoder_free_count);
-    else { if (radio_active_decoder_count > 0) radio_active_decoder_count--; }
+    if (rs->audioInitialized || rs->playbackStarted) {
+        if (rs->audio_buffer_free_count > 1) radio_duplicate_cleanup_warning(rs, "audio buffer free", rs->audio_buffer_free_count);
+        else { if (radio_active_audio_buffer_count > 0) radio_active_audio_buffer_count--; }
+    }
+    if (rs->decoderStarted) {
+        rs->decoder_free_count++;
+        if (rs->decoder_free_count > 1) radio_duplicate_cleanup_warning(rs, "decoder free", rs->decoder_free_count);
+        else { if (radio_active_decoder_count > 0) radio_active_decoder_count--; }
+    } else {
+        RADIO_DBG(printf("radio-cleanup: session=%lu decoder cleanup skipped (decoderStarted=0 headerDone=%d firstData=%d)\n", rs->session_id, rs->headerDone, rs->firstDataLogged););
+    }
     rs->ring = NULL; rs->ringAlloc = NULL;
     rs->size = rs->used = rs->rpos = rs->wpos = 0;
     rs->task_exit_count++;
@@ -1602,7 +1627,7 @@ int Radio_Pump(RadioStream *rs)
     }
     if (n <= 0) {
         close_current_socket(rs);
-        if (!rs->headerDone) { set_error(rs, rs->isSSL ? "HTTPS read failed" : "HTTP header read failed"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: HTTP header failed\n")); return -1; }
+        if (!rs->headerDone || !rs->firstDataLogged) { rs->decoderStarted = 0; rs->streamStateFlags &= ~DECODER_STARTED; set_error(rs, rs->isSSL ? "HTTPS read failed" : "HTTP header read failed"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: HTTP header failed before ready headerDone=%d firstData=%d\n", rs->headerDone, rs->firstDataLogged)); return -1; }
         if (!rs->everPlayed) { set_error(rs, "radio stream ended before audio buffered"); return -1; }
         rs->reconnectDelay = RADIO_RECONNECT_BACKOFF_PUMPS;
         set_status(rs, RADIO_STATUS_RECONNECTING);
@@ -1644,13 +1669,13 @@ int Radio_Pump(RadioStream *rs)
              * decoder/audio-device setup that runs after this point. */
             radio_ring_check_canary(rs, "buffering complete, before decoder handoff");
         }
-        rs->reconnectAttempts = 0; rs->reconnectDelay = 0; rs->everPlayed = 1; set_status(rs, RADIO_STATUS_PLAYING);
+        rs->reconnectAttempts = 0; rs->reconnectDelay = 0; rs->everPlayed = 1; rs->playbackStarted = 1; rs->streamStateFlags |= PLAYBACK_STARTED; set_status(rs, RADIO_STATUS_PLAYING);
     } else if (rs->headerDone && rs->status != RADIO_STATUS_PLAYING)
         set_status(rs, RADIO_STATUS_BUFFERING);
     return n;
 }
-int Radio_ReadAudio(RadioStream *rs,unsigned char *buf,int maxBytes){ int got; if(!rs||!buf||maxBytes<=0)return 0; if(radio_is_stopping(rs)) return 0; while(!radio_is_stopping(rs) && rs->status!=RADIO_STATUS_PLAYING && rs->used<RADIO_START_THRESHOLD && rs->status!=RADIO_STATUS_ERROR) { if(Radio_Pump(rs)<=0 && !rs->everPlayed && (++rs->zeroBytePumps>=RADIO_ZERO_BYTE_PUMP_MAX || radio_note_start_wait(rs,"radio stream did not buffer audio")<0)) { if(rs->status!=RADIO_STATUS_ERROR) set_error(rs,"radio stream did not buffer audio"); break; } } while(!radio_is_stopping(rs) && rs->used==0 && rs->status!=RADIO_STATUS_ERROR) { if(Radio_Pump(rs)<=0 && !rs->everPlayed && (++rs->zeroBytePumps>=RADIO_ZERO_BYTE_PUMP_MAX || radio_note_start_wait(rs,"radio stream did not deliver audio")<0)) { if(rs->status!=RADIO_STATUS_ERROR) set_error(rs,"radio stream did not deliver audio"); break; } } if(radio_is_stopping(rs)) return 0; got=ring_read(rs,buf,maxBytes); if(!rs->everPlayed && rs->status==RADIO_STATUS_PLAYING && rs->used<RADIO_LOW_WATER_BYTES) set_status(rs,RADIO_STATUS_BUFFERING); if(rs->status==RADIO_STATUS_BUFFERING && rs->used>=RADIO_START_THRESHOLD) set_status(rs,RADIO_STATUS_PLAYING); return got; }
-int Radio_ReadStartupAudio(RadioStream *rs,unsigned char *buf,int maxBytes,unsigned long timeoutMs){ clock_t start; int got; if(!rs||!buf||maxBytes<=0)return 0; start=clock(); while(!radio_is_stopping(rs)&&rs->used==0&&rs->status!=RADIO_STATUS_ERROR){ if(Radio_Pump(rs)<0)break; if(timeoutMs>0 && (unsigned long)((clock()-start)*1000UL/CLOCKS_PER_SEC)>=timeoutMs){ set_error(rs,"AAC stream start timeout"); close_current_socket(rs); break; } } if(radio_is_stopping(rs)) return 0; got=ring_read(rs,buf,maxBytes); if(!rs->everPlayed&&rs->headerDone&&rs->status!=RADIO_STATUS_PLAYING&&rs->status!=RADIO_STATUS_ERROR) set_status(rs,RADIO_STATUS_BUFFERING); return got; }
+int Radio_ReadAudio(RadioStream *rs,unsigned char *buf,int maxBytes){ int got; if(!rs||!buf||maxBytes<=0)return 0; if(radio_is_stopping(rs)) return 0; while(!radio_is_stopping(rs) && rs->status!=RADIO_STATUS_PLAYING && rs->used<RADIO_START_THRESHOLD && rs->status!=RADIO_STATUS_ERROR) { if(Radio_Pump(rs)<=0 && !rs->everPlayed && (++rs->zeroBytePumps>=RADIO_ZERO_BYTE_PUMP_MAX || radio_note_start_wait(rs,"radio stream did not buffer audio")<0)) { if(rs->status!=RADIO_STATUS_ERROR) set_error(rs,"radio stream did not buffer audio"); break; } } while(!radio_is_stopping(rs) && rs->used==0 && rs->status!=RADIO_STATUS_ERROR) { if(Radio_Pump(rs)<=0 && !rs->everPlayed && (++rs->zeroBytePumps>=RADIO_ZERO_BYTE_PUMP_MAX || radio_note_start_wait(rs,"radio stream did not deliver audio")<0)) { if(rs->status!=RADIO_STATUS_ERROR) set_error(rs,"radio stream did not deliver audio"); break; } } if(radio_is_stopping(rs)||!rs->headerDone||!rs->decoderStarted||rs->status==RADIO_STATUS_ERROR) return 0; got=ring_read(rs,buf,maxBytes); if(!rs->everPlayed && rs->status==RADIO_STATUS_PLAYING && rs->used<RADIO_LOW_WATER_BYTES) set_status(rs,RADIO_STATUS_BUFFERING); if(rs->status==RADIO_STATUS_BUFFERING && rs->used>=RADIO_START_THRESHOLD) set_status(rs,RADIO_STATUS_PLAYING); return got; }
+int Radio_ReadStartupAudio(RadioStream *rs,unsigned char *buf,int maxBytes,unsigned long timeoutMs){ clock_t start; int got; if(!rs||!buf||maxBytes<=0)return 0; start=clock(); while(!radio_is_stopping(rs)&&rs->used==0&&rs->status!=RADIO_STATUS_ERROR){ if(Radio_Pump(rs)<0)break; if(timeoutMs>0 && (unsigned long)((clock()-start)*1000UL/CLOCKS_PER_SEC)>=timeoutMs){ set_error(rs,"AAC stream start timeout"); close_current_socket(rs); break; } } if(radio_is_stopping(rs)||!rs->headerDone||!rs->decoderStarted||rs->status==RADIO_STATUS_ERROR) return 0; got=ring_read(rs,buf,maxBytes); if(!rs->everPlayed&&rs->headerDone&&rs->status!=RADIO_STATUS_PLAYING&&rs->status!=RADIO_STATUS_ERROR) set_status(rs,RADIO_STATUS_BUFFERING); return got; }
 void Radio_FailStartup(RadioStream *rs,const char *message){ if(!rs)return; set_error(rs,message&&message[0]?message:"AAC stream start timeout"); rs->stopping=1; rs->reconnectAttempts=RADIO_RECONNECT_MAX; rs->reconnectDelay=0; close_current_socket(rs); }
 RadioStatus Radio_GetStatus(RadioStream *rs){ return rs?rs->status:RADIO_STATUS_CLOSED; }
 const char *Radio_GetTitle(RadioStream *rs){ return rs?rs->title:""; }
