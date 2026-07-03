@@ -560,6 +560,7 @@ static void RadioDoProbeAndPlay(MrApp *app);
 static void RadioSelectResult(MrApp *app, ULONG eventSelected);
 
 static void SyncMenuChecks(MrApp *app);
+static void SetDecodeThenPlay(MrApp *app, int enabled);
 
 static const char *MrStreamStateName(MrStreamState state)
 {
@@ -5105,6 +5106,51 @@ static void HandlePlaylistWindow(MrApp *app)
 			break;
 		}
 	}
+}
+
+
+static void SetMenuItemChecked(MrApp *app, int menuNum, int itemNum, int checked)
+{
+	struct MenuItem *item;
+	if (!app->menuStrip)
+		return;
+	item = ItemAddress(app->menuStrip, FULLMENUNUM(menuNum, itemNum, NOSUB));
+	if (!item)
+		return;
+	if (checked)
+		item->Flags |= CHECKED;
+	else
+		item->Flags &= ~CHECKED;
+}
+
+static void SyncMenuChecks(MrApp *app)
+{
+	SetMenuItemChecked(app, MENUNUM_PLAYBACK, ITEMNUM_DTP,
+		app->decodeThenPlay);
+	SetMenuItemChecked(app, MENUNUM_PLAYBACK, ITEMNUM_BENCH, app->bench);
+	SetMenuItemChecked(app, MENUNUM_PLAYBACK, ITEMNUM_ARTWORK,
+		app->artEnabled);
+	SetMenuItemChecked(app, MENUNUM_PLAYBACK, ITEMNUM_ARTCACHE,
+		app->artCacheEnabled);
+	SetMenuItemChecked(app, MENUNUM_PLAYBACK, ITEMNUM_ARTCOLOR,
+		app->artColorEnabled);
+	SetMenuItemChecked(app, MENUNUM_PLAYBACK, ITEMNUM_PROGRESS,
+		app->progressEnabled);
+}
+
+static void SetDecodeThenPlay(MrApp *app, int enabled)
+{
+	app->decodeThenPlay = enabled ? 1 : 0;
+	if (app->win && app->bufferGad) {
+		SetGadgetAttrs((struct Gadget *)app->bufferGad, app->win, NULL,
+			GA_Disabled, app->decodeThenPlay,
+			TAG_DONE);
+	}
+	SyncMenuChecks(app);
+	SetStatus(app, app->decodeThenPlay ?
+		"Decode-then-play enabled; Buffer slider disabled." :
+		"Streaming playback mode enabled.");
+	SaveSettings(app);
 }
 
 static void HandleMenu(MrApp *app, UWORD code, int *done)
