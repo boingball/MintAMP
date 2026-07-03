@@ -6,6 +6,7 @@
  */
 
 #include "radio_browser_controller.h"
+#include "amiga_display_text.h"
 #include "radio_browser_url.h"
 #include "radio_browser_http.h"
 #include "radio_debug.h"
@@ -291,7 +292,7 @@ const char *rb_station_play_url(const RadioBrowserStation *station)
 
 void rb_station_display_name(const RadioBrowserStation *station, char *out, int out_size)
 {
-    rb_test_copy(out, out_size, station ? station->name : "");
+    AmigaUtf8ToDisplay(out, (size_t)(out_size > 0 ? out_size : 0), station ? station->name : "");
 }
 
 int rb_probe_stream_url(const char *url, RbStreamInfo *info, unsigned char *peek_buf,

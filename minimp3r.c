@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "radio_debug.h"
+#include "amiga_display_text.h"
 #include "miniamp_memguard.h"
 
 #if defined(AMIGA_M68K)
@@ -1063,13 +1064,16 @@ static int MrIsRadioInput(const char *name)
 		!strncmp(name, "https://", 8));
 }
 
+
 static void MrCopyVolatileString(char *dst, unsigned long dstSize, volatile const char *src)
 {
 	unsigned long i;
+	char raw[256];
 	if (!dst || dstSize == 0) return;
 	if (!src) { dst[0] = 0; return; }
-	for (i = 0; i + 1 < dstSize && src[i]; i++) dst[i] = (char)src[i];
-	dst[i] = 0;
+	for (i = 0; i + 1 < sizeof(raw) && src[i]; i++) raw[i] = (char)src[i];
+	raw[i] = 0;
+	AmigaUtf8ToDisplay(dst, dstSize, raw);
 }
 
 static void MrSplitStreamTitle(const char *streamTitle, char *artist, unsigned long artistSize, char *title, unsigned long titleSize)
