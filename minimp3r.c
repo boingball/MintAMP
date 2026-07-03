@@ -413,14 +413,18 @@ typedef struct MrApp {
 	Object         *statusGad;
 	Object         *artGad;
 
+	Object         *plWinObj;
 	struct Window  *plWin;
-	struct Gadget  *plGadgets;
-	struct Gadget  *plGadContext;
-	struct Gadget  *plGadList;
-	struct List     plList;
-	struct Node     plNodes[MR_PLAYLIST_MAX];
+	Object         *plSelectGad;
+	Object         *plAddGad;
+	Object         *plRemoveGad;
+	Object         *plClearGad;
+	Object         *plPlayGad;
+	Object         *plLoadGad;
+	Object         *plSaveGad;
+	Object         *plCloseGad;
+	STRPTR          plLabels[MR_PLAYLIST_MAX + 2];
 	char            plNames[MR_PLAYLIST_MAX][80];
-	APTR            plVisualInfo;
 
 	struct Window  *rbWin;
 	struct Gadget  *rbGadgets;
@@ -4720,19 +4724,22 @@ static const char *PlaylistBaseName(const char *path)
 static void RefreshPlaylistView(MrApp *app)
 {
 	int i;
-	NewList(&app->plList);
 	for (i = 0; i < app->playlistCount; i++) {
 		SafeCopy(app->plNames[i], sizeof(app->plNames[i]), PlaylistBaseName(app->playlist[i]));
-		app->plNodes[i].ln_Name = app->plNames[i];
-		app->plNodes[i].ln_Type = NT_USER;
-		app->plNodes[i].ln_Pri = 0;
-		AddTail(&app->plList, &app->plNodes[i]);
+		app->plLabels[i] = (STRPTR)app->plNames[i];
 	}
-	if (app->plWin && app->plGadList) {
+	if (app->playlistCount == 0) {
+		app->plLabels[0] = (STRPTR)"(playlist is empty)";
+		app->plLabels[1] = NULL;
+	} else {
+		app->plLabels[app->playlistCount] = NULL;
+	}
+	if (app->plWin && app->plSelectGad) {
 		int sel = app->playlistSelected >= 0 ? app->playlistSelected : app->playlistCurrent;
-		GT_SetGadgetAttrs(app->plGadList, app->plWin, NULL,
-			GTLV_Labels, (ULONG)&app->plList,
-			GTLV_Selected, sel >= 0 ? (ULONG)sel : (ULONG)~0,
+		SetGadgetAttrs((struct Gadget *)app->plSelectGad, app->plWin, NULL,
+			CHOOSER_LabelArray, (ULONG)app->plLabels,
+			CHOOSER_Selected, app->playlistCount > 0 && sel >= 0 ? (ULONG)sel : 0,
+			GA_Disabled, app->playlistCount == 0 ? TRUE : FALSE,
 			TAG_DONE);
 	}
 }
@@ -4885,93 +4892,122 @@ static void PlaylistSaveM3U(MrApp *app)
 
 static void ClosePlaylistWindow(MrApp *app)
 {
-	struct IntuiMessage *msg;
-	if (!app->plWin)
-		return;
-	ModifyIDCMP(app->plWin, 0);
-	while ((msg = GT_GetIMsg(app->plWin->UserPort)) != NULL)
-		GT_ReplyIMsg(msg);
-	if (app->plGadgets)
-		RemoveGList(app->plWin, app->plGadgets, -1);
-	CloseWindow(app->plWin);
-	app->plWin = NULL;
-	if (app->plGadgets) {
-		FreeGadgets(app->plGadgets);
-		app->plGadgets = NULL;
-		app->plGadContext = NULL;
-		app->plGadList = NULL;
+	if (app->plWinObj) {
+		RA_CloseWindow(app->plWinObj);
+		app->plWin = NULL;
+		DisposeObject(app->plWinObj);
+		app->plWinObj = NULL;
 	}
-	if (app->plVisualInfo) {
-		FreeVisualInfo(app->plVisualInfo);
-		app->plVisualInfo = NULL;
-	}
+	app->plSelectGad = NULL;
+	app->plAddGad = NULL;
+	app->plRemoveGad = NULL;
+	app->plClearGad = NULL;
+	app->plPlayGad = NULL;
+	app->plLoadGad = NULL;
+	app->plSaveGad = NULL;
+	app->plCloseGad = NULL;
+}
+
+static Object *PlaylistButton(ULONG id, const char *text)
+{
+	return (Object *)NewObject(BUTTON_GetClass(), NULL,
+		GA_ID, id,
+		GA_RelVerify, TRUE,
+		GA_Text, (ULONG)text,
+		TAG_DONE);
 }
 
 static void OpenPlaylistWindow(MrApp *app)
 {
-	struct NewWindow nw;
-	struct NewGadget ng;
-	struct Gadget *gad;
-	if (app->plWin || !app->win || !GadToolsBase)
+	Object *root = NULL;
+	int sel;
+
+	if (app->plWinObj || !app->win)
 		return;
-	app->plVisualInfo = GetVisualInfoA(app->win->WScreen, NULL);
-	if (!app->plVisualInfo)
-		return;
-	app->plGadContext = CreateContext(&app->plGadgets);
-	if (!app->plGadContext) {
-		FreeVisualInfo(app->plVisualInfo);
-		app->plVisualInfo = NULL;
-		return;
-	}
-	gad = app->plGadContext;
+
 	RefreshPlaylistView(app);
-	memset(&ng, 0, sizeof(ng));
-	{
-	int sel = app->playlistSelected >= 0 ? app->playlistSelected : app->playlistCurrent;
-	ng.ng_LeftEdge = 8; ng.ng_TopEdge = 20; ng.ng_Width = 344; ng.ng_Height = 120;
-	ng.ng_GadgetID = PL_GID_LIST; ng.ng_Flags = 0; ng.ng_VisualInfo = app->plVisualInfo;
-	app->plGadList = gad = CreateGadget(LISTVIEW_KIND, gad, &ng,
-		GTLV_Labels, (ULONG)&app->plList,
-		GTLV_Selected, sel >= 0 ? (ULONG)sel : (ULONG)~0,
-		GA_RelVerify, TRUE, TAG_DONE);
-	}
-	if (!gad) goto fail;
-	/* Row 1: Add | Remove | Clear | Play */
-	ng.ng_TopEdge = 148; ng.ng_Width = 84; ng.ng_Height = 18; ng.ng_Flags = PLACETEXT_IN;
-	ng.ng_LeftEdge = 8; ng.ng_GadgetText = (UBYTE *)"Add"; ng.ng_GadgetID = PL_GID_ADD;
-	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 96; ng.ng_GadgetText = (UBYTE *)"Remove"; ng.ng_GadgetID = PL_GID_REMOVE;
-	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 184; ng.ng_GadgetText = (UBYTE *)"Clear"; ng.ng_GadgetID = PL_GID_CLEAR;
-	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 272; ng.ng_GadgetText = (UBYTE *)"Play"; ng.ng_GadgetID = PL_GID_PLAY;
-	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
-	/* Row 2: Load M3U | Save M3U | Close */
-	ng.ng_TopEdge = 170; ng.ng_Width = 114;
-	ng.ng_LeftEdge = 8; ng.ng_GadgetText = (UBYTE *)"Load M3U"; ng.ng_GadgetID = PL_GID_LOAD_M3U;
-	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 126; ng.ng_GadgetText = (UBYTE *)"Save M3U"; ng.ng_GadgetID = PL_GID_SAVE_M3U;
-	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 244; ng.ng_GadgetText = (UBYTE *)"Close"; ng.ng_GadgetID = PL_GID_CLOSE;
-	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
-	memset(&nw, 0, sizeof(nw));
-	nw.LeftEdge = app->win->LeftEdge + 20; nw.TopEdge = app->win->TopEdge + 20;
-	nw.Width = 368; nw.Height = 200;
-	nw.IDCMPFlags = IDCMP_GADGETUP | IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW | IDCMP_VANILLAKEY;
-	nw.Flags = WFLG_CLOSEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET | WFLG_SMART_REFRESH;
-	nw.Title = (UBYTE *)"MiniAMP3 Playlist";
-	nw.MinWidth = nw.MaxWidth = 368; nw.MinHeight = nw.MaxHeight = 200;
-	nw.Type = WBENCHSCREEN;
-	app->plWin = OpenWindowTags(&nw, TAG_DONE);
-	if (!app->plWin) goto fail;
-	AddGList(app->plWin, app->plGadgets, (UWORD)-1, -1, NULL);
-	RefreshGList(app->plGadgets, app->plWin, NULL, -1);
-	GT_RefreshWindow(app->plWin, NULL);
+	sel = app->playlistSelected >= 0 ? app->playlistSelected : app->playlistCurrent;
+	if (sel < 0 || sel >= app->playlistCount)
+		sel = 0;
+
+	app->plSelectGad = (Object *)NewObject(CHOOSER_GetClass(), NULL,
+		GA_ID, PL_GID_LIST,
+		GA_RelVerify, TRUE,
+		GA_Disabled, app->playlistCount == 0 ? TRUE : FALSE,
+		CHOOSER_LabelArray, (ULONG)app->plLabels,
+		CHOOSER_Selected, (ULONG)sel,
+		TAG_DONE);
+	app->plAddGad = PlaylistButton(PL_GID_ADD, "Add");
+	app->plRemoveGad = PlaylistButton(PL_GID_REMOVE, "Remove");
+	app->plClearGad = PlaylistButton(PL_GID_CLEAR, "Clear");
+	app->plPlayGad = PlaylistButton(PL_GID_PLAY, "Play");
+	app->plLoadGad = PlaylistButton(PL_GID_LOAD_M3U, "Load M3U");
+	app->plSaveGad = PlaylistButton(PL_GID_SAVE_M3U, "Save M3U");
+	app->plCloseGad = PlaylistButton(PL_GID_CLOSE, "Close");
+
+	if (!app->plSelectGad || !app->plAddGad || !app->plRemoveGad ||
+		!app->plClearGad || !app->plPlayGad || !app->plLoadGad ||
+		!app->plSaveGad || !app->plCloseGad)
+		goto fail;
+
+	root = (Object *)NewObject(LAYOUT_GetClass(), NULL,
+		LAYOUT_Orientation, LAYOUT_ORIENT_VERT,
+		LAYOUT_SpaceOuter, TRUE,
+		LAYOUT_SpaceInner, TRUE,
+		LAYOUT_DeferLayout, TRUE,
+		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
+			LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
+			ADD_LABELLED(app->plSelectGad, "Track"),
+			TAG_DONE),
+		CHILD_WeightedHeight, 0,
+		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
+			LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
+			LAYOUT_EvenSize, TRUE,
+			LAYOUT_AddChild, (ULONG)app->plAddGad,
+			LAYOUT_AddChild, (ULONG)app->plRemoveGad,
+			LAYOUT_AddChild, (ULONG)app->plClearGad,
+			LAYOUT_AddChild, (ULONG)app->plPlayGad,
+			TAG_DONE),
+		CHILD_WeightedHeight, 0,
+		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
+			LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
+			LAYOUT_EvenSize, TRUE,
+			LAYOUT_AddChild, (ULONG)app->plLoadGad,
+			LAYOUT_AddChild, (ULONG)app->plSaveGad,
+			LAYOUT_AddChild, (ULONG)app->plCloseGad,
+			TAG_DONE),
+		CHILD_WeightedHeight, 0,
+		TAG_DONE);
+	if (!root)
+		goto fail;
+
+	app->plWinObj = (Object *)NewObject(WINDOW_GetClass(), NULL,
+		WA_Title, (ULONG)"MiniAMP3 Playlist",
+		WA_Activate, TRUE,
+		WA_DepthGadget, TRUE,
+		WA_DragBar, TRUE,
+		WA_CloseGadget, TRUE,
+		WA_SizeGadget, TRUE,
+		WA_IDCMP, IDCMP_GADGETUP | IDCMP_CLOSEWINDOW | IDCMP_IDCMPUPDATE |
+			IDCMP_REFRESHWINDOW | IDCMP_VANILLAKEY,
+		WA_Width, 420,
+		WA_Height, 120,
+		WINDOW_Position, WPOS_CENTERSCREEN,
+		WINDOW_ParentGroup, (ULONG)root,
+		TAG_DONE);
+	if (!app->plWinObj)
+		goto fail;
+
+	app->plWin = (struct Window *)RA_OpenWindow(app->plWinObj);
+	if (!app->plWin)
+		goto fail;
 	RefreshPlaylistView(app);
 	return;
+
 fail:
-	if (app->plGadgets) { FreeGadgets(app->plGadgets); app->plGadgets = NULL; app->plGadContext = NULL; app->plGadList = NULL; }
-	if (app->plVisualInfo) { FreeVisualInfo(app->plVisualInfo); app->plVisualInfo = NULL; }
+	if (!app->plWinObj && root)
+		DisposeObject(root);
+	ClosePlaylistWindow(app);
 }
 
 static void BrowseForPlaylist(MrApp *app)
@@ -5019,30 +5055,24 @@ static void PlaylistLoadCurrent(MrApp *app, int index, int startPlayback)
 
 static void HandlePlaylistWindow(MrApp *app)
 {
-	struct IntuiMessage *msg;
-	if (!app->plWin)
+	ULONG result;
+	UWORD code = 0;
+	if (!app->plWinObj)
 		return;
-	while ((msg = GT_GetIMsg(app->plWin->UserPort)) != NULL) {
-		ULONG cls = msg->Class;
-		struct Gadget *gad = (struct Gadget *)msg->IAddress;
-		UWORD gid = gad ? gad->GadgetID : 0;
-		UWORD code = msg->Code;
-		GT_ReplyIMsg(msg);
-		if (cls == IDCMP_CLOSEWINDOW) {
+	while ((result = RA_HandleInput(app->plWinObj, &code)) != WMHI_LASTMSG) {
+		switch (result & WMHI_CLASSMASK) {
+		case WMHI_CLOSEWINDOW:
 			ClosePlaylistWindow(app);
 			return;
-		}
-		if (cls == IDCMP_REFRESHWINDOW) {
-			GT_BeginRefresh(app->plWin);
-			GT_EndRefresh(app->plWin, TRUE);
-			continue;
-		}
-		if (cls == IDCMP_GADGETUP) {
-			switch (gid) {
+		case WMHI_GADGETUP:
+			switch (result & WMHI_GADGETMASK) {
 			case PL_GID_LIST:
-				/* Single click just selects; the Play button (or a second
-				 * click via the main window) starts playback. */
-				app->playlistSelected = (int)code;
+				if (app->playlistCount > 0 && app->plSelectGad) {
+					ULONG selected = 0;
+					GetAttr(CHOOSER_Selected, app->plSelectGad, &selected);
+					if ((int)selected < app->playlistCount)
+						app->playlistSelected = (int)selected;
+				}
 				break;
 			case PL_GID_ADD:
 				PlaylistAddFiles(app);
@@ -5072,41 +5102,9 @@ static void HandlePlaylistWindow(MrApp *app)
 				ClosePlaylistWindow(app);
 				return;
 			}
+			break;
 		}
 	}
-}
-
-static void SetMenuItemChecked(MrApp *app, int menuNum, int itemNum, int checked)
-{
-	struct MenuItem *item;
-	if (!app->menuStrip) return;
-	item = ItemAddress(app->menuStrip, SHIFTMENU(menuNum) | SHIFTITEM(itemNum));
-	if (!item) return;
-	if (checked) item->Flags |= CHECKED;
-	else item->Flags &= ~CHECKED;
-}
-
-static void SyncMenuChecks(MrApp *app)
-{
-	SetMenuItemChecked(app, MENUNUM_PLAYBACK, ITEMNUM_DTP, app->decodeThenPlay);
-	SetMenuItemChecked(app, MENUNUM_PLAYBACK, ITEMNUM_BENCH, app->bench);
-	SetMenuItemChecked(app, MENUNUM_PLAYBACK, ITEMNUM_ARTWORK, app->artEnabled);
-	SetMenuItemChecked(app, MENUNUM_PLAYBACK, ITEMNUM_ARTCACHE, app->artCacheEnabled);
-	SetMenuItemChecked(app, MENUNUM_PLAYBACK, ITEMNUM_ARTCOLOR, app->artColorEnabled);
-	SetMenuItemChecked(app, MENUNUM_PLAYBACK, ITEMNUM_PROGRESS, app->progressEnabled);
-}
-
-static void SetDecodeThenPlay(MrApp *app, int enabled)
-{
-	app->decodeThenPlay = enabled ? 1 : 0;
-	if (app->bufferGad && app->win)
-		SetGadgetAttrs((struct Gadget *)app->bufferGad, app->win, NULL,
-			GA_Disabled, app->decodeThenPlay,
-			TAG_DONE);
-	SetStatus(app, app->decodeThenPlay ?
-		"Decode-then-play enabled; Buffer slider disabled." :
-		"Streaming playback mode enabled.");
-	SaveSettings(app);
 }
 
 static void HandleMenu(MrApp *app, UWORD code, int *done)
@@ -5320,9 +5318,12 @@ int main(int argc, char **argv)
 	DrawArtPanel(&app);
 
 	while (!done) {
-		ULONG plSig = (app.plWin && app.plWin->UserPort) ? (1UL << app.plWin->UserPort->mp_SigBit) : 0;
+		ULONG plSig = 0;
 		ULONG rbSig = (app.rbWin && app.rbWin->UserPort) ? (1UL << app.rbWin->UserPort->mp_SigBit) : 0;
-		ULONG sigs = Wait(winSig | timerSig | doneSig | plSig | rbSig | SIGBREAKF_CTRL_C);
+		ULONG sigs;
+		if (app.plWinObj)
+			GetAttr(WINDOW_SigMask, app.plWinObj, &plSig);
+		sigs = Wait(winSig | timerSig | doneSig | plSig | rbSig | SIGBREAKF_CTRL_C);
 
 		if (sigs & SIGBREAKF_CTRL_C)
 			done = 1;
