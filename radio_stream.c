@@ -205,6 +205,7 @@ struct RadioStream {
     int stallPumps;   /* consecutive would-block pumps since last data, mid-stream */
     int everPlayed;
     int firstDataLogged;
+    int firstMetaLogged;
     int stopping;
     struct in_addr hostAddr;   /* cached DNS result so reconnects skip gethostbyname() */
     int haveHostAddr;
@@ -1546,6 +1547,11 @@ static int process_bytes(RadioStream *rs, const unsigned char *b, int n)
             rs->metaLen = lenByte * 16;
             rs->metaGot = 0;
             rs->metaLeft = rs->metaLen;
+            if (!rs->firstMetaLogged) {
+                rs->firstMetaLogged = 1;
+                RADIO_DBG(printf("radio-icy: first metadata block session=%lu len_byte=%d meta_len=%d metaint=%d fill=%lu url=\"%s\"\n",
+                    rs->session_id, lenByte, rs->metaLen, rs->metaint, rs->used, rs->url););
+            }
             RADIO_DBG(printf("radio-icy: metadata length session=%lu len_byte=%d meta_len=%d src_avail_after=%d metaint=%d url=\"%s\"\n",
                 rs->session_id, lenByte, rs->metaLen, n - i, rs->metaint, rs->url););
             if (rs->metaLen > RADIO_META_MAX)
@@ -1596,7 +1602,7 @@ static int process_bytes(RadioStream *rs, const unsigned char *b, int n)
                 rs->session_id, rs->metaint, rs->audioUntilMeta, avail, wanted, rs->used,
                 rs->size > rs->used ? rs->size - rs->used : 0, rs->wpos, rs->url););
             wrote = ring_write(rs, b + i, wanted);
-            if (wrote > 0 && rs->headerDone && !rs->decoderStarted) { rs->decoderStarted = 1; rs->streamStateFlags |= DECODER_STARTED; radio_active_decoder_count++; RADIO_DBG(printf("radio-resource: session=%lu decoder path started active_decoder_count=%ld\n", rs->session_id, radio_active_decoder_count);); }
+            if (wrote > 0 && rs->headerDone && !rs->decoderStarted) { rs->decoderStarted = 1; rs->streamStateFlags |= DECODER_STARTED; radio_active_decoder_count++; RADIO_DBG(printf("radio-resource: session=%lu decoder path started active_decoder_count=%ld first_write=%d fill=%lu metaint=%d\n", rs->session_id, radio_active_decoder_count, wrote, rs->used, rs->metaint);); }
             i += wrote;
             if (rs->metaint > 0) rs->audioUntilMeta -= wrote;
             RADIO_DBG(printf("radio-icy: audio write done session=%lu wrote=%d audio_until_meta_after=%d src_avail_after=%d fill_after=%lu ring_free_after=%lu wpos_after=%lu url=\"%s\"\n",

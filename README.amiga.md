@@ -192,7 +192,9 @@ The quality cycle maps directly to the same decoder quality levels used by
 - **Best** passes `--quality 3`: least aggressive optimisation.
 
 The Fast-mem checkbox remains independent of decoder quality, so unticking
-Fast-mem is always obeyed.
+Fast-mem is always obeyed.  When an internet stream is selected the GadTools
+frontend clears Fast-mem and omits `--fast-mem`, matching the ReAction frontend,
+because stream inputs are live sockets rather than finite seekable files.
 
 The buffer slider chooses the `--buffer-seconds` value from 1 to 30 seconds. The Volume slider stores `ENVARC:MiniAMP3/Volume` as 0-100% and maps it to `audio.device` `ioa_Volume` 0-64, so 0% is silent and 100% preserves the previous full-volume request value. Volume changes are shared with the embedded playback subprocess and applied to the next safe `CMD_WRITE` submission without changing PCM samples. The GUI rate selector cycles through 8287, 8820, 11025, 22050, and 28600 Hz.
 Superfast is a fast-lowrate variant rather than a separate exclusive mode; when
@@ -205,8 +207,12 @@ used by Shell playback, signal the child,
 and the audio wait path can abort/reap outstanding writes so the GUI remains
 responsive. During local-file playback the status bar keeps change-only
 playback text visible instead of redrawing generic `Playing` on each timer tick.
-For Internet radio streams, the ReAction GUI shows a stable `Streaming` status
-while audio is flowing and only changes it for connection, dropped-stream
+The GadTools Internet Radio dialog now exposes the same practical Radio Browser
+controls as the ReAction version: name/codec/country search, preset country
+codes, HTTP/HTTPS/all URL filtering, 10/25/50/100 result limits, maximum bitrate
+filtering, favourites, playable-result selection, and Up/Down selection buttons.
+For Internet radio streams, both GUI frontends show a stable `Streaming` status
+while audio is flowing and only change it for connection, dropped-stream
 reconnect, stop, or error states. The GUI file-info row reports the first MPEG frame channel mode
 as `mono`, `stereo`, `joint-stereo`, or `M/S` when the Layer III joint-stereo
 mode-extension bit marks mid/side stereo. Artwork greyscale conversion uses a
