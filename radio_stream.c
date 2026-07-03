@@ -1366,8 +1366,41 @@ static int connect_http(RadioStream *rs){
     } else {
         struct hostent *he;
         RADIO_DBG(printf("radio-dns: WARNING blocking DNS lookup in playback child host=%s\n", rs->host););
+#if defined(AMIGA_M68K)
+        /* gethostbyname() is a genuinely blocking bsdsocket.library call with
+         * no non-blocking mode of its own, unlike connect()/recv() elsewhere
+         * in this file.  Without a break mask, the Stop button's
+         * SIGBREAKF_CTRL_C (see StopPlayback() in both front ends) cannot
+         * touch it: the task just sits inside the resolver until it answers
+         * or times out, which some nameservers/stacks never do quickly --
+         * exactly the "Stopping..." that never finishes when a stream is
+         * asked to stop while it's still resolving its host (e.g. the user
+         * switches stations again before the previous one finished
+         * connecting).  SBTC_BREAKMASK tells bsdsocket.library which signals
+         * should abort a blocking call early for the calling task.
+         *
+         * Scoped tightly to just this one call: it is cleared again
+         * immediately below, win or lose.  Leaving it set would also apply
+         * to every later blocking bsdsocket call this task makes, including
+         * whatever AmiSSL does internally inside SSL_connect()/SSL_read() a
+         * few lines below for HTTPS streams -- and AmiSSL's SSL_connect() is
+         * already documented above (radio_ssl_global_init()) as sensitive to
+         * exactly this kind of external signal interference, having
+         * previously gone unresponsive to Stop when the surrounding signal
+         * plumbing changed. Getting an unexpected EINTR-style abort deep
+         * inside a library that was never written to expect one is a
+         * plausible way to corrupt its state rather than cleanly cancel it,
+         * so the mask must not outlive this single call. */
+        SocketBaseTags(SBTM_SETVAL(SBTC_BREAKMASK), (ULONG)SIGBREAKF_CTRL_C, TAG_DONE);
         he=gethostbyname(rs->host);
-        if(!he || !he->h_addr){ set_error(rs,"cannot resolve stream host"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: DNS failed for %s\n", rs->host)); return -1; }
+        SocketBaseTags(SBTM_SETVAL(SBTC_BREAKMASK), 0UL, TAG_DONE);
+#else
+        he=gethostbyname(rs->host);
+#endif
+        if(!he || !he->h_addr){
+            if (radio_is_stopping(rs)) { set_error(rs,"stopped"); return -1; }
+            set_error(rs,"cannot resolve stream host"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: DNS failed for %s\n", rs->host)); return -1;
+        }
         memcpy(&rs->hostAddr, he->h_addr, sizeof(rs->hostAddr));
         rs->haveHostAddr=1;
     }
