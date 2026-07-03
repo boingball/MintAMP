@@ -20,6 +20,7 @@ Classic AmigaOS • m68k • Paula • MP3 • AAC • FLAC • HTTP/HTTPS radio
 - GadTools GUI: `miniamp3`
 - CLI playback mode: `amiga_mp3dec.fastexp`
 - Direct HTTP and HTTPS internet radio with `RADIO=1 SSL=1`
+- Optional AmiSSL certificate verification with `SSLCERTS=1`
 - Radio Browser station search
 - ICY metadata parsing and live title/artist updates
 - Station name, genre, bitrate and content-type display
@@ -66,6 +67,7 @@ Suggested screenshots:
 | FLAC | Working | External decoder module. Performance depends heavily on CPU, output rate and file complexity. |
 | HTTP MP3/AAC radio | Working | Direct `http://` MP3 and ADTS AAC/AAC+ streams. ICY metadata supported where provided. |
 | HTTPS MP3/AAC radio | Working with AmiSSL | Build with `RADIO=1 SSL=1`. Uses AmiSSL and classic-Amiga-specific teardown quarantine for stability. |
+| HTTPS certificate verification | Optional | Add `SSLCERTS=1` to use AmiSSL's installed CA certificates for peer/hostname verification. |
 | Radio Browser search | Working | Used by the GUI radio search. |
 | JPEG artwork | Working | Station logo/artwork support in `minimp3r`. |
 | PNG artwork | Working | `lodepng` is compiled into the ReAction front-end only. |
@@ -99,13 +101,46 @@ GadTools GUI with HTTPS radio:
 make -f Makefile.amiga sslgui
 ```
 
-Optional certificate verification can be enabled with `SSLCERTS=1` when an AmiSSL root certificate bundle is installed and working:
+### AmiSSL certificates and `SSLCERTS=1`
+
+By default, HTTPS radio uses TLS transport but does not verify the remote certificate chain or hostname. This keeps HTTPS playback compatible with older or incomplete classic Amiga AmiSSL setups.
+
+Add `SSLCERTS=1` to enable certificate verification:
 
 ```sh
 make -f Makefile.amiga sslguir SSLCERTS=1
 ```
 
+`SSLCERTS=1` defines the certificate-verification path and tells MiniAMP3 to use AmiSSL's installed CA certificate bundle. The Amiga-side AmiSSL install must have its current root certificates available, and the system clock must be sane, otherwise valid HTTPS streams may fail verification.
+
+Useful certificate-verifying builds:
+
+```sh
+make -f Makefile.amiga sslradio030 SSLCERTS=1
+make -f Makefile.amiga sslgui SSLCERTS=1
+make -f Makefile.amiga sslguir SSLCERTS=1
+```
+
 Without `SSLCERTS=1`, HTTPS radio still uses TLS transport, but certificate verification is disabled for compatibility with classic Amiga setups.
+
+### Debug/development build
+
+The current heavy debug build used for radio, artwork, AmiSSL and heap-guard testing is:
+
+```sh
+make -f Makefile.amiga guir RADIO=1 SSL=1 SSLCERTS=1 DEBUG=1 HEAPGUARD=1
+```
+
+This enables:
+
+- ReAction/ClassAct GUI build (`guir`)
+- internet radio (`RADIO=1`)
+- HTTPS/AmiSSL transport (`SSL=1`)
+- AmiSSL certificate verification (`SSLCERTS=1`)
+- verbose radio/AmiSSL/artwork diagnostics (`DEBUG=1`)
+- MiniAMP heap guard instrumentation (`HEAPGUARD=1`)
+
+Use this for debugging only. It is intentionally noisier and heavier than a normal release build.
 
 ### Known working radio streams
 
@@ -145,6 +180,7 @@ If you are changing the HTTPS radio code, do not remove this quarantine behaviou
 - GNU Make
 - Git with submodule support
 - AmiSSL SDK headers for HTTPS radio builds
+- AmiSSL root certificates for `SSLCERTS=1` certificate verification
 - ReAction/ClassAct runtime classes for `minimp3r`
 - `bsdsocket.library` at runtime for radio
 
@@ -173,6 +209,8 @@ That document covers:
 - AAC asm build with `AACASM=1`
 - radio builds with `RADIO=1`
 - HTTPS/AmiSSL builds with `SSL=1`
+- certificate-verifying HTTPS builds with `SSLCERTS=1`
+- debug/heap-guard builds with `DEBUG=1 HEAPGUARD=1`
 - decoder entrypoint checks
 - copying files to Amiga/WinUAE
 - runtime tests
@@ -214,6 +252,8 @@ make -f Makefile.amiga gui RADIO=1   # GadTools GUI with radio
 make -f Makefile.amiga guir RADIO=1  # ReAction GUI with radio
 make -f Makefile.amiga sslgui        # GadTools GUI with HTTPS radio
 make -f Makefile.amiga sslguir       # ReAction GUI with HTTPS radio/artwork
+make -f Makefile.amiga sslguir SSLCERTS=1  # ReAction HTTPS radio with AmiSSL cert verification
+make -f Makefile.amiga guir RADIO=1 SSL=1 SSLCERTS=1 DEBUG=1 HEAPGUARD=1  # heavy debug build
 ```
 
 Verify decoder module entrypoints:
@@ -365,8 +405,9 @@ Supported artwork decode paths:
 
 - JPEG through `picojpeg`
 - PNG through vendored `lodepng`
+- ICO favicon files, including PNG-backed ICO entries and simple DIB-backed icons
 
-Artwork support is intentionally wired into `minimp3r` only. The GadTools and CLI builds do not need PNG/JPEG artwork support.
+Artwork support is intentionally wired into `minimp3r` only. The GadTools and CLI builds do not need PNG/JPEG/ICO artwork support.
 
 ## Development notes
 
@@ -398,6 +439,7 @@ AAC TNS-heavy file
 FLAC local playback
 HTTP MP3 radio playback
 HTTPS MP3 radio playback
+HTTPS certificate verification with SSLCERTS=1
 Radio Browser search
 ICY title/artist metadata updates
 Station artwork display where provided
