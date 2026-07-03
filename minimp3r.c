@@ -70,6 +70,7 @@
 #include <gadgets/button.h>
 #include <gadgets/getfile.h>
 #include <gadgets/chooser.h>
+#include <gadgets/listbrowser.h>
 #include <gadgets/slider.h>
 #include <gadgets/checkbox.h>
 #include <gadgets/fuelgauge.h>
@@ -89,6 +90,7 @@
 #include <proto/button.h>
 #include <proto/getfile.h>
 #include <proto/chooser.h>
+#include <proto/listbrowser.h>
 #include <proto/slider.h>
 #include <proto/checkbox.h>
 #include <proto/fuelgauge.h>
@@ -310,6 +312,7 @@ struct Library *LayoutBase;
 struct Library *ButtonBase;
 struct Library *GetFileBase;
 struct Library *ChooserBase;
+struct Library *ListBrowserBase;
 struct Library *SliderBase;
 struct Library *CheckBoxBase;
 struct Library *FuelGaugeBase;
@@ -413,21 +416,40 @@ typedef struct MrApp {
 	Object         *statusGad;
 	Object         *artGad;
 
+	Object         *plWinObj;
 	struct Window  *plWin;
-	struct Gadget  *plGadgets;
-	struct Gadget  *plGadContext;
-	struct Gadget  *plGadList;
+	Object         *plListGad;
+	Object         *plAddGad;
+	Object         *plRemoveGad;
+	Object         *plClearGad;
+	Object         *plPlayGad;
+	Object         *plLoadGad;
+	Object         *plSaveGad;
+	Object         *plCloseGad;
 	struct List     plList;
-	struct Node     plNodes[MR_PLAYLIST_MAX];
+	struct Node    *plNodes[MR_PLAYLIST_MAX];
 	char            plNames[MR_PLAYLIST_MAX][80];
-	APTR            plVisualInfo;
 
+	Object         *rbWinObj;
 	struct Window  *rbWin;
-	struct Gadget  *rbGadgets;
-	struct Gadget  *rbGadContext;
-	struct Gadget  *rbGadList;
+	Object         *rbSearchGad;
+	Object         *rbCodecGad;
+	Object         *rbCountryGad;
+	Object         *rbCountryCodeGad;
+	Object         *rbSchemeGad;
+	Object         *rbLimitGad;
+	Object         *rbBitrateGad;
+	Object         *rbListGad;
+	Object         *rbStatusGad;
+	Object         *rbDoSearchGad;
+	Object         *rbPlayGad;
+	Object         *rbAddFavGad;
+	Object         *rbFavouritesGad;
+	Object         *rbUpGad;
+	Object         *rbDownGad;
+	Object         *rbCloseGad;
 	struct List     rbList;
-	struct Node     rbNodes[RB_CONTROLLER_MAX_STATIONS];
+	struct Node    *rbNodes[RB_CONTROLLER_MAX_STATIONS];
 	char            rbNames[RB_CONTROLLER_MAX_STATIONS][96];
 	int             rbVisibleToController[RB_CONTROLLER_MAX_STATIONS];
 	int             rbVisibleCount;
@@ -442,7 +464,6 @@ typedef struct MrApp {
 	char            rbFavouriteUrls[MR_RADIO_FAV_MAX][RB_MAX_URL];
 	char            currentRadioStationName[RB_MAX_NAME];
 	char            currentRadioFavicon[RB_MAX_FAVICON];
-	APTR            rbVisualInfo;
 	RadioBrowserController rbController;
 
 	struct MsgPort   *timerPort;
@@ -556,6 +577,7 @@ static void RadioDoProbeAndPlay(MrApp *app);
 static void RadioSelectResult(MrApp *app, ULONG eventSelected);
 
 static void SyncMenuChecks(MrApp *app);
+static void SetDecodeThenPlay(MrApp *app, int enabled);
 
 static const char *MrStreamStateName(MrStreamState state)
 {
@@ -1889,15 +1911,16 @@ static void CloseTimer(MrApp *app)
 
 static void CloseLibs(void)
 {
-	RADIO_DBG(printf("app-close: CloseLibs enter GadTools=%p Label=%p String=%p FuelGauge=%p CheckBox=%p Slider=%p Chooser=%p GetFile=%p Button=%p Layout=%p Window=%p Utility=%p Intuition=%p\n",
+	RADIO_DBG(printf("app-close: CloseLibs enter GadTools=%p Label=%p String=%p FuelGauge=%p CheckBox=%p Slider=%p ListBrowser=%p Chooser=%p GetFile=%p Button=%p Layout=%p Window=%p Utility=%p Intuition=%p\n",
 		GadToolsBase, LabelBase, StringBase, FuelGaugeBase, CheckBoxBase, SliderBase,
-		ChooserBase, GetFileBase, ButtonBase, LayoutBase, WindowBase, UtilityBase, IntuitionBase);)
+		ListBrowserBase, ChooserBase, GetFileBase, ButtonBase, LayoutBase, WindowBase, UtilityBase, IntuitionBase);)
 	if (GadToolsBase)  { CloseLibrary(GadToolsBase);  GadToolsBase = NULL; RADIO_DBG(printf("app-close: CloseLibs GadTools done\n");) }
 	if (LabelBase)     { CloseLibrary(LabelBase);     LabelBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Label done\n");) }
 	if (StringBase)    { CloseLibrary(StringBase);    StringBase = NULL; RADIO_DBG(printf("app-close: CloseLibs String done\n");) }
 	if (FuelGaugeBase) { CloseLibrary(FuelGaugeBase); FuelGaugeBase = NULL; RADIO_DBG(printf("app-close: CloseLibs FuelGauge done\n");) }
 	if (CheckBoxBase)  { CloseLibrary(CheckBoxBase);  CheckBoxBase = NULL; RADIO_DBG(printf("app-close: CloseLibs CheckBox done\n");) }
 	if (SliderBase)    { CloseLibrary(SliderBase);    SliderBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Slider done\n");) }
+	if (ListBrowserBase) { CloseLibrary(ListBrowserBase); ListBrowserBase = NULL; RADIO_DBG(printf("app-close: CloseLibs ListBrowser done\n");) }
 	if (ChooserBase)   { CloseLibrary(ChooserBase);   ChooserBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Chooser done\n");) }
 	if (GetFileBase)   { CloseLibrary(GetFileBase);   GetFileBase = NULL; RADIO_DBG(printf("app-close: CloseLibs GetFile done\n");) }
 	if (ButtonBase)    { CloseLibrary(ButtonBase);    ButtonBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Button done\n");) }
@@ -1936,6 +1959,7 @@ static int OpenLibs(void)
 	ButtonBase    = OpenLibrary("gadgets/button.gadget",   MINIMP3R_CLASS_VERSION);
 	GetFileBase   = OpenLibrary("gadgets/getfile.gadget",  MINIMP3R_CLASS_VERSION);
 	ChooserBase   = OpenLibrary("gadgets/chooser.gadget",  MINIMP3R_CLASS_VERSION);
+	ListBrowserBase = OpenLibrary("gadgets/listbrowser.gadget", MINIMP3R_CLASS_VERSION);
 	SliderBase    = OpenLibrary("gadgets/slider.gadget",   MINIMP3R_CLASS_VERSION);
 	CheckBoxBase  = OpenLibrary("gadgets/checkbox.gadget", MINIMP3R_CLASS_VERSION);
 	FuelGaugeBase = OpenLibrary("gadgets/fuelgauge.gadget",MINIMP3R_CLASS_VERSION);
@@ -1943,7 +1967,7 @@ static int OpenLibs(void)
 	LabelBase     = OpenLibrary("images/label.image",      MINIMP3R_CLASS_VERSION);
 
 	if (!WindowBase || !LayoutBase || !ButtonBase || !GetFileBase ||
-		!ChooserBase || !SliderBase || !CheckBoxBase || !FuelGaugeBase ||
+		!ChooserBase || !ListBrowserBase || !SliderBase || !CheckBoxBase || !FuelGaugeBase ||
 		!StringBase || !LabelBase) {
 		fprintf(stderr,
 			"minimp3r needs the ReAction (or ClassAct) classes V%d+ installed.\n",
@@ -4072,17 +4096,13 @@ static const char *ProbeCodecName(RbStreamCodec codec)
 
 static void RadioSetStatus(MrApp *app, const char *text)
 {
-	struct Gadget *gad;
 	if (!app) return;
 	SafeCopy(app->lastRadioError, sizeof(app->lastRadioError), text ? text : "");
-	if (!app->rbWin || !app->rbGadgets) return;
-	gad = app->rbGadgets;
-	while (gad && gad->GadgetID != RB_GID_STATUS) gad = gad->NextGadget;
-	if (gad) {
-		GT_SetGadgetAttrs(gad, app->rbWin, NULL,
-			GTST_String, (ULONG)app->lastRadioError, TAG_DONE);
-	}
+	if (app->rbWin && app->rbStatusGad)
+		SetGadgetAttrs((struct Gadget *)app->rbStatusGad, app->rbWin, NULL,
+			STRINGA_TextVal, (ULONG)app->lastRadioError, TAG_DONE);
 }
+
 
 static int RadioStationMatchesScheme(MrApp *app, const RadioBrowserStation *st)
 {
@@ -4123,12 +4143,15 @@ static void RadioRefreshResults(MrApp *app)
 		wantedFavourite = app->rbSelectedFavourite;
 	else
 		wantedController = app->rbController.selected_index;
-	if (app->rbWin && app->rbGadList)
-		GT_SetGadgetAttrs(app->rbGadList, app->rbWin, NULL,
-			GTLV_Labels, (ULONG)~0,
-			GTLV_Selected, (ULONG)~0,
+	if (app->rbWin && app->rbListGad)
+		SetGadgetAttrs((struct Gadget *)app->rbListGad, app->rbWin, NULL,
+			LISTBROWSER_Labels, (ULONG)~0,
+			LISTBROWSER_Selected, (ULONG)~0,
 			TAG_DONE);
+	if (app->rbList.lh_Head)
+		FreeListBrowserList(&app->rbList);
 	NewList(&app->rbList);
+	memset(app->rbNodes, 0, sizeof(app->rbNodes));
 	app->rbVisibleCount = 0;
 	app->rbSelectedFavourite = -1;
 	if (app->rbShowingFavourites) {
@@ -4138,11 +4161,12 @@ static void RadioRefreshResults(MrApp *app)
 			app->rbVisibleToController[row] = i;
 			sprintf(app->rbNames[row], "%.48s | favourite", app->rbFavouriteNames[i]);
 			if (i == wantedFavourite) selectedRow = row;
-			memset(&app->rbNodes[row], 0, sizeof(app->rbNodes[row]));
-			app->rbNodes[row].ln_Name = app->rbNames[row];
-			app->rbNodes[row].ln_Type = NT_USER;
-			app->rbNodes[row].ln_Pri = (BYTE)i;
-			AddTail(&app->rbList, &app->rbNodes[row]);
+			app->rbNodes[row] = AllocListBrowserNode(1,
+				LBNA_Column, 0,
+					LBNCA_Text, (ULONG)app->rbNames[row],
+				TAG_DONE);
+			if (app->rbNodes[row])
+				AddTail(&app->rbList, app->rbNodes[row]);
 		}
 	} else {
 		for (i = 0; i < app->rbController.station_count; i++) {
@@ -4169,11 +4193,12 @@ static void RadioRefreshResults(MrApp *app)
 			rb_station_display_name(st, display, (int)sizeof(display));
 			sprintf(app->rbNames[row], "%.48s | %s | %d | %s",
 				display, st->codec, st->bitrate, st->countrycode);
-			memset(&app->rbNodes[row], 0, sizeof(app->rbNodes[row]));
-			app->rbNodes[row].ln_Name = app->rbNames[row];
-			app->rbNodes[row].ln_Type = NT_USER;
-			app->rbNodes[row].ln_Pri = (BYTE)i;
-			AddTail(&app->rbList, &app->rbNodes[row]);
+			app->rbNodes[row] = AllocListBrowserNode(1,
+				LBNA_Column, 0,
+					LBNCA_Text, (ULONG)app->rbNames[row],
+				TAG_DONE);
+			if (app->rbNodes[row])
+				AddTail(&app->rbList, app->rbNodes[row]);
 		}
 	}
 	if (app->rbVisibleCount <= 0) {
@@ -4191,97 +4216,48 @@ static void RadioRefreshResults(MrApp *app)
 	} else {
 		rb_controller_set_selected(&app->rbController, app->rbVisibleToController[selectedRow]);
 	}
-	if (app->rbWin && app->rbGadList) {
-		GT_SetGadgetAttrs(app->rbGadList, app->rbWin, NULL,
-			GTLV_Labels, (ULONG)&app->rbList,
-			GTLV_Selected, selectedRow >= 0 ? (ULONG)selectedRow : (ULONG)~0,
+	if (app->rbWin && app->rbListGad) {
+		SetGadgetAttrs((struct Gadget *)app->rbListGad, app->rbWin, NULL,
+			LISTBROWSER_Labels, (ULONG)&app->rbList,
+			LISTBROWSER_Selected, selectedRow >= 0 ? (ULONG)selectedRow : (ULONG)~0,
+			LISTBROWSER_ShowSelected, TRUE,
+			LISTBROWSER_MakeVisible, selectedRow >= 0 ? (ULONG)selectedRow : 0,
+			GA_Disabled, app->rbVisibleCount <= 0 ? TRUE : FALSE,
 			TAG_DONE);
-		RefreshGList(app->rbGadList, app->rbWin, NULL, 1);
 	}
-}
-
-static struct Gadget *FindRadioGadget(MrApp *app, UWORD id)
-{
-	struct Gadget *gad = app->rbGadgets;
-	while (gad) {
-		if (gad->GadgetID == id) return gad;
-		gad = gad->NextGadget;
-	}
-	return NULL;
 }
 
 static void RadioDoSearch(MrApp *app)
 {
-	struct Gadget *nameGad = FindRadioGadget(app, RB_GID_SEARCH_TEXT);
-	struct Gadget *codecGad = FindRadioGadget(app, RB_GID_CODEC);
-	struct Gadget *countryGad = FindRadioGadget(app, RB_GID_COUNTRY);
-	struct Gadget *countryCodeGad = FindRadioGadget(app, RB_GID_COUNTRY_CODE);
-	struct Gadget *limitGad = FindRadioGadget(app, RB_GID_LIMIT);
-	struct Gadget *bitrateGad = FindRadioGadget(app, RB_GID_BITRATE);
-	STRPTR text;
-	ULONG v;
+	STRPTR text = NULL;
+	ULONG v = 0;
 	int rc;
 	char filterMsg[192];
-
-	if (app->rbSearchInProgress) {
-		RadioSetStatus(app, "Search already running.");
-		return;
-	}
+	if (app->rbSearchInProgress) { RadioSetStatus(app, "Search already running."); return; }
 	app->rbSearchInProgress = 1;
 	RadioSetStatus(app, "Searching Radio Browser...");
-	text = NULL;
-	GT_GetGadgetAttrs(nameGad, app->rbWin, NULL, GTST_String, (ULONG)(void *)&text, TAG_DONE);
+	if (app->rbSearchGad) GetAttr(STRINGA_TextVal, app->rbSearchGad, (ULONG *)(void *)&text);
 	SafeCopy(app->rbController.name, sizeof(app->rbController.name), text ? (const char *)text : "");
-	v = 0;
-	GT_GetGadgetAttrs(codecGad, app->rbWin, NULL, GTCY_Active, (ULONG)&v, TAG_DONE);
+	v = 0; if (app->rbCodecGad) GetAttr(CHOOSER_Selected, app->rbCodecGad, &v);
 	SafeCopy(app->rbController.codec, sizeof(app->rbController.codec), RadioCodecFromIndex((int)v));
-	text = NULL;
-	GT_GetGadgetAttrs(countryGad, app->rbWin, NULL, GTST_String, (ULONG)(void *)&text, TAG_DONE);
+	text = NULL; if (app->rbCountryGad) GetAttr(STRINGA_TextVal, app->rbCountryGad, (ULONG *)(void *)&text);
 	SafeCopy(app->rbController.countrycode, sizeof(app->rbController.countrycode), text ? (const char *)text : "");
-	v = 0;
-	if (countryCodeGad)
-		GT_GetGadgetAttrs(countryCodeGad, app->rbWin, NULL, GTCY_Active, (ULONG)&v, TAG_DONE);
+	v = 0; if (app->rbCountryCodeGad) GetAttr(CHOOSER_Selected, app->rbCountryCodeGad, &v);
 	app->rbCountryMode = ClampInt((int)v, 0, 6);
-	if (app->rbCountryMode > 0)
-		SafeCopy(app->rbController.countrycode, sizeof(app->rbController.countrycode), RadioCountryFromIndex(app->rbCountryMode));
-	v = 1;
-	if (limitGad)
-		GT_GetGadgetAttrs(limitGad, app->rbWin, NULL, GTCY_Active, (ULONG)&v, TAG_DONE);
+	if (app->rbCountryMode > 0) SafeCopy(app->rbController.countrycode, sizeof(app->rbController.countrycode), RadioCountryFromIndex(app->rbCountryMode));
+	v = 1; if (app->rbLimitGad) GetAttr(CHOOSER_Selected, app->rbLimitGad, &v);
 	app->rbController.limit = kRadioSearchLimits[ClampInt((int)v, 0, MR_RADIO_SEARCH_LIMIT_COUNT - 1)];
-	v = 0;
-	if (bitrateGad)
-		GT_GetGadgetAttrs(bitrateGad, app->rbWin, NULL, GTCY_Active, (ULONG)&v, TAG_DONE);
+	v = 0; if (app->rbBitrateGad) GetAttr(CHOOSER_Selected, app->rbBitrateGad, &v);
 	app->rbController.max_bitrate = kRadioBitrateMax[ClampInt((int)v, 0, 4)];
-	sprintf(filterMsg, "Search filters: name=\"%.40s\" codec=%s country=%s max bitrate=%s limit=%d",
-		app->rbController.name[0] ? app->rbController.name : "Any",
-		app->rbController.codec[0] ? app->rbController.codec : "Any",
-		app->rbController.countrycode[0] ? app->rbController.countrycode : "Any",
-		RadioBitrateFilterLabel(app->rbController.max_bitrate),
-		app->rbController.limit);
+	sprintf(filterMsg, "Search filters: name=\"%.40s\" codec=%s country=%s max bitrate=%s limit=%d", app->rbController.name[0] ? app->rbController.name : "Any", app->rbController.codec[0] ? app->rbController.codec : "Any", app->rbController.countrycode[0] ? app->rbController.countrycode : "Any", RadioBitrateFilterLabel(app->rbController.max_bitrate), app->rbController.limit);
 	RadioSetStatus(app, filterMsg);
-#ifdef MINIAMP3_DEBUG
-	printf("%s\n", filterMsg);
-#endif
 	rc = rb_controller_search(&app->rbController);
 	Radio_CheckMiniMem("after radio browser JSON parse");
-	app->rbSearchInProgress = 0;
-	app->rbShowingFavourites = FALSE;
-	RadioRefreshResults(app);
-	if (rc < 0)
-		RadioSetStatus(app, app->rbController.last_error);
-	else {
-		char msg[128];
-		int hidden = app->rbController.raw_station_count - app->rbVisibleCount;
-		if (app->rbVisibleCount == 0 && app->rbController.raw_station_count > 0)
-			sprintf(msg, "No stations found after filters");
-		else if (app->rbVisibleCount == 0 && app->rbController.raw_station_count == 0)
-			sprintf(msg, "No stations found");
-		else
-			sprintf(msg, "Found %d stations, showing %d playable (%d hidden)",
-				app->rbController.raw_station_count, app->rbVisibleCount, hidden < 0 ? 0 : hidden);
-		RadioSetStatus(app, msg);
-	}
+	app->rbSearchInProgress = 0; app->rbShowingFavourites = FALSE; RadioRefreshResults(app);
+	if (rc < 0) RadioSetStatus(app, app->rbController.last_error);
+	else { char msg[128]; int hidden = app->rbController.raw_station_count - app->rbVisibleCount; if (app->rbVisibleCount == 0 && app->rbController.raw_station_count > 0) sprintf(msg, "No stations found after filters"); else if (app->rbVisibleCount == 0 && app->rbController.raw_station_count == 0) sprintf(msg, "No stations found"); else sprintf(msg, "Found %d stations, showing %d playable (%d hidden)", app->rbController.raw_station_count, app->rbVisibleCount, hidden < 0 ? 0 : hidden); RadioSetStatus(app, msg); }
 }
+
 
 static int RadioCurrentSelectedRow(MrApp *app)
 {
@@ -4297,7 +4273,7 @@ static int RadioCurrentSelectedRow(MrApp *app)
 static void RadioMoveSelection(MrApp *app, int delta)
 {
 	int row;
-	if (!app || !app->rbWin || !app->rbGadList) return;
+	if (!app || !app->rbWin || !app->rbListGad) return;
 	if (app->rbVisibleCount <= 0) {
 		RadioSetStatus(app, "No stations to select.");
 		return;
@@ -4318,10 +4294,9 @@ static void RadioSelectResult(MrApp *app, ULONG eventSelected)
 	char display[RB_MAX_NAME];
 	char msg[RB_MAX_NAME + 16];
 
-	if (!app->rbWin || !app->rbGadList) return;
+	if (!app->rbWin || !app->rbListGad) return;
 	if (selected == (ULONG)~0)
-		GT_GetGadgetAttrs(app->rbGadList, app->rbWin, NULL,
-			GTLV_Selected, (ULONG)&selected, TAG_DONE);
+		GetAttr(LISTBROWSER_Selected, app->rbListGad, &selected);
 #ifdef MINIAMP3_DEBUG
 	RADIO_DBG(printf("radio results selection event row/index: %ld\n", (long)selected);)
 #endif
@@ -4338,8 +4313,10 @@ static void RadioSelectResult(MrApp *app, ULONG eventSelected)
 	selected = (ULONG)app->rbVisibleToController[row];
 	if (app->rbShowingFavourites) {
 		app->rbSelectedFavourite = (int)selected;
-		GT_SetGadgetAttrs(app->rbGadList, app->rbWin, NULL, GTLV_Selected, (ULONG)row, TAG_DONE);
-		RefreshGList(app->rbGadList, app->rbWin, NULL, 1);
+		SetGadgetAttrs((struct Gadget *)app->rbListGad, app->rbWin, NULL,
+			LISTBROWSER_Selected, (ULONG)row,
+			LISTBROWSER_ShowSelected, TRUE,
+			LISTBROWSER_MakeVisible, (ULONG)row, TAG_DONE);
 		sprintf(msg, "Selected favourite: %.120s", app->rbFavouriteNames[app->rbSelectedFavourite]);
 		RadioSetStatus(app, msg);
 		return;
@@ -4349,9 +4326,10 @@ static void RadioSelectResult(MrApp *app, ULONG eventSelected)
 		RadioSetStatus(app, app->rbController.last_error);
 		return;
 	}
-	GT_SetGadgetAttrs(app->rbGadList, app->rbWin, NULL,
-		GTLV_Selected, (ULONG)row, TAG_DONE);
-	RefreshGList(app->rbGadList, app->rbWin, NULL, 1);
+	SetGadgetAttrs((struct Gadget *)app->rbListGad, app->rbWin, NULL,
+		LISTBROWSER_Selected, (ULONG)row,
+		LISTBROWSER_ShowSelected, TRUE,
+		LISTBROWSER_MakeVisible, (ULONG)row, TAG_DONE);
 	st = rb_controller_get_station(&app->rbController, app->rbController.selected_index);
 	if (!st) {
 		RadioSetStatus(app, "Select a station first.");
@@ -4539,171 +4517,85 @@ static void RadioDoProbeAndPlay(MrApp *app)
 	Radio_CheckMiniMem("after station switch");
 }
 
+static Object *RadioButton(ULONG id, const char *text)
+{
+	return (Object *)NewObject(BUTTON_GetClass(), NULL, GA_ID, id, GA_RelVerify, TRUE, GA_Text, (ULONG)text, TAG_DONE);
+}
+
 static void CloseRadioWindow(MrApp *app)
 {
-	struct IntuiMessage *msg;
-	if (!app->rbWin) return;
-	if (app->rbGadList)
-		GT_SetGadgetAttrs(app->rbGadList, app->rbWin, NULL,
-			GTLV_Labels, (ULONG)~0,
-			GTLV_Selected, (ULONG)~0, TAG_DONE);
-	ModifyIDCMP(app->rbWin, 0);
-	while ((msg = GT_GetIMsg(app->rbWin->UserPort)) != NULL)
-		GT_ReplyIMsg(msg);
-	if (app->rbGadgets)
-		RemoveGList(app->rbWin, app->rbGadgets, -1);
-	CloseWindow(app->rbWin);
-	app->rbWin = NULL;
-	if (app->rbGadgets) {
-		FreeGadgets(app->rbGadgets);
-		app->rbGadgets = NULL;
-		app->rbGadContext = NULL;
-		app->rbGadList = NULL;
+	if (app->rbWinObj) {
+		if (app->rbWin && app->rbListGad)
+			SetGadgetAttrs((struct Gadget *)app->rbListGad, app->rbWin, NULL, LISTBROWSER_Labels, (ULONG)~0, TAG_DONE);
+		RA_CloseWindow(app->rbWinObj);
+		app->rbWin = NULL;
+		DisposeObject(app->rbWinObj);
+		app->rbWinObj = NULL;
 	}
-	if (app->rbVisualInfo) {
-		FreeVisualInfo(app->rbVisualInfo);
-		app->rbVisualInfo = NULL;
-	}
+	if (app->rbList.lh_Head) FreeListBrowserList(&app->rbList);
+	NewList(&app->rbList);
+	app->rbSearchGad = app->rbCodecGad = app->rbCountryGad = app->rbCountryCodeGad = NULL;
+	app->rbSchemeGad = app->rbLimitGad = app->rbBitrateGad = app->rbListGad = NULL;
+	app->rbStatusGad = app->rbDoSearchGad = app->rbPlayGad = app->rbAddFavGad = NULL;
+	app->rbFavouritesGad = app->rbUpGad = app->rbDownGad = app->rbCloseGad = NULL;
 }
 
 static void OpenRadioWindow(MrApp *app)
 {
-	struct NewWindow nw;
-	struct NewGadget ng;
-	struct Gadget *gad;
+	Object *root = NULL;
 	static STRPTR codecs[] = { (STRPTR)"All", (STRPTR)"MP3", (STRPTR)"AAC", (STRPTR)"AAC+", NULL };
-	if (app->rbWin || !app->win || !GadToolsBase) return;
-	if (app->rbController.limit <= 0) {
-		rb_controller_init(&app->rbController);
-		app->rbShowHttps = FALSE;
-		app->rbSchemeMode = 0; /* Default to HTTP; HTTPS remains optional/heavier on real hardware. */
-		app->rbCountryMode = 0;
-	}
-	app->rbCountryMode = RadioCountryToIndex(app->rbController.countrycode);
-	app->rbShowingFavourites = FALSE;
-	app->rbSelectedFavourite = -1;
-	app->rbVisualInfo = GetVisualInfoA(app->win->WScreen, NULL);
-	if (!app->rbVisualInfo) return;
-	app->rbGadContext = CreateContext(&app->rbGadgets);
-	if (!app->rbGadContext) goto fail;
-	NewList(&app->rbList);
-	gad = app->rbGadContext;
-	memset(&ng, 0, sizeof(ng));
-	ng.ng_VisualInfo = app->rbVisualInfo; ng.ng_Flags = PLACETEXT_LEFT;
-	/* Keep the radio dialog arranged as a clear vertical stack with generous
-	 * outer/inner spacing: search+codec row, country row, results, buttons,
-	 * and a bottom status line.  The larger top margin prevents the first row
-	 * from clipping into the draggable title bar on ReAction/ClassAct systems.
-	 */
-	ng.ng_LeftEdge = 88; ng.ng_TopEdge = 24; ng.ng_Width = 220; ng.ng_Height = 18; ng.ng_GadgetText = (UBYTE *)"Search";
-	ng.ng_GadgetID = RB_GID_SEARCH_TEXT; gad = CreateGadget(STRING_KIND, gad, &ng, GTST_String, (ULONG)app->rbController.name, GTST_MaxChars, RB_MAX_NAME, GA_RelVerify, TRUE, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 390; ng.ng_TopEdge = 24; ng.ng_Width = 90; ng.ng_GadgetText = (UBYTE *)"Codec"; ng.ng_GadgetID = RB_GID_CODEC;
-	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)codecs, GTCY_Active, RadioCodecToIndex(app->rbController.codec), TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 88; ng.ng_TopEdge = 52; ng.ng_Width = 120; ng.ng_GadgetText = (UBYTE *)"Country";
-	ng.ng_GadgetID = RB_GID_COUNTRY; gad = CreateGadget(STRING_KIND, gad, &ng, GTST_String, (ULONG)app->rbController.countrycode, GTST_MaxChars, RB_MAX_COUNTRY, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 270; ng.ng_TopEdge = 52; ng.ng_Width = 54; ng.ng_GadgetText = (UBYTE *)"Code"; ng.ng_GadgetID = RB_GID_COUNTRY_CODE; ng.ng_Flags = PLACETEXT_LEFT;
-	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)kRadioCountryLabels, GTCY_Active, app->rbCountryMode, GA_RelVerify, TRUE, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 372; ng.ng_TopEdge = 52; ng.ng_Width = 108; ng.ng_GadgetText = (UBYTE *)"URL"; ng.ng_GadgetID = RB_GID_SCHEME; ng.ng_Flags = PLACETEXT_LEFT;
-	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)kRadioSchemeLabels, GTCY_Active, app->rbSchemeMode, GA_RelVerify, TRUE, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 88; ng.ng_TopEdge = 80; ng.ng_Width = 90; ng.ng_GadgetText = (UBYTE *)"Limit"; ng.ng_GadgetID = RB_GID_LIMIT; ng.ng_Flags = PLACETEXT_LEFT;
-	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)kRadioSearchLimitLabels, GTCY_Active, RadioSearchLimitIndex(app->rbController.limit), TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 288; ng.ng_TopEdge = 80; ng.ng_Width = 90; ng.ng_GadgetText = (UBYTE *)"Max kbps"; ng.ng_GadgetID = RB_GID_BITRATE; ng.ng_Flags = PLACETEXT_LEFT;
-	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)kRadioBitrateLabels,
-		GTCY_Active, app->rbController.max_bitrate <= 0 ? 0 : (app->rbController.max_bitrate <= 56 ? 1 : (app->rbController.max_bitrate <= 64 ? 2 : (app->rbController.max_bitrate <= 96 ? 3 : 4))), TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 8; ng.ng_TopEdge = 110; ng.ng_Width = 472; ng.ng_Height = 116; ng.ng_GadgetText = NULL; ng.ng_GadgetID = RB_GID_RADIO_RESULTS; ng.ng_Flags = 0;
-	app->rbGadList = gad = CreateGadget(LISTVIEW_KIND, gad, &ng,
-		GTLV_Labels, (ULONG)&app->rbList,
-		GTLV_Selected, (ULONG)~0,
-		GA_RelVerify, TRUE, TAG_DONE); if (!gad) goto fail;
-	ng.ng_TopEdge = 236; ng.ng_Height = 18; ng.ng_Flags = PLACETEXT_IN;
-	ng.ng_LeftEdge = 8; ng.ng_Width = 58; ng.ng_GadgetText = (UBYTE *)"Search"; ng.ng_GadgetID = RB_GID_SEARCH; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 72; ng.ng_Width = 50; ng.ng_GadgetText = (UBYTE *)"Play"; ng.ng_GadgetID = RB_GID_PROBE; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 128; ng.ng_Width = 64; ng.ng_GadgetText = (UBYTE *)"Add Fav"; ng.ng_GadgetID = RB_GID_ADD_FAV; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 198; ng.ng_Width = 76; ng.ng_GadgetText = (UBYTE *)"Favourites"; ng.ng_GadgetID = RB_GID_FAVOURITES; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 280; ng.ng_Width = 44; ng.ng_GadgetText = (UBYTE *)"Up"; ng.ng_GadgetID = RB_GID_UP; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 330; ng.ng_Width = 56; ng.ng_GadgetText = (UBYTE *)"Down"; ng.ng_GadgetID = RB_GID_DOWN; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 392; ng.ng_Width = 70; ng.ng_GadgetText = (UBYTE *)"Close"; ng.ng_GadgetID = RB_GID_CLOSE; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 8; ng.ng_TopEdge = 264; ng.ng_Width = 472; ng.ng_GadgetText = NULL; ng.ng_GadgetID = RB_GID_STATUS; ng.ng_Flags = 0;
-	gad = CreateGadget(STRING_KIND, gad, &ng, GTST_String, (ULONG)(app->lastRadioError[0] ? app->lastRadioError : "Ready."), GTST_MaxChars, 512, TAG_DONE); if (!gad) goto fail;
-	memset(&nw, 0, sizeof(nw));
-	nw.LeftEdge = app->win->LeftEdge + 30; nw.TopEdge = app->win->TopEdge + 30;
-	nw.Width = 496; nw.Height = 306;
-	nw.IDCMPFlags = IDCMP_GADGETUP | IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW | IDCMP_VANILLAKEY;
-	nw.Flags = WFLG_CLOSEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET | WFLG_SMART_REFRESH;
-	nw.Title = (UBYTE *)"Internet Radio";
-	nw.MinWidth = nw.MaxWidth = 496; nw.MinHeight = nw.MaxHeight = 306;
-	nw.Type = WBENCHSCREEN;
-	app->rbWin = OpenWindowTags(&nw, TAG_DONE);
-	if (!app->rbWin) goto fail;
-	AddGList(app->rbWin, app->rbGadgets, (UWORD)-1, -1, NULL);
-	RefreshGList(app->rbGadgets, app->rbWin, NULL, -1);
-	GT_RefreshWindow(app->rbWin, NULL);
-	RadioRefreshResults(app);
-	return;
+	if (app->rbWinObj || !app->win) return;
+	if (app->rbController.limit <= 0) { rb_controller_init(&app->rbController); app->rbShowHttps = FALSE; app->rbSchemeMode = 0; app->rbCountryMode = 0; }
+	app->rbCountryMode = RadioCountryToIndex(app->rbController.countrycode); app->rbShowingFavourites = FALSE; app->rbSelectedFavourite = -1; NewList(&app->rbList);
+	app->rbSearchGad = (Object *)NewObject(STRING_GetClass(), NULL, GA_ID, RB_GID_SEARCH_TEXT, GA_RelVerify, TRUE, STRINGA_TextVal, (ULONG)app->rbController.name, STRINGA_MaxChars, RB_MAX_NAME, TAG_DONE);
+	app->rbCodecGad = (Object *)NewObject(CHOOSER_GetClass(), NULL, GA_ID, RB_GID_CODEC, GA_RelVerify, TRUE, CHOOSER_LabelArray, (ULONG)codecs, CHOOSER_Selected, RadioCodecToIndex(app->rbController.codec), TAG_DONE);
+	app->rbCountryGad = (Object *)NewObject(STRING_GetClass(), NULL, GA_ID, RB_GID_COUNTRY, GA_RelVerify, TRUE, STRINGA_TextVal, (ULONG)app->rbController.countrycode, STRINGA_MaxChars, RB_MAX_COUNTRY, TAG_DONE);
+	app->rbCountryCodeGad = (Object *)NewObject(CHOOSER_GetClass(), NULL, GA_ID, RB_GID_COUNTRY_CODE, GA_RelVerify, TRUE, CHOOSER_LabelArray, (ULONG)kRadioCountryLabels, CHOOSER_Selected, app->rbCountryMode, TAG_DONE);
+	app->rbSchemeGad = (Object *)NewObject(CHOOSER_GetClass(), NULL, GA_ID, RB_GID_SCHEME, GA_RelVerify, TRUE, CHOOSER_LabelArray, (ULONG)kRadioSchemeLabels, CHOOSER_Selected, app->rbSchemeMode, TAG_DONE);
+	app->rbLimitGad = (Object *)NewObject(CHOOSER_GetClass(), NULL, GA_ID, RB_GID_LIMIT, GA_RelVerify, TRUE, CHOOSER_LabelArray, (ULONG)kRadioSearchLimitLabels, CHOOSER_Selected, RadioSearchLimitIndex(app->rbController.limit), TAG_DONE);
+	app->rbBitrateGad = (Object *)NewObject(CHOOSER_GetClass(), NULL, GA_ID, RB_GID_BITRATE, GA_RelVerify, TRUE, CHOOSER_LabelArray, (ULONG)kRadioBitrateLabels, CHOOSER_Selected, app->rbController.max_bitrate <= 0 ? 0 : (app->rbController.max_bitrate <= 56 ? 1 : (app->rbController.max_bitrate <= 64 ? 2 : (app->rbController.max_bitrate <= 96 ? 3 : 4))), TAG_DONE);
+	app->rbListGad = (Object *)NewObject(LISTBROWSER_GetClass(), NULL, GA_ID, RB_GID_RADIO_RESULTS, GA_RelVerify, TRUE, LISTBROWSER_Labels, (ULONG)&app->rbList, LISTBROWSER_Selected, (ULONG)~0, LISTBROWSER_ShowSelected, TRUE, LISTBROWSER_AutoFit, TRUE, LISTBROWSER_Separators, TRUE, TAG_DONE);
+	app->rbStatusGad = (Object *)NewObject(STRING_GetClass(), NULL, GA_ID, RB_GID_STATUS, GA_ReadOnly, TRUE, STRINGA_TextVal, (ULONG)(app->lastRadioError[0] ? app->lastRadioError : "Ready."), STRINGA_MaxChars, 512, TAG_DONE);
+	app->rbDoSearchGad = RadioButton(RB_GID_SEARCH, "Search"); app->rbPlayGad = RadioButton(RB_GID_PROBE, "Play"); app->rbAddFavGad = RadioButton(RB_GID_ADD_FAV, "Add Fav"); app->rbFavouritesGad = RadioButton(RB_GID_FAVOURITES, "Favourites"); app->rbUpGad = RadioButton(RB_GID_UP, "Up"); app->rbDownGad = RadioButton(RB_GID_DOWN, "Down"); app->rbCloseGad = RadioButton(RB_GID_CLOSE, "Close");
+	if (!app->rbSearchGad || !app->rbCodecGad || !app->rbCountryGad || !app->rbCountryCodeGad || !app->rbSchemeGad || !app->rbLimitGad || !app->rbBitrateGad || !app->rbListGad || !app->rbStatusGad || !app->rbDoSearchGad || !app->rbPlayGad || !app->rbAddFavGad || !app->rbFavouritesGad || !app->rbUpGad || !app->rbDownGad || !app->rbCloseGad) goto fail;
+	root = (Object *)NewObject(LAYOUT_GetClass(), NULL, LAYOUT_Orientation, LAYOUT_ORIENT_VERT, LAYOUT_SpaceOuter, TRUE, LAYOUT_SpaceInner, TRUE, LAYOUT_DeferLayout, TRUE,
+		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL, LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ, ADD_LABELLED(app->rbSearchGad, "Search"), ADD_LABELLED(app->rbCodecGad, "Codec"), TAG_DONE), CHILD_WeightedHeight, 0,
+		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL, LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ, ADD_LABELLED(app->rbCountryGad, "Country"), ADD_LABELLED(app->rbCountryCodeGad, "Code"), ADD_LABELLED(app->rbSchemeGad, "URL"), TAG_DONE), CHILD_WeightedHeight, 0,
+		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL, LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ, ADD_LABELLED(app->rbLimitGad, "Limit"), ADD_LABELLED(app->rbBitrateGad, "Max kbps"), TAG_DONE), CHILD_WeightedHeight, 0,
+		LAYOUT_AddChild, (ULONG)app->rbListGad, CHILD_MinHeight, 120,
+		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL, LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ, LAYOUT_EvenSize, TRUE, LAYOUT_AddChild, (ULONG)app->rbDoSearchGad, LAYOUT_AddChild, (ULONG)app->rbPlayGad, LAYOUT_AddChild, (ULONG)app->rbAddFavGad, LAYOUT_AddChild, (ULONG)app->rbFavouritesGad, LAYOUT_AddChild, (ULONG)app->rbUpGad, LAYOUT_AddChild, (ULONG)app->rbDownGad, LAYOUT_AddChild, (ULONG)app->rbCloseGad, TAG_DONE), CHILD_WeightedHeight, 0,
+		LAYOUT_AddChild, (ULONG)app->rbStatusGad, CHILD_WeightedHeight, 0, TAG_DONE);
+	if (!root) goto fail;
+	app->rbWinObj = (Object *)NewObject(WINDOW_GetClass(), NULL, WA_Title, (ULONG)"Internet Radio", WA_Activate, TRUE, WA_DepthGadget, TRUE, WA_DragBar, TRUE, WA_CloseGadget, TRUE, WA_SizeGadget, TRUE, WA_IDCMP, IDCMP_GADGETUP | IDCMP_CLOSEWINDOW | IDCMP_IDCMPUPDATE | IDCMP_REFRESHWINDOW, WA_Width, 540, WA_Height, 340, WINDOW_Position, WPOS_CENTERSCREEN, WINDOW_ParentGroup, (ULONG)root, TAG_DONE);
+	if (!app->rbWinObj) goto fail; app->rbWin = (struct Window *)RA_OpenWindow(app->rbWinObj); if (!app->rbWin) goto fail; RadioRefreshResults(app); return;
 fail:
-	CloseRadioWindow(app);
+	if (!app->rbWinObj && root) DisposeObject(root); CloseRadioWindow(app);
 }
 
 static void HandleRadioWindow(MrApp *app)
 {
-	struct IntuiMessage *msg;
-	if (!app->rbWin) return;
-	while ((msg = GT_GetIMsg(app->rbWin->UserPort)) != NULL) {
-		ULONG cls = msg->Class;
-		UWORD code = msg->Code;
-		struct Gadget *gad = (struct Gadget *)msg->IAddress;
-		UWORD gid = gad ? gad->GadgetID : 0;
-		GT_ReplyIMsg(msg);
-		if (cls == IDCMP_CLOSEWINDOW) { CloseRadioWindow(app); return; }
-		if (cls == IDCMP_REFRESHWINDOW) {
-			GT_BeginRefresh(app->rbWin);
-			GT_EndRefresh(app->rbWin, TRUE);
-			continue;
-		}
-		if (cls == IDCMP_VANILLAKEY && code == 13) {
-			RadioDoSearch(app);
-			continue;
-		}
-		if (cls == IDCMP_GADGETUP) {
-			if (gid == RB_GID_SEARCH_TEXT && code == 13)
-				RadioDoSearch(app);
-			else if (gid == RB_GID_RADIO_RESULTS)
-				RadioSelectResult(app, (ULONG)code);
-			else if (gid == RB_GID_SEARCH)
-				RadioDoSearch(app);
-			else if (gid == RB_GID_PROBE)
-				RadioDoProbeAndPlay(app);
-			else if (gid == RB_GID_ADD_FAV)
-				RadioAddFavourite(app);
-			else if (gid == RB_GID_FAVOURITES)
-				RadioToggleFavourites(app);
-			else if (gid == RB_GID_UP)
-				RadioMoveSelection(app, -1);
-			else if (gid == RB_GID_DOWN)
-				RadioMoveSelection(app, 1);
-			else if (gid == RB_GID_SCHEME) {
-				ULONG active = 0;
-				GT_GetGadgetAttrs(gad, app->rbWin, NULL, GTCY_Active, (ULONG)&active, TAG_DONE);
-				app->rbSchemeMode = ClampInt((int)active, 0, 2);
-				app->rbShowHttps = (app->rbSchemeMode != 0);
-				RadioRefreshResults(app);
+	ULONG result; UWORD code = 0; if (!app->rbWinObj) return;
+	while ((result = RA_HandleInput(app->rbWinObj, &code)) != WMHI_LASTMSG) {
+		switch (result & WMHI_CLASSMASK) {
+		case WMHI_CLOSEWINDOW: CloseRadioWindow(app); return;
+		case WMHI_GADGETUP:
+			switch (result & WMHI_GADGETMASK) {
+			case RB_GID_SEARCH_TEXT: case RB_GID_SEARCH: RadioDoSearch(app); break;
+			case RB_GID_RADIO_RESULTS: RadioSelectResult(app, (ULONG)code); break;
+			case RB_GID_PROBE: RadioDoProbeAndPlay(app); break;
+			case RB_GID_ADD_FAV: RadioAddFavourite(app); break;
+			case RB_GID_FAVOURITES: RadioToggleFavourites(app); break;
+			case RB_GID_UP: RadioMoveSelection(app, -1); break;
+			case RB_GID_DOWN: RadioMoveSelection(app, 1); break;
+			case RB_GID_SCHEME: { ULONG active = 0; GetAttr(CHOOSER_Selected, app->rbSchemeGad, &active); app->rbSchemeMode = ClampInt((int)active, 0, 2); app->rbShowHttps = (app->rbSchemeMode != 0); RadioRefreshResults(app); break; }
+			case RB_GID_COUNTRY_CODE: { ULONG active = 0; GetAttr(CHOOSER_Selected, app->rbCountryCodeGad, &active); app->rbCountryMode = ClampInt((int)active, 0, 6); if (app->rbCountryGad) SetGadgetAttrs((struct Gadget *)app->rbCountryGad, app->rbWin, NULL, STRINGA_TextVal, (ULONG)RadioCountryFromIndex(app->rbCountryMode), TAG_DONE); break; }
+			case RB_GID_CLOSE: CloseRadioWindow(app); return;
 			}
-			else if (gid == RB_GID_COUNTRY_CODE) {
-				ULONG active = 0;
-				struct Gadget *countryGad = FindRadioGadget(app, RB_GID_COUNTRY);
-				GT_GetGadgetAttrs(gad, app->rbWin, NULL, GTCY_Active, (ULONG)&active, TAG_DONE);
-				app->rbCountryMode = ClampInt((int)active, 0, 6);
-				if (countryGad)
-					GT_SetGadgetAttrs(countryGad, app->rbWin, NULL,
-						GTST_String, (ULONG)RadioCountryFromIndex(app->rbCountryMode), TAG_DONE);
-			}
-			else if (gid == RB_GID_CLOSE) {
-				CloseRadioWindow(app);
-				return;
-			}
+			break;
 		}
 	}
 }
+
 
 static const char *PlaylistBaseName(const char *path)
 {
@@ -4720,19 +4612,32 @@ static const char *PlaylistBaseName(const char *path)
 static void RefreshPlaylistView(MrApp *app)
 {
 	int i;
+	int sel = app->playlistSelected >= 0 ? app->playlistSelected : app->playlistCurrent;
+	if (app->plWin && app->plListGad) {
+		SetGadgetAttrs((struct Gadget *)app->plListGad, app->plWin, NULL,
+			LISTBROWSER_Labels, (ULONG)~0,
+			TAG_DONE);
+	}
+	if (app->plList.lh_Head)
+		FreeListBrowserList(&app->plList);
 	NewList(&app->plList);
+	memset(app->plNodes, 0, sizeof(app->plNodes));
 	for (i = 0; i < app->playlistCount; i++) {
 		SafeCopy(app->plNames[i], sizeof(app->plNames[i]), PlaylistBaseName(app->playlist[i]));
-		app->plNodes[i].ln_Name = app->plNames[i];
-		app->plNodes[i].ln_Type = NT_USER;
-		app->plNodes[i].ln_Pri = 0;
-		AddTail(&app->plList, &app->plNodes[i]);
+		app->plNodes[i] = AllocListBrowserNode(1,
+			LBNA_Column, 0,
+				LBNCA_Text, (ULONG)app->plNames[i],
+			TAG_DONE);
+		if (app->plNodes[i])
+			AddTail(&app->plList, app->plNodes[i]);
 	}
-	if (app->plWin && app->plGadList) {
-		int sel = app->playlistSelected >= 0 ? app->playlistSelected : app->playlistCurrent;
-		GT_SetGadgetAttrs(app->plGadList, app->plWin, NULL,
-			GTLV_Labels, (ULONG)&app->plList,
-			GTLV_Selected, sel >= 0 ? (ULONG)sel : (ULONG)~0,
+	if (app->plWin && app->plListGad) {
+		SetGadgetAttrs((struct Gadget *)app->plListGad, app->plWin, NULL,
+			LISTBROWSER_Labels, (ULONG)&app->plList,
+			LISTBROWSER_Selected, app->playlistCount > 0 && sel >= 0 ? (ULONG)sel : (ULONG)~0,
+			LISTBROWSER_ShowSelected, TRUE,
+			LISTBROWSER_MakeVisible, app->playlistCount > 0 && sel >= 0 ? (ULONG)sel : 0,
+			GA_Disabled, app->playlistCount == 0 ? TRUE : FALSE,
 			TAG_DONE);
 	}
 }
@@ -4885,93 +4790,131 @@ static void PlaylistSaveM3U(MrApp *app)
 
 static void ClosePlaylistWindow(MrApp *app)
 {
-	struct IntuiMessage *msg;
-	if (!app->plWin)
-		return;
-	ModifyIDCMP(app->plWin, 0);
-	while ((msg = GT_GetIMsg(app->plWin->UserPort)) != NULL)
-		GT_ReplyIMsg(msg);
-	if (app->plGadgets)
-		RemoveGList(app->plWin, app->plGadgets, -1);
-	CloseWindow(app->plWin);
-	app->plWin = NULL;
-	if (app->plGadgets) {
-		FreeGadgets(app->plGadgets);
-		app->plGadgets = NULL;
-		app->plGadContext = NULL;
-		app->plGadList = NULL;
+	if (app->plWinObj) {
+		if (app->plWin && app->plListGad) {
+			SetGadgetAttrs((struct Gadget *)app->plListGad, app->plWin, NULL,
+				LISTBROWSER_Labels, (ULONG)~0,
+				TAG_DONE);
+		}
+		RA_CloseWindow(app->plWinObj);
+		app->plWin = NULL;
+		DisposeObject(app->plWinObj);
+		app->plWinObj = NULL;
 	}
-	if (app->plVisualInfo) {
-		FreeVisualInfo(app->plVisualInfo);
-		app->plVisualInfo = NULL;
-	}
+	if (app->plList.lh_Head)
+		FreeListBrowserList(&app->plList);
+	NewList(&app->plList);
+	app->plListGad = NULL;
+	app->plAddGad = NULL;
+	app->plRemoveGad = NULL;
+	app->plClearGad = NULL;
+	app->plPlayGad = NULL;
+	app->plLoadGad = NULL;
+	app->plSaveGad = NULL;
+	app->plCloseGad = NULL;
+}
+
+static Object *PlaylistButton(ULONG id, const char *text)
+{
+	return (Object *)NewObject(BUTTON_GetClass(), NULL,
+		GA_ID, id,
+		GA_RelVerify, TRUE,
+		GA_Text, (ULONG)text,
+		TAG_DONE);
 }
 
 static void OpenPlaylistWindow(MrApp *app)
 {
-	struct NewWindow nw;
-	struct NewGadget ng;
-	struct Gadget *gad;
-	if (app->plWin || !app->win || !GadToolsBase)
+	Object *root = NULL;
+	int sel;
+
+	if (app->plWinObj || !app->win)
 		return;
-	app->plVisualInfo = GetVisualInfoA(app->win->WScreen, NULL);
-	if (!app->plVisualInfo)
-		return;
-	app->plGadContext = CreateContext(&app->plGadgets);
-	if (!app->plGadContext) {
-		FreeVisualInfo(app->plVisualInfo);
-		app->plVisualInfo = NULL;
-		return;
-	}
-	gad = app->plGadContext;
+
 	RefreshPlaylistView(app);
-	memset(&ng, 0, sizeof(ng));
-	{
-	int sel = app->playlistSelected >= 0 ? app->playlistSelected : app->playlistCurrent;
-	ng.ng_LeftEdge = 8; ng.ng_TopEdge = 20; ng.ng_Width = 344; ng.ng_Height = 120;
-	ng.ng_GadgetID = PL_GID_LIST; ng.ng_Flags = 0; ng.ng_VisualInfo = app->plVisualInfo;
-	app->plGadList = gad = CreateGadget(LISTVIEW_KIND, gad, &ng,
-		GTLV_Labels, (ULONG)&app->plList,
-		GTLV_Selected, sel >= 0 ? (ULONG)sel : (ULONG)~0,
-		GA_RelVerify, TRUE, TAG_DONE);
-	}
-	if (!gad) goto fail;
-	/* Row 1: Add | Remove | Clear | Play */
-	ng.ng_TopEdge = 148; ng.ng_Width = 84; ng.ng_Height = 18; ng.ng_Flags = PLACETEXT_IN;
-	ng.ng_LeftEdge = 8; ng.ng_GadgetText = (UBYTE *)"Add"; ng.ng_GadgetID = PL_GID_ADD;
-	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 96; ng.ng_GadgetText = (UBYTE *)"Remove"; ng.ng_GadgetID = PL_GID_REMOVE;
-	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 184; ng.ng_GadgetText = (UBYTE *)"Clear"; ng.ng_GadgetID = PL_GID_CLEAR;
-	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 272; ng.ng_GadgetText = (UBYTE *)"Play"; ng.ng_GadgetID = PL_GID_PLAY;
-	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
-	/* Row 2: Load M3U | Save M3U | Close */
-	ng.ng_TopEdge = 170; ng.ng_Width = 114;
-	ng.ng_LeftEdge = 8; ng.ng_GadgetText = (UBYTE *)"Load M3U"; ng.ng_GadgetID = PL_GID_LOAD_M3U;
-	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 126; ng.ng_GadgetText = (UBYTE *)"Save M3U"; ng.ng_GadgetID = PL_GID_SAVE_M3U;
-	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 244; ng.ng_GadgetText = (UBYTE *)"Close"; ng.ng_GadgetID = PL_GID_CLOSE;
-	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
-	memset(&nw, 0, sizeof(nw));
-	nw.LeftEdge = app->win->LeftEdge + 20; nw.TopEdge = app->win->TopEdge + 20;
-	nw.Width = 368; nw.Height = 200;
-	nw.IDCMPFlags = IDCMP_GADGETUP | IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW | IDCMP_VANILLAKEY;
-	nw.Flags = WFLG_CLOSEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET | WFLG_SMART_REFRESH;
-	nw.Title = (UBYTE *)"MiniAMP3 Playlist";
-	nw.MinWidth = nw.MaxWidth = 368; nw.MinHeight = nw.MaxHeight = 200;
-	nw.Type = WBENCHSCREEN;
-	app->plWin = OpenWindowTags(&nw, TAG_DONE);
-	if (!app->plWin) goto fail;
-	AddGList(app->plWin, app->plGadgets, (UWORD)-1, -1, NULL);
-	RefreshGList(app->plGadgets, app->plWin, NULL, -1);
-	GT_RefreshWindow(app->plWin, NULL);
+	sel = app->playlistSelected >= 0 ? app->playlistSelected : app->playlistCurrent;
+	if (sel < 0 || sel >= app->playlistCount)
+		sel = 0;
+
+	app->plListGad = (Object *)NewObject(LISTBROWSER_GetClass(), NULL,
+		GA_ID, PL_GID_LIST,
+		GA_RelVerify, TRUE,
+		GA_Disabled, app->playlistCount == 0 ? TRUE : FALSE,
+		LISTBROWSER_Labels, (ULONG)&app->plList,
+		LISTBROWSER_Selected, app->playlistCount > 0 ? (ULONG)sel : (ULONG)~0,
+		LISTBROWSER_MakeVisible, (ULONG)sel,
+		LISTBROWSER_ShowSelected, TRUE,
+		LISTBROWSER_AutoFit, TRUE,
+		LISTBROWSER_Separators, TRUE,
+		TAG_DONE);
+	app->plAddGad = PlaylistButton(PL_GID_ADD, "Add");
+	app->plRemoveGad = PlaylistButton(PL_GID_REMOVE, "Remove");
+	app->plClearGad = PlaylistButton(PL_GID_CLEAR, "Clear");
+	app->plPlayGad = PlaylistButton(PL_GID_PLAY, "Play");
+	app->plLoadGad = PlaylistButton(PL_GID_LOAD_M3U, "Load M3U");
+	app->plSaveGad = PlaylistButton(PL_GID_SAVE_M3U, "Save M3U");
+	app->plCloseGad = PlaylistButton(PL_GID_CLOSE, "Close");
+
+	if (!app->plListGad || !app->plAddGad || !app->plRemoveGad ||
+		!app->plClearGad || !app->plPlayGad || !app->plLoadGad ||
+		!app->plSaveGad || !app->plCloseGad)
+		goto fail;
+
+	root = (Object *)NewObject(LAYOUT_GetClass(), NULL,
+		LAYOUT_Orientation, LAYOUT_ORIENT_VERT,
+		LAYOUT_SpaceOuter, TRUE,
+		LAYOUT_SpaceInner, TRUE,
+		LAYOUT_DeferLayout, TRUE,
+		LAYOUT_AddChild, (ULONG)app->plListGad,
+		CHILD_MinHeight, 120,
+		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
+			LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
+			LAYOUT_EvenSize, TRUE,
+			LAYOUT_AddChild, (ULONG)app->plAddGad,
+			LAYOUT_AddChild, (ULONG)app->plRemoveGad,
+			LAYOUT_AddChild, (ULONG)app->plClearGad,
+			LAYOUT_AddChild, (ULONG)app->plPlayGad,
+			TAG_DONE),
+		CHILD_WeightedHeight, 0,
+		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
+			LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
+			LAYOUT_EvenSize, TRUE,
+			LAYOUT_AddChild, (ULONG)app->plLoadGad,
+			LAYOUT_AddChild, (ULONG)app->plSaveGad,
+			LAYOUT_AddChild, (ULONG)app->plCloseGad,
+			TAG_DONE),
+		CHILD_WeightedHeight, 0,
+		TAG_DONE);
+	if (!root)
+		goto fail;
+
+	app->plWinObj = (Object *)NewObject(WINDOW_GetClass(), NULL,
+		WA_Title, (ULONG)"MiniAMP3 Playlist",
+		WA_Activate, TRUE,
+		WA_DepthGadget, TRUE,
+		WA_DragBar, TRUE,
+		WA_CloseGadget, TRUE,
+		WA_SizeGadget, TRUE,
+		WA_IDCMP, IDCMP_GADGETUP | IDCMP_CLOSEWINDOW | IDCMP_IDCMPUPDATE |
+			IDCMP_REFRESHWINDOW | IDCMP_VANILLAKEY,
+		WA_Width, 420,
+		WA_Height, 120,
+		WINDOW_Position, WPOS_CENTERSCREEN,
+		WINDOW_ParentGroup, (ULONG)root,
+		TAG_DONE);
+	if (!app->plWinObj)
+		goto fail;
+
+	app->plWin = (struct Window *)RA_OpenWindow(app->plWinObj);
+	if (!app->plWin)
+		goto fail;
 	RefreshPlaylistView(app);
 	return;
+
 fail:
-	if (app->plGadgets) { FreeGadgets(app->plGadgets); app->plGadgets = NULL; app->plGadContext = NULL; app->plGadList = NULL; }
-	if (app->plVisualInfo) { FreeVisualInfo(app->plVisualInfo); app->plVisualInfo = NULL; }
+	if (!app->plWinObj && root)
+		DisposeObject(root);
+	ClosePlaylistWindow(app);
 }
 
 static void BrowseForPlaylist(MrApp *app)
@@ -5019,30 +4962,30 @@ static void PlaylistLoadCurrent(MrApp *app, int index, int startPlayback)
 
 static void HandlePlaylistWindow(MrApp *app)
 {
-	struct IntuiMessage *msg;
-	if (!app->plWin)
+	ULONG result;
+	UWORD code = 0;
+	if (!app->plWinObj)
 		return;
-	while ((msg = GT_GetIMsg(app->plWin->UserPort)) != NULL) {
-		ULONG cls = msg->Class;
-		struct Gadget *gad = (struct Gadget *)msg->IAddress;
-		UWORD gid = gad ? gad->GadgetID : 0;
-		UWORD code = msg->Code;
-		GT_ReplyIMsg(msg);
-		if (cls == IDCMP_CLOSEWINDOW) {
+	while ((result = RA_HandleInput(app->plWinObj, &code)) != WMHI_LASTMSG) {
+		switch (result & WMHI_CLASSMASK) {
+		case WMHI_CLOSEWINDOW:
 			ClosePlaylistWindow(app);
 			return;
-		}
-		if (cls == IDCMP_REFRESHWINDOW) {
-			GT_BeginRefresh(app->plWin);
-			GT_EndRefresh(app->plWin, TRUE);
-			continue;
-		}
-		if (cls == IDCMP_GADGETUP) {
-			switch (gid) {
+		case WMHI_GADGETUP:
+			switch (result & WMHI_GADGETMASK) {
 			case PL_GID_LIST:
-				/* Single click just selects; the Play button (or a second
-				 * click via the main window) starts playback. */
-				app->playlistSelected = (int)code;
+				if (app->playlistCount > 0 && app->plListGad) {
+					ULONG selected = (ULONG)code;
+					if (selected == (ULONG)~0)
+						GetAttr(LISTBROWSER_Selected, app->plListGad, &selected);
+					if ((int)selected < app->playlistCount) {
+						app->playlistSelected = (int)selected;
+						SetGadgetAttrs((struct Gadget *)app->plListGad, app->plWin, NULL,
+							LISTBROWSER_Selected, selected,
+							LISTBROWSER_ShowSelected, TRUE,
+							LISTBROWSER_MakeVisible, selected, TAG_DONE);
+					}
+				}
 				break;
 			case PL_GID_ADD:
 				PlaylistAddFiles(app);
@@ -5072,37 +5015,50 @@ static void HandlePlaylistWindow(MrApp *app)
 				ClosePlaylistWindow(app);
 				return;
 			}
+			break;
 		}
 	}
 }
 
+
 static void SetMenuItemChecked(MrApp *app, int menuNum, int itemNum, int checked)
 {
 	struct MenuItem *item;
-	if (!app->menuStrip) return;
-	item = ItemAddress(app->menuStrip, SHIFTMENU(menuNum) | SHIFTITEM(itemNum));
-	if (!item) return;
-	if (checked) item->Flags |= CHECKED;
-	else item->Flags &= ~CHECKED;
+	if (!app->menuStrip)
+		return;
+	item = ItemAddress(app->menuStrip, FULLMENUNUM(menuNum, itemNum, NOSUB));
+	if (!item)
+		return;
+	if (checked)
+		item->Flags |= CHECKED;
+	else
+		item->Flags &= ~CHECKED;
 }
 
 static void SyncMenuChecks(MrApp *app)
 {
-	SetMenuItemChecked(app, MENUNUM_PLAYBACK, ITEMNUM_DTP, app->decodeThenPlay);
+	SetMenuItemChecked(app, MENUNUM_PLAYBACK, ITEMNUM_DTP,
+		app->decodeThenPlay);
 	SetMenuItemChecked(app, MENUNUM_PLAYBACK, ITEMNUM_BENCH, app->bench);
-	SetMenuItemChecked(app, MENUNUM_PLAYBACK, ITEMNUM_ARTWORK, app->artEnabled);
-	SetMenuItemChecked(app, MENUNUM_PLAYBACK, ITEMNUM_ARTCACHE, app->artCacheEnabled);
-	SetMenuItemChecked(app, MENUNUM_PLAYBACK, ITEMNUM_ARTCOLOR, app->artColorEnabled);
-	SetMenuItemChecked(app, MENUNUM_PLAYBACK, ITEMNUM_PROGRESS, app->progressEnabled);
+	SetMenuItemChecked(app, MENUNUM_PLAYBACK, ITEMNUM_ARTWORK,
+		app->artEnabled);
+	SetMenuItemChecked(app, MENUNUM_PLAYBACK, ITEMNUM_ARTCACHE,
+		app->artCacheEnabled);
+	SetMenuItemChecked(app, MENUNUM_PLAYBACK, ITEMNUM_ARTCOLOR,
+		app->artColorEnabled);
+	SetMenuItemChecked(app, MENUNUM_PLAYBACK, ITEMNUM_PROGRESS,
+		app->progressEnabled);
 }
 
 static void SetDecodeThenPlay(MrApp *app, int enabled)
 {
 	app->decodeThenPlay = enabled ? 1 : 0;
-	if (app->bufferGad && app->win)
+	if (app->win && app->bufferGad) {
 		SetGadgetAttrs((struct Gadget *)app->bufferGad, app->win, NULL,
 			GA_Disabled, app->decodeThenPlay,
 			TAG_DONE);
+	}
+	SyncMenuChecks(app);
 	SetStatus(app, app->decodeThenPlay ?
 		"Decode-then-play enabled; Buffer slider disabled." :
 		"Streaming playback mode enabled.");
@@ -5320,9 +5276,14 @@ int main(int argc, char **argv)
 	DrawArtPanel(&app);
 
 	while (!done) {
-		ULONG plSig = (app.plWin && app.plWin->UserPort) ? (1UL << app.plWin->UserPort->mp_SigBit) : 0;
-		ULONG rbSig = (app.rbWin && app.rbWin->UserPort) ? (1UL << app.rbWin->UserPort->mp_SigBit) : 0;
-		ULONG sigs = Wait(winSig | timerSig | doneSig | plSig | rbSig | SIGBREAKF_CTRL_C);
+		ULONG plSig = 0;
+		ULONG rbSig = 0;
+		ULONG sigs;
+		if (app.plWinObj)
+			GetAttr(WINDOW_SigMask, app.plWinObj, &plSig);
+		if (app.rbWinObj)
+			GetAttr(WINDOW_SigMask, app.rbWinObj, &rbSig);
+		sigs = Wait(winSig | timerSig | doneSig | plSig | rbSig | SIGBREAKF_CTRL_C);
 
 		if (sigs & SIGBREAKF_CTRL_C)
 			done = 1;
