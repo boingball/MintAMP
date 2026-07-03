@@ -70,6 +70,7 @@
 #include <gadgets/button.h>
 #include <gadgets/getfile.h>
 #include <gadgets/chooser.h>
+#include <gadgets/listbrowser.h>
 #include <gadgets/slider.h>
 #include <gadgets/checkbox.h>
 #include <gadgets/fuelgauge.h>
@@ -89,6 +90,7 @@
 #include <proto/button.h>
 #include <proto/getfile.h>
 #include <proto/chooser.h>
+#include <proto/listbrowser.h>
 #include <proto/slider.h>
 #include <proto/checkbox.h>
 #include <proto/fuelgauge.h>
@@ -310,6 +312,7 @@ struct Library *LayoutBase;
 struct Library *ButtonBase;
 struct Library *GetFileBase;
 struct Library *ChooserBase;
+struct Library *ListBrowserBase;
 struct Library *SliderBase;
 struct Library *CheckBoxBase;
 struct Library *FuelGaugeBase;
@@ -415,7 +418,7 @@ typedef struct MrApp {
 
 	Object         *plWinObj;
 	struct Window  *plWin;
-	Object         *plSelectGad;
+	Object         *plListGad;
 	Object         *plAddGad;
 	Object         *plRemoveGad;
 	Object         *plClearGad;
@@ -423,7 +426,8 @@ typedef struct MrApp {
 	Object         *plLoadGad;
 	Object         *plSaveGad;
 	Object         *plCloseGad;
-	STRPTR          plLabels[MR_PLAYLIST_MAX + 2];
+	struct List     plList;
+	struct Node    *plNodes[MR_PLAYLIST_MAX];
 	char            plNames[MR_PLAYLIST_MAX][80];
 
 	struct Window  *rbWin;
@@ -1894,15 +1898,16 @@ static void CloseTimer(MrApp *app)
 
 static void CloseLibs(void)
 {
-	RADIO_DBG(printf("app-close: CloseLibs enter GadTools=%p Label=%p String=%p FuelGauge=%p CheckBox=%p Slider=%p Chooser=%p GetFile=%p Button=%p Layout=%p Window=%p Utility=%p Intuition=%p\n",
+	RADIO_DBG(printf("app-close: CloseLibs enter GadTools=%p Label=%p String=%p FuelGauge=%p CheckBox=%p Slider=%p ListBrowser=%p Chooser=%p GetFile=%p Button=%p Layout=%p Window=%p Utility=%p Intuition=%p\n",
 		GadToolsBase, LabelBase, StringBase, FuelGaugeBase, CheckBoxBase, SliderBase,
-		ChooserBase, GetFileBase, ButtonBase, LayoutBase, WindowBase, UtilityBase, IntuitionBase);)
+		ListBrowserBase, ChooserBase, GetFileBase, ButtonBase, LayoutBase, WindowBase, UtilityBase, IntuitionBase);)
 	if (GadToolsBase)  { CloseLibrary(GadToolsBase);  GadToolsBase = NULL; RADIO_DBG(printf("app-close: CloseLibs GadTools done\n");) }
 	if (LabelBase)     { CloseLibrary(LabelBase);     LabelBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Label done\n");) }
 	if (StringBase)    { CloseLibrary(StringBase);    StringBase = NULL; RADIO_DBG(printf("app-close: CloseLibs String done\n");) }
 	if (FuelGaugeBase) { CloseLibrary(FuelGaugeBase); FuelGaugeBase = NULL; RADIO_DBG(printf("app-close: CloseLibs FuelGauge done\n");) }
 	if (CheckBoxBase)  { CloseLibrary(CheckBoxBase);  CheckBoxBase = NULL; RADIO_DBG(printf("app-close: CloseLibs CheckBox done\n");) }
 	if (SliderBase)    { CloseLibrary(SliderBase);    SliderBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Slider done\n");) }
+	if (ListBrowserBase) { CloseLibrary(ListBrowserBase); ListBrowserBase = NULL; RADIO_DBG(printf("app-close: CloseLibs ListBrowser done\n");) }
 	if (ChooserBase)   { CloseLibrary(ChooserBase);   ChooserBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Chooser done\n");) }
 	if (GetFileBase)   { CloseLibrary(GetFileBase);   GetFileBase = NULL; RADIO_DBG(printf("app-close: CloseLibs GetFile done\n");) }
 	if (ButtonBase)    { CloseLibrary(ButtonBase);    ButtonBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Button done\n");) }
@@ -1941,6 +1946,7 @@ static int OpenLibs(void)
 	ButtonBase    = OpenLibrary("gadgets/button.gadget",   MINIMP3R_CLASS_VERSION);
 	GetFileBase   = OpenLibrary("gadgets/getfile.gadget",  MINIMP3R_CLASS_VERSION);
 	ChooserBase   = OpenLibrary("gadgets/chooser.gadget",  MINIMP3R_CLASS_VERSION);
+	ListBrowserBase = OpenLibrary("gadgets/listbrowser.gadget", MINIMP3R_CLASS_VERSION);
 	SliderBase    = OpenLibrary("gadgets/slider.gadget",   MINIMP3R_CLASS_VERSION);
 	CheckBoxBase  = OpenLibrary("gadgets/checkbox.gadget", MINIMP3R_CLASS_VERSION);
 	FuelGaugeBase = OpenLibrary("gadgets/fuelgauge.gadget",MINIMP3R_CLASS_VERSION);
@@ -1948,7 +1954,7 @@ static int OpenLibs(void)
 	LabelBase     = OpenLibrary("images/label.image",      MINIMP3R_CLASS_VERSION);
 
 	if (!WindowBase || !LayoutBase || !ButtonBase || !GetFileBase ||
-		!ChooserBase || !SliderBase || !CheckBoxBase || !FuelGaugeBase ||
+		!ChooserBase || !ListBrowserBase || !SliderBase || !CheckBoxBase || !FuelGaugeBase ||
 		!StringBase || !LabelBase) {
 		fprintf(stderr,
 			"minimp3r needs the ReAction (or ClassAct) classes V%d+ installed.\n",
@@ -4725,21 +4731,30 @@ static const char *PlaylistBaseName(const char *path)
 static void RefreshPlaylistView(MrApp *app)
 {
 	int i;
+	int sel = app->playlistSelected >= 0 ? app->playlistSelected : app->playlistCurrent;
+	if (app->plWin && app->plListGad) {
+		SetGadgetAttrs((struct Gadget *)app->plListGad, app->plWin, NULL,
+			LISTBROWSER_Labels, (ULONG)~0,
+			TAG_DONE);
+	}
+	if (app->plList.lh_Head)
+		FreeListBrowserList(&app->plList);
+	NewList(&app->plList);
+	memset(app->plNodes, 0, sizeof(app->plNodes));
 	for (i = 0; i < app->playlistCount; i++) {
 		SafeCopy(app->plNames[i], sizeof(app->plNames[i]), PlaylistBaseName(app->playlist[i]));
-		app->plLabels[i] = (STRPTR)app->plNames[i];
+		app->plNodes[i] = AllocListBrowserNode(1,
+			LBNA_Column, 0,
+				LBNCA_Text, (ULONG)app->plNames[i],
+			TAG_DONE);
+		if (app->plNodes[i])
+			AddTail(&app->plList, app->plNodes[i]);
 	}
-	if (app->playlistCount == 0) {
-		app->plLabels[0] = (STRPTR)"(playlist is empty)";
-		app->plLabels[1] = NULL;
-	} else {
-		app->plLabels[app->playlistCount] = NULL;
-	}
-	if (app->plWin && app->plSelectGad) {
-		int sel = app->playlistSelected >= 0 ? app->playlistSelected : app->playlistCurrent;
-		SetGadgetAttrs((struct Gadget *)app->plSelectGad, app->plWin, NULL,
-			CHOOSER_LabelArray, (ULONG)app->plLabels,
-			CHOOSER_Selected, app->playlistCount > 0 && sel >= 0 ? (ULONG)sel : 0,
+	if (app->plWin && app->plListGad) {
+		SetGadgetAttrs((struct Gadget *)app->plListGad, app->plWin, NULL,
+			LISTBROWSER_Labels, (ULONG)&app->plList,
+			LISTBROWSER_Selected, app->playlistCount > 0 && sel >= 0 ? (ULONG)sel : (ULONG)~0,
+			LISTBROWSER_MakeVisible, app->playlistCount > 0 && sel >= 0 ? (ULONG)sel : 0,
 			GA_Disabled, app->playlistCount == 0 ? TRUE : FALSE,
 			TAG_DONE);
 	}
@@ -4894,12 +4909,20 @@ static void PlaylistSaveM3U(MrApp *app)
 static void ClosePlaylistWindow(MrApp *app)
 {
 	if (app->plWinObj) {
+		if (app->plWin && app->plListGad) {
+			SetGadgetAttrs((struct Gadget *)app->plListGad, app->plWin, NULL,
+				LISTBROWSER_Labels, (ULONG)~0,
+				TAG_DONE);
+		}
 		RA_CloseWindow(app->plWinObj);
 		app->plWin = NULL;
 		DisposeObject(app->plWinObj);
 		app->plWinObj = NULL;
 	}
-	app->plSelectGad = NULL;
+	if (app->plList.lh_Head)
+		FreeListBrowserList(&app->plList);
+	NewList(&app->plList);
+	app->plListGad = NULL;
 	app->plAddGad = NULL;
 	app->plRemoveGad = NULL;
 	app->plClearGad = NULL;
@@ -4931,12 +4954,15 @@ static void OpenPlaylistWindow(MrApp *app)
 	if (sel < 0 || sel >= app->playlistCount)
 		sel = 0;
 
-	app->plSelectGad = (Object *)NewObject(CHOOSER_GetClass(), NULL,
+	app->plListGad = (Object *)NewObject(LISTBROWSER_GetClass(), NULL,
 		GA_ID, PL_GID_LIST,
 		GA_RelVerify, TRUE,
 		GA_Disabled, app->playlistCount == 0 ? TRUE : FALSE,
-		CHOOSER_LabelArray, (ULONG)app->plLabels,
-		CHOOSER_Selected, (ULONG)sel,
+		LISTBROWSER_Labels, (ULONG)&app->plList,
+		LISTBROWSER_Selected, app->playlistCount > 0 ? (ULONG)sel : (ULONG)~0,
+		LISTBROWSER_MakeVisible, (ULONG)sel,
+		LISTBROWSER_AutoFit, TRUE,
+		LISTBROWSER_Separators, TRUE,
 		TAG_DONE);
 	app->plAddGad = PlaylistButton(PL_GID_ADD, "Add");
 	app->plRemoveGad = PlaylistButton(PL_GID_REMOVE, "Remove");
@@ -4946,7 +4972,7 @@ static void OpenPlaylistWindow(MrApp *app)
 	app->plSaveGad = PlaylistButton(PL_GID_SAVE_M3U, "Save M3U");
 	app->plCloseGad = PlaylistButton(PL_GID_CLOSE, "Close");
 
-	if (!app->plSelectGad || !app->plAddGad || !app->plRemoveGad ||
+	if (!app->plListGad || !app->plAddGad || !app->plRemoveGad ||
 		!app->plClearGad || !app->plPlayGad || !app->plLoadGad ||
 		!app->plSaveGad || !app->plCloseGad)
 		goto fail;
@@ -4956,11 +4982,8 @@ static void OpenPlaylistWindow(MrApp *app)
 		LAYOUT_SpaceOuter, TRUE,
 		LAYOUT_SpaceInner, TRUE,
 		LAYOUT_DeferLayout, TRUE,
-		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
-			LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
-			ADD_LABELLED(app->plSelectGad, "Track"),
-			TAG_DONE),
-		CHILD_WeightedHeight, 0,
+		LAYOUT_AddChild, (ULONG)app->plListGad,
+		CHILD_MinHeight, 120,
 		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
 			LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
 			LAYOUT_EvenSize, TRUE,
@@ -5068,9 +5091,9 @@ static void HandlePlaylistWindow(MrApp *app)
 		case WMHI_GADGETUP:
 			switch (result & WMHI_GADGETMASK) {
 			case PL_GID_LIST:
-				if (app->playlistCount > 0 && app->plSelectGad) {
+				if (app->playlistCount > 0 && app->plListGad) {
 					ULONG selected = 0;
-					GetAttr(CHOOSER_Selected, app->plSelectGad, &selected);
+					GetAttr(LISTBROWSER_Selected, app->plListGad, &selected);
 					if ((int)selected < app->playlistCount)
 						app->playlistSelected = (int)selected;
 				}
