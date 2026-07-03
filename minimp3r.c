@@ -4578,7 +4578,7 @@ static void HandleRadioWindow(MrApp *app)
 		case WMHI_GADGETUP:
 			switch (result & WMHI_GADGETMASK) {
 			case RB_GID_SEARCH_TEXT: case RB_GID_SEARCH: RadioDoSearch(app); break;
-			case RB_GID_RADIO_RESULTS: RadioSelectResult(app, (ULONG)~0); break;
+			case RB_GID_RADIO_RESULTS: RadioSelectResult(app, (ULONG)code); break;
 			case RB_GID_PROBE: RadioDoProbeAndPlay(app); break;
 			case RB_GID_ADD_FAV: RadioAddFavourite(app); break;
 			case RB_GID_FAVOURITES: RadioToggleFavourites(app); break;
@@ -4970,10 +4970,15 @@ static void HandlePlaylistWindow(MrApp *app)
 			switch (result & WMHI_GADGETMASK) {
 			case PL_GID_LIST:
 				if (app->playlistCount > 0 && app->plListGad) {
-					ULONG selected = 0;
-					GetAttr(LISTBROWSER_Selected, app->plListGad, &selected);
-					if ((int)selected < app->playlistCount)
+					ULONG selected = (ULONG)code;
+					if (selected == (ULONG)~0)
+						GetAttr(LISTBROWSER_Selected, app->plListGad, &selected);
+					if ((int)selected < app->playlistCount) {
 						app->playlistSelected = (int)selected;
+						SetGadgetAttrs((struct Gadget *)app->plListGad, app->plWin, NULL,
+							LISTBROWSER_Selected, selected,
+							LISTBROWSER_MakeVisible, selected, TAG_DONE);
+					}
 				}
 				break;
 			case PL_GID_ADD:
