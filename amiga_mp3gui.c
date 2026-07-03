@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "miniamp_memguard.h"
+#include "amiga_display_text.h"
 
 #if defined(AMIGA_M68K)
 #define main HelixAmp3CliMain
@@ -1728,36 +1729,6 @@ static void SetInternetStreamMetadata(HelixAmp3Gui *gui)
 }
 
 
-static unsigned long GuiSanitizeMetadata(char *dst, unsigned long dstSize, const char *src)
-{
-	unsigned long si = 0, di = 0;
-	unsigned char c;
-	if (!dst || dstSize == 0)
-		return 0;
-	dst[0] = 0;
-	if (!src)
-		return 0;
-	while (src[si] && di + 1 < dstSize) {
-		c = (unsigned char)src[si++];
-		if (c < 0x20 || c == 0x7f) {
-			continue;
-		} else if (c < 0x80) {
-			dst[di++] = (char)c;
-		} else if ((c == 0xc2 || c == 0xc3) && (unsigned char)src[si] >= 0x80 && (unsigned char)src[si] <= 0xbf) {
-			dst[di++] = (char)((c == 0xc2) ? (unsigned char)src[si] : ((unsigned char)src[si] + 0x40));
-			si++;
-		} else if (c >= 0xc0 && src[si] && (((unsigned char)src[si] & 0xc0) == 0x80)) {
-			while (src[si] && (((unsigned char)src[si] & 0xc0) == 0x80))
-				si++;
-			dst[di++] = '?';
-		} else {
-			dst[di++] = (c >= 0x80 && c < 0xc0) ? '?' : (char)c;
-		}
-	}
-	dst[di] = 0;
-	return di;
-}
-
 static void CopyVolatileGuiString(char *dst, unsigned long dstSize, volatile const char *src)
 {
 	unsigned long i;
@@ -1771,7 +1742,7 @@ static void CopyVolatileGuiString(char *dst, unsigned long dstSize, volatile con
 	for (i = 0; i + 1 < sizeof(raw) && src[i]; i++)
 		raw[i] = (char)src[i];
 	raw[i] = 0;
-	GuiSanitizeMetadata(dst, dstSize, raw);
+	AmigaUtf8ToDisplay(dst, dstSize, raw);
 }
 
 static void SplitRadioStreamTitle(const char *streamTitle, char *artist, unsigned long artistSize, char *title, unsigned long titleSize)

@@ -5,6 +5,7 @@
  */
 
 #include "radio_browser_json.h"
+#include "amiga_display_text.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -221,6 +222,7 @@ const char *rb_station_play_url(const RadioBrowserStation *station)
 
 void rb_station_display_name(const RadioBrowserStation *station, char *out, int out_size)
 {
+    char display[RB_MAX_NAME];
     const char *p;
     int len;
     int pending_space;
@@ -228,7 +230,8 @@ void rb_station_display_name(const RadioBrowserStation *station, char *out, int 
     if (!out || out_size <= 0) return;
     out[0] = '\0';
     if (!station) return;
-    p = station->name;
+    AmigaUtf8ToDisplay(display, sizeof(display), station->name);
+    p = display;
     len = 0;
     pending_space = 0;
     while (*p && len < out_size - 1) {
