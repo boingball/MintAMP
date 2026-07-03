@@ -5139,8 +5139,7 @@ static void HandleMenu(MrApp *app, UWORD code, int *done)
 	while (code != MENUNULL) {
 		struct MenuItem *item = ItemAddress(app->menuStrip, code);
 		if (item) {
-			ULONG ud = (ULONG)GTMENUITEM_USERDATA(item);
-			int mn = (int)(ud / 100), it = (int)(ud % 100);
+			int mn = (int)MENUNUM(code), it = (int)ITEMNUM(code);
 			if (mn == MENUNUM_PROJECT && it == ITEMNUM_QUIT) *done = 1;
 			else if (mn == MENUNUM_PROJECT && it == ITEMNUM_ABOUT) {
 				struct EasyStruct es;
