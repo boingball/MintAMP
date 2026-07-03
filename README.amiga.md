@@ -192,7 +192,9 @@ The quality cycle maps directly to the same decoder quality levels used by
 - **Best** passes `--quality 3`: least aggressive optimisation.
 
 The Fast-mem checkbox remains independent of decoder quality, so unticking
-Fast-mem is always obeyed.
+Fast-mem is always obeyed.  When an internet stream is selected the GadTools
+frontend clears Fast-mem and omits `--fast-mem`, matching the ReAction frontend,
+because stream inputs are live sockets rather than finite seekable files.
 
 The buffer slider chooses the `--buffer-seconds` value from 1 to 30 seconds. The Volume slider stores `ENVARC:MiniAMP3/Volume` as 0-100% and maps it to `audio.device` `ioa_Volume` 0-64, so 0% is silent and 100% preserves the previous full-volume request value. Volume changes are shared with the embedded playback subprocess and applied to the next safe `CMD_WRITE` submission without changing PCM samples. The GUI rate selector cycles through 8287, 8820, 11025, 22050, and 28600 Hz.
 Superfast is a fast-lowrate variant rather than a separate exclusive mode; when

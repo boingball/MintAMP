@@ -4692,6 +4692,18 @@ static void GuiDisableFastMemIfTooSmall(HelixAmp3Gui *gui)
 	}
 }
 
+static void GuiDisableFastMemForRadio(HelixAmp3Gui *gui)
+{
+	if (!gui || !gui->fastMem)
+		return;
+	gui->fastMem = 0;
+	if (gui->win && gui->gadFastMem)
+		GT_SetGadgetAttrs(gui->gadFastMem, gui->win, NULL,
+			GTCB_Checked, FALSE, TAG_DONE);
+	SetStatus(gui, "Fast-mem disabled for internet streams.");
+	SaveGuiSettings(gui);
+}
+
 static const int kRadioSearchLimits[] = { 10, 25, 50, 100 };
 static STRPTR kRadioSearchLimitLabels[] = { (STRPTR)"10", (STRPTR)"25", (STRPTR)"50", (STRPTR)"100", NULL };
 #define GT_RADIO_SEARCH_LIMIT_COUNT ((int)(sizeof(kRadioSearchLimits) / sizeof(kRadioSearchLimits[0])))
@@ -5547,7 +5559,8 @@ static void PlaylistLoadAndShow(HelixAmp3Gui *gui, int index)
 	SafeCopy(gui->inputName, sizeof(gui->inputName),
 		gui->playlist.paths[index]);
 	SetFileDisplay(gui, gui->inputName);
-	if (is_url_path(gui->inputName)) {
+	if (IsRadioInputName(gui->inputName)) {
+		GuiDisableFastMemForRadio(gui);
 		FreeTags(&gui->tags);
 		memset(&gui->tags, 0, sizeof(gui->tags));
 		SetInternetStreamMetadata(gui);
@@ -5954,6 +5967,7 @@ static void SelectInternetStream(HelixAmp3Gui *gui, const char *url)
 		return;
 	}
 	if (gui->playbackActive || gui->playbackDonePending) {
+		GuiDisableFastMemForRadio(gui);
 		SafeCopy(gui->queuedInputName, sizeof(gui->queuedInputName), url);
 		gui->queuedHaveRadioHostAddr = 0;
 		gui->queuedRadioHostAddrBe = 0;
@@ -5961,6 +5975,7 @@ static void SelectInternetStream(HelixAmp3Gui *gui, const char *url)
 		return;
 	}
 	CancelArtDecode(gui);
+	GuiDisableFastMemForRadio(gui);
 	SafeCopy(gui->inputName, sizeof(gui->inputName), url);
 	gui->haveRadioHostAddr = 0;
 	gui->radioHostAddrBe = 0;
@@ -6129,6 +6144,7 @@ static void AddArg(HelixAmp3Args *args, const char *text)
 static void BuildPlaybackArgs(HelixAmp3Gui *gui, HelixAmp3Args *args)
 {
 	char num[16];
+	int isRadio = is_url_path(gui->inputName);
 
 	memset(args, 0, sizeof(*args));
 	AddArg(args, "amiga_mp3dec");
@@ -6148,7 +6164,10 @@ static void BuildPlaybackArgs(HelixAmp3Gui *gui, HelixAmp3Args *args)
 			}
 		}
 	}
-	if (gui->fastMem)
+	/* --fast-mem preloads the complete input and requires a finite, seekable
+	 * local file.  Radio streams are live sockets/handles, so never pass the
+	 * preload flag through for URL input even if an old setting is still on. */
+	if (gui->fastMem && !isRadio)
 		AddArg(args, "--fast-mem");
 	if (gui->cd32Ultrafast) {
 		AddArg(args, "--fast-lowrate");
@@ -6477,7 +6496,10 @@ static void StartPlayback(HelixAmp3Gui *gui)
 	gPlaybackEntryRunId = gui->playbackRunId;
 	gui->launchBufferSecs = gui->decodeThenPlay ? 0 : gui->bufferSeconds;
 	DrawProgress(gui);
-	GuiDisableFastMemIfTooSmall(gui);
+	if (IsRadioInputName(gui->inputName))
+		GuiDisableFastMemForRadio(gui);
+	else
+		GuiDisableFastMemIfTooSmall(gui);
 	BuildPlaybackArgs(gui, &gGuiArgs);
 #ifdef MINIAMP3_DEBUG
 	DebugSelftestPlaybackChannelArgs(gui);
