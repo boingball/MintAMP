@@ -2819,10 +2819,10 @@ static int MrJpegFindEntropyEnd(const unsigned char *p, const unsigned char *end
 static int DecodeProgressiveJpegDcPreviewToGrey(const unsigned char *jpg, unsigned long bytes,
 	unsigned char *greyOut, unsigned char *rgbOut, int outW, int outH)
 {
-	static short dc[3][(MR_MAX_JPEG_DIM / 8) * (MR_MAX_JPEG_DIM / 8)];
+	static short dc[4][(MR_MAX_JPEG_DIM / 8) * (MR_MAX_JPEG_DIM / 8)];
 	static unsigned long greyAccum[MR_ART_W * MR_ART_H], rAccum[MR_ART_W * MR_ART_H], gAccum[MR_ART_W * MR_ART_H], bAccum[MR_ART_W * MR_ART_H];
 	static unsigned short greyCount[MR_ART_W * MR_ART_H];
-	MrJpegHuffTab hdc[4]; MrProgComp comp[3];
+	MrJpegHuffTab hdc[4]; MrProgComp comp[4];
 	unsigned short qdc[4];
 	unsigned long p = 2; int width = 0, height = 0, comps = 0, maxh = 1, maxv = 1, sof2 = 0, anyDc = 0, anyDcScan = 0, lumaDcReady = 0, laterScanFailed = 0, i;
 	const char *failReason = NULL;
@@ -2849,7 +2849,7 @@ static int DecodeProgressiveJpegDcPreviewToGrey(const unsigned char *jpg, unsign
 			sof2 = 1; if (len < 8 || jpg[s] != 8) { failReason = (len >= 8 && jpg[s] != 8) ? "unsupported quant precision" : "bad entropy decode"; goto fail; }
 			height = ((int)jpg[s+1] << 8) | jpg[s+2]; width = ((int)jpg[s+3] << 8) | jpg[s+4]; comps = jpg[s+5];
 			RADIO_DBG(printf("radio-art: SOF2 width=%d height=%d components=%d\n", width, height, comps);)
-			if (width <= 0 || height <= 0 || width > MR_MAX_JPEG_DIM || height > MR_MAX_JPEG_DIM || (comps != 1 && comps != 3) || len != (unsigned)(8 + comps * 3)) { failReason = "bad entropy decode"; goto fail; }
+			if (width <= 0 || height <= 0 || width > MR_MAX_JPEG_DIM || height > MR_MAX_JPEG_DIM || (comps != 1 && comps != 3 && comps != 4) || len != (unsigned)(8 + comps * 3)) { failReason = "bad entropy decode"; goto fail; }
 			for (c = 0, s += 6; c < comps; c++, s += 3) { comp[c].id = jpg[s]; comp[c].h = jpg[s+1] >> 4; comp[c].v = jpg[s+1] & 15; comp[c].tq = jpg[s+2]; RADIO_DBG(printf("radio-art: SOF2 component id=%u h=%u v=%u tq=%u\n", comp[c].id, comp[c].h, comp[c].v, comp[c].tq);) if (!comp[c].h || !comp[c].v || comp[c].tq > 3) { failReason = "bad entropy decode"; goto fail; } if (comp[c].h > maxh) maxh = comp[c].h; if (comp[c].v > maxv) maxv = comp[c].v; }
 			for (c = 0; c < comps; c++) { comp[c].bw = (width * comp[c].h + maxh * 8 - 1) / (maxh * 8); comp[c].bh = (height * comp[c].v + maxv * 8 - 1) / (maxv * 8); if (comp[c].bw * comp[c].bh > (MR_MAX_JPEG_DIM / 8) * (MR_MAX_JPEG_DIM / 8)) { failReason = "bad entropy decode"; goto fail; } }
 		} else if (m == 0xc4) {
@@ -2857,7 +2857,7 @@ static int DecodeProgressiveJpegDcPreviewToGrey(const unsigned char *jpg, unsign
 			while (p < e) { unsigned int tc, th, n = 0, k; unsigned short code = 0; const unsigned char *counts; if (p + 17 > e) { failReason = "bad entropy decode"; goto fail; } tc = jpg[p] >> 4; th = jpg[p] & 15; p++; counts = jpg + p; for (i = 0; i < 16; i++) n += jpg[p+i]; RADIO_DBG(printf("radio-art: DHT class=%u table=%u symbols=%u\n", tc, th, n);) if (th > 3 || tc > 1 || p + 16 + n > e || n > 256) { failReason = "bad entropy decode"; goto fail; } p += 16; if (tc == 1) { RADIO_DBG(printf("radio-art: skipped AC DHT table=%u symbols=%u\n", th, n);) p += n; continue; } hdc[th].count = 0; for (i = 1; i <= 16; i++) { int cnt = counts[i - 1]; for (k = 0; k < (unsigned)cnt; k++) { int idx = hdc[th].count++; hdc[th].size[idx] = i; hdc[th].code[idx] = code++; hdc[th].sym[idx] = jpg[p++]; } code <<= 1; } hdc[th].valid = 1; }
 			continue;
 		} else if (m == 0xda) {
-			unsigned long s = p + 2; int ns, Ss, Se, Ah, Al, scanComp[3], scanOk = 1, scanHasLuma = 0, c, mi, mx, my, by, bx; const unsigned char *ep; MrProgBits br;
+			unsigned long s = p + 2; int ns, Ss, Se, Ah, Al, scanComp[4], scanOk = 1, scanHasLuma = 0, c, mi, mx, my, by, bx; const unsigned char *ep; MrProgBits br;
 			if (!sof2 || len < 6) { failReason = !sof2 ? "no SOF2" : "bad entropy decode"; goto fail; } ns = jpg[s++]; if (ns < 1 || ns > comps || len != (unsigned)(6 + ns * 2)) { failReason = "bad entropy decode"; goto fail; }
 			for (i = 0; i < ns; i++, s += 2) { for (c = 0; c < comps && comp[c].id != jpg[s]; c++); if (c >= comps || (jpg[s+1] & 15)) { failReason = "bad entropy decode"; goto fail; } comp[c].td = jpg[s+1] >> 4; scanComp[i] = c; if (c == 0) scanHasLuma = 1; RADIO_DBG(printf("radio-art: SOS component id=%u td=%u\n", comp[c].id, comp[c].td);) }
 			Ss = jpg[s++]; Se = jpg[s++]; Ah = jpg[s] >> 4; Al = jpg[s] & 15;
@@ -2892,6 +2892,7 @@ render_preview:
 	for (i = 0; i < outW * outH; i++) if (greyCount[i]) { unsigned short c = greyCount[i]; greyOut[i] = (unsigned char)((greyAccum[i] + c / 2) / c); if (rgbOut) { rgbOut[i*3] = (unsigned char)((rAccum[i] + c / 2) / c); rgbOut[i*3+1] = (unsigned char)((gAccum[i] + c / 2) / c); rgbOut[i*3+2] = (unsigned char)((bAccum[i] + c / 2) / c); } }
 	if (laterScanFailed) RADIO_DBG(printf("radio-art: progressive JPEG later scan failed, keeping luma preview\n");)
 	if (comps == 3 && comp[1].haveDc && comp[2].haveDc) RADIO_DBG(printf("radio-art: progressive JPEG colour DC preview used\n");)
+	else if (comps == 4) RADIO_DBG(printf("radio-art: progressive JPEG 4-component DC preview using component 0 greyscale\n");)
 	else RADIO_DBG(printf("radio-art: progressive JPEG greyscale DC preview used\n");)
 	return 0;
 
