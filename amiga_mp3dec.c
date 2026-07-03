@@ -141,7 +141,7 @@ static void RadioDebugUnsuppressedPrintf(const char *fmt, ...)
 
 #if defined(AMIGA_M68K)
 /* Tell AmigaOS to provide at least 256 KB of stack for this executable. */
-static const char amigaStackCookie[] __attribute__((used)) = "$STACK:262144";
+static const char amigaStackCookie[] __attribute__((used, aligned(4))) = "$STACK:262144";
 #endif
 
 void STATNAME(FDCT32)(int *x, int *d, int offset, int oddBlock, int gb);
@@ -5364,6 +5364,9 @@ static int DecodeStreamFillS8(DecodeStream *stream, const DecodeOptions *opt,
 			}
 			stream->stats->outputSamples += (unsigned long)outSamps;
 			stream->stats->decodedFrames++;
+			if (stream->stats->decodedFrames == 1)
+				RADIO_DBG(printf("radio-decode: first successful MP3 frame decode samprate=%d chans=%d output_samps=%d effective_rate=%d produced=%d\n",
+					info.samprate, info.nChans, outSamps, stream->effectiveRate, produced);)
 		}
 	}
 
@@ -9568,6 +9571,9 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 				PlaybackBufferName(refill));
 			goto cleanup;
 		}
+		if (refill == 0)
+			RADIO_DBG(printf("radio-audio: first audio.device CMD_WRITE queued slot=%s bytes=%lu live_slots=%d stereo=%d\n",
+				PlaybackBufferName(refill), len[refill], liveSlots, opt->stereo ? 1 : 0);)
 	}
 	GuiPublishStartupStage(GUISTART_PLAYING);
 	GuiSetPlaybackPhase(GUIPLAY_PHASE_PLAYING);

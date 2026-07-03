@@ -196,6 +196,7 @@ static char gSupportedExtPattern[512];
 #define HELIXAMP3_QUALITY_MAX 3
 #define HELIXAMP3_SIGMASK(gui) (1UL << (gui)->win->UserPort->mp_SigBit)
 #define GUI_ENV_PREFIX  "ENVARC:MiniAMP3"
+#define GUI_STARTUP_STACK_SIZE 262144UL
 
 #define GUI_WIN_W       560    /* inner width; wide enough for all controls */
 #define GUI_WIN_H       340    /* inner height */
@@ -572,6 +573,7 @@ static struct MsgPort *gDonePort;
 static volatile unsigned long gPlaybackRunCounter;
 static volatile unsigned long gDoneRunId;
 static volatile unsigned long gPlaybackEntryRunId;
+static int gGuiFirstUiProgressLogged;
 
 static struct TextAttr gTopaz8Attr = {
 	(STRPTR)"topaz.font", 8, FS_NORMAL, FPF_ROMFONT
@@ -3497,6 +3499,12 @@ static void HandleTimerSignal(HelixAmp3Gui *gui)
 		unsigned long halfBufferMs = gGuiPlaybackStatus.halfBufferMs;
 		int phaseChanged = (phase != gui->lastDisplayedPhase);
 		int isRadioInput = IsRadioInputName(gui->inputName);
+
+		if (!gGuiFirstUiProgressLogged && frames > 0) {
+			gGuiFirstUiProgressLogged = 1;
+			RADIO_DBG(printf("radio-ui: first GadTools UI progress/status update phase=%d frames=%lu rate=%d status=\"%s\"\n",
+				phase, frames, rate, gui->statusText);)
+		}
 
 		if (isRadioInput) {
 			if (gGuiPlaybackStatus.radioStatus == RADIO_STATUS_ERROR) {
@@ -6479,6 +6487,7 @@ static void StartPlayback(HelixAmp3Gui *gui)
 	gGuiPlayer.argv = gGuiArgs.argv;
 	gGuiPlayer.stopRequested = 0;
 	gPlaybackInterrupted = 0;
+	gGuiFirstUiProgressLogged = 0;
 	gDonePort = gui->donePort;
 	gDoneRunId = 0;
 
@@ -7058,7 +7067,15 @@ static void GuiPoll(HelixAmp3Gui *gui)
 	}
 }
 
-int main(int argc, char **argv)
+static struct StackSwapStruct gGuiNewStack;
+static struct StackSwapStruct gGuiOldStack;
+static APTR gGuiAllocatedStack;
+static ULONG gGuiDetectedStackLower;
+static ULONG gGuiDetectedStackUpper;
+static ULONG gGuiDetectedStackSize;
+static ULONG gGuiEffectiveStackSize;
+
+static int GuiMainReal(int argc, char **argv)
 {
 	static HelixAmp3Gui gui;
 
@@ -7088,6 +7105,49 @@ int main(int argc, char **argv)
 	SaveGuiSettings(&gui);
 	GuiClose(&gui);
 	return 0;
+}
+
+int main(int argc, char **argv)
+{
+	struct Task *task = FindTask(NULL);
+	int rc;
+
+	gGuiDetectedStackLower = (ULONG)task->tc_SPLower;
+	gGuiDetectedStackUpper = (ULONG)task->tc_SPUpper;
+	gGuiDetectedStackSize = gGuiDetectedStackUpper - gGuiDetectedStackLower;
+	gGuiEffectiveStackSize = gGuiDetectedStackSize;
+
+	if (gGuiDetectedStackSize >= GUI_STARTUP_STACK_SIZE) {
+#if defined(DEBUG) || defined(RADIO_DEBUG)
+		printf("miniamp3: startup stack lower=%lu upper=%lu size=%lu, no swap needed\n",
+			gGuiDetectedStackLower, gGuiDetectedStackUpper, gGuiDetectedStackSize);
+#endif
+		return GuiMainReal(argc, argv);
+	}
+
+	gGuiAllocatedStack = AllocMem(GUI_STARTUP_STACK_SIZE, MEMF_PUBLIC);
+	if (!gGuiAllocatedStack)
+		return 1;
+
+	gGuiNewStack.stk_Lower = gGuiAllocatedStack;
+	gGuiNewStack.stk_Upper = (ULONG)((UBYTE *)gGuiAllocatedStack + GUI_STARTUP_STACK_SIZE);
+	gGuiNewStack.stk_Pointer = (APTR)gGuiNewStack.stk_Upper;
+	gGuiEffectiveStackSize = GUI_STARTUP_STACK_SIZE;
+
+	StackSwap(&gGuiNewStack);
+	gGuiOldStack = gGuiNewStack;
+
+#if defined(DEBUG) || defined(RADIO_DEBUG)
+	printf("miniamp3: startup stack lower=%lu upper=%lu size=%lu, swapped to %lu bytes\n",
+		gGuiDetectedStackLower, gGuiDetectedStackUpper, gGuiDetectedStackSize,
+		gGuiEffectiveStackSize);
+#endif
+	rc = GuiMainReal(argc, argv);
+
+	StackSwap(&gGuiOldStack);
+	FreeMem(gGuiAllocatedStack, GUI_STARTUP_STACK_SIZE);
+	gGuiAllocatedStack = NULL;
+	return rc;
 }
 
 #else
