@@ -44,6 +44,7 @@
 
 #include <exec/types.h>
 #include <exec/memory.h>
+#include <exec/tasks.h>
 #include <dos/dos.h>
 #include <dos/dostags.h>
 #include <devices/timer.h>
@@ -119,6 +120,7 @@
 #define MR_MAX_JPEG_DIM 1024
 #define MR_QUALITY_MIN   0
 #define MR_QUALITY_MAX   3
+#define MR_STARTUP_STACK_SIZE 262144UL
 
 /* Optional Radio Browser station-favicon artwork.  Disable by building with
  * -DENABLE_RADIO_ARTWORK=0; it never touches stream playback either way. */
@@ -5261,7 +5263,15 @@ static void SyncFromGadgets(MrApp *app)
 /* Main                                                                      */
 /* ------------------------------------------------------------------------- */
 
-int main(int argc, char **argv)
+static struct StackSwapStruct gMrNewStack;
+static struct StackSwapStruct gMrOldStack;
+static APTR gMrAllocatedStack;
+static ULONG gMrDetectedStackLower;
+static ULONG gMrDetectedStackUpper;
+static ULONG gMrDetectedStackSize;
+static ULONG gMrEffectiveStackSize;
+
+static int MrMainReal(int argc, char **argv)
 {
 	static MrApp app;
 	ULONG winSig = 0;
@@ -5478,6 +5488,50 @@ int main(int argc, char **argv)
 	Radio_CheckMiniMem("before app exit");
 	MiniMem_ReportLeaks();
 	return 0;
+}
+
+
+int main(int argc, char **argv)
+{
+	struct Task *task = FindTask(NULL);
+	int rc;
+
+	gMrDetectedStackLower = (ULONG)task->tc_SPLower;
+	gMrDetectedStackUpper = (ULONG)task->tc_SPUpper;
+	gMrDetectedStackSize = gMrDetectedStackUpper - gMrDetectedStackLower;
+	gMrEffectiveStackSize = gMrDetectedStackSize;
+
+	if (gMrDetectedStackSize >= MR_STARTUP_STACK_SIZE) {
+#if defined(DEBUG) || defined(RADIO_DEBUG)
+		printf("minimp3r: startup stack lower=%lu upper=%lu size=%lu, no swap needed\n",
+			gMrDetectedStackLower, gMrDetectedStackUpper, gMrDetectedStackSize);
+#endif
+		return MrMainReal(argc, argv);
+	}
+
+	gMrAllocatedStack = AllocMem(MR_STARTUP_STACK_SIZE, MEMF_PUBLIC);
+	if (!gMrAllocatedStack)
+		return 1;
+
+	gMrNewStack.stk_Lower = gMrAllocatedStack;
+	gMrNewStack.stk_Upper = (ULONG)((UBYTE *)gMrAllocatedStack + MR_STARTUP_STACK_SIZE);
+	gMrNewStack.stk_Pointer = (APTR)gMrNewStack.stk_Upper;
+	gMrEffectiveStackSize = MR_STARTUP_STACK_SIZE;
+
+	StackSwap(&gMrNewStack);
+	gMrOldStack = gMrNewStack;
+
+#if defined(DEBUG) || defined(RADIO_DEBUG)
+	printf("minimp3r: startup stack lower=%lu upper=%lu size=%lu, swapped to %lu bytes\n",
+		gMrDetectedStackLower, gMrDetectedStackUpper, gMrDetectedStackSize,
+		gMrEffectiveStackSize);
+#endif
+	rc = MrMainReal(argc, argv);
+
+	StackSwap(&gMrOldStack);
+	FreeMem(gMrAllocatedStack, MR_STARTUP_STACK_SIZE);
+	gMrAllocatedStack = NULL;
+	return rc;
 }
 
 #else	/* !AMIGA_M68K */

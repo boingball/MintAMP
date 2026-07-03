@@ -72,8 +72,8 @@ the decoder falls back to the existing `AMIGA_FAST_POLYPHASE` C path instead of
 failing at link time.  Without the runtime argument, the older experimental
 polyphase remains in use so target profiling can compare both variants.
 
-The command-line decoder embeds an AmigaOS `$STACK:250000` cookie, requesting a
-minimum 250,000-byte stack without requiring users to run the `Stack` command
+The command-line decoder embeds an AmigaOS `$STACK:262144` cookie, requesting a
+minimum 262,144-byte stack without requiring users to run the `Stack` command
 first.
 
 For a native smoke build on a non-Amiga host, use a portable backend define such

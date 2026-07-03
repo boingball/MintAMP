@@ -140,8 +140,8 @@ static void RadioDebugUnsuppressedPrintf(const char *fmt, ...)
 #define fwrite MiniAmp3Fwrite
 
 #if defined(AMIGA_M68K)
-/* Tell AmigaOS to provide at least 250 KB of stack for this executable. */
-static const char amigaStackCookie[] __attribute__((used)) = "$STACK:250000";
+/* Tell AmigaOS to provide at least 256 KB of stack for this executable. */
+static const char amigaStackCookie[] __attribute__((used)) = "$STACK:262144";
 #endif
 
 void STATNAME(FDCT32)(int *x, int *d, int offset, int oddBlock, int gb);
