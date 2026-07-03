@@ -3722,22 +3722,22 @@ static void DrawArtPanel(MrApp *app)
 	/* Recessed frame drawn without GadTools so the panel remains visible even
 	 * before any artwork has decoded. */
 	{
-		int shinePen = 1, shadowPen = 2, backPen = 0;
+		int frameShinePen = 1, frameShadowPen = 2, frameBackPen = 0;
 		struct DrawInfo *dri = GetScreenDrawInfo(app->win->WScreen);
 		if (dri) {
-			shinePen = dri->dri_Pens[SHINEPEN];
-			shadowPen = dri->dri_Pens[SHADOWPEN];
-			backPen = dri->dri_Pens[BACKGROUNDPEN];
+			frameShinePen = dri->dri_Pens[SHINEPEN];
+			frameShadowPen = dri->dri_Pens[SHADOWPEN];
+			frameBackPen = dri->dri_Pens[BACKGROUNDPEN];
 			FreeScreenDrawInfo(app->win->WScreen, dri);
 		}
-		SetAPen(rp, (UWORD)backPen);
+		SetAPen(rp, (UWORD)frameBackPen);
 		RectFill(rp, ox - 2, oy - 2, ox + w + 1, oy + h + 1);
-		SetAPen(rp, (UWORD)shadowPen);
+		SetAPen(rp, (UWORD)frameShadowPen);
 		Move(rp, ox - 2, oy - 2);
 		Draw(rp, ox + w + 1, oy - 2);
 		Move(rp, ox - 2, oy - 2);
 		Draw(rp, ox - 2, oy + h + 1);
-		SetAPen(rp, (UWORD)shinePen);
+		SetAPen(rp, (UWORD)frameShinePen);
 		Move(rp, ox - 1, oy + h + 1);
 		Draw(rp, ox + w + 1, oy + h + 1);
 		Move(rp, ox + w + 1, oy - 1);
