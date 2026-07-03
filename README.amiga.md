@@ -205,8 +205,12 @@ used by Shell playback, signal the child,
 and the audio wait path can abort/reap outstanding writes so the GUI remains
 responsive. During local-file playback the status bar keeps change-only
 playback text visible instead of redrawing generic `Playing` on each timer tick.
-For Internet radio streams, the ReAction GUI shows a stable `Streaming` status
-while audio is flowing and only changes it for connection, dropped-stream
+The GadTools Internet Radio dialog now exposes the same practical Radio Browser
+controls as the ReAction version: name/codec/country search, preset country
+codes, HTTP/HTTPS/all URL filtering, 10/25/50/100 result limits, maximum bitrate
+filtering, favourites, playable-result selection, and Up/Down selection buttons.
+For Internet radio streams, both GUI frontends show a stable `Streaming` status
+while audio is flowing and only change it for connection, dropped-stream
 reconnect, stop, or error states. The GUI file-info row reports the first MPEG frame channel mode
 as `mono`, `stereo`, `joint-stereo`, or `M/S` when the Layer III joint-stereo
 mode-extension bit marks mid/side stereo. Artwork greyscale conversion uses a

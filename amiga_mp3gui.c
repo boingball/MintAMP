@@ -322,16 +322,19 @@ enum {
 #define RB_GID_SEARCH_TEXT   300
 #define RB_GID_CODEC         301
 #define RB_GID_COUNTRY       302
-#define RB_GID_SHOW_HTTPS    303
-#define RB_GID_LIMIT         304
-#define RB_GID_BITRATE       305
-#define RB_GID_RADIO_RESULTS 306
-#define RB_GID_SEARCH        307
-#define RB_GID_PROBE         308
-#define RB_GID_ADD_FAV       309
-#define RB_GID_FAVOURITES    310
-#define RB_GID_CLOSE         311
-#define RB_GID_STATUS        312
+#define RB_GID_COUNTRY_CODE 303
+#define RB_GID_SCHEME       304
+#define RB_GID_LIMIT        305
+#define RB_GID_BITRATE      306
+#define RB_GID_RADIO_RESULTS 307
+#define RB_GID_SEARCH       308
+#define RB_GID_PROBE        309
+#define RB_GID_ADD_FAV      310
+#define RB_GID_FAVOURITES   311
+#define RB_GID_UP           312
+#define RB_GID_DOWN         313
+#define RB_GID_CLOSE        314
+#define RB_GID_STATUS       315
 
 /* Playlist window gadget IDs (separate range to avoid main window conflicts) */
 #define PL_GID_LIST      200
@@ -450,6 +453,8 @@ typedef struct HelixAmp3Gui {
 	int             rbVisibleToController[RB_CONTROLLER_MAX_STATIONS];
 	int             rbVisibleCount;
 	int             rbShowHttps;
+	int             rbSchemeMode;
+	int             rbCountryMode;
 	int             rbShowingFavourites;
 	int             rbFavouriteCount;
 	int             rbSelectedFavourite;
@@ -4660,10 +4665,35 @@ static void GuiDisableFastMemIfTooSmall(HelixAmp3Gui *gui)
 	}
 }
 
-static const int kRadioSearchLimits[] = { 10, 25, 50 };
-static STRPTR kRadioSearchLimitLabels[] = { (STRPTR)"10", (STRPTR)"25", (STRPTR)"50", NULL };
+static const int kRadioSearchLimits[] = { 10, 25, 50, 100 };
+static STRPTR kRadioSearchLimitLabels[] = { (STRPTR)"10", (STRPTR)"25", (STRPTR)"50", (STRPTR)"100", NULL };
+#define GT_RADIO_SEARCH_LIMIT_COUNT ((int)(sizeof(kRadioSearchLimits) / sizeof(kRadioSearchLimits[0])))
 static const int kRadioBitrateMax[] = { -1, 56, 64, 96, 128 };
 static STRPTR kRadioBitrateLabels[] = { (STRPTR)"Any", (STRPTR)"<=56", (STRPTR)"<=64", (STRPTR)"<=96", (STRPTR)"<=128", NULL };
+static STRPTR kRadioSchemeLabels[] = { (STRPTR)"HTTP", (STRPTR)"HTTPS", (STRPTR)"All", NULL };
+static STRPTR kRadioCountryLabels[] = { (STRPTR)"All", (STRPTR)"GB", (STRPTR)"US", (STRPTR)"FR", (STRPTR)"ZA", (STRPTR)"DE", (STRPTR)"NL", NULL };
+
+static const char *RadioCountryFromIndex(int idx)
+{
+	switch (idx) {
+	case 1: return "GB";
+	case 2: return "US";
+	case 3: return "FR";
+	case 4: return "ZA";
+	case 5: return "DE";
+	case 6: return "NL";
+	default: return "";
+	}
+}
+
+static int RadioCountryToIndex(const char *countrycode)
+{
+	int i;
+	if (!countrycode || !countrycode[0]) return 0;
+	for (i = 1; kRadioCountryLabels[i]; i++)
+		if (!strcmp(countrycode, (const char *)kRadioCountryLabels[i])) return i;
+	return 0;
+}
 
 static const char *RadioBitrateFilterLabel(int max_bitrate)
 {
@@ -4708,24 +4738,44 @@ static void RadioSetStatus(HelixAmp3Gui *app, const char *text)
 			GTST_String, (ULONG)app->rbStatusText, TAG_DONE);
 }
 
-static int RadioIsHttpStation(const RadioBrowserStation *st)
+static int RadioStationMatchesScheme(HelixAmp3Gui *app, const RadioBrowserStation *st)
 {
 	const char *url = rb_station_play_url(st);
+	int isHttp, isHttps;
 	if (!url) return 0;
-	if (strncmp(url, "http://", 7) == 0) return 1;
+	isHttp = strncmp(url, "http://", 7) == 0;
+	isHttps = strncmp(url, "https://", 8) == 0;
+	if (app && app->rbSchemeMode == 1) {
 #if defined(HAVE_AMISSL)
-	if (strncmp(url, "https://", 8) == 0) return 1;
+		return isHttps;
+#else
+		return 0;
 #endif
-	return 0;
+	}
+	if (app && app->rbSchemeMode == 2) {
+#if defined(HAVE_AMISSL)
+		return isHttp || isHttps;
+#else
+		return isHttp;
+#endif
+	}
+	return isHttp;
 }
 
 static void RadioRefreshResults(HelixAmp3Gui *app)
 {
 	int i, row;
+	int selectedRow = -1;
+	int wantedController = -1;
+	int wantedFavourite = -1;
 	char display[RB_MAX_NAME];
 	const RadioBrowserStation *st;
 	const char *url;
 	const char *reason;
+	if (app->rbShowingFavourites)
+		wantedFavourite = app->rbSelectedFavourite;
+	else
+		wantedController = app->rbController.selected_index;
 	if (app->rbWin && app->rbGadList)
 		GT_SetGadgetAttrs(app->rbGadList, app->rbWin, NULL,
 			GTLV_Labels, (ULONG)~0,
@@ -4739,6 +4789,7 @@ static void RadioRefreshResults(HelixAmp3Gui *app)
 			if (!app->rbFavouriteNames[i][0] || !app->rbFavouriteUrls[i][0]) continue;
 			row = app->rbVisibleCount++;
 			app->rbVisibleToController[row] = i;
+			if (i == wantedFavourite) selectedRow = row;
 			sprintf(app->rbNames[row], "%.48s | favourite", app->rbFavouriteNames[i]);
 			memset(&app->rbNodes[row], 0, sizeof(app->rbNodes[row]));
 			app->rbNodes[row].ln_Name = app->rbNames[row];
@@ -4752,7 +4803,10 @@ static void RadioRefreshResults(HelixAmp3Gui *app)
 			if (!st) continue;
 			url = rb_station_play_url(st);
 			reason = "show";
-			if (!app->rbShowHttps && !RadioIsHttpStation(st)) { reason = "hidden_https"; }
+			if (!RadioStationMatchesScheme(app, st)) { reason = "hidden_scheme"; }
+			else if (st->hls) { reason = "hidden_hls"; }
+			else if (st->lastcheckok == 0) { reason = "hidden_offline"; }
+			else if (st->ssl_error != 0) { reason = "hidden_ssl_error"; }
 			else if (app->rbController.max_bitrate > 0 && st->bitrate == 0) { reason = "hidden_bitrate_unknown"; }
 			else if (app->rbController.max_bitrate > 0 && st->bitrate > app->rbController.max_bitrate) { reason = "hidden_bitrate"; }
 #ifdef MINIAMP3_DEBUG
@@ -4763,6 +4817,7 @@ static void RadioRefreshResults(HelixAmp3Gui *app)
 			if (reason[0] != 's') continue;
 			row = app->rbVisibleCount++;
 			app->rbVisibleToController[row] = i;
+			if (i == wantedController) selectedRow = row;
 			rb_station_display_name(st, display, (int)sizeof(display));
 			sprintf(app->rbNames[row], "%.48s | %s | %d | %s",
 				display, st->codec, st->bitrate, st->countrycode);
@@ -4773,11 +4828,25 @@ static void RadioRefreshResults(HelixAmp3Gui *app)
 			AddTail(&app->rbList, &app->rbNodes[row]);
 		}
 	}
-	app->rbController.selected_index = -1;
+	if (app->rbVisibleCount <= 0) {
+		app->rbController.selected_index = -1;
+		app->rbSelectedFavourite = -1;
+		selectedRow = -1;
+	} else if (selectedRow < 0) {
+		selectedRow = 0;
+		if (app->rbShowingFavourites)
+			app->rbSelectedFavourite = app->rbVisibleToController[0];
+		else
+			rb_controller_set_selected(&app->rbController, app->rbVisibleToController[0]);
+	} else if (app->rbShowingFavourites) {
+		app->rbSelectedFavourite = app->rbVisibleToController[selectedRow];
+	} else {
+		rb_controller_set_selected(&app->rbController, app->rbVisibleToController[selectedRow]);
+	}
 	if (app->rbWin && app->rbGadList)
 		GT_SetGadgetAttrs(app->rbGadList, app->rbWin, NULL,
 			GTLV_Labels, (ULONG)&app->rbList,
-			GTLV_Selected, (ULONG)~0,
+			GTLV_Selected, selectedRow >= 0 ? (ULONG)selectedRow : (ULONG)~0,
 			TAG_DONE);
 }
 
@@ -4796,6 +4865,8 @@ static void RadioDoSearch(HelixAmp3Gui *app)
 	struct Gadget *nameGad = FindRadioGadget(app, RB_GID_SEARCH_TEXT);
 	struct Gadget *codecGad = FindRadioGadget(app, RB_GID_CODEC);
 	struct Gadget *countryGad = FindRadioGadget(app, RB_GID_COUNTRY);
+	struct Gadget *countryCodeGad = FindRadioGadget(app, RB_GID_COUNTRY_CODE);
+	struct Gadget *schemeGad = FindRadioGadget(app, RB_GID_SCHEME);
 	struct Gadget *limitGad = FindRadioGadget(app, RB_GID_LIMIT);
 	struct Gadget *bitrateGad = FindRadioGadget(app, RB_GID_BITRATE);
 	STRPTR text;
@@ -4813,10 +4884,21 @@ static void RadioDoSearch(HelixAmp3Gui *app)
 	text = NULL;
 	GT_GetGadgetAttrs(countryGad, app->rbWin, NULL, GTST_String, (ULONG)(void *)&text, TAG_DONE);
 	SafeCopy(app->rbController.countrycode, sizeof(app->rbController.countrycode), text ? (const char *)text : "");
+	v = 0;
+	if (countryCodeGad)
+		GT_GetGadgetAttrs(countryCodeGad, app->rbWin, NULL, GTCY_Active, (ULONG)&v, TAG_DONE);
+	app->rbCountryMode = ClampInt((int)v, 0, 6);
+	if (app->rbCountryMode > 0)
+		SafeCopy(app->rbController.countrycode, sizeof(app->rbController.countrycode), RadioCountryFromIndex(app->rbCountryMode));
+	v = 0;
+	if (schemeGad)
+		GT_GetGadgetAttrs(schemeGad, app->rbWin, NULL, GTCY_Active, (ULONG)&v, TAG_DONE);
+	app->rbSchemeMode = ClampInt((int)v, 0, 2);
+	app->rbShowHttps = (app->rbSchemeMode != 0);
 	v = 1;
 	if (limitGad)
 		GT_GetGadgetAttrs(limitGad, app->rbWin, NULL, GTCY_Active, (ULONG)&v, TAG_DONE);
-	app->rbController.limit = kRadioSearchLimits[ClampInt((int)v, 0, 2)];
+	app->rbController.limit = kRadioSearchLimits[ClampInt((int)v, 0, GT_RADIO_SEARCH_LIMIT_COUNT - 1)];
 	v = 0;
 	if (bitrateGad)
 		GT_GetGadgetAttrs(bitrateGad, app->rbWin, NULL, GTCY_Active, (ULONG)&v, TAG_DONE);
@@ -4841,8 +4923,10 @@ static void RadioDoSearch(HelixAmp3Gui *app)
 		int hidden = app->rbController.raw_station_count - app->rbVisibleCount;
 		if (app->rbVisibleCount == 0 && app->rbController.raw_station_count == 0)
 			sprintf(msg, "No stations found");
+		else if (app->rbVisibleCount == 0 && app->rbController.raw_station_count > 0)
+			sprintf(msg, "No stations found after filters");
 		else
-			sprintf(msg, "Found %d stations, showing %d HTTP playable (%d hidden)",
+			sprintf(msg, "Found %d stations, showing %d playable (%d hidden)",
 				app->rbController.raw_station_count, app->rbVisibleCount, hidden < 0 ? 0 : hidden);
 		RadioSetStatus(app, msg);
 	}
@@ -4900,6 +4984,33 @@ static void RadioSelectResult(HelixAmp3Gui *app, ULONG eventSelected)
 #endif
 	sprintf(msg, "Selected: %.120s", display);
 	RadioSetStatus(app, msg);
+}
+
+static int RadioCurrentSelectedRow(HelixAmp3Gui *app)
+{
+	int i, wanted;
+	if (!app || app->rbVisibleCount <= 0) return -1;
+	wanted = app->rbShowingFavourites ? app->rbSelectedFavourite : app->rbController.selected_index;
+	for (i = 0; i < app->rbVisibleCount; i++)
+		if (app->rbVisibleToController[i] == wanted)
+			return i;
+	return -1;
+}
+
+static void RadioMoveSelection(HelixAmp3Gui *app, int delta)
+{
+	int row;
+	if (!app || !app->rbWin || !app->rbGadList) return;
+	if (app->rbVisibleCount <= 0) {
+		RadioSetStatus(app, "No stations to select.");
+		return;
+	}
+	row = RadioCurrentSelectedRow(app);
+	if (row < 0) row = 0;
+	else row += delta;
+	if (row < 0) row = 0;
+	if (row >= app->rbVisibleCount) row = app->rbVisibleCount - 1;
+	RadioSelectResult(app, (ULONG)row);
 }
 
 static void RadioAddFavourite(HelixAmp3Gui *app)
@@ -5077,6 +5188,8 @@ static void OpenRadioWindow(HelixAmp3Gui *app)
 	if (app->rbWin || !app->win || !GadToolsBase) return;
 	rb_controller_init(&app->rbController);
 	app->rbShowHttps = FALSE;
+	app->rbSchemeMode = 0;
+	app->rbCountryMode = RadioCountryToIndex(app->rbController.countrycode);
 	app->rbShowingFavourites = FALSE;
 	app->rbSelectedFavourite = -1;
 	app->rbVisibleCount = 0;
@@ -5097,15 +5210,17 @@ static void OpenRadioWindow(HelixAmp3Gui *app)
 	ng.ng_GadgetID = RB_GID_SEARCH_TEXT; gad = CreateGadget(STRING_KIND, gad, &ng, GTST_MaxChars, RB_MAX_NAME, TAG_DONE); if (!gad) goto fail;
 	ng.ng_LeftEdge = 390; ng.ng_TopEdge = 24; ng.ng_Width = 90; ng.ng_GadgetText = (UBYTE *)"Codec"; ng.ng_GadgetID = RB_GID_CODEC;
 	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)codecs, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 88; ng.ng_TopEdge = 52; ng.ng_Width = 220; ng.ng_GadgetText = (UBYTE *)"Country";
+	ng.ng_LeftEdge = 88; ng.ng_TopEdge = 52; ng.ng_Width = 150; ng.ng_GadgetText = (UBYTE *)"Country";
 	ng.ng_GadgetID = RB_GID_COUNTRY; gad = CreateGadget(STRING_KIND, gad, &ng, GTST_MaxChars, RB_MAX_COUNTRY, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 340; ng.ng_TopEdge = 52; ng.ng_Width = 140; ng.ng_GadgetText = (UBYTE *)"Show HTTPS stations"; ng.ng_GadgetID = RB_GID_SHOW_HTTPS; ng.ng_Flags = PLACETEXT_RIGHT;
-	gad = CreateGadget(CHECKBOX_KIND, gad, &ng, GTCB_Checked, FALSE, GA_RelVerify, TRUE, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 304; ng.ng_TopEdge = 52; ng.ng_Width = 70; ng.ng_GadgetText = (UBYTE *)"Code"; ng.ng_GadgetID = RB_GID_COUNTRY_CODE; ng.ng_Flags = PLACETEXT_LEFT;
+	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)kRadioCountryLabels, GTCY_Active, app->rbCountryMode, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 430; ng.ng_TopEdge = 52; ng.ng_Width = 55; ng.ng_GadgetText = (UBYTE *)"URL"; ng.ng_GadgetID = RB_GID_SCHEME; ng.ng_Flags = PLACETEXT_LEFT;
+	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)kRadioSchemeLabels, GTCY_Active, app->rbSchemeMode, TAG_DONE); if (!gad) goto fail;
 	ng.ng_LeftEdge = 88; ng.ng_TopEdge = 80; ng.ng_Width = 90; ng.ng_GadgetText = (UBYTE *)"Limit"; ng.ng_GadgetID = RB_GID_LIMIT; ng.ng_Flags = PLACETEXT_LEFT;
 	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)kRadioSearchLimitLabels, GTCY_Active, 1, TAG_DONE); if (!gad) goto fail;
 	ng.ng_LeftEdge = 288; ng.ng_TopEdge = 80; ng.ng_Width = 90; ng.ng_GadgetText = (UBYTE *)"Max kbps"; ng.ng_GadgetID = RB_GID_BITRATE; ng.ng_Flags = PLACETEXT_LEFT;
 	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)kRadioBitrateLabels, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 8; ng.ng_TopEdge = 110; ng.ng_Width = 472; ng.ng_Height = 116; ng.ng_GadgetText = NULL; ng.ng_GadgetID = RB_GID_RADIO_RESULTS; ng.ng_Flags = 0;
+	ng.ng_LeftEdge = 8; ng.ng_TopEdge = 110; ng.ng_Width = 524; ng.ng_Height = 116; ng.ng_GadgetText = NULL; ng.ng_GadgetID = RB_GID_RADIO_RESULTS; ng.ng_Flags = 0;
 	app->rbGadList = gad = CreateGadget(LISTVIEW_KIND, gad, &ng,
 		GTLV_Labels, (ULONG)&app->rbList,
 		GTLV_Selected, (ULONG)~0,
@@ -5115,16 +5230,18 @@ static void OpenRadioWindow(HelixAmp3Gui *app)
 	ng.ng_LeftEdge = 100; ng.ng_GadgetText = (UBYTE *)"Play"; ng.ng_GadgetID = RB_GID_PROBE; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
 	ng.ng_LeftEdge = 192; ng.ng_GadgetText = (UBYTE *)"Add Fav"; ng.ng_GadgetID = RB_GID_ADD_FAV; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
 	ng.ng_LeftEdge = 284; ng.ng_GadgetText = (UBYTE *)"Favourites"; ng.ng_GadgetID = RB_GID_FAVOURITES; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 376; ng.ng_GadgetText = (UBYTE *)"Close"; ng.ng_GadgetID = RB_GID_CLOSE; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 8; ng.ng_TopEdge = 264; ng.ng_Width = 472; ng.ng_GadgetText = NULL; ng.ng_GadgetID = RB_GID_STATUS; ng.ng_Flags = 0;
+	ng.ng_LeftEdge = 376; ng.ng_Width = 40; ng.ng_GadgetText = (UBYTE *)"Up"; ng.ng_GadgetID = RB_GID_UP; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 420; ng.ng_GadgetText = (UBYTE *)"Down"; ng.ng_GadgetID = RB_GID_DOWN; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 464; ng.ng_GadgetText = (UBYTE *)"Close"; ng.ng_GadgetID = RB_GID_CLOSE; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 8; ng.ng_TopEdge = 264; ng.ng_Width = 524; ng.ng_GadgetText = NULL; ng.ng_GadgetID = RB_GID_STATUS; ng.ng_Flags = 0;
 	gad = CreateGadget(STRING_KIND, gad, &ng, GTST_String, (ULONG)"Ready.", GTST_MaxChars, 512, TAG_DONE); if (!gad) goto fail;
 	memset(&nw, 0, sizeof(nw));
 	nw.LeftEdge = app->win->LeftEdge + 30; nw.TopEdge = app->win->TopEdge + 30;
-	nw.Width = 496; nw.Height = 306;
+	nw.Width = 548; nw.Height = 306;
 	nw.IDCMPFlags = IDCMP_GADGETUP | IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW | IDCMP_VANILLAKEY;
 	nw.Flags = WFLG_CLOSEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET | WFLG_SMART_REFRESH;
 	nw.Title = (UBYTE *)"Internet Radio";
-	nw.MinWidth = nw.MaxWidth = 496; nw.MinHeight = nw.MaxHeight = 306;
+	nw.MinWidth = nw.MaxWidth = 548; nw.MinHeight = nw.MaxHeight = 306;
 	nw.Type = WBENCHSCREEN;
 	app->rbWin = OpenWindowTags(&nw, TAG_DONE);
 	if (!app->rbWin) goto fail;
@@ -5167,10 +5284,21 @@ static void HandleRadioWindow(HelixAmp3Gui *app)
 				RadioAddFavourite(app);
 			else if (gid == RB_GID_FAVOURITES)
 				RadioToggleFavourites(app);
-			else if (gid == RB_GID_SHOW_HTTPS) {
-				app->rbShowHttps = app->rbShowHttps ? FALSE : TRUE;
-				GT_SetGadgetAttrs(gad, app->rbWin, NULL, GTCB_Checked, app->rbShowHttps, TAG_DONE);
+			else if (gid == RB_GID_UP)
+				RadioMoveSelection(app, -1);
+			else if (gid == RB_GID_DOWN)
+				RadioMoveSelection(app, 1);
+			else if (gid == RB_GID_SCHEME) {
+				app->rbSchemeMode = ClampInt((int)code, 0, 2);
+				app->rbShowHttps = (app->rbSchemeMode != 0);
 				RadioRefreshResults(app);
+			}
+			else if (gid == RB_GID_COUNTRY_CODE) {
+				struct Gadget *countryGad = FindRadioGadget(app, RB_GID_COUNTRY);
+				app->rbCountryMode = ClampInt((int)code, 0, 6);
+				if (countryGad)
+					GT_SetGadgetAttrs(countryGad, app->rbWin, NULL,
+						GTST_String, (ULONG)RadioCountryFromIndex(app->rbCountryMode), TAG_DONE);
 			}
 			else if (gid == RB_GID_CLOSE) {
 				CloseRadioWindow(app);
