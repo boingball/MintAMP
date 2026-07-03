@@ -129,10 +129,52 @@ static __inline unsigned int HuffmanLoadBE16_AMIGA_M68K_ASM(unsigned char **buf,
 #define HUFFMAN_LOADBE16_FAST(bufPtr, bitsLeft) LOADBE16(bufPtr)
 #endif
 
+#if HUFFMAN_PAIRS_HAS_AMIGA_M68K_ASM
+/* GetHLen/GetCWX/GetCWY pull 4-bit fields out of the 16-bit codeword using a
+ * generic shift+mask.  cw is passed in as a zero-extended unsigned int, so
+ * the codeword occupies bits 15:0 of the register and its three nibbles sit
+ * at bit-field offsets 16, 20, and 24 counted from the register MSB (offset
+ * 0).  A single bfextu replaces the shift+and pair GCC would otherwise emit
+ * at every codeword visited in the table walk.  Purely an arithmetic
+ * substitution: it changes no control flow and produces the identical value
+ * as the GetHLen/GetCWX/GetCWY macros for every possible cw, so it is wired
+ * in only on the runtime-selectable experimental path (useAsmRefill) to keep
+ * DecodeHuffmanPairs_C_REFERENCE as the untouched portable reference for
+ * --selftest-huffman.
+ */
+static __inline unsigned int GetHLen_AMIGA_M68K_ASM(unsigned int cw)
+{
+	unsigned int result;
+	__asm__ volatile ("bfextu %1{#16:#4},%0" : "=d" (result) : "d" (cw) : "cc");
+	return result;
+}
+static __inline unsigned int GetCWY_AMIGA_M68K_ASM(unsigned int cw)
+{
+	unsigned int result;
+	__asm__ volatile ("bfextu %1{#20:#4},%0" : "=d" (result) : "d" (cw) : "cc");
+	return result;
+}
+static __inline unsigned int GetCWX_AMIGA_M68K_ASM(unsigned int cw)
+{
+	unsigned int result;
+	__asm__ volatile ("bfextu %1{#24:#4},%0" : "=d" (result) : "d" (cw) : "cc");
+	return result;
+}
+#define HUFF_GET_HLEN(cw, useAsm) ((useAsm) ? (int)GetHLen_AMIGA_M68K_ASM((unsigned int)(cw)) : GetHLen(cw))
+#define HUFF_GET_CWX(cw, useAsm)  ((useAsm) ? (int)GetCWX_AMIGA_M68K_ASM((unsigned int)(cw))  : GetCWX(cw))
+#define HUFF_GET_CWY(cw, useAsm)  ((useAsm) ? (int)GetCWY_AMIGA_M68K_ASM((unsigned int)(cw))  : GetCWY(cw))
+#define HUFFMAN_PAIRS_FAST_NOTE_FIELDS " + m68k bfextu codeword field extract"
+#else
+#define HUFF_GET_HLEN(cw, useAsm) GetHLen(cw)
+#define HUFF_GET_CWX(cw, useAsm)  GetCWX(cw)
+#define HUFF_GET_CWY(cw, useAsm)  GetCWY(cw)
+#define HUFFMAN_PAIRS_FAST_NOTE_FIELDS ""
+#endif
+
 #if HUFFMAN_PAIRS_HAS_AMIGA_M68K_ASM && MULSHIFT32_HAS_AMIGA_M68K_ASM
-#define HUFFMAN_PAIRS_FAST_NOTE "m68k inline move.l pair/quad refill + m68k MULSHIFT32 available"
+#define HUFFMAN_PAIRS_FAST_NOTE "m68k inline move.l pair/quad refill + m68k MULSHIFT32 available" HUFFMAN_PAIRS_FAST_NOTE_FIELDS
 #elif HUFFMAN_PAIRS_HAS_AMIGA_M68K_ASM
-#define HUFFMAN_PAIRS_FAST_NOTE "m68k inline move.l pair/quad refill available"
+#define HUFFMAN_PAIRS_FAST_NOTE "m68k inline move.l pair/quad refill available" HUFFMAN_PAIRS_FAST_NOTE_FIELDS
 #else
 #define HUFFMAN_PAIRS_FAST_NOTE "no (C reference path only in this build)"
 #endif
@@ -227,12 +269,12 @@ static int DecodeHuffmanPairs_Impl(int *xy, int nVals, int tabIdx, int bitsLeft,
 			/* largest maxBits = 9, plus 2 for sign bits, so make sure cache has at least 11 bits */
 			while (nVals > 0 && cachedBits >= 11 ) {
 				cw = tBase[cache >> (32 - maxBits)];
-				len = GetHLen(cw);
+				len = HUFF_GET_HLEN(cw, useAsmRefill);
 				cachedBits -= len;
 				cache <<= len;
 
-				x = GetCWX(cw);		if (x)	{ApplySign(x, cache); cache <<= 1; cachedBits--;}
-				y = GetCWY(cw);		if (y)	{ApplySign(y, cache); cache <<= 1; cachedBits--;}
+				x = HUFF_GET_CWX(cw, useAsmRefill);	if (x)	{ApplySign(x, cache); cache <<= 1; cachedBits--;}
+				y = HUFF_GET_CWY(cw, useAsmRefill);	if (y)	{ApplySign(y, cache); cache <<= 1; cachedBits--;}
 
 				/* ran out of real bits - clamp to padded zero bits rather than
 				 * reporting a bad Huffman stream. Some valid encoders leave the
@@ -291,7 +333,7 @@ static int DecodeHuffmanPairs_Impl(int *xy, int nVals, int tabIdx, int bitsLeft,
 
 			while (nVals > 0 && cachedBits >= 11) {
 				cw = tCurr[(cache >> (32 - curMaxBits)) + 1];
-				len = GetHLen(cw);
+				len = HUFF_GET_HLEN(cw, useAsmRefill);
 				if (!len) {
 					cachedBits -= curMaxBits;
 					cache <<= curMaxBits;
@@ -302,8 +344,8 @@ static int DecodeHuffmanPairs_Impl(int *xy, int nVals, int tabIdx, int bitsLeft,
 				cachedBits -= len;
 				cache <<= len;
 
-				x = GetCWX(cw);		if (x)	{ApplySign(x, cache); cache <<= 1; cachedBits--;}
-				y = GetCWY(cw);		if (y)	{ApplySign(y, cache); cache <<= 1; cachedBits--;}
+				x = HUFF_GET_CWX(cw, useAsmRefill);	if (x)	{ApplySign(x, cache); cache <<= 1; cachedBits--;}
+				y = HUFF_GET_CWY(cw, useAsmRefill);	if (y)	{ApplySign(y, cache); cache <<= 1; cachedBits--;}
 
 				/* See oneShot case: do not turn a zero-padded tail into
 				 * ERR_MP3_INVALID_HUFFCODES.
@@ -354,7 +396,7 @@ static int DecodeHuffmanPairs_Impl(int *xy, int nVals, int tabIdx, int bitsLeft,
 			/* largest maxBits = 9, plus 2 for sign bits, so make sure cache has at least 11 bits */
 			while (nVals > 0 && cachedBits >= 11 ) {
 				cw = tCurr[(cache >> (32 - curMaxBits)) + 1];
-				len = GetHLen(cw);
+				len = HUFF_GET_HLEN(cw, useAsmRefill);
 				if (!len) {
 					cachedBits -= curMaxBits;
 					cache <<= curMaxBits;
@@ -364,9 +406,9 @@ static int DecodeHuffmanPairs_Impl(int *xy, int nVals, int tabIdx, int bitsLeft,
 				}
 				cachedBits -= len;
 				cache <<= len;
-			
-				x = GetCWX(cw);
-				y = GetCWY(cw);
+
+				x = HUFF_GET_CWX(cw, useAsmRefill);
+				y = HUFF_GET_CWY(cw, useAsmRefill);
 
 				if (x == 15) {
 					minBits = linBits + 1 + (y ? 1 : 0);

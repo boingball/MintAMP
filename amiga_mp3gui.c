@@ -267,6 +267,18 @@ static char gSupportedExtPattern[512];
 #define MINIAMP3_ART_COMPARE_JPEG 0
 #endif
 
+/* Radio Browser station-favicon artwork, ported from minimp3r's
+ * ReAction frontend.  JPEG and ICO favicons are decoded (dispatched on
+ * magic bytes, never URL extension or Content-Type); PNG is intentionally
+ * not supported here since GadTools does not link lodepng (see
+ * Makefile.amiga) and this frontend targets lower-spec/lower-memory
+ * systems than minimp3r.  Disable entirely with -DENABLE_RADIO_ARTWORK=0.
+ * Never touches the MP3/ICY stream either way. */
+#ifndef ENABLE_RADIO_ARTWORK
+#define ENABLE_RADIO_ARTWORK 1
+#endif
+#define HELIXAMP3_FAVICON_MAX_BYTES (256L * 1024L)
+
 #define MENUNUM_PROJECT   0
 #define MENUNUM_PLAYBACK  1
 #define ITEMNUM_ABOUT     0
@@ -463,6 +475,7 @@ typedef struct HelixAmp3Gui {
 	char            rbFavouriteUrls[HELIXAMP3_RADIO_FAV_MAX][RB_MAX_URL];
 	char            rbStatusText[128];
 	char            currentRadioStationName[RB_MAX_NAME];
+	char            currentRadioFavicon[RB_MAX_FAVICON];
 	struct VisualInfo *rbVisualInfo;
 	RadioBrowserController rbController;
 	struct Menu *menuStrip;
@@ -2588,16 +2601,24 @@ static void PumpArtDecode(HelixAmp3Gui *gui)
 
 static void ArtworkCacheName(HelixAmp3Gui *gui, char *dst, size_t dstSize)
 {
-	const char *base;
+	const char *source, *base, *end;
 	char safe[80];
 	int i;
 	int j;
 
 	EnvName(dst, dstSize, "ArtCache");
-	base = gui->inputName + strlen(gui->inputName);
-	while (base > gui->inputName && base[-1] != '/' && base[-1] != ':')
+	/* Radio input has no local path to key the cache off of; key it by the
+	 * station favicon URL instead so the fetch is skipped on the next visit
+	 * to the same station, matching minimp3r's ArtworkCacheName(). */
+	source = (is_url_path(gui->inputName) && gui->currentRadioFavicon[0]) ?
+		gui->currentRadioFavicon : gui->inputName;
+	end = strchr(source, '?');
+	if (!end)
+		end = source + strlen(source);
+	base = end;
+	while (base > source && base[-1] != '/' && base[-1] != ':')
 		base--;
-	for (i = 0, j = 0; base[i] && j < (int)sizeof(safe) - 1; i++) {
+	for (i = 0, j = 0; base + i < end && base[i] && j < (int)sizeof(safe) - 1; i++) {
 		unsigned char c = (unsigned char)base[i];
 		if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
 			(c >= '0' && c <= '9'))
@@ -2619,8 +2640,7 @@ static int LoadArtworkCache(HelixAmp3Gui *gui)
 	FILE *f;
 	unsigned char hdr[8];
 
-	if (!gui->artCacheEnabled || gui->artCacheBypass || !gui->inputName[0] ||
-		is_url_path(gui->inputName))
+	if (!gui->artCacheEnabled || gui->artCacheBypass || !gui->inputName[0])
 		return 0;
 	ArtworkCacheName(gui, path, sizeof(path));
 	GuiLogPathOp("LoadArtworkCache/fopen", path);
@@ -2660,8 +2680,7 @@ static void SaveArtworkCache(HelixAmp3Gui *gui)
 	FILE *f;
 	static const unsigned char hdr[8] = { 'M','3','A','G','6','4','\0', 2 };
 
-	if (!gui->artCacheEnabled || !gui->inputName[0] || !gui->artValid ||
-		is_url_path(gui->inputName))
+	if (!gui->artCacheEnabled || !gui->inputName[0] || !gui->artValid)
 		return;
 	EnvName(dir, sizeof(dir), "ArtCache");
 	CreateDir((STRPTR)dir);
@@ -2715,6 +2734,368 @@ static void CleanArtworkCache(HelixAmp3Gui *gui)
 		SetStatus(gui, "No cached artwork files to remove.");
 }
 
+#if ENABLE_RADIO_ARTWORK
+static int GuiIsJpegMagic(const unsigned char *data, int bytes)
+{
+	return bytes >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF;
+}
+
+/* Detected only to skip a PNG-encoded ICO entry gracefully (GadTools does
+ * not link a PNG decoder -- see the ENABLE_RADIO_ARTWORK comment above);
+ * never decoded. */
+static int GuiIsPngMagic(const unsigned char *data, int bytes)
+{
+	static const unsigned char sig[8] = { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
+	return bytes >= 8 && memcmp(data, sig, sizeof(sig)) == 0;
+}
+
+static int GuiIsIcoMagic(const unsigned char *data, int bytes)
+{
+	/* ICONDIR: 2 bytes reserved (0), 2 bytes type (1 = icon, 2 = cursor). */
+	return bytes >= 6 && data[0] == 0 && data[1] == 0 &&
+		data[2] == 1 && data[3] == 0;
+}
+
+static unsigned GuiIcoLE16(const unsigned char *p)
+{
+	return (unsigned)p[0] | ((unsigned)p[1] << 8);
+}
+
+static unsigned long GuiIcoLE32(const unsigned char *p)
+{
+	return (unsigned long)p[0] | ((unsigned long)p[1] << 8) |
+		((unsigned long)p[2] << 16) | ((unsigned long)p[3] << 24);
+}
+
+typedef struct GuiIcoEntry {
+	unsigned width, height, bitCount;
+	unsigned long size, offset;
+} GuiIcoEntry;
+
+/* Decodes a favicon JPEG straight into the grey+RGB thumbnail buffers in
+ * one call (unlike StartArtDecode()'s chunked MCU-by-MCU pump for local
+ * ID3/folder art): favicons are small and bounded by
+ * HELIXAMP3_FAVICON_MAX_BYTES, and this only ever runs once per station
+ * selection, so there is no need to spread the decode across GUI ticks. */
+static int DecodeFaviconJpegToGrey(const unsigned char *jpegData, unsigned long jpegBytes,
+	unsigned char *greyOut, unsigned char *rgbOut, int outW, int outH)
+{
+	pjpeg_image_info_t info;
+	PjpegSrc src;
+	unsigned char status;
+	unsigned char xMap[MAX_JPEG_DIM];
+	unsigned char yMap[MAX_JPEG_DIM];
+	static unsigned long greyAccum[ART_W * ART_H];
+	static unsigned long rAccum[ART_W * ART_H];
+	static unsigned long gAccum[ART_W * ART_H];
+	static unsigned long bAccum[ART_W * ART_H];
+	static unsigned short greyCount[ART_W * ART_H];
+	int mcuIndex;
+	int i;
+
+	if (!jpegData || jpegBytes <= 4 || !greyOut ||
+		outW <= 0 || outW > ART_W || outH <= 0 || outH > ART_H)
+		return -1;
+	src.data = jpegData;
+	src.pos = 0;
+	src.size = jpegBytes;
+	memset(greyOut, 0x80, (size_t)(outW * outH));
+	if (rgbOut)
+		memset(rgbOut, 0x80, (size_t)(outW * outH * 3));
+	memset(greyAccum, 0, sizeof(greyAccum));
+	memset(rAccum, 0, sizeof(rAccum));
+	memset(gAccum, 0, sizeof(gAccum));
+	memset(bAccum, 0, sizeof(bAccum));
+	memset(greyCount, 0, sizeof(greyCount));
+	status = pjpeg_decode_init(&info, pjpeg_cb, &src, 0);
+	if (status != 0 || info.m_width <= 0 || info.m_height <= 0 ||
+		info.m_width > MAX_JPEG_DIM || info.m_height > MAX_JPEG_DIM) {
+		pjpeg_decode_free();
+		return -1;
+	}
+	for (i = 0; i < info.m_width; i++)
+		xMap[i] = (unsigned char)((i * outW) / info.m_width);
+	for (i = 0; i < info.m_height; i++)
+		yMap[i] = (unsigned char)((i * outH) / info.m_height);
+	for (mcuIndex = 0; mcuIndex < info.m_MCUSPerRow * info.m_MCUSPerCol; mcuIndex++) {
+		int mcuX, mcuY, y;
+
+		status = pjpeg_decode_mcu();
+		if (status == PJPG_NO_MORE_BLOCKS)
+			break;
+		if (status != 0) {
+			pjpeg_decode_free();
+			return -1;
+		}
+		mcuX = (mcuIndex % info.m_MCUSPerRow) * info.m_MCUWidth;
+		mcuY = (mcuIndex / info.m_MCUSPerRow) * info.m_MCUHeight;
+		for (y = 0; y < info.m_MCUHeight; y++) {
+			int srcY = mcuY + y;
+			int dstY;
+			int x;
+
+			if (srcY >= info.m_height)
+				continue;
+			dstY = yMap[srcY];
+			for (x = 0; x < info.m_MCUWidth; x++) {
+				int srcX = mcuX + x;
+				unsigned char r, g, b;
+				int grey;
+
+				if (srcX >= info.m_width)
+					continue;
+				grey = JpegSampleRGB(&info, McuSampleOffset(&info, x, y), &r, &g, &b);
+				ArtAccumSampleColor(greyAccum, rAccum, gAccum, bAccum, greyCount,
+					dstY * outW + xMap[srcX], grey, r, g, b, 1);
+			}
+		}
+	}
+	pjpeg_decode_free();
+	for (i = 0; i < outW * outH; i++) {
+		if (greyCount[i]) {
+			unsigned short c = greyCount[i];
+			unsigned long half = (unsigned long)c >> 1;
+
+			greyOut[i] = (unsigned char)((greyAccum[i] + half) / c);
+			if (rgbOut) {
+				rgbOut[i * 3    ] = (unsigned char)((rAccum[i] + half) / c);
+				rgbOut[i * 3 + 1] = (unsigned char)((gAccum[i] + half) / c);
+				rgbOut[i * 3 + 2] = (unsigned char)((bAccum[i] + half) / c);
+			}
+		}
+	}
+	return 0;
+}
+
+/* Decodes the raw BITMAPINFOHEADER-style DIB embedded in a legacy
+ * (non-PNG) ICO entry.  Only the depths real-world icon tools actually
+ * emit are supported (32/24/8bpp, uncompressed); 4bpp/1bpp and
+ * RLE-compressed DIBs are rejected.  The AND (transparency) mask that
+ * follows the pixel data is ignored -- favicons are rarely meaningfully
+ * transparent.  Ported from minimp3r's DecodeIcoDibToGrey(). */
+static int DecodeIcoDibToGrey(const unsigned char *dib, unsigned long dibBytes,
+	unsigned char *greyOut, unsigned char *rgbOut, int outW, int outH)
+{
+	unsigned long headerSize;
+	long width, height;
+	unsigned bitCount;
+	unsigned long compression, paletteEntries, rowBytes;
+	const unsigned char *palette;
+	const unsigned char *pixels;
+	/* Indexed by source pixel column/row (0..width-1 / 0..height-1), not by
+	 * output size -- width/height are bounded to <=256 above, so size these
+	 * for the source range, not ART_W/ART_H (the downsampled output is only
+	 * written through xMap[]/yMap[]'s *values*, not their index range). */
+	unsigned char xMap[256], yMap[256];
+	static unsigned long greyAccum[ART_W * ART_H];
+	static unsigned long rAccum[ART_W * ART_H];
+	static unsigned long gAccum[ART_W * ART_H];
+	static unsigned long bAccum[ART_W * ART_H];
+	static unsigned short greyCount[ART_W * ART_H];
+	long x, y;
+	int i;
+
+	if (!dib || dibBytes < 40 || !greyOut || outW <= 0 || outW > ART_W ||
+		outH <= 0 || outH > ART_H)
+		return -1;
+	headerSize = GuiIcoLE32(dib);
+	if (headerSize < 40 || headerSize > dibBytes)
+		return -1;
+	width = (long)GuiIcoLE32(dib + 4);
+	/* Height counts the XOR colour rows plus the AND mask rows stacked
+	 * together, so the actual image height is half the field's value. */
+	height = (long)GuiIcoLE32(dib + 8) / 2;
+	bitCount = GuiIcoLE16(dib + 14);
+	compression = GuiIcoLE32(dib + 16);
+	if (width <= 0 || height <= 0 || width > 256 || height > 256 ||
+		compression != 0 /* BI_RGB, uncompressed */)
+		return -1;
+	if (bitCount != 32 && bitCount != 24 && bitCount != 8)
+		return -1;
+
+	paletteEntries = (bitCount == 8) ? 256UL : 0UL;
+	palette = dib + headerSize;
+	pixels = palette + paletteEntries * 4UL;
+	rowBytes = (((unsigned long)width * bitCount + 31UL) / 32UL) * 4UL;
+	if ((unsigned long)(pixels - dib) + rowBytes * (unsigned long)height > dibBytes)
+		return -1;
+
+	memset(greyOut, 0x80, (size_t)(outW * outH));
+	if (rgbOut)
+		memset(rgbOut, 0x80, (size_t)(outW * outH * 3));
+	memset(greyAccum, 0, sizeof(greyAccum));
+	memset(rAccum, 0, sizeof(rAccum));
+	memset(gAccum, 0, sizeof(gAccum));
+	memset(bAccum, 0, sizeof(bAccum));
+	memset(greyCount, 0, sizeof(greyCount));
+	for (x = 0; x < width; x++)
+		xMap[x] = (unsigned char)((x * outW) / width);
+	for (y = 0; y < height; y++)
+		yMap[y] = (unsigned char)((y * outH) / height);
+
+	/* DIB pixel rows are stored bottom-up. */
+	for (y = 0; y < height; y++) {
+		const unsigned char *row = pixels +
+			(unsigned long)(height - 1 - y) * rowBytes;
+		int dstY = yMap[y];
+
+		for (x = 0; x < width; x++) {
+			unsigned char r, g, b;
+			int dst;
+
+			if (bitCount == 8) {
+				const unsigned char *pal = palette + 4 * row[x];
+				b = pal[0]; g = pal[1]; r = pal[2];
+			} else {
+				const unsigned char *px = row + (bitCount == 32 ? 4 : 3) * x;
+				b = px[0]; g = px[1]; r = px[2];
+			}
+			dst = dstY * outW + xMap[x];
+			greyAccum[dst] += (77UL * r + 150UL * g + 29UL * b + 128UL) >> 8;
+			rAccum[dst] += r; gAccum[dst] += g; bAccum[dst] += b;
+			if (greyCount[dst] != 0xffff) greyCount[dst]++;
+		}
+	}
+	for (i = 0; i < outW * outH; i++)
+		if (greyCount[i]) {
+			unsigned short c = greyCount[i];
+			unsigned long half = (unsigned long)c >> 1;
+
+			greyOut[i] = (unsigned char)((greyAccum[i] + half) / c);
+			if (rgbOut) {
+				rgbOut[i * 3    ] = (unsigned char)((rAccum[i] + half) / c);
+				rgbOut[i * 3 + 1] = (unsigned char)((gAccum[i] + half) / c);
+				rgbOut[i * 3 + 2] = (unsigned char)((bAccum[i] + half) / c);
+			}
+		}
+	return 0;
+}
+
+static int GuiIcoEntryCompare(const void *pa, const void *pb)
+{
+	const GuiIcoEntry *a = (const GuiIcoEntry *)pa;
+	const GuiIcoEntry *b = (const GuiIcoEntry *)pb;
+	unsigned long areaA = (unsigned long)a->width * (unsigned long)a->height;
+	unsigned long areaB = (unsigned long)b->width * (unsigned long)b->height;
+
+	if (areaA != areaB) return areaA > areaB ? -1 : 1;
+	return (int)b->bitCount - (int)a->bitCount;
+}
+
+/* ICO files are a directory of one or more embedded images at different
+ * sizes/depths.  Entries are tried largest-first for the best quality once
+ * downsampled to the ART_W x ART_H thumbnail, falling through to a
+ * smaller/other entry if the chosen one can't be decoded -- e.g. a
+ * PNG-encoded entry (no PNG decoder in this frontend) or a legacy
+ * 4bpp/1bpp DIB.  Ported from minimp3r's DecodeIcoToGrey(). */
+static int DecodeIcoToGrey(const unsigned char *icoData, unsigned long icoBytes,
+	unsigned char *greyOut, unsigned char *rgbOut, int outW, int outH)
+{
+	unsigned count, i, n;
+	GuiIcoEntry entries[64];
+
+	if (!icoData || icoBytes < 6 || !GuiIsIcoMagic(icoData, (int)icoBytes))
+		return -1;
+	count = GuiIcoLE16(icoData + 4);
+	if (count == 0)
+		return -1;
+	if (count > 64)
+		count = 64;
+	n = 0;
+	for (i = 0; i < count; i++) {
+		const unsigned char *e = icoData + 6 + (unsigned long)i * 16UL;
+		unsigned w, h;
+		unsigned long size, offset;
+
+		if (6UL + (unsigned long)(i + 1) * 16UL > icoBytes)
+			break;
+		w = e[0] ? e[0] : 256;
+		h = e[1] ? e[1] : 256;
+		size = GuiIcoLE32(e + 8);
+		offset = GuiIcoLE32(e + 12);
+		if (size < 8 || offset > icoBytes || size > icoBytes - offset)
+			continue;
+		entries[n].width = w;
+		entries[n].height = h;
+		entries[n].bitCount = GuiIcoLE16(e + 6);
+		entries[n].size = size;
+		entries[n].offset = offset;
+		n++;
+	}
+	if (n == 0)
+		return -1;
+	qsort(entries, n, sizeof(entries[0]), GuiIcoEntryCompare);
+	for (i = 0; i < n; i++) {
+		const unsigned char *payload = icoData + entries[i].offset;
+		unsigned long payloadBytes = entries[i].size;
+
+		if (GuiIsPngMagic(payload, (int)payloadBytes))
+			continue;
+		if (DecodeIcoDibToGrey(payload, payloadBytes, greyOut, rgbOut,
+			outW, outH) == 0)
+			return 0;
+	}
+	return -1;
+}
+
+/* Favicon artwork is fetched from the Radio Browser station's "favicon"
+ * field only, never from the MP3/ICY stream, and only once playback has
+ * already picked a station (see RadioDoProbeAndPlay()/SelectInternetStream()).
+ * The fetch goes through rb_probe_fetch_binary(), which shares its
+ * HTTP/HTTPS/AmiSSL connection handling with the stream probe used to start
+ * playback but is a separate code path the probe's stream-playback logic
+ * never calls into.  Any failure here (bad URL, unsupported TLS, oversized
+ * body, unsupported format, broken decode) just leaves artValid 0 and never
+ * affects playback.  Ported from minimp3r's LoadRadioFaviconImage(). */
+static int LoadRadioFaviconImage(HelixAmp3Gui *gui)
+{
+	char contentType[64];
+	static unsigned char response[HELIXAMP3_FAVICON_MAX_BYTES];
+	int bytes = 0;
+	int rc;
+
+	if (!gui || !gui->currentRadioFavicon[0]) {
+		RADIO_DBG(printf("radio-art: no favicon URL for current station\n");)
+		return 0;
+	}
+	RADIO_DBG(printf("radio-art: fetching favicon url=%s\n", gui->currentRadioFavicon);)
+	rc = rb_probe_fetch_binary(gui->currentRadioFavicon, response, (int)sizeof(response),
+		&bytes, contentType, (int)sizeof(contentType));
+	if (rc != RB_STREAM_PROBE_OK) {
+		RADIO_DBG(printf("radio-art: fetch failed rc=%d (%s)\n", rc, rb_probe_error_text(rc));)
+		return 0;
+	}
+	RADIO_DBG(printf("radio-art: fetched %d bytes content-type=\"%s\"\n", bytes, contentType);)
+	if (bytes <= 8)
+		return 0;
+
+	/* Dispatch purely on the actual bytes fetched, not the URL extension or
+	 * declared Content-Type -- plenty of real sites serve a different format
+	 * under a "favicon.ico" URL and/or a misleading Content-Type. */
+	if (GuiIsJpegMagic(response, bytes)) {
+		if (DecodeFaviconJpegToGrey(response, (unsigned long)bytes, gui->artGreyBuf,
+			gui->artRGBBuf, ART_W, ART_H) != 0) {
+			RADIO_DBG(printf("radio-art: jpeg decode failed\n");)
+			return 0;
+		}
+		gui->artValid = 1;
+		return 1;
+	}
+	if (GuiIsIcoMagic(response, bytes)) {
+		if (DecodeIcoToGrey(response, (unsigned long)bytes, gui->artGreyBuf,
+			gui->artRGBBuf, ART_W, ART_H) != 0) {
+			RADIO_DBG(printf("radio-art: ico decode failed\n");)
+			return 0;
+		}
+		gui->artValid = 1;
+		return 1;
+	}
+	RADIO_DBG(printf("radio-art: rejected, unsupported favicon format (first bytes %02X %02X %02X %02X)\n",
+		response[0], response[1], response[2], response[3]);)
+	return 0;
+}
+#endif /* ENABLE_RADIO_ARTWORK */
+
 static void StartArtDecode(HelixAmp3Gui *gui)
 {
 	ArtDecodeState *st = &gui->artDecode;
@@ -2736,6 +3117,16 @@ static void StartArtDecode(HelixAmp3Gui *gui)
 		return;
 	}
 	if (!gui->tags.artData || gui->tags.artBytes <= 4 || gui->tags.artIsPng) {
+#if ENABLE_RADIO_ARTWORK
+		if (gui->artEnabled && is_url_path(gui->inputName) &&
+			gui->currentRadioFavicon[0] && LoadRadioFaviconImage(gui)) {
+			if (gui->artColorEnabled)
+				BuildArtColorPens(gui);
+			SaveArtworkCache(gui);
+			DrawArtPanel(gui);
+			return;
+		}
+#endif
 		DrawArtPanel(gui);
 		return;
 	}
@@ -3177,10 +3568,21 @@ static int PlaybackProcessStillExists(void)
 
 static int PlaybackCanFinalize(HelixAmp3Gui *gui)
 {
+	/* Deliberately does NOT require gGuiPlaybackStatus.cleanupComplete: that
+	 * flag is set by the playback child itself right before it posts its
+	 * done message and exits, so it is normally already 1 by the time DOS
+	 * has actually removed the task.  But if the child ever dies through a
+	 * path that skips that final bookkeeping (a wedged decoder/network read
+	 * that never returns, an abnormal exit), cleanupComplete would never
+	 * become 1 and this front end would sit in "Stopping..." forever with
+	 * no way back short of quitting the app -- the "stuck stopping" symptom.
+	 * The ReAction front end (minimp3r.c) finalizes on
+	 * "playbackDonePending && !PlaybackProcessStillExists()" alone and is
+	 * the more battle-tested of the two; match it here. Once the task is
+	 * confirmed gone there is nothing left to wait for. */
 	return gui->playbackDonePending &&
 		gDoneRunId == gui->playbackRunId &&
 		gGuiPlaybackStatus.runId == gui->playbackRunId &&
-		gGuiPlaybackStatus.cleanupComplete &&
 		!PlaybackProcessStillExists();
 }
 
@@ -3234,7 +3636,7 @@ static const char *RadioStreamStateName(int phase)
 
 static void radio_debug_state_summary(HelixAmp3Gui *gui, const char *reason)
 {
-	printf("radio-state: reason=%s active=%d pending=%d stopping=%d stopRequested=%d donePending=%d uiState=%s streamState=%s codec=%s session=%lu\n",
+	RADIO_DBG(printf("radio-state: reason=%s active=%d pending=%d stopping=%d stopRequested=%d donePending=%d uiState=%s streamState=%s codec=%s session=%lu\n",
 		reason ? reason : "state",
 		gui ? gui->playbackActive : 0,
 		(gGuiPlayer.process != NULL),
@@ -3244,7 +3646,7 @@ static void radio_debug_state_summary(HelixAmp3Gui *gui, const char *reason)
 		gui ? gui->statusText : "",
 		RadioStreamStateName(gGuiPlaybackStatus.phase),
 		gGuiPlaybackStatus.radioContentType,
-		gui ? gui->playbackRunId : gGuiPlaybackStatus.runId);
+		gui ? gui->playbackRunId : gGuiPlaybackStatus.runId);)
 }
 
 static void radio_reset_playback_state_after_stop(HelixAmp3Gui *gui, const char *reason)
@@ -3282,29 +3684,29 @@ static void radio_reset_playback_state_after_stop(HelixAmp3Gui *gui, const char 
 static int radio_validate_ready_to_play(HelixAmp3Gui *gui)
 {
 	if (PlaybackProcessStillExists()) {
-		printf("Cannot start: previous stream still stopping\n");
+		RADIO_DBG(printf("Cannot start: previous stream still stopping\n");)
 		return 0;
 	}
 	if (gGuiPlayer.process) {
-		printf("Cannot start: stale active session\n");
+		RADIO_DBG(printf("Cannot start: stale active session\n");)
 		return 0;
 	}
 	if (gGuiPlayer.stopRequested) {
-		printf("Cannot start: previous stream still stopping\n");
+		RADIO_DBG(printf("Cannot start: previous stream still stopping\n");)
 		return 0;
 	}
 	if (gui && gui->playbackDonePending) {
-		printf("Cannot start: donePending still set\n");
+		RADIO_DBG(printf("Cannot start: donePending still set\n");)
 		return 0;
 	}
 	if (gui && gui->playbackActive) {
-		printf("Cannot start: stale active session\n");
+		RADIO_DBG(printf("Cannot start: stale active session\n");)
 		return 0;
 	}
 	if (gGuiPlaybackStatus.phase != GUIPLAY_PHASE_IDLE &&
 		gGuiPlaybackStatus.phase != GUIPLAY_PHASE_DONE &&
 		gGuiPlaybackStatus.phase != GUIPLAY_PHASE_ERROR) {
-		printf("Cannot start: previous stream still stopping\n");
+		RADIO_DBG(printf("Cannot start: previous stream still stopping\n");)
 		return 0;
 	}
 	return 1;
@@ -3386,7 +3788,7 @@ static void FinalizePlayback(HelixAmp3Gui *gui)
 			SendTimerRequest(gui, ART_TIMER_MICROS);
 		if (queuedPlayPending) {
 #if defined(AMIGA_M68K)
-			printf("radio-done: Delay before queued stream start after parent done received\n");
+			RADIO_DBG(printf("radio-done: Delay before queued stream start after parent done received\n");)
 			Delay(3);
 #endif
 			StartPlayback(gui);
@@ -3477,13 +3879,14 @@ static void HandleTimerSignal(HelixAmp3Gui *gui)
 	if (gui->playbackDonePending && PlaybackCanFinalize(gui))
 		FinalizePlayback(gui);
 
-	/* Recovery: if the playback process has exited and cleanup is marked
-	 * complete but no done message was ever delivered to the GUI (e.g., the
-	 * child read gDonePort as NULL in a race), force-finalize so the player
-	 * does not stay stuck in the Stopping state indefinitely. */
+	/* Recovery: if the playback process has exited but no done message was
+	 * ever delivered to the GUI (e.g., the child read gDonePort as NULL in a
+	 * race, or died before reaching its own cleanup-complete bookkeeping),
+	 * force-finalize so the player does not stay stuck in the Stopping state
+	 * indefinitely.  Deliberately does not require cleanupComplete -- see
+	 * the comment on PlaybackCanFinalize(). */
 	if (gui->playbackActive && !gui->playbackDonePending &&
 		gGuiPlaybackStatus.runId == gui->playbackRunId &&
-		gGuiPlaybackStatus.cleanupComplete &&
 		!PlaybackProcessStillExists()) {
 		gui->playbackDonePending = 1;
 		gui->playbackStoppedByUser = gGuiPlayer.stopRequested ? 1 : 0;
@@ -5142,6 +5545,8 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 			RadioSetStatus(app, "Stopping current stream before playing favourite...");
 			return;
 		}
+		/* Favourites only store a name and URL, no favicon. */
+		app->currentRadioFavicon[0] = '\0';
 		SelectInternetStream(app, app->rbFavouriteUrls[app->rbSelectedFavourite]);
 		SafeCopy(app->currentRadioStationName, sizeof(app->currentRadioStationName), app->rbFavouriteNames[app->rbSelectedFavourite]);
 		app->haveRadioHostAddr = 0;
@@ -5195,6 +5600,8 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 		RadioSetStatus(app, "Stopping current stream before playing selection...");
 		return;
 	}
+	SafeCopy(app->currentRadioFavicon, sizeof(app->currentRadioFavicon), st->favicon);
+	RADIO_DBG(printf("radio-art: station favicon=\"%s\"\n", app->currentRadioFavicon);)
 	SelectInternetStream(app, info.final_url);
 	rb_station_display_name(st, msg, (int)sizeof(msg));
 	SafeCopy(app->currentRadioStationName, sizeof(app->currentRadioStationName), msg);
@@ -6128,8 +6535,13 @@ static void EnterInternetStream(HelixAmp3Gui *gui)
 	}
 	FreeGadgets(gadgets);
 	CloseWindow(win);
-	if (accepted)
+	if (accepted) {
+		/* Manually typed URLs never have a known station favicon; clear any
+		 * favicon left over from a previously played station so the art
+		 * panel doesn't show a stale image for this stream. */
+		gui->currentRadioFavicon[0] = '\0';
 		SelectInternetStream(gui, url);
+	}
 }
 
 static void AddArg(HelixAmp3Args *args, const char *text)
@@ -6646,10 +7058,11 @@ static void WaitForPlaybackShutdown(HelixAmp3Gui *gui)
 			break;
 		}
 
+		/* Deliberately does not require cleanupComplete -- see the comment
+		 * on PlaybackCanFinalize(). */
 		if (!gui->playbackDonePending &&
 			gDoneRunId == gui->playbackRunId &&
 			gGuiPlaybackStatus.runId == gui->playbackRunId &&
-			gGuiPlaybackStatus.cleanupComplete &&
 			!PlaybackProcessStillExists()) {
 			gui->playbackDonePending = 1;
 			gui->playbackStoppedByUser = 1;
