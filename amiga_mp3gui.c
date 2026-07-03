@@ -3425,6 +3425,16 @@ static void FinalizePlayback(HelixAmp3Gui *gui)
 	}
 }
 
+static void SignalPlaybackChildCtrlC(void)
+{
+	struct Task *child;
+	Forbid();
+	child = FindTask((STRPTR)"MiniAMP3 playback");
+	if (child)
+		Signal(child, SIGBREAKF_CTRL_C);
+	Permit();
+}
+
 static void HandleTimerSignal(HelixAmp3Gui *gui)
 {
 	int expiredWasArt;
@@ -3436,6 +3446,11 @@ static void HandleTimerSignal(HelixAmp3Gui *gui)
 		;
 	gui->timerPending = 0;
 	gui->timerIsArt = 0;
+
+	if (gui->playbackActive && !gui->playbackDonePending && gGuiPlayer.stopRequested) {
+		gPlaybackInterrupted = 1;
+		SignalPlaybackChildCtrlC();
+	}
 
 	/* Poll the done port on every tick while playback is active so that a
 	 * fast-exiting child whose signal wake was already consumed by a previous
@@ -6320,9 +6335,6 @@ static void PlaybackEntry(void)
 		earlyStop = 1;
 	if (!earlyStop)
 		ResetDecoderStatics();
-#if ENABLE_RADIO
-	Radio_SetStopFlag((const volatile int *)&gPlaybackInterrupted);
-#endif
 	gGuiPlaybackStatus.runId = gPlaybackEntryRunId;
 	if (stopBeforeStart || gGuiPlayer.stopRequested || gPlaybackInterrupted ||
 		(pending & SIGBREAKF_CTRL_C)) {
@@ -6354,9 +6366,6 @@ static void PlaybackEntry(void)
 		HelixAmp3CliMain(gGuiPlayer.argc, gGuiPlayer.argv);
 		gGuiPlaybackStatus.startupStage = GUISTART_CLEANUP;
 	}
-#if ENABLE_RADIO
-	Radio_SetStopFlag(NULL);
-#endif
 	if (!ranDecoder) {
 		gGuiPlaybackStatus.phase = GUIPLAY_PHASE_DONE;
 		gGuiPlaybackStatus.cleanupStage = GUIPLAY_CLEANUP_COMPLETE;
@@ -6581,14 +6590,7 @@ static void StopPlayback(HelixAmp3Gui *gui)
 	 * address/size passed to FreeMem() -- not a signal-delivery alert; the
 	 * Forbid/FindTask guard here is unrelated defensive hygiene, not a fix
 	 * for that alert.) */
-	{
-		struct Task *child;
-		Forbid();
-		child = FindTask((STRPTR)"MiniAMP3 playback");
-		if (child)
-			Signal(child, SIGBREAKF_CTRL_C);
-		Permit();
-	}
+	SignalPlaybackChildCtrlC();
 	SetStatus(gui, "Stopping...");
 }
 
@@ -6632,14 +6634,8 @@ static void WaitForPlaybackShutdown(HelixAmp3Gui *gui)
 		 * (0x0100000F is AN_BadFreeAddr -- a bad address/size passed to
 		 * FreeMem() -- not a signal-delivery alert; see the note above
 		 * StopPlayback()'s equivalent guard.) */
-		if (!gui->playbackDonePending) {
-			struct Task *child;
-			Forbid();
-			child = FindTask((STRPTR)"MiniAMP3 playback");
-			if (child)
-				Signal(child, SIGBREAKF_CTRL_C);
-			Permit();
-		}
+		if (!gui->playbackDonePending)
+			SignalPlaybackChildCtrlC();
 		Delay(1);
 	}
 }
