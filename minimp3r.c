@@ -4220,6 +4220,7 @@ static void RadioRefreshResults(MrApp *app)
 		SetGadgetAttrs((struct Gadget *)app->rbListGad, app->rbWin, NULL,
 			LISTBROWSER_Labels, (ULONG)&app->rbList,
 			LISTBROWSER_Selected, selectedRow >= 0 ? (ULONG)selectedRow : (ULONG)~0,
+			LISTBROWSER_ShowSelected, TRUE,
 			LISTBROWSER_MakeVisible, selectedRow >= 0 ? (ULONG)selectedRow : 0,
 			GA_Disabled, app->rbVisibleCount <= 0 ? TRUE : FALSE,
 			TAG_DONE);
@@ -4314,6 +4315,7 @@ static void RadioSelectResult(MrApp *app, ULONG eventSelected)
 		app->rbSelectedFavourite = (int)selected;
 		SetGadgetAttrs((struct Gadget *)app->rbListGad, app->rbWin, NULL,
 			LISTBROWSER_Selected, (ULONG)row,
+			LISTBROWSER_ShowSelected, TRUE,
 			LISTBROWSER_MakeVisible, (ULONG)row, TAG_DONE);
 		sprintf(msg, "Selected favourite: %.120s", app->rbFavouriteNames[app->rbSelectedFavourite]);
 		RadioSetStatus(app, msg);
@@ -4326,6 +4328,7 @@ static void RadioSelectResult(MrApp *app, ULONG eventSelected)
 	}
 	SetGadgetAttrs((struct Gadget *)app->rbListGad, app->rbWin, NULL,
 		LISTBROWSER_Selected, (ULONG)row,
+		LISTBROWSER_ShowSelected, TRUE,
 		LISTBROWSER_MakeVisible, (ULONG)row, TAG_DONE);
 	st = rb_controller_get_station(&app->rbController, app->rbController.selected_index);
 	if (!st) {
@@ -4551,7 +4554,7 @@ static void OpenRadioWindow(MrApp *app)
 	app->rbSchemeGad = (Object *)NewObject(CHOOSER_GetClass(), NULL, GA_ID, RB_GID_SCHEME, GA_RelVerify, TRUE, CHOOSER_LabelArray, (ULONG)kRadioSchemeLabels, CHOOSER_Selected, app->rbSchemeMode, TAG_DONE);
 	app->rbLimitGad = (Object *)NewObject(CHOOSER_GetClass(), NULL, GA_ID, RB_GID_LIMIT, GA_RelVerify, TRUE, CHOOSER_LabelArray, (ULONG)kRadioSearchLimitLabels, CHOOSER_Selected, RadioSearchLimitIndex(app->rbController.limit), TAG_DONE);
 	app->rbBitrateGad = (Object *)NewObject(CHOOSER_GetClass(), NULL, GA_ID, RB_GID_BITRATE, GA_RelVerify, TRUE, CHOOSER_LabelArray, (ULONG)kRadioBitrateLabels, CHOOSER_Selected, app->rbController.max_bitrate <= 0 ? 0 : (app->rbController.max_bitrate <= 56 ? 1 : (app->rbController.max_bitrate <= 64 ? 2 : (app->rbController.max_bitrate <= 96 ? 3 : 4))), TAG_DONE);
-	app->rbListGad = (Object *)NewObject(LISTBROWSER_GetClass(), NULL, GA_ID, RB_GID_RADIO_RESULTS, GA_RelVerify, TRUE, LISTBROWSER_Labels, (ULONG)&app->rbList, LISTBROWSER_Selected, (ULONG)~0, LISTBROWSER_AutoFit, TRUE, LISTBROWSER_Separators, TRUE, TAG_DONE);
+	app->rbListGad = (Object *)NewObject(LISTBROWSER_GetClass(), NULL, GA_ID, RB_GID_RADIO_RESULTS, GA_RelVerify, TRUE, LISTBROWSER_Labels, (ULONG)&app->rbList, LISTBROWSER_Selected, (ULONG)~0, LISTBROWSER_ShowSelected, TRUE, LISTBROWSER_AutoFit, TRUE, LISTBROWSER_Separators, TRUE, TAG_DONE);
 	app->rbStatusGad = (Object *)NewObject(STRING_GetClass(), NULL, GA_ID, RB_GID_STATUS, GA_ReadOnly, TRUE, STRINGA_TextVal, (ULONG)(app->lastRadioError[0] ? app->lastRadioError : "Ready."), STRINGA_MaxChars, 512, TAG_DONE);
 	app->rbDoSearchGad = RadioButton(RB_GID_SEARCH, "Search"); app->rbPlayGad = RadioButton(RB_GID_PROBE, "Play"); app->rbAddFavGad = RadioButton(RB_GID_ADD_FAV, "Add Fav"); app->rbFavouritesGad = RadioButton(RB_GID_FAVOURITES, "Favourites"); app->rbUpGad = RadioButton(RB_GID_UP, "Up"); app->rbDownGad = RadioButton(RB_GID_DOWN, "Down"); app->rbCloseGad = RadioButton(RB_GID_CLOSE, "Close");
 	if (!app->rbSearchGad || !app->rbCodecGad || !app->rbCountryGad || !app->rbCountryCodeGad || !app->rbSchemeGad || !app->rbLimitGad || !app->rbBitrateGad || !app->rbListGad || !app->rbStatusGad || !app->rbDoSearchGad || !app->rbPlayGad || !app->rbAddFavGad || !app->rbFavouritesGad || !app->rbUpGad || !app->rbDownGad || !app->rbCloseGad) goto fail;
@@ -4632,6 +4635,7 @@ static void RefreshPlaylistView(MrApp *app)
 		SetGadgetAttrs((struct Gadget *)app->plListGad, app->plWin, NULL,
 			LISTBROWSER_Labels, (ULONG)&app->plList,
 			LISTBROWSER_Selected, app->playlistCount > 0 && sel >= 0 ? (ULONG)sel : (ULONG)~0,
+			LISTBROWSER_ShowSelected, TRUE,
 			LISTBROWSER_MakeVisible, app->playlistCount > 0 && sel >= 0 ? (ULONG)sel : 0,
 			GA_Disabled, app->playlistCount == 0 ? TRUE : FALSE,
 			TAG_DONE);
@@ -4839,6 +4843,7 @@ static void OpenPlaylistWindow(MrApp *app)
 		LISTBROWSER_Labels, (ULONG)&app->plList,
 		LISTBROWSER_Selected, app->playlistCount > 0 ? (ULONG)sel : (ULONG)~0,
 		LISTBROWSER_MakeVisible, (ULONG)sel,
+		LISTBROWSER_ShowSelected, TRUE,
 		LISTBROWSER_AutoFit, TRUE,
 		LISTBROWSER_Separators, TRUE,
 		TAG_DONE);
@@ -4977,6 +4982,7 @@ static void HandlePlaylistWindow(MrApp *app)
 						app->playlistSelected = (int)selected;
 						SetGadgetAttrs((struct Gadget *)app->plListGad, app->plWin, NULL,
 							LISTBROWSER_Selected, selected,
+							LISTBROWSER_ShowSelected, TRUE,
 							LISTBROWSER_MakeVisible, selected, TAG_DONE);
 					}
 				}
