@@ -33,6 +33,18 @@
 #ifndef RADIO_START_TIMEOUT_PUMPS
 #define RADIO_START_TIMEOUT_PUMPS 150
 #endif
+/* Mid-stream stall watchdog: consecutive would-block pumps (each preceded by
+ * radio_backoff_sleep()'s ~40ms yield, so 750 is roughly 30 seconds) with no
+ * data after playback has started.  A dead relay that keeps the TCP session
+ * open but never sends another byte (and never a FIN) otherwise pumps forever:
+ * the startup timeout (RADIO_START_TIMEOUT_PUMPS) only arms before everPlayed,
+ * so the stream sat in "Buffering" for good.  On expiry the stream fails with
+ * set_error() exactly like the startup timeout, so the child unwinds and
+ * exits; see the comment at the check itself for why this is not an
+ * automatic reconnect. */
+#ifndef RADIO_STALL_TIMEOUT_PUMPS
+#define RADIO_STALL_TIMEOUT_PUMPS 750
+#endif
 #if defined(RADIO_DEBUG) || defined(RADIO_DEBUG_OPEN)
 #define RADIO_OPEN_DEBUG_PRINTF(x) RADIO_DBG_PRINTF(x)
 #else
@@ -54,6 +66,7 @@
 #include <exec/memory.h>
 #include <exec/memory.h>
 #include <exec/execbase.h>
+#include <dos/dos.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
 #include <proto/bsdsocket.h>
@@ -188,6 +201,7 @@ struct RadioStream {
     int reconnectAttempts, reconnectDelay;
     int zeroBytePumps;
     int startPumps;
+    int stallPumps;   /* consecutive would-block pumps since last data, mid-stream */
     int everPlayed;
     int firstDataLogged;
     int stopping;
@@ -472,7 +486,40 @@ static void radio_app_exit_report(void)
     radio_resource_summary(NULL, "before app close");
 }
 
-static int radio_is_stopping(const RadioStream *rs) { return !rs || rs->stopping || rs->status == RADIO_STATUS_STOPPING || rs->status == RADIO_STATUS_CLOSED; }
+/* App-side stop flag (Radio_SetStopFlag).  Polled by radio_is_stopping() so
+ * the pump/connect/read-audio wait loops notice a Stop click even while
+ * stalled on a dead socket that never delivers another byte -- the only
+ * other stop propagation path (Radio_RequestStop() from InputSourceClose()/
+ * InputSourceRead()) runs between Radio_ReadAudio() calls, which a stalled
+ * buffering loop never returns to.
+ *
+ * Deliberately a pointer to a data flag, NOT a callback: polling means only
+ * data reads through the pointer, and a data read cannot raise the
+ * odd-address instruction-fetch fault (guru 80000003) that calling through
+ * a corrupted function pointer can.  Both GUI front-ends set their shared
+ * interrupt flag before signalling the playback child, so reading the flag
+ * is sufficient; the pending-CTRL_C case is handled below with a direct,
+ * statically linked SetSignal() call instead of app code. */
+static const volatile int *radio_external_stop_flag = 0;
+
+void Radio_SetStopFlag(const volatile int *flag) { radio_external_stop_flag = flag; }
+
+static int radio_is_stopping(const RadioStream *rs)
+{
+    if (!rs || rs->stopping || rs->status == RADIO_STATUS_STOPPING || rs->status == RADIO_STATUS_CLOSED)
+        return 1;
+    if (radio_external_stop_flag && *radio_external_stop_flag)
+        return 1;
+#if defined(AMIGA_M68K)
+    /* A pending break on the pumping task (the GUIs signal their playback
+     * child with SIGBREAKF_CTRL_C; a CLI run gets it from the shell).
+     * SetSignal(0,0) only samples -- the signal stays pending for the
+     * existing break checks in the decoder loops to latch as before. */
+    if (SetSignal(0, 0) & SIGBREAKF_CTRL_C)
+        return 1;
+#endif
+    return 0;
+}
 static void close_current_socket(RadioStream *rs);
 static int radio_contains_nocase(const char *s, const char *needle)
 {
@@ -514,6 +561,7 @@ static void radio_reset_session_state(RadioStream *rs)
     rs->parseState = RADIO_PARSE_HEADER;
     rs->metaLen = rs->metaGot = rs->metaLeft = 0;
     rs->reconnectAttempts = rs->reconnectDelay = rs->zeroBytePumps = rs->startPumps = 0;
+    rs->stallPumps = 0;
     rs->everPlayed = rs->firstDataLogged = rs->haveHostAddr = 0;
     rs->sslFreed = rs->ctxFreed = rs->socketClosed = rs->cleanupDone = 0;
 }
@@ -2009,6 +2057,22 @@ int Radio_Pump(RadioStream *rs)
     if (n < 0 && wb) {
         radio_backoff_sleep();
         if (radio_note_start_wait(rs, rs->isSSL ? "HTTPS stream start timeout" : "radio stream start timed out") < 0) return -1;
+        if (rs->everPlayed && ++rs->stallPumps >= RADIO_STALL_TIMEOUT_PUMPS) {
+            /* Fail the stream through the same set_error/close path as the
+             * startup timeout (radio_note_start_wait) so the decoder unwinds
+             * and the playback child exits cleanly.  Deliberately NOT an
+             * automatic reconnect: tearing down and re-creating the AmiSSL
+             * session unattended exercises the SSL_free()/SSL_CTX churn this
+             * file's fault-quarantine comments exist for, and doing that in a
+             * loop against an already-dead relay risks exactly the alerts the
+             * quarantine defends against.  The user can restart the stream
+             * from a clean session with one click instead. */
+            RADIO_DBG(printf("radio-stream: session=%lu stalled for %d silent pumps, failing stream url=\"%s\"\n", rs->session_id, rs->stallPumps, rs->url););
+            rs->stallPumps = 0;
+            set_error(rs, "radio stream stalled - no data received");
+            close_current_socket(rs);
+            return -1;
+        }
         return 0;
     }
     if (n <= 0) {
@@ -2020,6 +2084,7 @@ int Radio_Pump(RadioStream *rs)
         return 0;
     }
     rs->zeroBytePumps = 0;
+    rs->stallPumps = 0;
     if (!rs->firstDataLogged) {
         RADIO_DBG(printf("radio-stream: first data received fd=%ld ssl=%p\n",
             (long)rs->sock,

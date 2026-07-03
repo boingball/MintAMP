@@ -1585,6 +1585,18 @@ static void InputSourceInitRadio(InputSource *input, RadioStream *radio)
 {
 	memset(input, 0, sizeof(*input));
 	input->radio = radio;
+#if ENABLE_RADIO
+	/* Let radio_stream.c's internal wait loops poll the shared interrupt
+	 * flag so a Stop click reaches a stream stalled inside
+	 * Radio_ReadAudio()/Radio_Pump() on a dead socket.  Without this the
+	 * only stop checks ran between InputSourceRead() calls, and a stream
+	 * stuck in "Buffering" never returned from the pump loop to see them:
+	 * Stop timed out, the playback child could not be reaped, and the GUI
+	 * froze in its shutdown wait.  The cast covers the non-Amiga build
+	 * where the flag is volatile sig_atomic_t (int-sized on all supported
+	 * hosts). */
+	Radio_SetStopFlag((const volatile int *)&gPlaybackInterrupted);
+#endif
 }
 
 #ifdef HAVE_AMIGA_AUDIO_DEVICE

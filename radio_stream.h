@@ -33,6 +33,17 @@ typedef enum {
 RadioStream *Radio_OpenWithHostAddr(const char *url, int haveHostAddr, unsigned long hostAddrBe);
 RadioStream *Radio_Open(const char *url);
 void Radio_RequestStop(RadioStream *rs);
+/* Install an app-side "stop requested" flag polled by every internal
+ * pump/connect/read-audio wait loop.  Radio_RequestStop() can only be called
+ * between Radio_ReadAudio() calls, so without this hook a stream stalled on a
+ * dead socket (stuck "Buffering", no data, no FIN) could never observe a Stop
+ * click and the playback child looped forever, deadlocking the GUI's
+ * stop/close paths.  A data flag rather than a callback on purpose: the
+ * radio code only ever reads through the pointer, so a stale/corrupt value
+ * cannot become a wild jump.  NULL disables the poll.  On AMIGA_M68K builds
+ * the same loops also honour a pending SIGBREAKF_CTRL_C on the pumping task
+ * directly, no app hook needed. */
+void Radio_SetStopFlag(const volatile int *flag);
 void Radio_Close(RadioStream *rs);
 int Radio_Pump(RadioStream *rs);
 int Radio_ReadAudio(RadioStream *rs, unsigned char *buf, int maxBytes);
@@ -98,6 +109,7 @@ void Radio_DebugCheckExecMem(const char *where);
 static RadioStream *Radio_OpenWithHostAddr(const char *url, int haveHostAddr, unsigned long hostAddrBe) { (void)url; (void)haveHostAddr; (void)hostAddrBe; return (RadioStream *)0; }
 static RadioStream *Radio_Open(const char *url) { (void)url; return (RadioStream *)0; }
 static void Radio_RequestStop(RadioStream *rs) { (void)rs; }
+static void Radio_SetStopFlag(const volatile int *flag) { (void)flag; }
 static void Radio_Close(RadioStream *rs) { (void)rs; }
 static int Radio_Pump(RadioStream *rs) { (void)rs; return -1; }
 static int Radio_ReadAudio(RadioStream *rs, unsigned char *buf, int maxBytes) { (void)rs; (void)buf; (void)maxBytes; return 0; }

@@ -669,8 +669,25 @@ static void AppCloseShutdown(MrApp *app)
 	if (AppHasActivePlaybackChild(app)) {
 		AppCloseDebug("stop active playback if needed", app);
 		if (!StopPlaybackAndWait(app, 500, "Failed to stop previous stream")) {
-			while (PlaybackProcessStillExists())
+			/* The child missed the first stop request (e.g. it was stalled
+			 * inside a radio pump loop).  Keep re-asserting the shared stop
+			 * flags and re-signalling CTRL_C while waiting -- a single Signal
+			 * sent before the child sampled its signal mask can be consumed
+			 * without effect, and the old bare Delay() wait here left the app
+			 * frozen forever when that happened.  Matches the GadTools
+			 * front-end's WaitForPlaybackShutdown() loop. */
+			while (PlaybackProcessStillExists()) {
+				struct Task *child;
+				gPlayer.stopRequested = 1;
+				gPlaybackInterrupted = 1;
+				Forbid();
+				child = FindTask((STRPTR)"minimp3r playback");
+				if (child)
+					Signal(child, SIGBREAKF_CTRL_C);
+				Permit();
+				HandleDoneSignal(app);
 				Delay(5);
+			}
 			HandleDoneSignal(app);
 		}
 	} else {
@@ -1672,6 +1689,16 @@ static void FinalizePlayback(MrApp *app)
 		app->queuedStreamUrl[0] = '\0';
 		app->playlistNextPending = 0;
 		RADIO_DBG(printf("radio-memory: queued/next stream suppressed after memory poison session=%lu\n", gPlayer.sessionId);)
+		return;
+	}
+	if (app->shuttingDown) {
+		/* AppCloseShutdown() is reaping the child on the way out.  Starting
+		 * a queued stream or playlist-next now would launch a fresh playback
+		 * child that the imminent GUI teardown then pulls the rug from
+		 * under.  Reachable since Stop can complete from mid-buffering
+		 * states (Radio_SetStopCheck) that previously never finalized. */
+		app->queuedStreamUrl[0] = '\0';
+		app->playlistNextPending = 0;
 		return;
 	}
 	if (app->queuedStreamUrl[0]) {
