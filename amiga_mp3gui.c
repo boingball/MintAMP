@@ -557,6 +557,7 @@ static void RadioSetStatus(HelixAmp3Gui *app, const char *text);
 static void CloseRadioWindow(HelixAmp3Gui *gui);
 static void OpenRadioWindow(HelixAmp3Gui *gui);
 static void HandleRadioWindow(HelixAmp3Gui *gui);
+static void RadioDoProbeAndPlay(HelixAmp3Gui *app);
 
 struct IntuitionBase *IntuitionBase;
 extern struct CIA ciaa;
@@ -3360,6 +3361,9 @@ static void FinalizePlayback(HelixAmp3Gui *gui)
 		gui->queuedInputName[0] = '\0';
 		gui->haveRadioHostAddr = 0;
 		gui->radioHostAddrBe = 0;
+	} else if (!strcmp(queuedInputName, "radio-selection")) {
+		RadioSetStatus(gui, "Starting queued stream...");
+		RadioDoProbeAndPlay(gui);
 	} else if (queuedInputName[0]) {
 		CancelArtDecode(gui);
 		SafeCopy(gui->inputName, sizeof(gui->inputName), queuedInputName);
@@ -5075,6 +5079,16 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 		RADIO_DBG(printf("radio-memory: refusing RadioDoProbeAndPlay after MiniMem/ring corruption\n");)
 		return;
 	}
+	if (app->playbackActive || app->playbackDonePending || PlaybackProcessStillExists()) {
+		SafeCopy(app->queuedInputName, sizeof(app->queuedInputName), "radio-selection");
+		app->queuedHaveRadioHostAddr = 0;
+		app->queuedRadioHostAddrBe = 0;
+		app->queuedPlayPending = 1;
+		RadioSetStatus(app, "Queued stream; stopping previous stream...");
+		if (!gGuiPlayer.stopRequested)
+			StopPlayback(app);
+		return;
+	}
 	if (app->rbShowingFavourites) {
 		if (app->rbSelectedFavourite < 0 || app->rbSelectedFavourite >= app->rbFavouriteCount) {
 			RadioSetStatus(app, "Select a favourite first.");
@@ -6306,6 +6320,9 @@ static void PlaybackEntry(void)
 		earlyStop = 1;
 	if (!earlyStop)
 		ResetDecoderStatics();
+#if ENABLE_RADIO
+	Radio_SetStopFlag((const volatile int *)&gPlaybackInterrupted);
+#endif
 	gGuiPlaybackStatus.runId = gPlaybackEntryRunId;
 	if (stopBeforeStart || gGuiPlayer.stopRequested || gPlaybackInterrupted ||
 		(pending & SIGBREAKF_CTRL_C)) {
@@ -6337,6 +6354,9 @@ static void PlaybackEntry(void)
 		HelixAmp3CliMain(gGuiPlayer.argc, gGuiPlayer.argv);
 		gGuiPlaybackStatus.startupStage = GUISTART_CLEANUP;
 	}
+#if ENABLE_RADIO
+	Radio_SetStopFlag(NULL);
+#endif
 	if (!ranDecoder) {
 		gGuiPlaybackStatus.phase = GUIPLAY_PHASE_DONE;
 		gGuiPlaybackStatus.cleanupStage = GUIPLAY_CLEANUP_COMPLETE;
