@@ -49,7 +49,6 @@
 #include <intuition/intuition.h>
 #include <intuition/gadgetclass.h>
 #include <intuition/icclass.h>
-#include <libraries/gadtools.h>
 #include <hardware/cia.h>
 #include "picojpeg.h"
 #include "lodepng.h"
@@ -96,7 +95,6 @@
 #include <proto/fuelgauge.h>
 #include <proto/string.h>
 #include <proto/label.h>
-#include <proto/gadtools.h>
 #include <proto/graphics.h>
 
 /* ------------------------------------------------------------------------- */
@@ -281,23 +279,79 @@ static const int kFakeStereoDelays[] = { 48, 64, 96, 128, 192 };
 #define ITEMNUM_ARTCLEAN   7
 #define ITEMNUM_PROGRESS   8
 
-static struct NewMenu kMenus[] = {
-	{ NM_TITLE, (STRPTR)"Project", 0, 0, 0, 0 },
-	{ NM_ITEM, (STRPTR)"About MiniAMP3...", 0, 0, 0, (APTR)(MENUNUM_PROJECT * 100 + ITEMNUM_ABOUT) },
-	{ NM_ITEM, (STRPTR)"Internet Radio", 0, 0, 0, (APTR)(MENUNUM_PROJECT * 100 + ITEMNUM_RADIO) },
-	{ NM_ITEM, (STRPTR)"Quit", 0, 0, 0, (APTR)(MENUNUM_PROJECT * 100 + ITEMNUM_QUIT) },
-	{ NM_TITLE, (STRPTR)"Playback", 0, 0, 0, 0 },
-	{ NM_ITEM, (STRPTR)"Decode-then-play", 0, CHECKIT | MENUTOGGLE, 0, (APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_DTP) },
-	{ NM_ITEM, (STRPTR)"Bench mode", 0, CHECKIT | MENUTOGGLE, 0, (APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_BENCH) },
-	{ NM_ITEM, (STRPTR)"Artwork", 0, CHECKIT | MENUTOGGLE, 0, (APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_ARTWORK) },
-	{ NM_ITEM, (STRPTR)"Artwork Cache", 0, CHECKIT | MENUTOGGLE, 0, (APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_ARTCACHE) },
-	{ NM_ITEM, (STRPTR)"Colour Artwork", 0, CHECKIT | MENUTOGGLE, 0, (APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_ARTCOLOR) },
-	{ NM_ITEM, (STRPTR)"Refresh Artwork", 0, 0, 0, (APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_ARTREFRESH) },
-	{ NM_ITEM, (STRPTR)"Reload Art from File", 0, 0, 0, (APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_ARTRELOAD) },
-	{ NM_ITEM, (STRPTR)"Clear Artwork Cache", 0, 0, 0, (APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_ARTCLEAN) },
-	{ NM_ITEM, (STRPTR)"Progress Bar", 0, CHECKIT | MENUTOGGLE, 0, (APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_PROGRESS) },
-	{ NM_END, NULL, 0, 0, 0, 0 }
+static struct Menu kMenus[2];
+static struct MenuItem kProjectItems[3];
+static struct MenuItem kPlaybackItems[9];
+static struct IntuiText kProjectText[3];
+static struct IntuiText kPlaybackText[9];
+static const char * const kProjectLabels[3] = {
+	"About MiniAMP3...", "Internet Radio", "Quit"
 };
+static const char * const kPlaybackLabels[9] = {
+	"Decode-then-play", "Bench mode", "Artwork", "Artwork Cache",
+	"Colour Artwork", "Refresh Artwork", "Reload Art from File",
+	"Clear Artwork Cache", "Progress Bar"
+};
+
+static void MrInitMenuStrip(void)
+{
+	int i;
+	memset(kMenus, 0, sizeof(kMenus));
+	memset(kProjectItems, 0, sizeof(kProjectItems));
+	memset(kPlaybackItems, 0, sizeof(kPlaybackItems));
+	memset(kProjectText, 0, sizeof(kProjectText));
+	memset(kPlaybackText, 0, sizeof(kPlaybackText));
+	kMenus[0].NextMenu = &kMenus[1];
+	kMenus[0].LeftEdge = 0;
+	kMenus[0].TopEdge = 0;
+	kMenus[0].Width = 72;
+	kMenus[0].Height = 10;
+	kMenus[0].Flags = MENUENABLED;
+	kMenus[0].MenuName = (STRPTR)"Project";
+	kMenus[0].FirstItem = &kProjectItems[0];
+	kMenus[1].LeftEdge = 72;
+	kMenus[1].TopEdge = 0;
+	kMenus[1].Width = 80;
+	kMenus[1].Height = 10;
+	kMenus[1].Flags = MENUENABLED;
+	kMenus[1].MenuName = (STRPTR)"Playback";
+	kMenus[1].FirstItem = &kPlaybackItems[0];
+	for (i = 0; i < 3; i++) {
+		kProjectText[i].FrontPen = 0;
+		kProjectText[i].BackPen = 1;
+		kProjectText[i].DrawMode = JAM1;
+		kProjectText[i].LeftEdge = 2;
+		kProjectText[i].TopEdge = 1;
+		kProjectText[i].IText = (STRPTR)kProjectLabels[i];
+		kProjectItems[i].NextItem = (i < 2) ? &kProjectItems[i + 1] : NULL;
+		kProjectItems[i].LeftEdge = 0;
+		kProjectItems[i].TopEdge = i * 10;
+		kProjectItems[i].Width = 152;
+		kProjectItems[i].Height = 10;
+		kProjectItems[i].Flags = ITEMTEXT | ITEMENABLED | HIGHCOMP;
+		kProjectItems[i].ItemFill = (APTR)&kProjectText[i];
+		kProjectItems[i].NextSelect = MENUNULL;
+	}
+	for (i = 0; i < 9; i++) {
+		kPlaybackText[i].FrontPen = 0;
+		kPlaybackText[i].BackPen = 1;
+		kPlaybackText[i].DrawMode = JAM1;
+		kPlaybackText[i].LeftEdge = 14;
+		kPlaybackText[i].TopEdge = 1;
+		kPlaybackText[i].IText = (STRPTR)kPlaybackLabels[i];
+		kPlaybackItems[i].NextItem = (i < 8) ? &kPlaybackItems[i + 1] : NULL;
+		kPlaybackItems[i].LeftEdge = 0;
+		kPlaybackItems[i].TopEdge = i * 10;
+		kPlaybackItems[i].Width = 176;
+		kPlaybackItems[i].Height = 10;
+		kPlaybackItems[i].Flags = ITEMTEXT | ITEMENABLED | HIGHCOMP;
+		if (i == ITEMNUM_DTP || i == ITEMNUM_BENCH || i == ITEMNUM_ARTWORK ||
+			i == ITEMNUM_ARTCACHE || i == ITEMNUM_ARTCOLOR || i == ITEMNUM_PROGRESS)
+			kPlaybackItems[i].Flags |= CHECKIT | MENUTOGGLE;
+		kPlaybackItems[i].ItemFill = (APTR)&kPlaybackText[i];
+		kPlaybackItems[i].NextSelect = MENUNULL;
+	}
+}
 
 
 /* ------------------------------------------------------------------------- */
@@ -318,7 +372,6 @@ struct Library *CheckBoxBase;
 struct Library *FuelGaugeBase;
 struct Library *StringBase;
 struct Library *LabelBase;
-struct Library *GadToolsBase;
 
 /* ------------------------------------------------------------------------- */
 /* Playback child plumbing (a trimmed-down copy of the amiga_mp3gui logic)   */
@@ -384,7 +437,6 @@ typedef struct MrApp {
 	Object         *winObj;
 	struct Window  *win;
 	struct Menu    *menuStrip;
-	APTR            visualInfo;
 
 	Object         *fileGad;
 	Object         *rateGad;
@@ -1938,10 +1990,9 @@ static void CloseTimer(MrApp *app)
 
 static void CloseLibs(void)
 {
-	RADIO_DBG(printf("app-close: CloseLibs enter GadTools=%p Label=%p String=%p FuelGauge=%p CheckBox=%p Slider=%p ListBrowser=%p Chooser=%p GetFile=%p Button=%p Layout=%p Window=%p Utility=%p Intuition=%p\n",
-		GadToolsBase, LabelBase, StringBase, FuelGaugeBase, CheckBoxBase, SliderBase,
+	RADIO_DBG(printf("app-close: CloseLibs enter Label=%p String=%p FuelGauge=%p CheckBox=%p Slider=%p ListBrowser=%p Chooser=%p GetFile=%p Button=%p Layout=%p Window=%p Utility=%p Intuition=%p\n",
+		LabelBase, StringBase, FuelGaugeBase, CheckBoxBase, SliderBase,
 		ListBrowserBase, ChooserBase, GetFileBase, ButtonBase, LayoutBase, WindowBase, UtilityBase, IntuitionBase);)
-	if (GadToolsBase)  { CloseLibrary(GadToolsBase);  GadToolsBase = NULL; RADIO_DBG(printf("app-close: CloseLibs GadTools done\n");) }
 	if (LabelBase)     { CloseLibrary(LabelBase);     LabelBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Label done\n");) }
 	if (StringBase)    { CloseLibrary(StringBase);    StringBase = NULL; RADIO_DBG(printf("app-close: CloseLibs String done\n");) }
 	if (FuelGaugeBase) { CloseLibrary(FuelGaugeBase); FuelGaugeBase = NULL; RADIO_DBG(printf("app-close: CloseLibs FuelGauge done\n");) }
@@ -1963,11 +2014,6 @@ static int OpenLibs(void)
 	IntuitionBase = (struct IntuitionBase *)OpenLibrary("intuition.library", 39);
 	if (!IntuitionBase) {
 		fprintf(stderr, "minimp3r needs intuition.library V39+.\n");
-		return 0;
-	}
-	GadToolsBase = OpenLibrary("gadtools.library", 39);
-	if (!GadToolsBase) {
-		fprintf(stderr, "minimp3r needs gadtools.library V39+.\n");
 		return 0;
 	}
 	UtilityBase = OpenLibrary("utility.library", 39);
@@ -2361,29 +2407,17 @@ static int MrOpenWindow(MrApp *app)
 		SetGadgetAttrs((struct Gadget *)app->bufferGad, app->win, NULL,
 			GA_Disabled, app->decodeThenPlay,
 			TAG_DONE);
-	/* A visual-info handle is needed both to lay the menu strip out (without
-	 * LayoutMenus the items have no size, so the drop-downs never render) and
-	 * to draw the recessed artwork bevel. */
-	app->visualInfo = GetVisualInfoA(app->win->WScreen, NULL);
-	app->menuStrip = CreateMenus(kMenus, TAG_DONE);
-	if (app->menuStrip && app->visualInfo &&
-		LayoutMenus(app->menuStrip, app->visualInfo, TAG_DONE)) {
-		SyncMenuChecks(app);
-		SetMenuStrip(app->win, app->menuStrip);
-	} else {
-		fprintf(stderr, "minimp3r: could not create menus.\n");
-		if (app->menuStrip) {
-			FreeMenus(app->menuStrip);
-			app->menuStrip = NULL;
-		}
-	}
+	MrInitMenuStrip();
+	app->menuStrip = &kMenus[0];
+	SyncMenuChecks(app);
+	SetMenuStrip(app->win, app->menuStrip);
 	return 1;
 }
 
 static void MrCloseWindow(MrApp *app)
 {
-	RADIO_DBG(printf("app-close: MrCloseWindow enter rbWin=%p plWin=%p menuStrip=%p visualInfo=%p winObj=%p\n",
-		app->rbWin, app->plWin, app->menuStrip, app->visualInfo, app->winObj);)
+	RADIO_DBG(printf("app-close: MrCloseWindow enter rbWin=%p plWin=%p menuStrip=%p winObj=%p\n",
+		app->rbWin, app->plWin, app->menuStrip, app->winObj);)
 	CloseRadioWindow(app);
 	RADIO_DBG(printf("app-close: CloseRadioWindow done\n");)
 	ClosePlaylistWindow(app);
@@ -2392,16 +2426,7 @@ static void MrCloseWindow(MrApp *app)
 		ClearMenuStrip(app->win);
 		RADIO_DBG(printf("app-close: ClearMenuStrip done\n");)
 	}
-	if (app->menuStrip) {
-		FreeMenus(app->menuStrip);
-		app->menuStrip = NULL;
-		RADIO_DBG(printf("app-close: FreeMenus done\n");)
-	}
-	if (app->visualInfo) {
-		FreeVisualInfo(app->visualInfo);
-		app->visualInfo = NULL;
-		RADIO_DBG(printf("app-close: FreeVisualInfo done\n");)
-	}
+	app->menuStrip = NULL;
 	if (app->winObj) {
 		DisposeObject(app->winObj);	/* disposes the whole gadget tree too */
 		app->winObj = NULL;
@@ -3694,13 +3719,30 @@ static void DrawArtPanel(MrApp *app)
 	ox = gad->LeftEdge + 4 + (availW - w) / 2;
 	oy = gad->TopEdge + 4 + (availH - h) / 2;
 
-	/* Recessed frame, exactly like the GadTools frontend, so the panel is
-	 * always visible even before any artwork has decoded. */
-	if (app->visualInfo)
-		DrawBevelBox(rp, ox - 2, oy - 2, w + 4, h + 4,
-			GT_VisualInfo, (ULONG)app->visualInfo,
-			GTBB_Recessed, TRUE,
-			TAG_DONE);
+	/* Recessed frame drawn without GadTools so the panel remains visible even
+	 * before any artwork has decoded. */
+	{
+		int frameShinePen = 1, frameShadowPen = 2, frameBackPen = 0;
+		struct DrawInfo *dri = GetScreenDrawInfo(app->win->WScreen);
+		if (dri) {
+			frameShinePen = dri->dri_Pens[SHINEPEN];
+			frameShadowPen = dri->dri_Pens[SHADOWPEN];
+			frameBackPen = dri->dri_Pens[BACKGROUNDPEN];
+			FreeScreenDrawInfo(app->win->WScreen, dri);
+		}
+		SetAPen(rp, (UWORD)frameBackPen);
+		RectFill(rp, ox - 2, oy - 2, ox + w + 1, oy + h + 1);
+		SetAPen(rp, (UWORD)frameShadowPen);
+		Move(rp, ox - 2, oy - 2);
+		Draw(rp, ox + w + 1, oy - 2);
+		Move(rp, ox - 2, oy - 2);
+		Draw(rp, ox - 2, oy + h + 1);
+		SetAPen(rp, (UWORD)frameShinePen);
+		Move(rp, ox - 1, oy + h + 1);
+		Draw(rp, ox + w + 1, oy + h + 1);
+		Move(rp, ox + w + 1, oy - 1);
+		Draw(rp, ox + w + 1, oy + h + 1);
+	}
 
 	if (app->artValid) {
 		int pens[3] = {0, 1, 1};
@@ -5097,8 +5139,7 @@ static void HandleMenu(MrApp *app, UWORD code, int *done)
 	while (code != MENUNULL) {
 		struct MenuItem *item = ItemAddress(app->menuStrip, code);
 		if (item) {
-			ULONG ud = (ULONG)GTMENUITEM_USERDATA(item);
-			int mn = (int)(ud / 100), it = (int)(ud % 100);
+			int mn = (int)MENUNUM(code), it = (int)ITEMNUM(code);
 			if (mn == MENUNUM_PROJECT && it == ITEMNUM_QUIT) *done = 1;
 			else if (mn == MENUNUM_PROJECT && it == ITEMNUM_ABOUT) {
 				struct EasyStruct es;
