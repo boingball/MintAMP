@@ -665,7 +665,7 @@ static void rb_probe_transport_close(RbProbeTransport *transport);
 
 static int rb_probe_transport_open(RbProbeTransport *transport, const char *host, int port, int use_ssl, unsigned long *host_addr_be)
 {
-    struct hostent *he;
+    const struct hostent *he;
     struct sockaddr_in sa;
 
     if (!transport || !host) return RB_STREAM_PROBE_ERR_BAD_ARG;
