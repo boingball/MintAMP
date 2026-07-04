@@ -1191,10 +1191,37 @@ static int radio_send_all(RadioStream *rs, const char *buf, int len)
             }
             r = (int)SSL_write(rs->ssl, buf + sent, len - sent);
             if (r > 0) { sent += r; continue; }
-            if (r < 0) {
+            if (r <= 0) {
                 int e = SSL_get_error(rs->ssl, r);
                 if (e == SSL_ERROR_WANT_WRITE || e == SSL_ERROR_WANT_READ) {
                     radio_backoff_sleep(); tries++; continue;
+                }
+                {
+                    unsigned long ssl_lib_error = ERR_get_error();
+                    char ssl_error_buf[160];
+                    ssl_error_buf[0] = '\0';
+                    if (ssl_lib_error != 0)
+                        ERR_error_string_n(ssl_lib_error, ssl_error_buf, sizeof(ssl_error_buf));
+                    RADIO_DBG(printf("radio-ssl-write: session=%lu write failed ssl_error=%d lib_error=%08lx (%s)\n",
+                        rs->session_id, e, ssl_lib_error, ssl_error_buf[0] ? ssl_error_buf : "none"));
+                    if (e == SSL_ERROR_SSL || ssl_lib_error != 0) {
+                        /* Match the SSL_connect()/SSL_read() quarantine:
+                         * after a fatal AmiSSL write fault, do not let close
+                         * walk SSL/CTX/task state that may already be
+                         * corrupted. HTTPS remains usable for other sessions
+                         * unless the repeated-fault fuse hard-poisons it. */
+                        rs->sslStatePoisoned = 1;
+                        radio_amissl_task_poisoned = 1;
+                        Radio_NoteTlsFaultHost(rs->host);
+                        if (!rs->tlsFaultCounted) {
+                            rs->tlsFaultCounted = 1;
+                            Radio_ReportTlsFault(e == SSL_ERROR_SSL ? "SSL_ERROR_SSL from SSL_write" : "fatal AmiSSL error queue from SSL_write");
+                        } else {
+                            RADIO_DBG(printf("radio-tls: repeat TLS fault in session=%lu (already counted) -- quarantining objects again\n", rs->session_id));
+                        }
+                        ERR_clear_error();
+                        RADIO_DBG(printf("radio-ssl-write: session=%lu SSL state quarantined -- will skip SSL_free/SSL_CTX_free/CleanupAmiSSL on close\n", rs->session_id));
+                    }
                 }
             }
             return -1;

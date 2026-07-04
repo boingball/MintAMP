@@ -1071,6 +1071,35 @@ static int rb_probe_send_all(RbProbeTransport *transport, const char *buf, int l
                 if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
                     rb_probe_backoff_sleep(); tries++; continue;
                 }
+#ifdef SSL_ERROR_ZERO_RETURN
+                if (e == SSL_ERROR_ZERO_RETURN) {
+                    transport->sslReadCloseSeen = 1;
+                    RADIO_DBG(printf("rb-probe-ssl-write: session=%lu SSL_ERROR_ZERO_RETURN seen -- will skip SSL_free on close\n", transport->session_id);)
+                    return RB_STREAM_PROBE_ERR_SEND;
+                }
+#endif
+                {
+                    unsigned long ssl_lib_error = ERR_get_error();
+                    char ssl_error_buf[160];
+                    ssl_error_buf[0] = '\0';
+                    if (ssl_lib_error != 0)
+                        ERR_error_string_n(ssl_lib_error, ssl_error_buf, sizeof(ssl_error_buf));
+                    RADIO_DBG(printf("rb-probe-ssl-write: session=%lu write failed ssl_error=%d lib_error=%08lx (%s)\n",
+                        transport->session_id, e, ssl_lib_error, ssl_error_buf[0] ? ssl_error_buf : "none"));
+                    if (e == SSL_ERROR_SSL || ssl_lib_error != 0) {
+                        /* Same containment as SSL_connect()/SSL_read():
+                         * a fatal AmiSSL write error can leave the probe's
+                         * SSL/CTX/task state unsafe for cleanup, so quarantine
+                         * the transport and keep global HTTPS alive unless the
+                         * repeated-fault fuse decides otherwise. */
+                        transport->sslStatePoisoned = 1;
+                        rb_probe_amissl_dirty = 1;
+                        Radio_NoteTlsFaultHost(transport->host);
+                        Radio_ReportTlsFault(e == SSL_ERROR_SSL ? "probe SSL_ERROR_SSL from SSL_write" : "probe fatal AmiSSL error queue from SSL_write");
+                        ERR_clear_error();
+                        RADIO_DBG(printf("rb-probe-ssl-write: session=%lu SSL state quarantined -- will skip SSL_free/SSL_CTX_free/CleanupAmiSSL on close\n", transport->session_id));
+                    }
+                }
             }
             return RB_STREAM_PROBE_ERR_SEND;
         }
