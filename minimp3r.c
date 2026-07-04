@@ -141,6 +141,15 @@
 #define MR_TICK_MICROS   250000UL
 #define MR_METADATA_TICKS 4
 #define MR_TIME_TICKS     2
+/* How long Stop is allowed to sit outstanding (child signalled but never
+ * confirmed gone) before the GUI gives up waiting silently and says so.
+ * See the matching define/comment in amiga_mp3gui.c. */
+#define STOP_WATCHDOG_TIMEOUT_MICROS (20UL * 1000000UL)
+/* Bound on AppCloseShutdown()'s re-signal loop: each iteration delays 5
+ * ticks (Delay(5), ~1/10s at the usual 50Hz jiffy rate), so this is roughly
+ * a minute total before giving up on a wedged playback child and letting
+ * the app close anyway rather than hang the whole task forever. */
+#define APP_CLOSE_WEDGED_CHILD_MAX_TICKS 600
 
 #ifdef REACTION_POLL_DEBUG
 #define MR_POLL_DBG(args) do { printf args; } while (0)
@@ -512,6 +521,8 @@ typedef struct MrApp {
 	int             rbSchemeMode;
 	int             hasNetwork;
 	int             hasHttps;
+	unsigned long   stopWatchdogMicros;
+	int             stopWatchdogFired;
 	int             rbCountryMode;
 	int             rbShowingFavourites;
 	int             rbFavouriteCount;
@@ -732,8 +743,17 @@ static void AppCloseShutdown(MrApp *app)
 			 * sent before the child sampled its signal mask can be consumed
 			 * without effect, and the old bare Delay() wait here left the app
 			 * frozen forever when that happened.  Matches the GadTools
-			 * front-end's WaitForPlaybackShutdown() loop. */
-			while (PlaybackProcessStillExists()) {
+			 * front-end's WaitForPlaybackShutdown() loop.
+			 *
+			 * But if the child is genuinely wedged inside a blocking call
+			 * that never observes SIGBREAKF_CTRL_C at all (not just a missed
+			 * signal), re-signalling forever never helps either -- give up
+			 * after a bound so the app can still close instead of hanging
+			 * the whole task, at the cost of leaking the wedged child (no
+			 * safe way to force-kill a task stuck inside a library call). */
+			int wedgedTicks;
+			for (wedgedTicks = 0; wedgedTicks < APP_CLOSE_WEDGED_CHILD_MAX_TICKS &&
+				PlaybackProcessStillExists(); wedgedTicks++) {
 				struct Task *child;
 				gPlayer.stopRequested = 1;
 				gPlaybackInterrupted = 1;
@@ -745,6 +765,8 @@ static void AppCloseShutdown(MrApp *app)
 				HandleDoneSignal(app);
 				Delay(5);
 			}
+			if (PlaybackProcessStillExists())
+				RADIO_DBG(printf("app-close: giving up on wedged playback child after %d ticks, leaking it\n", wedgedTicks);)
 			HandleDoneSignal(app);
 		}
 	} else {
@@ -1633,6 +1655,8 @@ static void StopPlayback(MrApp *app)
 	app->streamState = MR_STREAM_STOP_REQUESTED;
 	gPlayer.stage = "STOP_REQUESTED";
 	gPlayer.stopRequested = 1;
+	app->stopWatchdogMicros = 0;
+	app->stopWatchdogFired = 0;
 	MrDebugSession("parent stop request sent", app);
 	gPlaybackInterrupted = 1;
 
@@ -1721,6 +1745,8 @@ static void FinalizePlayback(MrApp *app)
 	gPlayer.task = NULL;
 	gPlayer.stopRequested = 0;
 	app->activeChildCount = 0; app->activeStreamSessions = 0; app->activeStreamTasks = 0;
+	app->stopWatchdogMicros = 0;
+	app->stopWatchdogFired = 0;
 	gPlaybackInterrupted = 0;
 	gDonePort = NULL;
 	ResetCliParser();
@@ -1848,6 +1874,27 @@ static void PollPlaybackStatus(MrApp *app)
 	if (!app->playbackActive) {
 		MR_POLL_DBG(("minimp3r: poll %lu idle, updates=%d\n", tick, updates));
 		return;
+	}
+
+	/* Last-resort watchdog: Stop has been outstanding for a long time and the
+	 * child still has not been confirmed gone -- most likely wedged inside a
+	 * blocking bsdsocket/AmiSSL call that never observes SIGBREAKF_CTRL_C.
+	 * There is no safe way to force-kill an AmigaOS task stuck inside a
+	 * library call, and starting a new playback child while this one might
+	 * still be alive would let two children race on the same shared decoder/
+	 * IPC globals. So this does not try to recover playback; it only
+	 * replaces the indefinite silent "Stopping..." with an honest, one-shot
+	 * status so the user knows a restart is needed. */
+	if (!app->playbackDonePending && gPlayer.stopRequested) {
+		app->stopWatchdogMicros += MR_TICK_MICROS;
+		if (!app->stopWatchdogFired && app->stopWatchdogMicros >= STOP_WATCHDOG_TIMEOUT_MICROS) {
+			app->stopWatchdogFired = 1;
+			RADIO_DBG(printf("radio-stop: watchdog timeout after %luus, stream not responding to Stop\n", app->stopWatchdogMicros);)
+			SetStatus(app, "Stream isn't responding to Stop - restart the app to recover.");
+		}
+	} else {
+		app->stopWatchdogMicros = 0;
+		app->stopWatchdogFired = 0;
 	}
 
 	radioStatus = gGuiPlaybackStatus.radioStatus;

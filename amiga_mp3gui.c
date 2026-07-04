@@ -259,6 +259,19 @@ static char gSupportedExtPattern[512];
 #define TIME_W          80
 #define TIMER_TICK_MICROS 1000000UL
 #define ART_TIMER_MICROS 20000UL
+/* How long Stop is allowed to sit outstanding (child signalled but never
+ * confirmed gone) before the GUI gives up waiting silently and says so.
+ * Generous enough to cover a slow DNS lookup/TLS handshake plus buffer
+ * drain, short enough that a genuinely wedged child (blocking bsdsocket/
+ * AmiSSL call that never observes SIGBREAKF_CTRL_C) doesn't leave the user
+ * staring at "Stopping..." with no feedback and no idea whether it's
+ * frozen or about to recover. */
+#define STOP_WATCHDOG_TIMEOUT_MICROS (20UL * 1000000UL)
+/* Bound on WaitForPlaybackShutdown()'s app-close wait loop: each iteration
+ * delays 1 tick (Delay(1), ~1/50s at the usual jiffy rate), so this is
+ * roughly a minute total before giving up on a wedged playback child. See
+ * the comment at the loop's timeout check for the tradeoff this accepts. */
+#define APP_CLOSE_WEDGED_CHILD_MAX_TICKS 3000
 #define ART_MCUS_PER_PUMP 16
 #ifndef MINIAMP3_ART_REDUCED_JPEG
 #define MINIAMP3_ART_REDUCED_JPEG 1
@@ -539,6 +552,8 @@ typedef struct HelixAmp3Gui {
 	int   queuedPlayPending;
 	unsigned long playbackRunId;
 	unsigned long playbackDoneRunId;
+	unsigned long stopWatchdogMicros;
+	int stopWatchdogFired;
 	int lastCleanupStage;
 	int lastStartupStage;
 	int startupStageStableTicks;
@@ -3667,6 +3682,8 @@ static void radio_reset_playback_state_after_stop(HelixAmp3Gui *gui, const char 
 		gui->startupStageStableTicks = 0;
 		gui->startupStallShown = 0;
 		gui->lastDisplayedPhase = GUIPLAY_PHASE_IDLE;
+		gui->stopWatchdogMicros = 0;
+		gui->stopWatchdogFired = 0;
 	}
 	gGuiPlayer.process = NULL;
 	gGuiPlayer.stopRequested = 0;
@@ -3893,6 +3910,29 @@ static void HandleTimerSignal(HelixAmp3Gui *gui)
 		gui->playbackDonePending = 1;
 		gui->playbackStoppedByUser = gGuiPlayer.stopRequested ? 1 : 0;
 		FinalizePlayback(gui);
+	}
+
+	/* Last-resort watchdog: Stop has been outstanding for a long time and the
+	 * child still has not been confirmed gone -- most likely wedged inside a
+	 * blocking bsdsocket/AmiSSL call that never observes SIGBREAKF_CTRL_C.
+	 * There is no safe way to force-kill an AmigaOS task stuck inside a
+	 * library call, and starting a new playback child while this one might
+	 * still be alive would let two children race on the same shared decoder/
+	 * IPC globals -- exactly the class of corruption this codebase already
+	 * has scar tissue from. So this does not try to recover playback; it
+	 * only replaces the indefinite silent "Stopping..." with an honest,
+	 * one-shot status so the user knows a restart is needed instead of
+	 * wondering whether the app is about to come back on its own. */
+	if (gui->playbackActive && !gui->playbackDonePending && gGuiPlayer.stopRequested) {
+		gui->stopWatchdogMicros += expiredWasArt ? ART_TIMER_MICROS : TIMER_TICK_MICROS;
+		if (!gui->stopWatchdogFired && gui->stopWatchdogMicros >= STOP_WATCHDOG_TIMEOUT_MICROS) {
+			gui->stopWatchdogFired = 1;
+			RADIO_DBG(printf("radio-stop: watchdog timeout after %luus, stream not responding to Stop\n", gui->stopWatchdogMicros);)
+			SetStatus(gui, "Stream isn't responding to Stop - restart the app to recover.");
+		}
+	} else {
+		gui->stopWatchdogMicros = 0;
+		gui->stopWatchdogFired = 0;
 	}
 
 	if (gui->playbackActive && !gui->playbackDonePending && !expiredWasArt) {
@@ -7027,6 +7067,8 @@ static void StopPlayback(HelixAmp3Gui *gui)
 	}
 	gGuiPlayer.stopRequested = 1;
 	gPlaybackInterrupted = 1;
+	gui->stopWatchdogMicros = 0;
+	gui->stopWatchdogFired = 0;
 	if (IsRadioInputName(gui->inputName)) {
 		gGuiPlaybackStatus.radioStatus = (int)RADIO_STATUS_STOPPING;
 		gGuiPlaybackStatus.radioActive = 0;
@@ -7050,11 +7092,28 @@ static void StopPlayback(HelixAmp3Gui *gui)
 
 static void WaitForPlaybackShutdown(HelixAmp3Gui *gui)
 {
+	unsigned long wedgedTicks = 0;
+
 	if (!gui->playbackActive)
 		return;
 
 	StopPlayback(gui);
 	while (gui->playbackActive) {
+		if (++wedgedTicks >= APP_CLOSE_WEDGED_CHILD_MAX_TICKS) {
+			/* The child never observed Stop at all (not just a missed
+			 * signal) -- most likely wedged inside a blocking bsdsocket/
+			 * AmiSSL call. Re-signalling forever would hang the whole app
+			 * on quit with no way out but a reboot, so give up and let
+			 * GuiClose() proceed. This does not make the child disappear:
+			 * it is a task still running in this program's own code/data
+			 * segment, and abandoning it here is a real (if previously
+			 * already-accepted-elsewhere-in-this-file) risk that segment
+			 * gets torn down while it is still executing. It is still the
+			 * better trade: the alternative is a guaranteed permanent
+			 * hang, this is only a possible one. */
+			RADIO_DBG(printf("app-close: giving up on wedged playback child after %lu ticks, leaking it\n", wedgedTicks);)
+			break;
+		}
 		if (gui->donePort)
 			HandleDoneSignal(gui);
 
