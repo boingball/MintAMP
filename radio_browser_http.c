@@ -147,7 +147,7 @@ static int rb_http_build_request(char *out, int out_size,
 
 static int rb_http_transport_open(RbHttpTransport *transport, const char *host, int port)
 {
-    struct hostent *he;
+    const struct hostent *he;
     struct sockaddr_in sa;
     int rc;
 
