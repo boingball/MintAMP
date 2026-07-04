@@ -1085,18 +1085,21 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
         radio_close_mode_name(mode), rs->session_id, (int)rs->status, rs->sslHandshakeDone,
         shutdown_called ? "called" : "skipped", (void *)rs->ssl, (void *)rs->ctx, (long)rs->sock, radio_open_socket_count););
     if (rs->ssl && !rs->sslFreed) {
-        /* Debug containment: on classic AmiSSL the playback child can crash
-         * later even after apparently healthy SSL_free()/SSL_CTX_free()/
-         * CleanupAmiSSL() cycles. Do not call back into AmiSSL from the child
-         * close path; leak the per-session SSL object and let process exit
-         * reclaim only our own non-AmiSSL allocations. */
-        RADIO_DBG(printf("radio-cleanup: SSL_free skipped (playback quarantine) session=%lu ssl=%p leaking to avoid AmiSSL playback cleanup crash\n", rs->session_id, (void *)rs->ssl));
+        if (rs->sslStatePoisoned || Radio_IsTlsPoisoned()) {
+            RADIO_DBG(printf("radio-cleanup: SSL_free skipped (playback quarantine) session=%lu ssl=%p reason=%s\n",
+                rs->session_id, (void *)rs->ssl,
+                rs->sslStatePoisoned ? "session-poisoned" : "tls-poisoned"));
+            radio_amissl_task_poisoned = 1;
+            radio_tls_shutdown_quarantine = 1;
+        } else {
+            RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_free start ssl=%p\n", (void *)rs->ssl));
+            SSL_free(rs->ssl);
+            RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_free done\n"));
+        }
         rs->sslFreed = 1;
         if (radio_active_ssl_count > 0) radio_active_ssl_count--;
         rs->ssl = NULL;
         rs->sslHandshakeDone = 0;
-        radio_amissl_task_poisoned = 1;
-        radio_tls_shutdown_quarantine = 1;
     } else {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_free skipped\n"));
     }
@@ -1118,14 +1121,20 @@ static void radio_ssl_free_ctx(RadioStream *rs)
 {
     if (!rs) return;
     if (rs->ctx && !rs->ctxFreed) {
-        /* Same containment as SSL_free(): keep playback child away from
-         * AmiSSL ctx teardown. */
-        RADIO_DBG(printf("radio-cleanup: SSL_CTX_free skipped (playback quarantine) session=%lu ctx=%p leaking to avoid AmiSSL playback cleanup crash\n", rs->session_id, (void *)rs->ctx));
+        if (rs->sslStatePoisoned || Radio_IsTlsPoisoned()) {
+            RADIO_DBG(printf("radio-cleanup: SSL_CTX_free skipped (playback quarantine) session=%lu ctx=%p reason=%s\n",
+                rs->session_id, (void *)rs->ctx,
+                rs->sslStatePoisoned ? "session-poisoned" : "tls-poisoned"));
+            radio_amissl_task_poisoned = 1;
+            radio_tls_shutdown_quarantine = 1;
+        } else {
+            RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_CTX_free start ctx=%p\n", (void *)rs->ctx));
+            SSL_CTX_free(rs->ctx);
+            RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_CTX_free done\n"));
+        }
         rs->ctxFreed = 1;
         if (radio_active_ssl_ctx_count > 0) radio_active_ssl_ctx_count--;
         rs->ctx = NULL;
-        radio_amissl_task_poisoned = 1;
-        radio_tls_shutdown_quarantine = 1;
     } else {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_CTX_free skipped\n"));
     }
@@ -1191,10 +1200,29 @@ static int radio_send_all(RadioStream *rs, const char *buf, int len)
             }
             r = (int)SSL_write(rs->ssl, buf + sent, len - sent);
             if (r > 0) { sent += r; continue; }
-            if (r < 0) {
+            {
                 int e = SSL_get_error(rs->ssl, r);
+                unsigned long ssl_lib_error = 0;
+                char ssl_error_buf[160];
+                ssl_error_buf[0] = '\0';
                 if (e == SSL_ERROR_WANT_WRITE || e == SSL_ERROR_WANT_READ) {
                     radio_backoff_sleep(); tries++; continue;
+                }
+                ssl_lib_error = ERR_get_error();
+                if (ssl_lib_error != 0)
+                    ERR_error_string_n(ssl_lib_error, ssl_error_buf, sizeof(ssl_error_buf));
+                RADIO_DBG(printf("radio-ssl-write: session=%lu failed ret=%d ssl_error=%d lib_error=%08lx (%s)\n",
+                    rs->session_id, r, e, ssl_lib_error, ssl_error_buf[0] ? ssl_error_buf : "none"));
+                if (e == SSL_ERROR_SSL || ssl_lib_error != 0) {
+                    rs->sslStatePoisoned = 1;
+                    radio_amissl_task_poisoned = 1;
+                    Radio_NoteTlsFaultHost(rs->host);
+                    if (!rs->tlsFaultCounted) {
+                        rs->tlsFaultCounted = 1;
+                        Radio_ReportTlsFault(e == SSL_ERROR_SSL ? "SSL_ERROR_SSL from SSL_write" : "fatal AmiSSL error queue from SSL_write");
+                    }
+                    ERR_clear_error();
+                    RADIO_DBG(printf("radio-ssl-write: session=%lu SSL state quarantined -- will skip SSL_free/SSL_CTX_free/CleanupAmiSSL on close\n", rs->session_id));
                 }
             }
             return -1;
@@ -2080,6 +2108,10 @@ void Radio_NetworkShutdown(void)
     radio_network_shutdown_started = 1;
 #if defined(HAVE_AMISSL)
     if (Radio_IsTlsPoisoned() || radio_tls_shutdown_quarantine) {
+        const char *shutdown_reason = Radio_IsTlsPoisoned() ? "heap/memory poison" :
+            (radio_tls_fault_count > 0 ? "real TLS fault" :
+            (radio_amissl_task_poisoned ? "intentionally leaked SSL object" :
+            (radio_tls_shutdown_quarantine ? "legacy forced quarantine" : "unknown reason")));
         /* SSL_free()/SSL_CTX_free()/CleanupAmiSSL() were deliberately
          * skipped at least once this run (TLS fault quarantine or full
          * poison), so tasks have left dangling per-task state inside the
@@ -2088,12 +2120,12 @@ void Radio_NetworkShutdown(void)
          * recoverable alerts on app close. Abandon the whole shared
          * instance instead: the OS reclaims it when the process exits. */
         if (Radio_IsTlsPoisoned())
-            printf("APP_CLOSE: AmiSSL poisoned, skipping final AmiSSL shutdown\n");
+            printf("APP_CLOSE: AmiSSL poisoned, skipping final AmiSSL shutdown (shutdown_reason=%s)\n", shutdown_reason);
         else
-            printf("APP_CLOSE: AmiSSL quarantined after TLS fault(s), skipping final AmiSSL shutdown\n");
-        RADIO_DBG(printf("radio-netshutdown: AmiSSL %s (reason=%s, tls_fault_count=%ld), abandoning base=%p ext=%p master=%p without CleanupAmiSSL/CloseAmiSSL/CloseLibrary\n",
+            printf("APP_CLOSE: AmiSSL quarantined, skipping final AmiSSL shutdown (shutdown_reason=%s)\n", shutdown_reason);
+        RADIO_DBG(printf("radio-netshutdown: AmiSSL %s (poison_reason=%s, shutdown_reason=%s, tls_fault_count=%ld), abandoning base=%p ext=%p master=%p without CleanupAmiSSL/CloseAmiSSL/CloseLibrary\n",
             Radio_IsTlsPoisoned() ? "poisoned" : "quarantined",
-            Radio_TlsPoisonReason(), radio_tls_fault_count,
+            Radio_TlsPoisonReason(), shutdown_reason, radio_tls_fault_count,
             (void *)AmiSSLBase, (void *)AmiSSLExtBase, (void *)AmiSSLMasterBase););
         AmiSSLBase = NULL;
         AmiSSLExtBase = NULL;

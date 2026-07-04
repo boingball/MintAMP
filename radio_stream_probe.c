@@ -913,9 +913,20 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *host
             rb_probe_transport_close(transport);
             return RB_STREAM_PROBE_ERR_CONNECT;
         }
-        SSL_set_fd(transport->ssl, (int)transport->sock);
+        RADIO_DBG(printf("RB_PROBE_SSL_SET_FD_BEFORE session=%lu ssl=%p fd=%ld\n", transport->session_id, (void *)transport->ssl, (long)transport->sock);)
+        {
+            int set_fd_ok = SSL_set_fd(transport->ssl, (int)transport->sock);
+            RADIO_DBG(printf("RB_PROBE_SSL_SET_FD_AFTER session=%lu rc=%d ssl=%p fd=%ld\n", transport->session_id, set_fd_ok, (void *)transport->ssl, (long)transport->sock);)
+            if (!set_fd_ok) {
+                transport->ctx = NULL;
+                rb_probe_transport_close(transport);
+                return RB_STREAM_PROBE_ERR_CONNECT;
+            }
+        }
 #ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
+        RADIO_DBG(printf("RB_PROBE_SSL_SNI_BEFORE session=%lu host=%s ssl=%p\n", transport->session_id, host, (void *)transport->ssl);)
         sni_set = (SSL_set_tlsext_host_name(transport->ssl, host) == 1);
+        RADIO_DBG(printf("RB_PROBE_SSL_SNI_AFTER session=%lu host=%s sni_set=%d ssl=%p\n", transport->session_id, host, sni_set, (void *)transport->ssl);)
 #else
         sni_set = -1;
 #endif
@@ -929,10 +940,22 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *host
          * must not be misread as this connection's fatal error below. */
         ERR_clear_error();
         for (tries = 0; tries < 150; tries++) {
+            RADIO_DBG(printf("RB_PROBE_SSL_CONNECT_ATTEMPT session=%lu attempt=%d ssl=%p fd=%ld\n", transport->session_id, tries + 1, (void *)transport->ssl, (long)transport->sock);)
             ssl_connect_rc = SSL_connect(transport->ssl);
-            if (ssl_connect_rc == 1) break;
+            if (ssl_connect_rc == 1) {
+                RADIO_DBG(printf("RB_PROBE_SSL_CONNECT_DONE session=%lu attempt=%d\n", transport->session_id, tries + 1);)
+                break;
+            }
+            RADIO_DBG(printf("RB_PROBE_SSL_GET_ERROR_BEFORE session=%lu attempt=%d ret=%d\n", transport->session_id, tries + 1, ssl_connect_rc);)
             ssl_error = SSL_get_error(transport->ssl, ssl_connect_rc);
-            if (ssl_error == SSL_ERROR_WANT_READ || ssl_error == SSL_ERROR_WANT_WRITE) {
+            RADIO_DBG(printf("RB_PROBE_SSL_GET_ERROR_AFTER session=%lu attempt=%d ssl_error=%d\n", transport->session_id, tries + 1, ssl_error);)
+            if (ssl_error == SSL_ERROR_WANT_READ) {
+                RADIO_DBG(printf("RB_PROBE_SSL_CONNECT_WANT_READ session=%lu attempt=%d\n", transport->session_id, tries + 1);)
+                rb_probe_backoff_sleep();
+                continue;
+            }
+            if (ssl_error == SSL_ERROR_WANT_WRITE) {
+                RADIO_DBG(printf("RB_PROBE_SSL_CONNECT_WANT_WRITE session=%lu attempt=%d\n", transport->session_id, tries + 1);)
                 rb_probe_backoff_sleep();
                 continue;
             }
@@ -1064,12 +1087,30 @@ static int rb_probe_send_all(RbProbeTransport *transport, const char *buf, int l
         if (tries >= RB_PROBE_IO_STALL_TRIES) return RB_STREAM_PROBE_ERR_SEND;
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
         if (transport->isSSL && transport->ssl) {
+            RADIO_DBG(printf("RB_PROBE_SSL_WRITE_BEFORE session=%lu ssl=%p sent=%d len=%d\n", transport->session_id, (void *)transport->ssl, sent, len);)
             n = (int)SSL_write(transport->ssl, buf + sent, len - sent);
+            RADIO_DBG(printf("RB_PROBE_SSL_WRITE_AFTER session=%lu ret=%d sent=%d len=%d\n", transport->session_id, n, sent, len);)
             if (n > 0) { sent += n; tries = 0; continue; }
             {
                 int e = SSL_get_error(transport->ssl, n);
+                unsigned long ssl_lib_error = 0;
+                char ssl_error_buf[160];
+                ssl_error_buf[0] = '\0';
                 if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
                     rb_probe_backoff_sleep(); tries++; continue;
+                }
+                ssl_lib_error = ERR_get_error();
+                if (ssl_lib_error != 0)
+                    ERR_error_string_n(ssl_lib_error, ssl_error_buf, sizeof(ssl_error_buf));
+                RADIO_DBG(printf("rb-probe-ssl-write: session=%lu failed ret=%d ssl_error=%d lib_error=%08lx (%s)\n",
+                    transport->session_id, n, e, ssl_lib_error, ssl_error_buf[0] ? ssl_error_buf : "none");)
+                if (e == SSL_ERROR_SSL || ssl_lib_error != 0) {
+                    transport->sslStatePoisoned = 1;
+                    rb_probe_amissl_dirty = 1;
+                    Radio_NoteTlsFaultHost(transport->host);
+                    Radio_ReportTlsFault(e == SSL_ERROR_SSL ? "probe SSL_ERROR_SSL from SSL_write" : "probe fatal AmiSSL error queue from SSL_write");
+                    ERR_clear_error();
+                    RADIO_DBG(printf("rb-probe-ssl-write: session=%lu SSL state quarantined -- will skip SSL_free/SSL_CTX_free/CleanupAmiSSL on close\n", transport->session_id);)
                 }
             }
             return RB_STREAM_PROBE_ERR_SEND;
@@ -1373,7 +1414,9 @@ static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
         if (rc == RB_STREAM_PROBE_OK)
             info->have_host_addr = 1;
         if (rc < 0) return rc;
+        RADIO_DBG(printf("RB_PROBE_SSL_WRITE_BEFORE url=%s request_len=%d isSSL=%d\n", current_url, request_len, parsed.isSSL);)
         rc = rb_probe_send_all(&transport, request, request_len);
+        RADIO_DBG(printf("RB_PROBE_SSL_WRITE_AFTER url=%s rc=%d isSSL=%d\n", current_url, rc, parsed.isSSL);)
         if (rc < 0) {
             rb_probe_transport_close(&transport);
             return rc;
@@ -1381,6 +1424,7 @@ static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
         total = 0;
         header_end = -1;
         done = 0;
+        RADIO_DBG(printf("RB_PROBE_SSL_FIRST_READ_BEFORE url=%s isSSL=%d\n", current_url, parsed.isSSL);)
         while (!done) {
             int want;
             int n;
@@ -1564,7 +1608,9 @@ static int rb_probe_fetch_binary_impl(const char *url, unsigned char *out_buf, i
         request_len = (int)strlen(request);
         rc = rb_probe_transport_open(&transport, parsed.host, parsed.port, parsed.isSSL, NULL);
         if (rc < 0) return rc;
+        RADIO_DBG(printf("RB_PROBE_SSL_WRITE_BEFORE url=%s request_len=%d isSSL=%d\n", current_url, request_len, parsed.isSSL);)
         rc = rb_probe_send_all(&transport, request, request_len);
+        RADIO_DBG(printf("RB_PROBE_SSL_WRITE_AFTER url=%s rc=%d isSSL=%d\n", current_url, rc, parsed.isSSL);)
         if (rc < 0) {
             rb_probe_transport_close(&transport);
             return rc;
@@ -1572,6 +1618,7 @@ static int rb_probe_fetch_binary_impl(const char *url, unsigned char *out_buf, i
 
         total = 0;
         header_end = -1;
+        RADIO_DBG(printf("RB_PROBE_SSL_FIRST_READ_BEFORE url=%s isSSL=%d\n", current_url, parsed.isSSL);)
         for (;;) {
             int want;
             int n;
