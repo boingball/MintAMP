@@ -17,11 +17,13 @@
 #   make -C decoders aac      # build only the AAC module (AAC asm on by default)
 #   make -C decoders aac AACASM=0  # build AAC without m68k asm helpers
 #   make -C decoders ogg      # build only the OGG/Vorbis (Tremor) module
+#   make -C decoders ogg OGGASM=0  # build OGG/Tremor without m68k asm helpers
 
 CC     := m68k-amigaos-gcc
 NM     := m68k-amigaos-nm
 CPU    := -m68020
 AACASM ?= 1
+OGGASM ?= 1
 CFLAGS := $(CPU) -O2 -fomit-frame-pointer -std=gnu89 -Wall -I. \
           -DHAVE_AMIGA_AUDIO_DEVICE -DAMIGA_M68K \
           -fno-builtin \
@@ -218,14 +220,37 @@ aac.decoder: $(AAC_OBJS) decoder_module.h aac/aacdec.h
 # libogg/include on the search path.
 # --------------------------------------------------------------------------
 
+# decoders/tremor is a third-party submodule (pschatzmann/arduino-libvorbis-
+# tremor) we don't own, so the m68k asm additions can't live as commits inside
+# it; they're carried as ogg-tremor-m68k-asm.patch and applied here. Tremor's
+# own src/tremor/misc.h already includes asm_arm.h unconditionally for the
+# equivalent ARM fast path, so this follows the same upstream-provided hook
+# (see docs/ogg-tremor-m68k-asm.md). Using the new header itself as the
+# make target means the patch is only (re-)applied when it isn't already
+# present, so a repeat build or an already-patched checkout is a no-op.
+OGG_ASM_PATCH  := ogg-tremor-m68k-asm.patch
+OGG_ASM_MARKER := tremor/src/tremor/asm_m68k.h
+
+$(OGG_ASM_MARKER): $(OGG_ASM_PATCH)
+	@if [ -f $(OGG_ASM_MARKER) ]; then \
+	    echo "Tremor m68k asm patch already applied, skipping."; \
+	else \
+	    echo "Applying Tremor m68k asm patch ($(OGG_ASM_PATCH))..."; \
+	    cd tremor && patch -p1 < ../$(OGG_ASM_PATCH); \
+	fi
+
 TREMOR_LIB_SRCS := $(filter-out %_example.c,$(wildcard tremor/src/tremor/*.c))
 LIBOGG_LIB_SRCS := $(wildcard libogg/src/*.c)
 OGG_SRCS := ogg_entry.c ogg_alloc.c ogg_module.c $(TREMOR_LIB_SRCS) $(LIBOGG_LIB_SRCS)
 OGG_OBJS := $(OGG_SRCS:.c=.o)
 
-ogg: ogg.decoder
+ogg: $(OGG_ASM_MARKER) ogg.decoder
 
 OGG_CFLAGS := $(CFLAGS) -I. -Itremor/src -Itremor/src/tremor -Iogg-config-shim -Ilibogg/include
+
+ifeq ($(OGGASM),1)
+OGG_CFLAGS += -D_M68K_ASSEM_
+endif
 
 ogg_entry.o ogg_alloc.o ogg_module.o: decoder_module.h
 ogg_alloc.o ogg_module.o: ogg_alloc.h
@@ -244,7 +269,7 @@ ogg_entry.o ogg_alloc.o ogg_module.o: %.o: %.c
 # _impure_ptr (see ogg_alloc.c) for the same reason -- referenced from an
 # errno check in that same dead code, and pulling in the real one cascades
 # into the entire stdio implementation and DOSBase.
-tremor/src/tremor/%.o: tremor/src/tremor/%.c
+tremor/src/tremor/%.o: tremor/src/tremor/%.c $(OGG_ASM_MARKER)
 	$(CC) $(OGG_CFLAGS) \
 	    -include ogg_standalone.h \
 	    -Dmalloc=OggModuleMalloc \

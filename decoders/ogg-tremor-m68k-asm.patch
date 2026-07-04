@@ -1,0 +1,141 @@
+diff --git a/src/tremor/asm_m68k.h b/src/tremor/asm_m68k.h
+new file mode 100644
+index 0000000..d197d24
+--- /dev/null
++++ b/src/tremor/asm_m68k.h
+@@ -0,0 +1,123 @@
++/********************************************************************
++ *                                                                  *
++ * THIS FILE IS PART OF THE OggVorbis 'TREMOR' CODEC SOURCE CODE.   *
++ *                                                                  *
++ * USE, DISTRIBUTION AND REPRODUCTION OF THIS LIBRARY SOURCE IS     *
++ * GOVERNED BY A BSD-STYLE SOURCE LICENSE INCLUDED WITH THIS SOURCE *
++ * IN 'COPYING'. PLEASE READ THESE TERMS BEFORE DISTRIBUTING.       *
++ *                                                                  *
++ ********************************************************************
++
++ function: 68020+ wide math functions, mirroring asm_arm.h
++
++ Amiga/m68k addition: not part of upstream Tremor. Follows the same
++ pattern as this project's real/assembly.h (see MULSHIFT32_AMIGA_M68K_ASM),
++ which already uses muls.l for the equivalent MP3-decoder primitive.
++
++ ********************************************************************/
++
++#ifdef _M68K_ASSEM_
++
++#if defined(__GNUC__) && \
++	(defined(__mc68020__) || defined(__mc68030__) || defined(__mc68040__) || \
++	 defined(__mc68060__) || defined(mc68020))
++
++#if !defined(_V_WIDE_MATH) && !defined(_LOW_ACCURACY_)
++#define _V_WIDE_MATH
++
++/* muls.l %2,%0:%1 writes the high 32 bits of the signed 64-bit product to
++ * the first data register (%0) and the low 32 bits to the second (%1);
++ * see MULSHIFT32_AMIGA_M68K_ASM in real/assembly.h for the same idiom used
++ * by the MP3 decoder core.
++ */
++static inline ogg_int32_t MULT32(ogg_int32_t x, ogg_int32_t y) {
++  int hi, lo;
++  lo = x;
++  __asm__ volatile ("muls.l %2,%0:%1"
++	: "=d" (hi), "+d" (lo)
++	: "dmi" (y)
++	: "cc");
++  (void)lo;
++  return hi;
++}
++
++static inline ogg_int32_t MULT31(ogg_int32_t x, ogg_int32_t y) {
++  return MULT32(x, y) << 1;
++}
++
++static inline ogg_int32_t MULT31_SHIFT15(ogg_int32_t x, ogg_int32_t y) {
++  int hi, lo;
++  lo = x;
++  __asm__ volatile ("muls.l %2,%0:%1"
++	: "=d" (hi), "+d" (lo)
++	: "dmi" (y)
++	: "cc");
++  return ((ogg_uint32_t)lo >> 15) | (hi << 17);
++}
++
++#define MB() __asm__ volatile ("" : : : "memory")
++
++/* Not hand-scheduled m68k asm (see docs/ogg-tremor-m68k-asm.md) - just the
++ * same composition misc.h's own non-i386 C fallback uses, built on our
++ * asm MULT32/MULT31 above. Required here because defining _V_WIDE_MATH
++ * (above) makes this header responsible for the whole contract that guard
++ * covers in misc.h, which includes XPROD32/XPROD31/XNPROD31 alongside
++ * MULT32/MULT31/MULT31_SHIFT15 - leaving them out left them undefined at
++ * link time instead of falling back to the portable C.
++ */
++static inline void XPROD32(ogg_int32_t a, ogg_int32_t b,
++			    ogg_int32_t t, ogg_int32_t v,
++			    ogg_int32_t *x, ogg_int32_t *y)
++{
++  *x = MULT32(a, t) + MULT32(b, v);
++  *y = MULT32(b, t) - MULT32(a, v);
++}
++
++static inline void XPROD31(ogg_int32_t a, ogg_int32_t b,
++			    ogg_int32_t t, ogg_int32_t v,
++			    ogg_int32_t *x, ogg_int32_t *y)
++{
++  *x = MULT31(a, t) + MULT31(b, v);
++  *y = MULT31(b, t) - MULT31(a, v);
++}
++
++static inline void XNPROD31(ogg_int32_t a, ogg_int32_t b,
++			     ogg_int32_t t, ogg_int32_t v,
++			     ogg_int32_t *x, ogg_int32_t *y)
++{
++  *x = MULT31(a, t) - MULT31(b, v);
++  *y = MULT31(b, t) + MULT31(a, v);
++}
++
++#endif
++
++#ifndef _V_CLIP_MATH
++#define _V_CLIP_MATH
++
++/* Same clamp to [-32768, 32767] as the generic CLIP_TO_15() in misc.h and
++ * the ARM asm version in asm_arm.h, written as two compare/branch pairs
++ * rather than ARM's predicated-instruction trick (68020 doesn't have an
++ * equivalent conditional-execution density, and a plain branch pair here
++ * is easy to verify against the C reference bit-for-bit).
++ */
++static inline ogg_int32_t CLIP_TO_15(ogg_int32_t x) {
++  __asm__ volatile (
++	"cmp.l %1,%0\n\t"
++	"ble.s 0f\n\t"
++	"move.l %1,%0\n\t"
++	"0:\n\t"
++	"cmp.l %2,%0\n\t"
++	"bge.s 1f\n\t"
++	"move.l %2,%0\n\t"
++	"1:"
++	: "+d" (x)
++	: "di" (32767), "di" (-32768)
++	: "cc");
++  return x;
++}
++
++#endif
++
++#endif /* __GNUC__ && 68020+ */
++
++#endif /* _M68K_ASSEM_ */
+diff --git a/src/tremor/misc.h b/src/tremor/misc.h
+index 1ae4d2e..0380c73 100644
+--- a/src/tremor/misc.h
++++ b/src/tremor/misc.h
+@@ -29,6 +29,7 @@
+ #endif
+ 
+ #include "asm_arm.h"
++#include "asm_m68k.h"
+ #include <stdlib.h> /* for abs() */
+   
+ #ifndef _V_WIDE_MATH

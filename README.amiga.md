@@ -130,6 +130,19 @@ AAC m68k asm helpers are enabled by default for these builds.  Pass `AACASM=0`
 to either the top-level Amiga makefile or `make -C decoders aac` only when you
 need the plain C fallback.
 
+OGG/Vorbis support is provided by `decoders/ogg.decoder`, built from
+`decoders/ogg_entry.c`/`ogg_alloc.c`/`ogg_module.c` plus the vendored Tremor
+(fixed-point Vorbis) and libogg submodules:
+
+```sh
+git submodule update --init decoders/tremor decoders/libogg
+make -C decoders ogg
+```
+
+Like AAC, Tremor's m68k asm helpers (`decoders/tremor/src/tremor/asm_m68k.h`,
+covering `MULT32`/`MULT31`/`MULT31_SHIFT15`/`CLIP_TO_15`) are enabled by
+default. Pass `OGGASM=0` to build Tremor with its plain C fallback instead.
+
 `make -f Makefile.amiga`, `fast030`, `gui`, and `guir` all depend on
 `decoder-modules`; the module makefile now builds both `flac.decoder` and `aac.decoder` by default.  The FLAC module is linked with `-nostartfiles`, keeps its allocation
 inside the module through an Exec `AllocMem`/`FreeMem` shim, and audits for
