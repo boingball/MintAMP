@@ -54,6 +54,7 @@
 #include <hardware/cia.h>
 #include "picojpeg.h"
 #include "lodepng.h"
+#include "svgdec.h"
 #include "radio_stream.h"
 #include "radio_browser_controller.h"
 #include "radio_browser_http.h"
@@ -133,6 +134,13 @@
  * source list to actually shrink the binary. */
 #ifndef ENABLE_PNG_ARTWORK
 #define ENABLE_PNG_ARTWORK 1
+#endif
+/* SVG favicon support via svgdec.c (a small from-scratch, fixed-point
+ * subset decoder -- see svgdec.h).  Disable by building with
+ * -DENABLE_SVG_ARTWORK=0 and dropping svgdec.c from the Makefile's
+ * source list to shrink the binary. */
+#ifndef ENABLE_SVG_ARTWORK
+#define ENABLE_SVG_ARTWORK 1
 #endif
 #define MR_FAVICON_MAX_BYTES (256L * 1024L)
 
@@ -3665,10 +3673,10 @@ static int DecodeIcoToGrey(const unsigned char *icoData, unsigned long icoBytes,
  * into -- so this never touches the MP3 stream's SSL read loop.  Any
  * failure here (bad URL, unsupported TLS, oversized body, unsupported
  * format, broken decode) just leaves artValid 0 and never affects
- * playback.  JPEG, PNG and ICO are tried in that order based on URL
- * extension or Content-Type, each independently confirmed via magic
- * bytes before decoding; anything else (WebP, SVG, ...) is silently
- * rejected. */
+ * playback.  JPEG, PNG, ICO and SVG are tried in that order, each
+ * independently confirmed via magic bytes (or, for SVG, a bounded scan
+ * for a "<svg" root tag) before decoding, regardless of URL extension or
+ * Content-Type; anything else (WebP, ...) is silently rejected. */
 static int LoadRadioFaviconImage(MrApp *app)
 {
 	char contentType[64];
@@ -3724,7 +3732,18 @@ static int LoadRadioFaviconImage(MrApp *app)
 		app->artValid = 1;
 		return 1;
 	}
-	RADIO_DBG(printf("radio-art: rejected, unsupported favicon format (first bytes %02X %02X %02X %02X don't match JPEG/PNG/ICO)\n",
+#if ENABLE_SVG_ARTWORK
+	if (SvgLooksLikeSvg(response, bytes)) {
+		if (SvgDecodeToGrey(response, (unsigned long)bytes, app->artGreyBuf, app->artRGBBuf,
+			MR_ART_W, MR_ART_H) != 0) {
+			RADIO_DBG(printf("radio-art: svgdec decode failed\n");)
+			return 0;
+		}
+		app->artValid = 1;
+		return 1;
+	}
+#endif
+	RADIO_DBG(printf("radio-art: rejected, unsupported favicon format (first bytes %02X %02X %02X %02X don't match JPEG/PNG/ICO/SVG)\n",
 		response[0], response[1], response[2], response[3]);)
 	return 0;
 }

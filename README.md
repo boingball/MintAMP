@@ -24,7 +24,7 @@ Classic AmigaOS • m68k • Paula • MP3 • AAC • FLAC • HTTP/HTTPS radio
 - Radio Browser station search
 - ICY metadata parsing and live title/artist updates
 - Station name, genre, bitrate and content-type display
-- JPEG and PNG station artwork support in the ReAction front-end
+- JPEG, PNG and SVG station artwork support in the ReAction front-end
 - Resilient radio buffering and reconnect handling
 - Paula audio.device playback output
 - Fast low-rate playback options for slower classic systems
@@ -71,6 +71,7 @@ Suggested screenshots:
 | Radio Browser search | Working | Used by the GUI radio search. |
 | JPEG artwork | Working | Station logo/artwork support in `minimp3r`. |
 | PNG artwork | Working | `lodepng` is compiled into the ReAction front-end only. |
+| SVG artwork | Working (subset) | `svgdec.c`, a small from-scratch fixed-point decoder, compiled into the ReAction front-end only. See "Artwork notes" below for what's supported. |
 | HLS / M3U8 | Not supported | Out of scope currently. Direct stream URLs only. |
 
 ## Internet radio
@@ -406,8 +407,11 @@ Supported artwork decode paths:
 - JPEG through `picojpeg`
 - PNG through vendored `lodepng`
 - ICO favicon files, including PNG-backed ICO entries and simple DIB-backed icons
+- SVG through `svgdec.c`, a small from-scratch, fixed-point (no floating point) decoder written for this project rather than a vendored library, since general-purpose SVG libraries assume float math and full CSS/gradient/filter support that don't fit this project's constraints
 
-Artwork support is intentionally wired into `minimp3r` only. The GadTools and CLI builds do not need PNG/JPEG/ICO artwork support.
+`svgdec.c` covers `path`/`rect`/`circle`/`ellipse`/`polygon`/`polyline`/`line` with solid fills and simple strokes, `transform` (translate/scale/rotate/skewX/skewY/matrix), opacity/fill-opacity/stroke-opacity, and `viewBox`/`width`/`height` sizing. It does not resolve gradients, patterns, filters, clip/mask, `<use>`, `<image>`, `<text>`, or CSS `<style>` rules -- the affected paint or subtree is simply left unpainted rather than failing the whole decode. Elliptical arc (`A`) path commands degrade to a straight line to their endpoint rather than a true arc. A document with no usable `<svg>` root/size still fails outright, same as an undecodable JPEG/PNG/ICO.
+
+Artwork support is intentionally wired into `minimp3r` only. The GadTools and CLI builds do not need PNG/JPEG/ICO/SVG artwork support.
 
 ## Development notes
 

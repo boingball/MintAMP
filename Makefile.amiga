@@ -64,6 +64,12 @@ endif
 PNG_CPPFLAGS := -DENABLE_PNG_ARTWORK -DLODEPNG_NO_COMPILE_ENCODER \
 	-DLODEPNG_NO_COMPILE_DISK -DLODEPNG_NO_COMPILE_ANCILLARY_CHUNKS
 
+# SVG favicon decoding for minimp3r's radio artwork (svgdec.c, a small
+# from-scratch fixed-point subset decoder -- no floating point, no third-
+# party library, see svgdec.h).  Disable with -DENABLE_SVG_ARTWORK=0 in
+# EXTRA_CFLAGS and drop svgdec.c from GUIR_SOURCES below to also shrink
+# the binary; the C-level guard alone only skips the decode calls.
+
 SOURCES := amiga_mp3dec.c miniamp_memguard.c $(RADIO_SOURCES) $(DECODER_SOURCES)
 # miniamp_memguard.c compiles to nothing unless HEAPGUARD=1 (see
 # MINIAMP_DEBUG_ALLOC above), so it's harmless to always list it.
@@ -74,9 +80,10 @@ GUI_SOURCES := amiga_mp3gui.c picojpeg.c miniamp_memguard.c $(RADIO_SOURCES) \
 # minimp3r is the ReAction/ClassAct frontend; it pulls amiga_mp3dec.c in itself
 # (like amiga_mp3gui.c) so only the shared decoder modules are listed here.  The
 # ReAction classes are opened at runtime, so no extra linker flag is needed.
-# lodepng.c is only needed here -- the radio favicon artwork feature (and its
-# PNG support) is minimp3r-only, not wired into the GadTools frontend above.
-GUIR_SOURCES := minimp3r.c picojpeg.c lodepng.c miniamp_memguard.c $(RADIO_SOURCES) \
+# lodepng.c/svgdec.c are only needed here -- the radio favicon artwork
+# feature (and its PNG/SVG support) is minimp3r-only, not wired into the
+# GadTools frontend above.
+GUIR_SOURCES := minimp3r.c picojpeg.c lodepng.c svgdec.c miniamp_memguard.c $(RADIO_SOURCES) \
 	radio_browser_controller.c radio_browser.c radio_browser_url.c \
 	radio_browser_http.c radio_browser_json.c radio_stream_probe.c
 
