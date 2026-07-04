@@ -70,6 +70,7 @@ static long rb_probe_amissl_cleanup_count = 0;
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <errno.h>
+#include <fcntl.h>
 #define RB_PROBE_SOCKET int
 #define RB_PROBE_INVALID_SOCKET (-1)
 #define rb_probe_close_socket(s) close(s)
@@ -113,16 +114,74 @@ static void rb_probe_format_ipv4_be(unsigned long addr_be, char *out, int out_si
 #define RB_PROBE_READ_CHUNK 512
 #define RB_PROBE_MAX_REDIRECTS 3
 #define RB_PROBE_MAX_URL 512
+/* ~6s at ~40ms/poll -- same connect budget as radio_stream.c's
+ * radio_wait_connected(). */
+#define RB_PROBE_CONNECT_TRIES 150
+/* ~10s of no data before giving up on a stalled send/recv.  This whole probe
+ * runs synchronously on the main GUI task (see rb_probe_fetch_binary_impl()'s
+ * comment), so on a blocking socket a server that accepts the TCP connection
+ * and then never answers -- or answers the headers and then goes silent --
+ * hangs this call forever with no non-blocking mode of its own to fall back
+ * on, freezing the whole GUI (Stop included, since it never gets back to the
+ * event loop to see the click) until the machine is rebooted. */
+#define RB_PROBE_IO_STALL_TRIES 250
 
 static unsigned long rb_probe_next_session_id = 1;
 static long rb_probe_open_socket_count = 0;
 
-#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+#if defined(AMIGA_M68K)
 static void rb_probe_backoff_sleep(void)
 {
     Delay(2); /* ~40ms (2 ticks @ 50Hz), same budget as radio_stream.c's handshake poll */
 }
+#else
+static void rb_probe_backoff_sleep(void)
+{
+    usleep(40000);
+}
 #endif
+
+#ifndef FIONBIO
+#define FIONBIO 0x8004667EUL
+#endif
+#ifndef EWOULDBLOCK
+#define EWOULDBLOCK 35
+#endif
+#ifndef EAGAIN
+#define EAGAIN 35
+#endif
+#ifndef EISCONN
+#define EISCONN 56
+#endif
+
+/* Put the probe's TCP socket into non-blocking mode.  See radio_stream.c's
+ * matching radio_set_nonblocking() -- without this, connect()/send()/recv()
+ * on this socket can block indefinitely (or for whatever the underlying
+ * stack's own long default timeout is), and this file has no task/signal of
+ * its own to interrupt them with since it runs on the caller's own task. */
+static void rb_probe_set_nonblocking(RB_PROBE_SOCKET s)
+{
+#if defined(AMIGA_M68K)
+    long nb = 1;
+    IoctlSocket(s, FIONBIO, (char *)&nb);
+#else
+    int fl = fcntl(s, F_GETFL, 0);
+    if (fl >= 0)
+        fcntl(s, F_SETFL, fl | O_NONBLOCK);
+#endif
+}
+
+/* True when the last socket call failed only because no data/connection is
+ * ready yet on the now-non-blocking socket. */
+static int rb_probe_would_block(void)
+{
+#if defined(AMIGA_M68K)
+    long e = Errno();
+    return e == EWOULDBLOCK || e == EAGAIN;
+#else
+    return errno == EWOULDBLOCK || errno == EAGAIN;
+#endif
+}
 
 #if defined(AMIGA_M68K) && !defined(RB_STREAM_PROBE_EXTERNAL_SOCKETBASE)
 /* bsdsocket.library is now opened once by Radio_NetworkInit() at app startup
@@ -663,6 +722,49 @@ static void rb_probe_cleanup_amissl(void)
 static void rb_probe_transport_close_mode(RbProbeTransport *transport, RbProbeCloseMode mode, int http_status);
 static void rb_probe_transport_close(RbProbeTransport *transport);
 
+/* Drive a non-blocking connect() to completion by re-issuing connect() and
+ * yielding with Delay()/usleep() between tries, mirroring radio_stream.c's
+ * radio_wait_connected() -- see the rationale on RB_PROBE_IO_STALL_TRIES for
+ * why this socket must never block outright.  Returns 0 on success (or
+ * already-connected), -1 once the try budget is exhausted. */
+static int rb_probe_wait_connected(RbProbeTransport *transport, struct sockaddr_in *sa)
+{
+    int tries;
+
+    for (tries = 0; tries < RB_PROBE_CONNECT_TRIES; tries++) {
+        long e;
+        int cr;
+
+        rb_probe_backoff_sleep();
+        cr = connect(transport->sock, (struct sockaddr *)sa, sizeof(*sa));
+        if (cr == 0) return 0;
+        e = rb_probe_sock_errno();
+        if (e == EISCONN) return 0;
+    }
+    RADIO_DBG(printf("rb-probe-connect: session=%lu wait_connected timed out host=%s\n", transport->session_id, transport->host);)
+    return -1;
+}
+
+/* Bounded non-blocking recv(): retries on EWOULDBLOCK/EAGAIN, yielding
+ * between tries, instead of the plain blocking recv() this replaces -- a
+ * server that accepts the connection and then never answers (or goes silent
+ * mid-response) used to hang this call, and therefore the whole calling
+ * task, forever. Returns >0 bytes read, 0 on clean EOF, -1 on a real error
+ * or once the stall budget is exhausted. */
+static int rb_probe_recv(RbProbeTransport *transport, void *buf, int want)
+{
+    int tries;
+
+    for (tries = 0; tries < RB_PROBE_IO_STALL_TRIES; tries++) {
+        int n = (int)recv(transport->sock, buf, want, 0);
+        if (n >= 0) return n;
+        if (!rb_probe_would_block()) return -1;
+        rb_probe_backoff_sleep();
+    }
+    RADIO_DBG(printf("rb-probe-recv: session=%lu stalled recv timed out\n", transport->session_id);)
+    return -1;
+}
+
 static int rb_probe_transport_open(RbProbeTransport *transport, const char *host, int port, int use_ssl, unsigned long *host_addr_be)
 {
     const struct hostent *he;
@@ -720,13 +822,21 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *host
     if (transport->sock == RB_PROBE_INVALID_SOCKET) { rb_probe_socket_fail(transport, "socket"); return RB_STREAM_PROBE_ERR_CONNECT; }
     rb_probe_open_socket_count++;
     RADIO_DBG(printf("radio-socket: probe socket opened session=%lu host=%s fd=%ld open_socket_count=%ld probe_open_socket_count=%ld\n", transport->session_id, transport->host, (long)transport->sock, rb_probe_open_socket_count, rb_probe_open_socket_count);)
+    /* Go non-blocking BEFORE connect so a dead/unresponsive host can never
+     * block this call -- this probe runs on the caller's own task (the main
+     * GUI task for a station/favicon probe), so a blocking connect()/recv()
+     * here freezes the whole app, not just a background child. */
+    rb_probe_set_nonblocking(transport->sock);
     memset(&sa, 0, sizeof(sa));
     sa.sin_family = AF_INET;
     sa.sin_port = htons((unsigned short)port);
     memcpy(&sa.sin_addr, he->h_addr_list[0], (size_t)he->h_length);
-    if (connect(transport->sock, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
-        rb_probe_transport_close(transport);
-        return RB_STREAM_PROBE_ERR_CONNECT;
+    {
+        int cr = connect(transport->sock, (struct sockaddr *)&sa, sizeof(sa));
+        if (cr < 0 && rb_probe_wait_connected(transport, &sa) != 0) {
+            rb_probe_transport_close(transport);
+            return RB_STREAM_PROBE_ERR_CONNECT;
+        }
     }
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     if (use_ssl) {
@@ -922,19 +1032,31 @@ static int rb_probe_send_all(RbProbeTransport *transport, const char *buf, int l
 {
     int sent;
     int n;
+    int tries;
 
     if (!transport || transport->sock == RB_PROBE_INVALID_SOCKET || !buf || len < 0)
         return RB_STREAM_PROBE_ERR_BAD_ARG;
     sent = 0;
+    tries = 0;
     while (sent < len) {
+        if (tries >= RB_PROBE_IO_STALL_TRIES) return RB_STREAM_PROBE_ERR_SEND;
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-        if (transport->isSSL && transport->ssl)
+        if (transport->isSSL && transport->ssl) {
             n = (int)SSL_write(transport->ssl, buf + sent, len - sent);
-        else
+            if (n > 0) { sent += n; tries = 0; continue; }
+            {
+                int e = SSL_get_error(transport->ssl, n);
+                if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
+                    rb_probe_backoff_sleep(); tries++; continue;
+                }
+            }
+            return RB_STREAM_PROBE_ERR_SEND;
+        }
 #endif
         n = (int)send(transport->sock, (char *)buf + sent, len - sent, 0);
-        if (n <= 0) return RB_STREAM_PROBE_ERR_SEND;
-        sent += n;
+        if (n > 0) { sent += n; tries = 0; continue; }
+        if (n < 0 && rb_probe_would_block()) { rb_probe_backoff_sleep(); tries++; continue; }
+        return RB_STREAM_PROBE_ERR_SEND;
     }
     return RB_STREAM_PROBE_OK;
 }
@@ -1256,7 +1378,7 @@ static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
                 n = rb_probe_ssl_read_retrying(&transport, (char *)header_buf + total, want, capacity, total);
             } else
 #endif
-            n = (int)recv(transport.sock, (char *)header_buf + total, want, 0);
+            n = rb_probe_recv(&transport, (char *)header_buf + total, want);
             if (n < 0) {
                 rb_probe_transport_close(&transport);
                 return RB_STREAM_PROBE_ERR_RECV;
@@ -1323,7 +1445,7 @@ static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
             n2 = rb_probe_ssl_read_retrying(&transport, (char *)peek_buf + *peek_len, want2, capacity2, *peek_len);
         } else
 #endif
-        n2 = (int)recv(transport.sock, (char *)peek_buf + *peek_len, want2, 0);
+        n2 = rb_probe_recv(&transport, (char *)peek_buf + *peek_len, want2);
         if (n2 < 0) {
             rb_probe_transport_close(&transport);
             return RB_STREAM_PROBE_ERR_RECV;
@@ -1445,7 +1567,7 @@ static int rb_probe_fetch_binary_impl(const char *url, unsigned char *out_buf, i
                 n = rb_probe_ssl_read_retrying(&transport, (char *)header_buf + total, want, RB_PROBE_HEADER_BUF - total, total);
             else
 #endif
-            n = (int)recv(transport.sock, (char *)header_buf + total, want, 0);
+            n = rb_probe_recv(&transport, (char *)header_buf + total, want);
             if (n < 0) {
                 rb_probe_transport_close(&transport);
                 return RB_STREAM_PROBE_ERR_RECV;
@@ -1498,7 +1620,7 @@ static int rb_probe_fetch_binary_impl(const char *url, unsigned char *out_buf, i
             n = rb_probe_ssl_read_retrying(&transport, (char *)out_buf + *out_len, want, out_buf_size - *out_len, *out_len);
         else
 #endif
-        n = (int)recv(transport.sock, (char *)out_buf + *out_len, want, 0);
+        n = rb_probe_recv(&transport, (char *)out_buf + *out_len, want);
         if (n < 0) {
             rb_probe_transport_close(&transport);
             return RB_STREAM_PROBE_ERR_RECV;
