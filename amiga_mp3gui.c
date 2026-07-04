@@ -467,6 +467,8 @@ typedef struct HelixAmp3Gui {
 	int             rbVisibleCount;
 	int             rbShowHttps;
 	int             rbSchemeMode;
+	int             hasNetwork;
+	int             hasHttps;
 	int             rbCountryMode;
 	int             rbShowingFavourites;
 	int             rbFavouriteCount;
@@ -4716,6 +4718,12 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	ScanDecoderModules();
 
 	memset(gui, 0, sizeof(*gui));
+	/* Probe bsdsocket.library/AmiSSL once up front so the menu/gadgets below
+	 * can be greyed out for offline users instead of failing on first use --
+	 * see Radio_HasNetwork()/Radio_HasHttps(). */
+	Radio_NetworkInit();
+	gui->hasNetwork = Radio_HasNetwork();
+	gui->hasHttps = Radio_HasHttps();
 	gui->fastLowrate = LoadEnvInt("FastLowrate", 1, 0, 1);
 	gui->superfastLowrate = LoadEnvInt("SuperfastLowrate", 0, 0, 1);
 	gui->ultrafast = LoadEnvInt("Ultrafast", 0, 0, 1);
@@ -4882,6 +4890,8 @@ static int GuiOpen(HelixAmp3Gui *gui)
 		LayoutMenus(gui->menuStrip, gui->visualInfo, TAG_DONE);
 		SyncMenuChecks(gui);
 		SetMenuStrip(gui->win, gui->menuStrip);
+		if (!gui->hasNetwork)
+			OffMenu(gui->win, FULLMENUNUM(MENUNUM_PROJECT, ITEMNUM_STREAM, NOSUB));
 	}
 	gui->timerPort = CreateMsgPort();
 	if (gui->timerPort)
@@ -5008,6 +5018,7 @@ static void GuiClose(HelixAmp3Gui *gui)
 		CloseLibrary((struct Library *)IntuitionBase);
 		IntuitionBase = NULL;
 	}
+	Radio_NetworkShutdown();
 }
 
 
@@ -5565,12 +5576,10 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 		RadioSetStatus(app, "Select a station first.");
 		return;
 	}
-#if !defined(HAVE_AMISSL)
-	if (rb_station_play_url(st) && strncmp(rb_station_play_url(st), "https://", 8) == 0) {
+	if (!app->hasHttps && rb_station_play_url(st) && strncmp(rb_station_play_url(st), "https://", 8) == 0) {
 		RadioSetStatus(app, "HTTPS/TLS streams are not supported yet");
 		return;
 	}
-#endif
 	memset(&info, 0, sizeof(info));
 	RadioSetStatus(app, "Checking stream...");
 	rc = rb_controller_probe_selected(&app->rbController, &info, peek, (int)sizeof(peek), &peekLen);
@@ -5641,7 +5650,7 @@ static void OpenRadioWindow(HelixAmp3Gui *app)
 	struct NewGadget ng;
 	struct Gadget *gad;
 	static STRPTR codecs[] = { (STRPTR)"All", (STRPTR)"MP3", (STRPTR)"AAC", (STRPTR)"AAC+", NULL };
-	if (app->rbWin || !app->win || !GadToolsBase) return;
+	if (app->rbWin || !app->win || !GadToolsBase || !app->hasNetwork) return;
 	rb_controller_init(&app->rbController);
 	app->rbShowHttps = FALSE;
 	app->rbSchemeMode = 0;
@@ -5671,7 +5680,8 @@ static void OpenRadioWindow(HelixAmp3Gui *app)
 	ng.ng_LeftEdge = 304; ng.ng_TopEdge = 52; ng.ng_Width = 70; ng.ng_GadgetText = (UBYTE *)"Code"; ng.ng_GadgetID = RB_GID_COUNTRY_CODE; ng.ng_Flags = PLACETEXT_LEFT;
 	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)kRadioCountryLabels, GTCY_Active, app->rbCountryMode, TAG_DONE); if (!gad) goto fail;
 	ng.ng_LeftEdge = 430; ng.ng_TopEdge = 52; ng.ng_Width = 55; ng.ng_GadgetText = (UBYTE *)"URL"; ng.ng_GadgetID = RB_GID_SCHEME; ng.ng_Flags = PLACETEXT_LEFT;
-	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)kRadioSchemeLabels, GTCY_Active, app->rbSchemeMode, TAG_DONE); if (!gad) goto fail;
+	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)kRadioSchemeLabels, GTCY_Active, app->rbSchemeMode,
+		GA_Disabled, !app->hasHttps, TAG_DONE); if (!gad) goto fail;
 	ng.ng_LeftEdge = 88; ng.ng_TopEdge = 80; ng.ng_Width = 90; ng.ng_GadgetText = (UBYTE *)"Limit"; ng.ng_GadgetID = RB_GID_LIMIT; ng.ng_Flags = PLACETEXT_LEFT;
 	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)kRadioSearchLimitLabels, GTCY_Active, 1, TAG_DONE); if (!gad) goto fail;
 	ng.ng_LeftEdge = 288; ng.ng_TopEdge = 80; ng.ng_Width = 90; ng.ng_GadgetText = (UBYTE *)"Max kbps"; ng.ng_GadgetID = RB_GID_BITRATE; ng.ng_Flags = PLACETEXT_LEFT;

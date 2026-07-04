@@ -74,6 +74,15 @@ void Radio_NetworkShutdown(void);
 void Radio_GetNetworkStats(long *active_stream_sessions, long *active_stream_tasks,
     long *open_socket_count, long *active_ssl_count, long *active_ssl_ctx_count);
 void Radio_GetNetworkBases(void **socket_base, void **amissl_base, void **amissl_master_base);
+/* True once Radio_NetworkInit() has successfully opened bsdsocket.library --
+ * lets the GUI grey out internet-radio features up front on a machine with
+ * no network stack installed, instead of failing later on first connect. */
+int Radio_HasNetwork(void);
+/* True once Radio_NetworkInit() has successfully opened the shared AmiSSL
+ * instance -- lets the GUI grey out the HTTPS scheme option up front on a
+ * machine without AmiSSL installed (always false in builds without
+ * HAVE_AMISSL). */
+int Radio_HasHttps(void);
 /* Shared AmiSSL instance opened by Radio_NetworkInit()/radio_stream.c, for
  * radio_stream_probe.c to adopt instead of opening a second instance (its
  * weak-symbol copies of the bases do not reliably merge with the strong
@@ -142,6 +151,8 @@ static void Radio_GetNetworkBases(void **socket_base, void **amissl_base, void *
     if (amissl_base) *amissl_base = 0;
     if (amissl_master_base) *amissl_master_base = 0;
 }
+static int Radio_HasNetwork(void) { return 0; }
+static int Radio_HasHttps(void) { return 0; }
 static void Radio_GetAmiSslShared(void **amissl_base, void **amissl_ext_base, void **amissl_master_base)
 {
     if (amissl_base) *amissl_base = 0;

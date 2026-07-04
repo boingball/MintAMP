@@ -510,6 +510,8 @@ typedef struct MrApp {
 	int             rbVisibleCount;
 	int             rbShowHttps;
 	int             rbSchemeMode;
+	int             hasNetwork;
+	int             hasHttps;
 	int             rbCountryMode;
 	int             rbShowingFavourites;
 	int             rbFavouriteCount;
@@ -2192,7 +2194,7 @@ static int MrOpenWindow(MrApp *app)
 	app->playlistGad = (Object *)NewObject(BUTTON_GetClass(), NULL,
 	                GA_ID, GID_PLAYLIST, GA_RelVerify, TRUE, GA_Text, (ULONG)"Playlist", TAG_DONE);
 	app->radioGad = (Object *)NewObject(BUTTON_GetClass(), NULL,
-	                GA_ID, GID_RADIO, GA_RelVerify, TRUE, GA_Text, (ULONG)"Internet Radio", TAG_DONE);
+	                GA_ID, GID_RADIO, GA_RelVerify, TRUE, GA_Disabled, !app->hasNetwork, GA_Text, (ULONG)"Internet Radio", TAG_DONE);
 
 	app->gaugeGad = (Object *)NewObject(FUELGAUGE_GetClass(), NULL,
 	                FUELGAUGE_Min, 0,
@@ -2417,6 +2419,8 @@ static int MrOpenWindow(MrApp *app)
 	app->menuStrip = &kMenus[0];
 	SyncMenuChecks(app);
 	SetMenuStrip(app->win, app->menuStrip);
+	if (!app->hasNetwork)
+		OffMenu(app->win, FULLMENUNUM(MENUNUM_PROJECT, ITEMNUM_RADIO, NOSUB));
 	return 1;
 }
 
@@ -4537,12 +4541,10 @@ static void RadioDoProbeAndPlay(MrApp *app)
 		RadioSetStatus(app, "Select a station first.");
 		return;
 	}
-#if !defined(HAVE_AMISSL)
-	if (rb_station_play_url(st) && strncmp(rb_station_play_url(st), "https://", 8) == 0) {
+	if (!app->hasHttps && rb_station_play_url(st) && strncmp(rb_station_play_url(st), "https://", 8) == 0) {
 		RadioSetStatus(app, "HTTPS not supported in this build");
 		return;
 	}
-#endif
 	memset(&info, 0, sizeof(info));
 	RadioSetStatus(app, "Connecting...");
 	RADIO_DBG(printf("radio-ui: new stream probe start url=\"%s\"\n", rb_station_play_url(st));)
@@ -4619,14 +4621,14 @@ static void OpenRadioWindow(MrApp *app)
 {
 	Object *root = NULL;
 	static STRPTR codecs[] = { (STRPTR)"All", (STRPTR)"MP3", (STRPTR)"AAC", (STRPTR)"AAC+", NULL };
-	if (app->rbWinObj || !app->win) return;
+	if (app->rbWinObj || !app->win || !app->hasNetwork) return;
 	if (app->rbController.limit <= 0) { rb_controller_init(&app->rbController); app->rbShowHttps = FALSE; app->rbSchemeMode = 0; app->rbCountryMode = 0; }
 	app->rbCountryMode = RadioCountryToIndex(app->rbController.countrycode); app->rbShowingFavourites = FALSE; app->rbSelectedFavourite = -1; NewList(&app->rbList);
 	app->rbSearchGad = (Object *)NewObject(STRING_GetClass(), NULL, GA_ID, RB_GID_SEARCH_TEXT, GA_RelVerify, TRUE, STRINGA_TextVal, (ULONG)app->rbController.name, STRINGA_MaxChars, RB_MAX_NAME, TAG_DONE);
 	app->rbCodecGad = (Object *)NewObject(CHOOSER_GetClass(), NULL, GA_ID, RB_GID_CODEC, GA_RelVerify, TRUE, CHOOSER_LabelArray, (ULONG)codecs, CHOOSER_Selected, RadioCodecToIndex(app->rbController.codec), TAG_DONE);
 	app->rbCountryGad = (Object *)NewObject(STRING_GetClass(), NULL, GA_ID, RB_GID_COUNTRY, GA_RelVerify, TRUE, STRINGA_TextVal, (ULONG)app->rbController.countrycode, STRINGA_MaxChars, RB_MAX_COUNTRY, TAG_DONE);
 	app->rbCountryCodeGad = (Object *)NewObject(CHOOSER_GetClass(), NULL, GA_ID, RB_GID_COUNTRY_CODE, GA_RelVerify, TRUE, CHOOSER_LabelArray, (ULONG)kRadioCountryLabels, CHOOSER_Selected, app->rbCountryMode, TAG_DONE);
-	app->rbSchemeGad = (Object *)NewObject(CHOOSER_GetClass(), NULL, GA_ID, RB_GID_SCHEME, GA_RelVerify, TRUE, CHOOSER_LabelArray, (ULONG)kRadioSchemeLabels, CHOOSER_Selected, app->rbSchemeMode, TAG_DONE);
+	app->rbSchemeGad = (Object *)NewObject(CHOOSER_GetClass(), NULL, GA_ID, RB_GID_SCHEME, GA_RelVerify, TRUE, CHOOSER_LabelArray, (ULONG)kRadioSchemeLabels, CHOOSER_Selected, app->rbSchemeMode, GA_Disabled, !app->hasHttps, TAG_DONE);
 	app->rbLimitGad = (Object *)NewObject(CHOOSER_GetClass(), NULL, GA_ID, RB_GID_LIMIT, GA_RelVerify, TRUE, CHOOSER_LabelArray, (ULONG)kRadioSearchLimitLabels, CHOOSER_Selected, RadioSearchLimitIndex(app->rbController.limit), TAG_DONE);
 	app->rbBitrateGad = (Object *)NewObject(CHOOSER_GetClass(), NULL, GA_ID, RB_GID_BITRATE, GA_RelVerify, TRUE, CHOOSER_LabelArray, (ULONG)kRadioBitrateLabels, CHOOSER_Selected, app->rbController.max_bitrate <= 0 ? 0 : (app->rbController.max_bitrate <= 56 ? 1 : (app->rbController.max_bitrate <= 64 ? 2 : (app->rbController.max_bitrate <= 96 ? 3 : 4))), TAG_DONE);
 	app->rbListGad = (Object *)NewObject(LISTBROWSER_GetClass(), NULL, GA_ID, RB_GID_RADIO_RESULTS, GA_RelVerify, TRUE, LISTBROWSER_Labels, (ULONG)&app->rbList, LISTBROWSER_Selected, (ULONG)~0, LISTBROWSER_ShowSelected, TRUE, LISTBROWSER_AutoFit, TRUE, LISTBROWSER_Separators, TRUE, TAG_DONE);
@@ -5321,6 +5323,10 @@ static int MrMainReal(int argc, char **argv)
 	 * socket and, for HTTPS, its own SSL/SSL_CTX -- only the shared libraries
 	 * stay open until Radio_NetworkShutdown() at final app exit. */
 	Radio_NetworkInit();
+	/* Probe the result up front so the menu/gadgets below can be greyed out
+	 * for offline users instead of failing on first use. */
+	app.hasNetwork = Radio_HasNetwork();
+	app.hasHttps = Radio_HasHttps();
 
 	LoadSettings(&app);
 

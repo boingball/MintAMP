@@ -1905,6 +1905,31 @@ void Radio_GetNetworkBases(void **socket_base, void **amissl_base, void **amissl
 #endif
 }
 
+/* True once Radio_NetworkInit() has successfully opened bsdsocket.library --
+ * lets the GUI grey out internet-radio features up front on a machine with
+ * no network stack installed, instead of failing later on first connect. */
+int Radio_HasNetwork(void)
+{
+#if defined(AMIGA_M68K)
+    return SocketBase != NULL;
+#else
+    return 0;
+#endif
+}
+
+/* True once Radio_NetworkInit() has successfully opened the shared AmiSSL
+ * instance -- lets the GUI grey out the HTTPS scheme option up front on a
+ * machine without AmiSSL installed (always false in builds without
+ * HAVE_AMISSL). */
+int Radio_HasHttps(void)
+{
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+    return AmiSSLBase != NULL;
+#else
+    return 0;
+#endif
+}
+
 /* Runtime accessor so radio_stream_probe.c can adopt the shared AmiSSL
  * instance opened here.  The probe file declares its own AmiSSLBase/
  * AmiSSLExtBase/AmiSSLMasterBase as weak symbols expecting the linker to
