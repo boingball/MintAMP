@@ -3364,6 +3364,156 @@ static void BuildArtColorPens(HelixAmp3Gui *gui)
 	gui->artPensBuilt = 1;
 }
 
+/* Integer Newton's-method sqrt, used to plot filled circles for the
+ * fallback art icons below without pulling in <math.h>. */
+static int ArtIconIntSqrt(int n)
+{
+	int x, y;
+	if (n <= 0)
+		return 0;
+	x = n;
+	y = (x + 1) / 2;
+	while (y < x) {
+		x = y;
+		y = (x + n / x) / 2;
+	}
+	return x;
+}
+
+static void ArtIconFillCircle(struct RastPort *rp, int cx, int cy, int r)
+{
+	int dy;
+	for (dy = -r; dy <= r; dy++) {
+		int dx = ArtIconIntSqrt(r * r - dy * dy);
+		RectFill(rp, cx - dx, cy + dy, cx + dx, cy + dy);
+	}
+}
+
+/* Drawn when there's no station favicon (or it failed to load) for a
+ * radio stream: a boombox silhouette (handle, antenna, body, speaker
+ * ring, tuning dial), built entirely from RectFill/Move/Draw so it
+ * needs no bitmap asset. */
+static void DrawRadioIcon(struct RastPort *rp, int originX, int originY)
+{
+	int bx0 = originX + 10, by0 = originY + 34;
+	int bx1 = originX + 54, by1 = originY + 58;
+
+	SetAPen(rp, 1);
+
+	Move(rp, bx0 + 10, by0);
+	Draw(rp, bx0 + 10, by0 - 12);
+	Draw(rp, bx1 - 10, by0 - 12);
+	Draw(rp, bx1 - 10, by0);
+
+	Move(rp, bx1 - 8, by0);
+	Draw(rp, bx1 + 4, by0 - 16);
+	RectFill(rp, bx1 + 2, by0 - 18, bx1 + 6, by0 - 14);
+
+	Move(rp, bx0, by0);
+	Draw(rp, bx1, by0);
+	Draw(rp, bx1, by1);
+	Draw(rp, bx0, by1);
+	Draw(rp, bx0, by0);
+
+	ArtIconFillCircle(rp, bx0 + 12, by0 + 12, 7);
+	SetAPen(rp, 0);
+	ArtIconFillCircle(rp, bx0 + 12, by0 + 12, 4);
+
+	SetAPen(rp, 1);
+	ArtIconFillCircle(rp, bx1 - 10, by0 + 12, 4);
+}
+
+/* Drawn when a local/offline file has no embedded artwork: a simple
+ * eighth note (filled head, stem, flag), same no-asset approach. */
+static void DrawMusicNoteIcon(struct RastPort *rp, int originX, int originY)
+{
+	int headCx = originX + 24;
+	int headCy = originY + 46;
+	int headR = 8;
+	int stemX = headCx + headR - 1;
+	int stemTopY = originY + 12;
+
+	SetAPen(rp, 1);
+	ArtIconFillCircle(rp, headCx, headCy, headR);
+
+	Move(rp, stemX, headCy);
+	Draw(rp, stemX, stemTopY);
+
+	Draw(rp, stemX + 12, stemTopY + 8);
+	Draw(rp, stemX, stemTopY + 16);
+	Draw(rp, stemX, stemTopY);
+}
+
+/* Upper-cased file extension of a URL's path (ignoring any query string),
+ * e.g. "http://x/icon.jpg?v=2" -> "JPG". Mirrors minimp3r.c's
+ * MrUrlExtensionUpper so both frontends report rejected favicon formats
+ * the same way. */
+static void ArtUrlExtensionUpper(const char *url, char *out, int outSize)
+{
+	const char *q, *dot;
+	int len, i, j;
+	if (!out || outSize <= 0)
+		return;
+	out[0] = '\0';
+	if (!url || !url[0])
+		return;
+	q = strchr(url, '?');
+	len = (int)(q ? (q - url) : (int)strlen(url));
+	dot = url + len;
+	while (dot > url && dot[-1] != '/' && dot[-1] != ':')
+		dot--;
+	while (*dot && dot < url + len && *dot != '.')
+		dot++;
+	if (dot >= url + len)
+		return;
+	dot++;
+	for (i = 0, j = 0; dot + i < url + len && dot[i] && j < outSize - 1; i++) {
+		unsigned char c = (unsigned char)dot[i];
+		if (c >= 'a' && c <= 'z')
+			c = (unsigned char)(c - 'a' + 'A');
+		if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))
+			out[j++] = (char)c;
+		else
+			break;
+	}
+	out[j] = '\0';
+}
+
+/* Radio stream whose favicon was fetched but rejected (unsupported format
+ * or failed decode): show "No art" plus the rejected extension so a
+ * station icon swap is visibly noticed even when nothing renders. Same
+ * convention as minimp3r.c's DrawArtPanel. */
+static void DrawNoArtFormatLabel(struct RastPort *rp, int originX, int originY,
+	const char *favicon)
+{
+	char ext[16];
+	char line1[16];
+	char line2[16];
+	int line1Len, line2Len, line1W, line2W;
+
+	ArtUrlExtensionUpper(favicon, ext, sizeof(ext));
+	SafeCopy(line1, sizeof(line1), "No art");
+	line2[0] = '\0';
+	if (ext[0])
+		sprintf(line2, "(%s)", ext);
+
+	line1Len = (int)strlen(line1);
+	line2Len = (int)strlen(line2);
+	line1W = TextLength(rp, line1, line1Len);
+	line2W = line2Len > 0 ? TextLength(rp, line2, line2Len) : 0;
+
+	SetAPen(rp, 1);
+	if (line2Len > 0) {
+		Move(rp, originX + (ART_W - line1W) / 2, originY + ART_H / 2 - 2);
+		Text(rp, line1, line1Len);
+		Move(rp, originX + (ART_W - line2W) / 2, originY + ART_H / 2 + 9);
+		Text(rp, line2, line2Len);
+	} else {
+		Move(rp, originX + (ART_W - line1W) / 2, originY + ART_H / 2 + 2);
+		Text(rp, line1, line1Len);
+	}
+}
+
 static void DrawArtPanel(HelixAmp3Gui *gui)
 {
 	struct RastPort *rp;
@@ -3447,12 +3597,19 @@ static void DrawArtPanel(HelixAmp3Gui *gui)
 			}
 		}
 	} else {
-		const char *label = gui->artLoading ? "Loading" : "No art";
 		SetAPen(rp, 0);
 		RectFill(rp, ART_X, ART_Y, ART_X + ART_W - 1, ART_Y + ART_H - 1);
-		SetAPen(rp, 1);
-		Move(rp, ART_X + (gui->artLoading ? 10 : 16), ART_Y + ART_H / 2);
-		Text(rp, label, gui->artLoading ? 7 : 6);
+		if (gui->artLoading) {
+			SetAPen(rp, 1);
+			Move(rp, ART_X + 10, ART_Y + ART_H / 2);
+			Text(rp, "Loading", 7);
+		} else if (IsRadioInputName(gui->inputName) && gui->currentRadioFavicon[0]) {
+			DrawNoArtFormatLabel(rp, ART_X, ART_Y, gui->currentRadioFavicon);
+		} else if (IsRadioInputName(gui->inputName)) {
+			DrawRadioIcon(rp, ART_X, ART_Y);
+		} else {
+			DrawMusicNoteIcon(rp, ART_X, ART_Y);
+		}
 	}
 }
 
