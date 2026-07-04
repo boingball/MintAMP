@@ -91,7 +91,6 @@
 
 /* additional external symbols to name-mangle for static linking */
 #define	SetBitstreamPointer	STATNAME(SetBitstreamPointer)
-#define	GetBits				STATNAME(GetBits)
 #define BitstreamRefillSelftest STATNAME(BitstreamRefillSelftest)
 #define	CalcBitsUsed		STATNAME(CalcBitsUsed)
 #define	DequantChannel		STATNAME(DequantChannel)
@@ -188,6 +187,91 @@ typedef struct _BitStreamInfo {
 	int cachedBits;
 	int nBytes;
 } BitStreamInfo;
+
+/**************************************************************************************
+ * RefillBitstreamCache / GetBits live here (rather than bitstream.c) as
+ * static __inline so every translation unit that reads bits (bitstream.c
+ * itself for header/side-info fields, scalfact.c for scale factors) inlines
+ * the bit-cache logic at the call site instead of paying a real call/return
+ * per bit read - GetBits alone has dozens of call sites across those two
+ * files. Semantics are unchanged from the original bitstream.c
+ * implementation; BitstreamRefillSelftest() in bitstream.c still exercises
+ * RefillBitstreamCache4_C_REFERENCE/_TEST_ACTIVE directly to compare them.
+ **************************************************************************************/
+#if defined(AMIGA_M68K) && defined(AMIGA_M68K_ASM) && defined(__GNUC__) \
+	&& (defined(__mc68020__) || defined(__mc68030__) || defined(__mc68040__) || defined(__mc68060__))
+#define AMIGA_M68K_BITSTREAM_MOVEL 1
+#endif
+
+static __inline void RefillBitstreamCache4_C_REFERENCE(BitStreamInfo *bsi)
+{
+	bsi->iCache  = ((unsigned int)(*bsi->bytePtr++)) << 24;
+	bsi->iCache |= ((unsigned int)(*bsi->bytePtr++)) << 16;
+	bsi->iCache |= ((unsigned int)(*bsi->bytePtr++)) <<  8;
+	bsi->iCache |=  (unsigned int)(*bsi->bytePtr++);
+	bsi->cachedBits = 32;
+	bsi->nBytes -= 4;
+}
+
+static __inline void RefillBitstreamCache4_TEST_ACTIVE(BitStreamInfo *bsi)
+{
+#ifdef AMIGA_M68K_BITSTREAM_MOVEL
+	__asm__ volatile (
+		"move.l (%0)+,%1"
+		: "+a" (bsi->bytePtr), "=d" (bsi->iCache)
+		: );
+	bsi->cachedBits = 32;
+	bsi->nBytes -= 4;
+#else
+	RefillBitstreamCache4_C_REFERENCE(bsi);
+#endif
+}
+
+static __inline void RefillBitstreamCache(BitStreamInfo *bsi)
+{
+	int nBytes = bsi->nBytes;
+
+	/* optimize for common case, independent of machine endian-ness */
+	if (nBytes >= 4) {
+		RefillBitstreamCache4_TEST_ACTIVE(bsi);
+	} else {
+		bsi->iCache = 0;
+		while (nBytes--) {
+			bsi->iCache |= (*bsi->bytePtr++);
+			bsi->iCache <<= 8;
+		}
+		bsi->iCache <<= ((3 - bsi->nBytes)*8);
+		bsi->cachedBits = 8*bsi->nBytes;
+		bsi->nBytes = 0;
+	}
+}
+
+/* nBits must be in range [0, 31], nBits outside this range masked by 0x1f
+ * for speed, does not indicate error if you overrun bit buffer
+ * if nBits = 0, returns 0 (useful for scalefactor unpacking)
+ */
+static __inline unsigned int GetBits(BitStreamInfo *bsi, int nBits)
+{
+	unsigned int data, lowBits;
+
+	nBits &= 0x1f;							/* nBits mod 32 to avoid unpredictable results like >> by negative amount */
+	data = bsi->iCache >> (31 - nBits);		/* unsigned >> so zero-extend */
+	data >>= 1;								/* do as >> 31, >> 1 so that nBits = 0 works okay (returns 0) */
+	bsi->iCache <<= nBits;					/* left-justify cache */
+	bsi->cachedBits -= nBits;				/* how many bits have we drawn from the cache so far */
+
+	/* if we cross an int boundary, refill the cache */
+	if (bsi->cachedBits < 0) {
+		lowBits = -bsi->cachedBits;
+		RefillBitstreamCache(bsi);
+		data |= bsi->iCache >> (32 - lowBits);		/* get the low-order bits */
+
+		bsi->cachedBits -= lowBits;			/* how many bits have we drawn from the cache so far */
+		bsi->iCache <<= lowBits;			/* left-justify cache */
+	}
+
+	return data;
+}
 
 typedef struct _FrameHeader {
     MPEGVersion ver;	/* version ID */
@@ -319,7 +403,6 @@ typedef struct _SubbandInfo {
 
 /* bitstream.c */
 void SetBitstreamPointer(BitStreamInfo *bsi, int nBytes, unsigned char *buf);
-unsigned int GetBits(BitStreamInfo *bsi, int nBits);
 int BitstreamRefillSelftest(void);
 int CalcBitsUsed(BitStreamInfo *bsi, unsigned char *startBuf, int startOffset);
 
