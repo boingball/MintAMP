@@ -171,7 +171,10 @@ static int rb_http_transport_open(RbHttpTransport *transport, const char *host, 
     }
 #endif
 
-    he = gethostbyname(host);
+    /* Amiga bsdsocket headers declare gethostbyname() with a mutable
+     * name argument even though the call only reads it. Cast at the call
+     * site so const-correct callers do not trigger -Wdiscarded-qualifiers. */
+    he = gethostbyname((char *)host);
     if (!he || !he->h_addr_list || !he->h_addr_list[0]) {
 #if defined(AMIGA_M68K) && !defined(RB_HTTP_EXTERNAL_SOCKETBASE)
         rb_http_release_socketbase();

@@ -704,7 +704,10 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *host
         if (!SocketBase) return RB_STREAM_PROBE_ERR_CONNECT;
     }
 #endif
-    he = gethostbyname(host);
+    /* Amiga bsdsocket headers declare gethostbyname() with a mutable
+     * name argument even though the call only reads it. Cast at the call
+     * site so const-correct callers do not trigger -Wdiscarded-qualifiers. */
+    he = gethostbyname((char *)host);
     if (!he || !he->h_addr_list || !he->h_addr_list[0]) return RB_STREAM_PROBE_ERR_DNS;
     if (host_addr_be) {
         char addr_text[16];
