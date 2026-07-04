@@ -1508,11 +1508,12 @@ static void StartPlayback(MrApp *app)
 
 	if (!MrVerifyAppMagic(app, "StartPlayback"))
 		return;
-	if (Radio_IsMemoryPoisoned()) {
-		SetStatus(app, "Memory corruption detected - restart app");
-		RADIO_DBG(printf("radio-memory: refusing StartPlayback after MiniMem/ring corruption url=\"%s\"\n", app->inputName);)
+	if (Radio_IsMemoryPoisoned() || Radio_CheckMiniMem("before StartPlayback") > 0) {
+		SetStatus(app, "Memory corruption detected after HTTPS probe; playback blocked. Restart MiniAMP3.");
+		RADIO_DBG(printf("radio-ui: StartPlayback blocked because heap already corrupt url=\"%s\"\n", app->inputName);)
 		return;
 	}
+	RADIO_DBG(printf("radio-ui: heap clean before StartPlayback url=\"%s\"\n", app->inputName);)
 	if (!app->inputName[0]) {
 		SetStatus(app, "Pick an audio file first.");
 		return;
@@ -4639,6 +4640,11 @@ static void RadioDoProbeAndPlay(MrApp *app)
 		Delay(4);
 	}
 #endif
+	if (Radio_IsMemoryPoisoned() || Radio_CheckMiniMem("after probe before station switch") > 0) {
+		RadioSetStatus(app, "Memory corruption detected after HTTPS probe; playback blocked. Restart MiniAMP3.");
+		RADIO_DBG(printf("radio-ui: StartPlayback blocked because heap already corrupt url=\"%s\"\n", info.final_url);)
+		return;
+	}
 	SafeCopy(app->inputName, sizeof(app->inputName), info.final_url);
 	SafeCopy(app->currentRadioFavicon, sizeof(app->currentRadioFavicon), st->favicon);
 	RADIO_DBG(printf("radio-art: station favicon=\"%s\"\n", app->currentRadioFavicon);)
@@ -4651,9 +4657,9 @@ static void RadioDoProbeAndPlay(MrApp *app)
 	sprintf(msg, "Buffering - %.140s", app->currentRadioStationName[0] ? app->currentRadioStationName : "Internet Radio");
 	RadioSetStatus(app, msg);
 	RADIO_DBG(printf("radio-ui: new stream start url=\"%s\"\n", info.final_url);)
-	if (Radio_IsMemoryPoisoned()) {
-		RadioSetStatus(app, "Memory corruption detected - restart app");
-		RADIO_DBG(printf("radio-memory: refusing station switch after MiniMem/ring corruption url=\"%s\"\n", info.final_url);)
+	if (Radio_IsMemoryPoisoned() || Radio_CheckMiniMem("after probe before station switch") > 0) {
+		RadioSetStatus(app, "Memory corruption detected after HTTPS probe; playback blocked. Restart MiniAMP3.");
+		RADIO_DBG(printf("radio-ui: StartPlayback blocked because heap already corrupt url=\"%s\"\n", info.final_url);)
 		return;
 	}
 	StartPlayback(app);

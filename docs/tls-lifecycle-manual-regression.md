@@ -45,3 +45,28 @@ Expected shutdown log characteristics after a clean run:
 4. Confirm unsafe `SSL_free`, `SSL_CTX_free`, and per-task `CleanupAmiSSL` are skipped for that bad session.
 5. Confirm quarantine is attributed to the real TLS fault, not to a clean user stop.
 6. Confirm other non-faulting hosts remain usable during the same app run.
+
+## Probe quarantine regression tests
+
+### Test 1: HTTPS AACP station JOE
+
+1. Start `https://audio-streaming.joe.nl/Joe_nl_high.aac`.
+2. Confirm there is no `CORRUPT bad chunk size` after probe close.
+3. Confirm playback either starts cleanly or fails gracefully without a recoverable alert.
+4. Confirm AACP stays enabled when the heap remains clean.
+
+### Test 2: HTTPS sequence JOE / AAC / Dance Wave
+
+1. Start an HTTPS AAC station.
+2. Stop playback.
+3. Start the HTTPS AACP JOE station.
+4. Stop playback.
+5. Start Dance Wave.
+6. Confirm there is no recoverable alert loop.
+
+### Test 3: corrupt-after-probe gate
+
+1. Force or reproduce heap corruption immediately after HTTPS probe close.
+2. Confirm the UI reports that playback is blocked and MiniAMP3 should be restarted.
+3. Confirm no `PlaybackEntry` child task is spawned after the corrupt probe.
+4. Confirm artwork is not loaded after the corrupt probe.

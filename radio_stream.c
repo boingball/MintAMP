@@ -371,6 +371,7 @@ static long radio_tls_fault_count = 0;
  * abandons the instance instead (same as hard poison, but HTTPS keeps
  * working until then). */
 static int radio_tls_shutdown_quarantine = 0;
+static long radio_tls_intentional_leak_count = 0;
 
 void Radio_ReportTlsFault(const char *where)
 {
@@ -380,6 +381,14 @@ void Radio_ReportTlsFault(const char *where)
         radio_tls_fault_count, where ? where : "",
         radio_poison_session_id, radio_poison_url[0] ? radio_poison_url : ""));
     (void)where;
+}
+
+void Radio_QuarantineTlsShutdown(const char *where)
+{
+    radio_tls_shutdown_quarantine = 1;
+    radio_tls_intentional_leak_count++;
+    RADIO_DBG(printf("radio-tls: AmiSSL shutdown quarantined after intentional leak %ld where=%s\n",
+        radio_tls_intentional_leak_count, where ? where : ""));
 }
 
 /* Hosts that triggered a fatal AmiSSL fault this run. The fault can corrupt
@@ -472,7 +481,7 @@ int Radio_CheckMiniMem(const char *where)
  * discovered ages later; running this at every session boundary brackets
  * the corruptor to one interval in the log instead. Read-only, so it is
  * safe to call anywhere; costs one list walk (a few hundred nodes). */
-void Radio_DebugCheckExecMem(const char *where)
+int Radio_DebugCheckExecMem(const char *where)
 {
 #if defined(AMIGA_M68K) && defined(RADIO_DEBUG)
     struct MemHeader *mh;
@@ -507,13 +516,18 @@ void Radio_DebugCheckExecMem(const char *where)
         printf("radio-memcheck: CORRUPT %s at %p where=%s (exec heap damaged BEFORE this point)\n",
             fault, fault_addr, where ? where : "");
         fflush(stdout);
+        Radio_MarkMemoryPoisoned(where);
+        Radio_MarkTlsPoisoned(where ? where : "exec heap corruption");
+        return 1;
     } else {
         printf("radio-memcheck: OK where=%s headers=%ld chunks=%ld free=%lu\n",
             where ? where : "", headers, chunks, total_free);
         fflush(stdout);
+        return 0;
     }
 #else
     (void)where;
+    return 0;
 #endif
 }
 
@@ -2110,8 +2124,9 @@ void Radio_NetworkShutdown(void)
     if (Radio_IsTlsPoisoned() || radio_tls_shutdown_quarantine) {
         const char *shutdown_reason = Radio_IsTlsPoisoned() ? "heap/memory poison" :
             (radio_tls_fault_count > 0 ? "real TLS fault" :
+            (radio_tls_intentional_leak_count > 0 ? "intentionally leaked SSL object" :
             (radio_amissl_task_poisoned ? "intentionally leaked SSL object" :
-            (radio_tls_shutdown_quarantine ? "legacy forced quarantine" : "unknown reason")));
+            (radio_tls_shutdown_quarantine ? "legacy forced quarantine" : "unknown reason"))));
         /* SSL_free()/SSL_CTX_free()/CleanupAmiSSL() were deliberately
          * skipped at least once this run (TLS fault quarantine or full
          * poison), so tasks have left dangling per-task state inside the

@@ -117,6 +117,7 @@ int Radio_IsMemoryPoisoned(void);
 void Radio_MarkMemoryPoisoned(const char *where);
 int Radio_IsTlsPoisoned(void);
 void Radio_MarkTlsPoisoned(const char *where);
+void Radio_QuarantineTlsShutdown(const char *where);
 /* Record a fatal-but-survivable TLS fault (SSL_ERROR_SSL from SSL_read):
  * the failing session's SSL objects are quarantined (leaked, never freed)
  * and HTTPS stays enabled -- always. Only detected memory corruption
@@ -134,7 +135,7 @@ const char *Radio_TlsPoisonReason(void);
 int Radio_CheckMiniMem(const char *where);
 /* Debug builds: validate exec's memory free lists (the invariants behind
  * AN_MemCorrupt) and log OK/CORRUPT with a location tag. No-op in release. */
-void Radio_DebugCheckExecMem(const char *where);
+int Radio_DebugCheckExecMem(const char *where);
 #else
 static RadioStream *Radio_OpenWithHostAddr(const char *url, int haveHostAddr, unsigned long hostAddrBe) { (void)url; (void)haveHostAddr; (void)hostAddrBe; return (RadioStream *)0; }
 static RadioStream *Radio_Open(const char *url) { (void)url; return (RadioStream *)0; }
@@ -187,13 +188,14 @@ static int Radio_IsMemoryPoisoned(void) { return 0; }
 static void Radio_MarkMemoryPoisoned(const char *where) { (void)where; }
 static int Radio_IsTlsPoisoned(void) { return 0; }
 static void Radio_MarkTlsPoisoned(const char *where) { (void)where; }
+static void Radio_QuarantineTlsShutdown(const char *where) { (void)where; }
 static void Radio_ReportTlsFault(const char *where) { (void)where; }
 static void Radio_NoteTlsFaultHost(const char *host) { (void)host; }
 static int Radio_IsTlsFaultHost(const char *host) { (void)host; return 0; }
 static const char *Radio_TlsPoisonedMessage(void) { return "HTTPS disabled after memory corruption; reboot before using HTTPS."; }
 static const char *Radio_TlsPoisonReason(void) { return "not-poisoned"; }
 static int Radio_CheckMiniMem(const char *where) { (void)where; return 0; }
-static void Radio_DebugCheckExecMem(const char *where) { (void)where; }
+static int Radio_DebugCheckExecMem(const char *where) { (void)where; return 0; }
 static const char *Radio_StatusText(RadioStatus status)
 {
     switch (status) {

@@ -5806,6 +5806,12 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 		RadioSetStatus(app, "Stopping current stream before playing selection...");
 		return;
 	}
+	if (Radio_IsMemoryPoisoned() || Radio_CheckMiniMem("after probe before station switch") > 0) {
+		radio_reset_playback_state_after_stop(app, "probe-heap-corrupt");
+		RadioSetStatus(app, "Memory corruption detected after HTTPS probe; playback blocked. Restart MiniAMP3.");
+		RADIO_DBG(printf("radio-ui: StartPlayback blocked because heap already corrupt url=\"%s\"\n", info.final_url);)
+		return;
+	}
 	SafeCopy(app->currentRadioFavicon, sizeof(app->currentRadioFavicon), st->favicon);
 	RADIO_DBG(printf("radio-art: station favicon=\"%s\"\n", app->currentRadioFavicon);)
 	SelectInternetStream(app, info.final_url);
@@ -7047,11 +7053,12 @@ static void StartPlayback(HelixAmp3Gui *gui)
 	BPTR nilOut;
 	struct Process *thisProc;
 
-	if (Radio_IsMemoryPoisoned()) {
-		SetStatus(gui, "Memory corruption detected - restart app");
-		RADIO_DBG(printf("radio-memory: refusing StartPlayback after MiniMem/ring corruption url=\"%s\"\n", gui->inputName);)
+	if (Radio_IsMemoryPoisoned() || Radio_CheckMiniMem("before StartPlayback") > 0) {
+		SetStatus(gui, "Memory corruption detected after HTTPS probe; playback blocked. Restart MiniAMP3.");
+		RADIO_DBG(printf("radio-ui: StartPlayback blocked because heap already corrupt url=\"%s\"\n", gui->inputName);)
 		return;
 	}
+	RADIO_DBG(printf("radio-ui: heap clean before StartPlayback url=\"%s\"\n", gui->inputName);)
 	if (!gui->inputName[0]) {
 		SetStatus(gui, "Browse to an audio file first.");
 		return;

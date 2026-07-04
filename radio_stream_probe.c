@@ -736,7 +736,10 @@ static void rb_probe_cleanup_amissl(void)
      * longer closes them itself. */
     RADIO_DBG(printf("radio-ssl-diag: probe cleanup EXIT  probe_init=%d base=%p ext=%p master=%p\n", rb_probe_amissl_initialized, (void *)AmiSSLBase, (void *)AmiSSLExtBase, (void *)AmiSSLMasterBase);)
     if (locked) Radio_AmiSslUnlock();
-    Radio_DebugCheckExecMem("after probe AmiSSL cleanup");
+    if (Radio_DebugCheckExecMem("after probe AmiSSL cleanup") > 0) {
+        rb_probe_amissl_dirty = 1;
+        Radio_QuarantineTlsShutdown("heap corruption after probe AmiSSL cleanup");
+    }
 }
 
 #endif
@@ -1032,21 +1035,18 @@ static void rb_probe_transport_close_mode(RbProbeTransport *transport, RbProbeCl
         }
         RADIO_DBG(printf("radio-cleanup: probe ssl_shutdown session=%lu mode=%s %s\n",
             transport->session_id, rb_probe_close_mode_name(mode), shutdown_called ? "called" : "skipped");)
-        if (transport->ssl && (transport->sslStatePoisoned || transport->sslReadCloseSeen || Radio_IsTlsPoisoned())) {
-            RADIO_DBG(printf("radio-cleanup: probe SSL_free skipped (%s) session=%lu ssl=%p leaking to avoid crashing on AmiSSL close/free path\n",
-                transport->sslStatePoisoned ? "poisoned" : (transport->sslReadCloseSeen ? "zero-return" : "tls-poisoned"),
-                transport->session_id, (void *)transport->ssl);)
+        if (transport->ssl) {
+            RADIO_DBG(printf("radio-cleanup: probe SSL_free skipped (AmiSSL probe quarantine) session=%lu ssl=%p mode=%s reason=%s\n",
+                transport->session_id, (void *)transport->ssl, rb_probe_close_mode_name(mode),
+                transport->sslStatePoisoned ? "poisoned" :
+                (transport->sslReadCloseSeen ? "zero-return" :
+                (Radio_IsTlsPoisoned() ? "tls-poisoned" : "probe-close")));)
             transport->ssl = NULL;
             transport->sslHandshakeDone = 0;
-            transport->ctx = NULL;
+            rb_probe_amissl_dirty = 1;
+            Radio_QuarantineTlsShutdown("probe SSL_free skipped (AmiSSL probe quarantine)");
             if (transport->sslStatePoisoned || Radio_IsTlsPoisoned())
                 rb_probe_shared_ctx = NULL;
-        } else if (transport->ssl) {
-            rb_probe_debug_mem_report(transport->session_id, "before close SSL_free");
-            SSL_free(transport->ssl);
-            transport->ssl = NULL;
-            transport->sslHandshakeDone = 0;
-            rb_probe_debug_mem_report(transport->session_id, "after close SSL_free");
         }
         /* transport->ctx is rb_probe_shared_ctx. It is deliberately kept for
          * the run and never SSL_CTX_free()'d from a per-probe close path. */
@@ -1063,7 +1063,13 @@ static void rb_probe_transport_close_mode(RbProbeTransport *transport, RbProbeCl
     }
     RADIO_DBG(printf("radio-cleanup: probe close mode=%s session=%lu complete open_socket_count_after=%ld\n",
         rb_probe_close_mode_name(mode), transport->session_id, rb_probe_open_socket_count);)
-    Radio_DebugCheckExecMem("after probe transport close");
+    if (Radio_DebugCheckExecMem("after probe transport close") > 0) {
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+        rb_probe_amissl_dirty = 1;
+#endif
+        Radio_NoteTlsFaultHost(transport->host);
+        Radio_QuarantineTlsShutdown("heap corruption after probe transport close");
+    }
 }
 
 /* Safe default used by every connect/handshake/send/recv/redirect/HTTP-error
@@ -1539,6 +1545,9 @@ static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
     info->codec = rb_probe_detect_codec(&parsed, info, peek_buf, *peek_len);
     RADIO_DBG(printf("rb-probe codec: final selected codec=%s\n",
            info->codec == RB_STREAM_CODEC_MP3 ? "MP3" : (info->codec == RB_STREAM_CODEC_AAC ? "AAC" : (info->codec == RB_STREAM_CODEC_OGG ? "OGG" : "unsupported")));)
+    if (info->codec == RB_STREAM_CODEC_AAC && rb_probe_contains_nocase(info->content_type, "audio/aacp")) {
+        RADIO_DBG(printf("radio-codec: AACP stream selected; heap status checked before decoder start\n");)
+    }
     if (rb_probe_is_hls(&parsed, info)) {
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
         rb_probe_cleanup_amissl();
