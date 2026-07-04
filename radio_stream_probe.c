@@ -649,8 +649,11 @@ static int rb_probe_ensure_amissl_locked(void)
         /* No shared instance to adopt either (Radio_NetworkInit() failed or
          * this is a standalone build without radio_stream.c) -- lazily open
          * our own here as a last resort. No InitAmiSSLMaster(): the AmiSSL
-         * v5/v6 SDK replaces it (and OpenAmiSSL()/InitAmiSSL() for the
-         * calling task) with this single OpenAmiSSLTags() call. */
+         * v5/v6 SDK replaces it with this single OpenAmiSSLTags() call.
+         * AmiSSL_InitAmiSSL, TRUE makes that call also initialise the
+         * calling task (forwarding the AmiSSL_SocketBase/AmiSSL_ErrNoPtr
+         * tags); without it OpenAmiSSLTags() only OPENS the library and the
+         * opener would be using OpenSSL uninitialised. */
         RADIO_DBG(printf("radio-netinit: probe found no shared AmiSSL instance, opening its own\n");)
         if (!AmiSSLMasterBase) {
             AmiSSLMasterBase = OpenLibrary("amisslmaster.library", AMISSLMASTER_MIN_VERSION);
@@ -658,6 +661,7 @@ static int rb_probe_ensure_amissl_locked(void)
         }
         if (OpenAmiSSLTags(AMISSL_CURRENT_VERSION,
                            AmiSSL_UsesOpenSSLStructs, TRUE,
+                           AmiSSL_InitAmiSSL, TRUE,
                            AmiSSL_GetAmiSSLBase, (ULONG)&AmiSSLBase,
                            AmiSSL_GetAmiSSLExtBase, (ULONG)&AmiSSLExtBase,
                            AmiSSL_SocketBase, (ULONG)SocketBase,
@@ -667,13 +671,13 @@ static int rb_probe_ensure_amissl_locked(void)
         rb_probe_opened_shared_here = 1;
     }
     if (Radio_AmiSslTaskIsOpener() || rb_probe_opened_shared_here) {
-        /* Per the AmiSSL v5/v6 SDK, the task that called OpenAmiSSLTags()
-         * is already initialized -- only OTHER subprocesses run the
-         * InitAmiSSL()/CleanupAmiSSL() pair. Probes run in the same
-         * (parent/GUI) task that ran Radio_NetworkInit()'s OpenAmiSSLTags(),
-         * so no per-task init is needed or allowed here. */
+        /* The opener task was initialised by OpenAmiSSLTags() itself via
+         * the AmiSSL_InitAmiSSL tag (both call sites pass it) -- only OTHER
+         * subprocesses run the InitAmiSSL()/CleanupAmiSSL() pair. Probes
+         * run in the same (parent/GUI) task that ran Radio_NetworkInit()'s
+         * OpenAmiSSLTags(), so no per-task init is needed or allowed here. */
         rb_probe_amissl_initialized = 1;
-        RADIO_DBG(printf("radio-resource: probe task is the OpenAmiSSLTags opener, InitAmiSSL not needed\n");)
+        RADIO_DBG(printf("radio-resource: probe opener task was initialised by OpenAmiSSLTags/AmiSSL_InitAmiSSL; manual InitAmiSSL/CleanupAmiSSL not needed\n");)
         return 0;
     }
     /* Deliberately using AmiSSL's own auto-allocated timer.device port
@@ -720,11 +724,11 @@ static void rb_probe_cleanup_amissl(void)
             Radio_IsTlsPoisoned() ? "poisoned" : "quarantined");)
     } else if (rb_probe_amissl_initialized &&
                (Radio_AmiSslTaskIsOpener() || rb_probe_opened_shared_here)) {
-        /* The opener task's AmiSSL state belongs to OpenAmiSSLTags()/
-         * CloseAmiSSL(); the SDK reserves the InitAmiSSL()/CleanupAmiSSL()
-         * pair for other subprocesses. Keep initialized set -- there is
-         * nothing to release per probe. */
-        RADIO_DBG(printf("radio-cleanup: probe CleanupAmiSSL not needed (this task is the OpenAmiSSLTags opener)\n");)
+        /* The opener task was initialised via OpenAmiSSLTags()'s
+         * AmiSSL_InitAmiSSL tag, so CloseAmiSSL() owns its cleanup -- the
+         * autodocs forbid a manual CleanupAmiSSL() for that task. Keep
+         * initialized set -- there is nothing to release per probe. */
+        RADIO_DBG(printf("radio-cleanup: probe CleanupAmiSSL not needed (opener task initialised by OpenAmiSSLTags/AmiSSL_InitAmiSSL; CloseAmiSSL owns cleanup)\n");)
     } else if (rb_probe_amissl_initialized) {
         CleanupAmiSSL(TAG_DONE);
         rb_probe_amissl_initialized = 0;
@@ -1068,8 +1072,22 @@ static int rb_probe_send_all(RbProbeTransport *transport, const char *buf, int l
             if (n > 0) { sent += n; tries = 0; continue; }
             {
                 int e = SSL_get_error(transport->ssl, n);
+                unsigned long ssl_lib_error;
                 if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
                     rb_probe_backoff_sleep(); tries++; continue;
+                }
+                /* Same fatal-fault quarantine as the probe's SSL_connect()/
+                 * SSL_read() paths: after SSL_ERROR_SSL or a non-empty error
+                 * queue this transport's objects must never be freed again,
+                 * and the host is blocked for the run. */
+                ssl_lib_error = ERR_get_error();
+                RADIO_DBG(printf("rb-probe-ssl-write: session=%lu write failed ssl_error=%d lib_error=%08lx\n", transport->session_id, e, ssl_lib_error);)
+                if (e == SSL_ERROR_SSL || ssl_lib_error != 0) {
+                    transport->sslStatePoisoned = 1;
+                    rb_probe_amissl_dirty = 1;
+                    Radio_NoteTlsFaultHost(transport->host);
+                    Radio_ReportTlsFault(e == SSL_ERROR_SSL ? "probe SSL_ERROR_SSL from SSL_write" : "probe fatal AmiSSL error queue from SSL_write");
+                    ERR_clear_error();
                 }
             }
             return RB_STREAM_PROBE_ERR_SEND;
@@ -1299,6 +1317,7 @@ const char *rb_probe_error_text(int rc)
     case RB_STREAM_PROBE_ERR_SERVER_CLOSED: return "Stream probe failed: server closed connection during probe";
     case RB_STREAM_PROBE_ERR_TLS_HANDSHAKE: return "TLS handshake failed";
     case RB_STREAM_PROBE_ERR_TLS_POISONED: return "HTTPS disabled after memory corruption; reboot before using HTTPS.";
+    case RB_STREAM_PROBE_ERR_MEM_POISONED: return "Memory corruption detected; restart MiniAMP3 before playing radio.";
     case RB_STREAM_PROBE_ERR_HTTP_STATUS: return "Stream unavailable (server returned an error status)";
     default: return "Stream probe failed";
     }
@@ -1346,6 +1365,12 @@ static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
 
     if (!url || !info || !peek_len || peek_buf_size < 0 || (peek_buf_size > 0 && !peek_buf))
         return RB_STREAM_PROBE_ERR_BAD_ARG;
+    if (Radio_IsMemoryPoisoned()) {
+        /* Corrupt heap: no probe of any kind (not even plain HTTP/DNS) may
+         * run again this app run -- see docs/amissl-lifecycle-audit.md F3. */
+        RADIO_DBG(printf("rb-probe: refused probe after memory poison url=\"%s\"\n", url);)
+        return RB_STREAM_PROBE_ERR_MEM_POISONED;
+    }
     if (!strncmp(url, "https://", 8) && Radio_IsTlsPoisoned()) {
         RADIO_DBG(printf("rb-probe: refused HTTPS probe after AmiSSL poison url=\"%s\"\n", url);)
         return RB_STREAM_PROBE_ERR_TLS_POISONED;
@@ -1542,6 +1567,12 @@ static int rb_probe_fetch_binary_impl(const char *url, unsigned char *out_buf, i
     int redirects;
 
     if (!url || !out_buf || out_buf_size <= 0 || !out_len) return RB_STREAM_PROBE_ERR_BAD_ARG;
+    if (Radio_IsMemoryPoisoned()) {
+        /* Corrupt heap: no fetch of any kind (favicon/artwork included) may
+         * run again this app run -- see docs/amissl-lifecycle-audit.md F3. */
+        RADIO_DBG(printf("rb-probe: refused fetch after memory poison url=\"%s\"\n", url);)
+        return RB_STREAM_PROBE_ERR_MEM_POISONED;
+    }
     if (!strncmp(url, "https://", 8) && Radio_IsTlsPoisoned()) {
         RADIO_DBG(printf("rb-probe: refused HTTPS fetch after AmiSSL poison url=\"%s\"\n", url);)
         return RB_STREAM_PROBE_ERR_TLS_POISONED;

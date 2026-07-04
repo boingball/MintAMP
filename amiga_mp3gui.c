@@ -5721,7 +5721,7 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 	const RadioBrowserStation *st;
 	char msg[512];
 	if (Radio_IsMemoryPoisoned()) {
-		RadioSetStatus(app, "Memory corruption detected - restart app");
+		RadioSetStatus(app, "Memory corruption detected; restart MiniAMP3 before playing radio.");
 		RADIO_DBG(printf("radio-memory: refusing RadioDoProbeAndPlay after MiniMem/ring corruption\n");)
 		return;
 	}
@@ -7048,7 +7048,7 @@ static void StartPlayback(HelixAmp3Gui *gui)
 	struct Process *thisProc;
 
 	if (Radio_IsMemoryPoisoned()) {
-		SetStatus(gui, "Memory corruption detected - restart app");
+		SetStatus(gui, "Memory corruption detected; restart MiniAMP3 before playing radio.");
 		RADIO_DBG(printf("radio-memory: refusing StartPlayback after MiniMem/ring corruption url=\"%s\"\n", gui->inputName);)
 		return;
 	}

@@ -336,6 +336,14 @@ void Radio_MarkMemoryPoisoned(const char *where)
     printf("radio-memory: Memory corruption detected - restart app (where=%s session=%lu url=\"%s\")\n",
         where ? where : "", radio_poison_session_id,
         radio_poison_url[0] ? radio_poison_url : "");
+    /* A corrupt heap must also hard-quarantine AmiSSL (audit rule 9): TLS
+     * poison blocks every later HTTPS probe/playback this run, makes each
+     * task's cleanup skip CleanupAmiSSL(), and makes Radio_NetworkShutdown()
+     * abandon the instance instead of walking CleanupAmiSSL()/CloseAmiSSL()/
+     * CloseLibrary() through damaged memory. Previously only the ring-canary
+     * path set this, so a MiniMem report without a TLS fault still cleaned
+     * AmiSSL up on a known-corrupt heap. */
+    Radio_MarkTlsPoisoned(where && where[0] ? where : "MiniMem heap corruption");
 }
 
 int Radio_IsMemoryPoisoned(void)
@@ -706,8 +714,9 @@ static void set_error(RadioStream *rs, const char *msg);
  * app startup; radio_ssl_global_init()/rb_probe_ensure_amissl() keep a lazy
  * fallback for builds that skip Radio_NetworkInit(). Requires SocketBase.
  * Returns 0 when the shared instance is (already) open. */
-/* The task that ran OpenAmiSSLTags(): per the AmiSSL v5/v6 SDK, that call
- * already initializes AmiSSL for the calling task, and only OTHER
+/* The task that ran OpenAmiSSLTags(): that call is made with
+ * AmiSSL_InitAmiSSL, TRUE, so it also initializes AmiSSL for the calling
+ * task (without that tag it would only OPEN the library), and only OTHER
  * subprocesses sharing the instance call InitAmiSSL()/CleanupAmiSSL().
  * Running that pair in the opener task as well (as this app used to, around
  * every probe) tears down and recreates state OpenAmiSSLTags() owns. */
@@ -732,9 +741,18 @@ static int radio_amissl_open_shared(void)
     /* No InitAmiSSLMaster() here: that is the old v3/v4 entry point, and the
      * v5/v6 SDK explicitly replaces InitAmiSSLMaster()/OpenAmiSSL()/
      * InitAmiSSL() with this single OpenAmiSSLTags() call -- mixing the two
-     * init styles on the same master library is off-spec. */
+     * init styles on the same master library is off-spec.
+     *
+     * AmiSSL_InitAmiSSL is required for the opener task actually to be
+     * initialised: without it OpenAmiSSLTags() only OPENS the library, and
+     * the autodocs then require a manual InitAmiSSL() before any OpenSSL
+     * call.  With the tag, InitAmiSSL() runs implicitly for this task using
+     * the AmiSSL_SocketBase/AmiSSL_ErrNoPtr tags below, and CloseAmiSSL()
+     * owns the matching cleanup (CleanupAmiSSL() must NOT be called manually
+     * for this task -- see amissl.library/CleanupAmiSSLA). */
     if (OpenAmiSSLTags(AMISSL_CURRENT_VERSION,
                        AmiSSL_UsesOpenSSLStructs, TRUE,
+                       AmiSSL_InitAmiSSL, TRUE,
                        AmiSSL_GetAmiSSLBase, (ULONG)&AmiSSLBase,
                        AmiSSL_GetAmiSSLExtBase, (ULONG)&AmiSSLExtBase,
                        AmiSSL_SocketBase, (ULONG)SocketBase,
@@ -803,11 +821,11 @@ static int radio_ssl_global_init(RadioStream *rs)
         }
     }
     if (Radio_AmiSslTaskIsOpener()) {
-        /* Per the AmiSSL v5/v6 SDK, OpenAmiSSLTags() already initialized
-         * AmiSSL for the task that called it; only OTHER subprocesses run
-         * the InitAmiSSL()/CleanupAmiSSL() pair. */
+        /* The opener task was initialised by OpenAmiSSLTags() itself via
+         * the AmiSSL_InitAmiSSL tag (see radio_amissl_open_shared()); only
+         * OTHER subprocesses run the InitAmiSSL()/CleanupAmiSSL() pair. */
         radio_amissl_initialized = 1;
-        RADIO_DBG(printf("radio-resource: session=%lu task is the OpenAmiSSLTags opener, InitAmiSSL not needed\n", rs ? rs->session_id : 0););
+        RADIO_DBG(printf("radio-resource: session=%lu opener task was initialised by OpenAmiSSLTags/AmiSSL_InitAmiSSL; manual InitAmiSSL/CleanupAmiSSL not needed\n", rs ? rs->session_id : 0););
         if (locked) Radio_AmiSslUnlock();
         return 0;
     }
@@ -820,6 +838,13 @@ static int radio_ssl_global_init(RadioStream *rs)
      * does differently from a bare CreateMsgPort() one, it's required for
      * SSL_connect()'s own retry/timeout handling to keep noticing external
      * signals -- so leave it alone. */
+    /* TODO(F4, docs/amissl-lifecycle-audit.md): SocketBase here is the base
+     * the GUI/main task opened -- bsdsocket.library bases are per-opener,
+     * so each playback child should really open its OWN bsdsocket.library
+     * base and pass that to its InitAmiSSL() (and use it for its socket
+     * calls), closing it before task exit. Deliberately not changed in the
+     * lifecycle patch: every socket call in this file goes through the one
+     * shared global, so that fix needs its own change and soak test. */
     if (InitAmiSSL(AmiSSL_SocketBase, (ULONG)SocketBase,
                    AmiSSL_ErrNoPtr, (ULONG)&errno,
                    TAG_DONE) != 0) {
@@ -858,12 +883,11 @@ static void radio_ssl_global_cleanup(void)
         RADIO_DBG(printf("radio-cleanup: CleanupAmiSSL skipped (poisoned) leaking per-task AmiSSL state to avoid crashing on corrupted AmiSSL internals\n"););
         radio_amissl_initialized = 0;
     } else if (radio_amissl_initialized && Radio_AmiSslTaskIsOpener()) {
-        /* The opener task's state belongs to OpenAmiSSLTags()/CloseAmiSSL(),
-         * not to an InitAmiSSL()/CleanupAmiSSL() pair -- calling
-         * CleanupAmiSSL() here would tear down state OpenAmiSSLTags() owns
-         * (the SDK reserves that pair for other subprocesses only). */
+        /* The opener task was initialised via OpenAmiSSLTags()'s
+         * AmiSSL_InitAmiSSL tag, so CloseAmiSSL() owns its cleanup -- the
+         * autodocs forbid a manual CleanupAmiSSL() for that task. */
         radio_amissl_initialized = 0;
-        RADIO_DBG(printf("radio-cleanup: CleanupAmiSSL not needed (this task is the OpenAmiSSLTags opener)\n"););
+        RADIO_DBG(printf("radio-cleanup: CleanupAmiSSL not needed (opener task initialised by OpenAmiSSLTags/AmiSSL_InitAmiSSL; CloseAmiSSL owns cleanup)\n"););
     } else if (radio_amissl_initialized) {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: CleanupAmiSSL start\n"));
         CleanupAmiSSL(TAG_DONE);
@@ -1085,18 +1109,27 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
         radio_close_mode_name(mode), rs->session_id, (int)rs->status, rs->sslHandshakeDone,
         shutdown_called ? "called" : "skipped", (void *)rs->ssl, (void *)rs->ctx, (long)rs->sock, radio_open_socket_count););
     if (rs->ssl && !rs->sslFreed) {
-        /* Debug containment: on classic AmiSSL the playback child can crash
-         * later even after apparently healthy SSL_free()/SSL_CTX_free()/
-         * CleanupAmiSSL() cycles. Do not call back into AmiSSL from the child
-         * close path; leak the per-session SSL object and let process exit
-         * reclaim only our own non-AmiSSL allocations. */
-        RADIO_DBG(printf("radio-cleanup: SSL_free skipped (playback quarantine) session=%lu ssl=%p leaking to avoid AmiSSL playback cleanup crash\n", rs->session_id, (void *)rs->ssl));
+        if (rs->sslStatePoisoned || Radio_IsTlsPoisoned() || Radio_IsMemoryPoisoned()) {
+            /* Poisoned session: an f121.rndfnk.com run proved SSL_free()
+             * after a fatal record-layer error corrupts the exec heap
+             * (AN_BadFreeAddr mid-SSL_free, deadend AN_MemCorrupt after).
+             * Leak the object and quarantine this task's CleanupAmiSSL()
+             * and the final CloseAmiSSL() walk. Only an actually poisoned
+             * session may take this path -- a healthy stop must free
+             * normally, or every stop leaks and CloseAmiSSL() never runs. */
+            RADIO_DBG(printf("radio-cleanup: SSL_free skipped (poisoned) session=%lu ssl=%p leaking to avoid AmiSSL cleanup crash\n", rs->session_id, (void *)rs->ssl));
+            radio_amissl_task_poisoned = 1;
+            radio_tls_shutdown_quarantine = 1;
+        } else {
+            RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_free start ssl=%p\n", (void *)rs->ssl));
+            SSL_free(rs->ssl);
+            rs->ssl_free_count++;
+            RADIO_DBG(printf("radio-cleanup: SSL_free done session=%lu\n", rs->session_id));
+        }
         rs->sslFreed = 1;
         if (radio_active_ssl_count > 0) radio_active_ssl_count--;
         rs->ssl = NULL;
         rs->sslHandshakeDone = 0;
-        radio_amissl_task_poisoned = 1;
-        radio_tls_shutdown_quarantine = 1;
     } else {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_free skipped\n"));
     }
@@ -1118,14 +1151,21 @@ static void radio_ssl_free_ctx(RadioStream *rs)
 {
     if (!rs) return;
     if (rs->ctx && !rs->ctxFreed) {
-        /* Same containment as SSL_free(): keep playback child away from
-         * AmiSSL ctx teardown. */
-        RADIO_DBG(printf("radio-cleanup: SSL_CTX_free skipped (playback quarantine) session=%lu ctx=%p leaking to avoid AmiSSL playback cleanup crash\n", rs->session_id, (void *)rs->ctx));
+        if (rs->sslStatePoisoned || Radio_IsTlsPoisoned() || Radio_IsMemoryPoisoned()) {
+            /* Same poison gate as SSL_free() above: only an actually
+             * poisoned session leaks its ctx and quarantines cleanup. */
+            RADIO_DBG(printf("radio-cleanup: SSL_CTX_free skipped (poisoned) session=%lu ctx=%p leaking to avoid AmiSSL cleanup crash\n", rs->session_id, (void *)rs->ctx));
+            radio_amissl_task_poisoned = 1;
+            radio_tls_shutdown_quarantine = 1;
+        } else {
+            RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_CTX_free start ctx=%p\n", (void *)rs->ctx));
+            SSL_CTX_free(rs->ctx);
+            rs->ssl_ctx_free_count++;
+            RADIO_DBG(printf("radio-cleanup: SSL_CTX_free done session=%lu\n", rs->session_id));
+        }
         rs->ctxFreed = 1;
         if (radio_active_ssl_ctx_count > 0) radio_active_ssl_ctx_count--;
         rs->ctx = NULL;
-        radio_amissl_task_poisoned = 1;
-        radio_tls_shutdown_quarantine = 1;
     } else {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_CTX_free skipped\n"));
     }
@@ -1191,10 +1231,27 @@ static int radio_send_all(RadioStream *rs, const char *buf, int len)
             }
             r = (int)SSL_write(rs->ssl, buf + sent, len - sent);
             if (r > 0) { sent += r; continue; }
-            if (r < 0) {
+            {
                 int e = SSL_get_error(rs->ssl, r);
+                unsigned long ssl_lib_error;
                 if (e == SSL_ERROR_WANT_WRITE || e == SSL_ERROR_WANT_READ) {
                     radio_backoff_sleep(); tries++; continue;
+                }
+                /* Same fatal-fault quarantine as SSL_connect()/SSL_read():
+                 * after SSL_ERROR_SSL or a non-empty error queue this
+                 * session's objects must never be freed again, and the host
+                 * is blocked for the run. */
+                ssl_lib_error = ERR_get_error();
+                RADIO_DBG(printf("radio-ssl-write: session=%lu write failed ssl_error=%d lib_error=%08lx\n", rs->session_id, e, ssl_lib_error));
+                if (e == SSL_ERROR_SSL || ssl_lib_error != 0) {
+                    rs->sslStatePoisoned = 1;
+                    radio_amissl_task_poisoned = 1;
+                    Radio_NoteTlsFaultHost(rs->host);
+                    if (!rs->tlsFaultCounted) {
+                        rs->tlsFaultCounted = 1;
+                        Radio_ReportTlsFault(e == SSL_ERROR_SSL ? "SSL_ERROR_SSL from SSL_write" : "fatal AmiSSL error queue from SSL_write");
+                    }
+                    ERR_clear_error();
                 }
             }
             return -1;
@@ -1748,7 +1805,7 @@ RadioStream *Radio_OpenWithHostAddr(const char *url, int haveHostAddr, unsigned 
     if (radioMemoryPoisoned) {
         rs->status = RADIO_STATUS_ERROR;
         radio_copy_string(rs->url, sizeof(rs->url), url ? url : "");
-        set_error(rs, "Memory corruption detected - restart app");
+        set_error(rs, "Memory corruption detected; restart MiniAMP3 before playing radio.");
         RADIO_OPEN_DEBUG_PRINTF(("radio-open: refused stream start after memory poison session=%lu url=\"%s\"\n", rs->session_id, rs->url));
         return rs;
     }

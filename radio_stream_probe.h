@@ -44,7 +44,10 @@ enum {
     RB_STREAM_PROBE_ERR_SERVER_CLOSED = -14,
     RB_STREAM_PROBE_ERR_TLS_HANDSHAKE = -15,
     RB_STREAM_PROBE_ERR_HTTP_STATUS = -16,
-    RB_STREAM_PROBE_ERR_TLS_POISONED = -17
+    RB_STREAM_PROBE_ERR_TLS_POISONED = -17,
+    /* MiniMem/heap corruption detected earlier this run: every probe/fetch
+     * (HTTP and HTTPS alike) is refused until app restart. */
+    RB_STREAM_PROBE_ERR_MEM_POISONED = -18
 };
 
 const char *rb_probe_error_text(int rc);
