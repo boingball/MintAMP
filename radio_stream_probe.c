@@ -577,14 +577,31 @@ static int rb_probe_resolve_location(const RbProbeUrl *base, const char *locatio
 }
 
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+static int rb_probe_ensure_amissl_locked(void);
+
 static int rb_probe_ensure_amissl(void)
 {
+    int rc;
+    int locked;
     if (Radio_IsTlsPoisoned()) {
         /* AmiSSL cleanup has already been skipped/leaked for this run --
          * never call back into it (callers also refuse HTTPS up front; this
          * is the belt-and-braces check on the transport path itself). */
         return -1;
     }
+    /* Same shared globals as radio_stream.c's radio_ssl_global_init() --
+     * this probe runs on the GUI/opener task and can race a playback
+     * child's own InitAmiSSL()/CleanupAmiSSL() on the very same
+     * AmiSSLBase/SocketBase/rb_probe_amissl_initialized state. Best-effort,
+     * bounded lock -- see Radio_AmiSslLock()'s comment in radio_stream.h. */
+    locked = Radio_AmiSslLock();
+    rc = rb_probe_ensure_amissl_locked();
+    if (locked) Radio_AmiSslUnlock();
+    return rc;
+}
+
+static int rb_probe_ensure_amissl_locked(void)
+{
     if (!SocketBase) {
         /* Probes run in the same parent/GUI task that ran Radio_NetworkInit()
          * -- adopt its bsdsocket.library rather than opening a second one.
@@ -688,6 +705,10 @@ static int rb_probe_ensure_amissl(void)
  * per task or SSL_CTX_new()/SSL_new() crashes in a later task. */
 static void rb_probe_cleanup_amissl(void)
 {
+    /* Same lock as rb_probe_ensure_amissl(): this runs on the GUI/opener
+     * task and can race a playback child's own AmiSSL init/cleanup on the
+     * same shared globals. */
+    int locked = Radio_AmiSslLock();
     RADIO_DBG(printf("radio-ssl-diag: probe cleanup ENTER probe_init=%d base=%p ext=%p master=%p\n", rb_probe_amissl_initialized, (void *)AmiSSLBase, (void *)AmiSSLExtBase, (void *)AmiSSLMasterBase);)
     if (rb_probe_amissl_initialized && (Radio_IsTlsPoisoned() || rb_probe_amissl_dirty)) {
         /* Never CleanupAmiSSL() after a fault/poison. Crucially,
@@ -714,6 +735,7 @@ static void rb_probe_cleanup_amissl(void)
      * (see radio_stream.c's Radio_NetworkShutdown()) -- this function no
      * longer closes them itself. */
     RADIO_DBG(printf("radio-ssl-diag: probe cleanup EXIT  probe_init=%d base=%p ext=%p master=%p\n", rb_probe_amissl_initialized, (void *)AmiSSLBase, (void *)AmiSSLExtBase, (void *)AmiSSLMasterBase);)
+    if (locked) Radio_AmiSslUnlock();
     Radio_DebugCheckExecMem("after probe AmiSSL cleanup");
 }
 

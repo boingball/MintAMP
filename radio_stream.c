@@ -68,6 +68,7 @@
 #include <exec/memory.h>
 #include <exec/execbase.h>
 #include <dos/dos.h>
+#include <exec/semaphores.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
 #include <proto/bsdsocket.h>
@@ -76,6 +77,55 @@
 #include <netdb.h>
 extern struct ExecBase *SysBase;
 struct Library *SocketBase = NULL;
+/* Guards every read/write of the shared AmiSSLBase/AmiSSLExtBase/
+ * AmiSSLMasterBase/SocketBase globals and the per-task "have I initialized"
+ * bookkeeping below (radio_amissl_initialized, radio_amissl_opener_task,
+ * rb_probe_amissl_initialized in radio_stream_probe.c).  Those are plain
+ * statics with no locking of their own: fine while exactly one non-opener
+ * task ever touches them, but the GUI/opener task can independently open a
+ * second HTTPS connection (station-list favicon fetch, "Reload Art") while a
+ * playback child is still tearing down its own -- two tasks racing on
+ * radio_amissl_initialized/AmiSSLBase at once is exactly what corrupts state
+ * and crashes AmiSSL. Only the brief init/cleanup transitions are locked;
+ * actual SSL I/O on an already-initialized per-task SSL/SSL_CTX is left
+ * unlocked, since that part of the model is genuinely per-task per the
+ * AmiSSL v5/v6 SDK. */
+static struct SignalSemaphore radio_amissl_sem;
+static int radio_amissl_sem_ready = 0;
+/* ~10s at ~40ms/poll, same budget as radio_stream_probe.c's
+ * RB_PROBE_IO_STALL_TRIES. */
+#define RADIO_AMISSL_LOCK_TRIES 250
+
+/* Deliberately AttemptSemaphore() in a bounded poll, NOT a plain
+ * ObtainSemaphore(). This file's own comments elsewhere document
+ * CleanupAmiSSL() looping forever on corrupted AmiSSL internals -- a task
+ * wedged like that while holding this lock must not turn into every other
+ * task (including the one processing the user's Stop click) blocking on an
+ * exec Wait() with no way to react to a signal at all. Better to give up
+ * and proceed unlocked (this file's own single-task-at-a-time assumption
+ * failing open, same as before this lock existed) than to make one wedged
+ * task freeze the whole app irrecoverably. */
+/* Returns 1 if the lock was actually acquired, 0 if it gave up and the
+ * caller is proceeding unlocked. Callers MUST only call Radio_AmiSslUnlock()
+ * when this returned 1 -- ReleaseSemaphore() on a semaphore this task does
+ * not hold is undefined (and corrupts the semaphore's owner tracking for
+ * everyone else). */
+int Radio_AmiSslLock(void)
+{
+    int tries;
+    if (!radio_amissl_sem_ready) return 0;
+    for (tries = 0; tries < RADIO_AMISSL_LOCK_TRIES; tries++) {
+        if (AttemptSemaphore(&radio_amissl_sem)) return 1;
+        Delay(2);
+    }
+    RADIO_DBG(printf("radio-ssl-diag: AmiSSL lock timed out, proceeding unlocked\n"););
+    return 0;
+}
+
+void Radio_AmiSslUnlock(void)
+{
+    ReleaseSemaphore(&radio_amissl_sem);
+}
 #define RADIO_SOCKET long
 #define RADIO_INVALID_SOCKET (-1)
 #define radio_close_socket(s) CloseSocket(s)
@@ -109,6 +159,8 @@ static int radio_amissl_task_poisoned = 0;
 #define RADIO_SOCKET int
 #define RADIO_INVALID_SOCKET (-1)
 #define radio_close_socket(s) close(s)
+int Radio_AmiSslLock(void) { return 0; }
+void Radio_AmiSslUnlock(void) { }
 #endif
 
 /* Non-blocking ioctl request and "no data yet" errno values.  Define local
@@ -698,15 +750,25 @@ static int radio_amissl_open_shared(void)
 
 static int radio_ssl_global_init(RadioStream *rs)
 {
+    int locked;
     if (Radio_IsTlsPoisoned()) {
         /* AmiSSL cleanup has already been skipped/leaked for this run --
          * never call back into it. */
         set_error(rs, Radio_TlsPoisonedMessage());
         return -1;
     }
+    /* Locked from here on (best-effort -- see Radio_AmiSslLock()'s comment):
+     * everything below reads/writes SocketBase, AmiSSLBase/AmiSSLExtBase/
+     * AmiSSLMasterBase and radio_amissl_initialized, all shared with whatever
+     * the GUI/opener task (station probes, favicon fetches) or another
+     * playback child is doing to the same globals right now. */
+    locked = Radio_AmiSslLock();
     if (!SocketBase) {
         SocketBase = OpenLibrary("bsdsocket.library", 4);
-        if (!SocketBase) { set_error(rs, "AmiSSL unavailable: bsdsocket.library unavailable"); return -1; }
+        if (!SocketBase) {
+            if (locked) Radio_AmiSslUnlock();
+            set_error(rs, "AmiSSL unavailable: bsdsocket.library unavailable"); return -1;
+        }
         radio_socket_library_open_count++;
         RADIO_DBG(printf("radio-netinit: bsdsocket.library opened socket_library_open_count=%ld\n", radio_socket_library_open_count););
     }
@@ -728,7 +790,7 @@ static int radio_ssl_global_init(RadioStream *rs)
      * startup/shutdown. Reusing another task's InitAmiSSL() result without
      * calling InitAmiSSL() again in this task is what crashes inside
      * SSL_CTX_new()/SSL_new(). */
-    if (radio_amissl_initialized) return 0;
+    if (radio_amissl_initialized) { if (locked) Radio_AmiSslUnlock(); return 0; }
     if (!AmiSSLBase) {
         /* Shared instance not open yet (Radio_NetworkInit() didn't get to
          * it, or this is a build that calls straight into
@@ -736,6 +798,7 @@ static int radio_ssl_global_init(RadioStream *rs)
          * Whoever gets here first opens it for the rest of the app's
          * lifetime. */
         if (radio_amissl_open_shared() != 0) {
+            if (locked) Radio_AmiSslUnlock();
             set_error(rs, "AmiSSL unavailable"); return -1;
         }
     }
@@ -745,6 +808,7 @@ static int radio_ssl_global_init(RadioStream *rs)
          * the InitAmiSSL()/CleanupAmiSSL() pair. */
         radio_amissl_initialized = 1;
         RADIO_DBG(printf("radio-resource: session=%lu task is the OpenAmiSSLTags opener, InitAmiSSL not needed\n", rs ? rs->session_id : 0););
+        if (locked) Radio_AmiSslUnlock();
         return 0;
     }
     /* Deliberately using AmiSSL's own auto-allocated timer.device port here
@@ -762,16 +826,22 @@ static int radio_ssl_global_init(RadioStream *rs)
         /* Do NOT CloseAmiSSL() here: this task may not be the one that
          * opened the shared library, and other tasks (or a later retry)
          * may still need it -- only Radio_NetworkShutdown() closes it. */
+        if (locked) Radio_AmiSslUnlock();
         set_error(rs, "AmiSSL init failed"); return -1;
     }
     radio_amissl_initialized = 1;
     radio_amissl_init_count++;
     RADIO_DBG(printf("radio-resource: session=%lu AmiSSL init count=%ld\n", rs ? rs->session_id : 0, radio_amissl_init_count););
+    if (locked) Radio_AmiSslUnlock();
     return 0;
 }
 
 static void radio_ssl_global_cleanup(void)
 {
+    /* Same shared-globals lock as radio_ssl_global_init() -- this can run on
+     * a playback child that's exiting while the GUI/opener task is mid-probe
+     * or mid-favicon-fetch on the very same AmiSSLBase/radio_amissl_initialized. */
+    int locked = Radio_AmiSslLock();
     RADIO_DBG(printf("radio-ssl-diag: cleanup ENTER initialized=%d base=%p ext=%p master=%p\n", radio_amissl_initialized, (void *)AmiSSLBase, (void *)AmiSSLExtBase, (void *)AmiSSLMasterBase););
     RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: AmiSSL global cleanup start initialized=%d base=%p master=%p\n", radio_amissl_initialized, (void *)AmiSSLBase, (void *)AmiSSLMasterBase));
     if (radio_amissl_initialized && (radio_amissl_task_poisoned || Radio_IsTlsPoisoned())) {
@@ -816,6 +886,7 @@ static void radio_ssl_global_cleanup(void)
     RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: AmiSSL base kept open base=%p master=%p\n", (void *)AmiSSLBase, (void *)AmiSSLMasterBase));
     RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: AmiSSL global cleanup complete\n"));
     RADIO_DBG(printf("radio-ssl-diag: cleanup EXIT  initialized=%d base=%p ext=%p master=%p\n", radio_amissl_initialized, (void *)AmiSSLBase, (void *)AmiSSLExtBase, (void *)AmiSSLMasterBase););
+    if (locked) Radio_AmiSslUnlock();
     Radio_DebugCheckExecMem("after child AmiSSL cleanup");
 }
 
@@ -1967,6 +2038,13 @@ void Radio_GetAmiSslShared(void **amissl_base, void **amissl_ext_base, void **am
 void Radio_NetworkInit(void)
 {
 #if defined(AMIGA_M68K)
+    if (!radio_amissl_sem_ready) {
+        /* Must happen here, on the main task, before any probe or playback
+         * child can exist -- initializing the semaphore itself needs no
+         * locking since nothing else touches it yet. */
+        InitSemaphore(&radio_amissl_sem);
+        radio_amissl_sem_ready = 1;
+    }
     if (!SocketBase) {
         SocketBase = OpenLibrary("bsdsocket.library", 4);
         if (SocketBase) {

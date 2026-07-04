@@ -92,6 +92,27 @@ void Radio_GetAmiSslShared(void **amissl_base, void **amissl_ext_base, void **am
  * AmiSSL v5/v6 SDK that task is already initialized and must NOT run the
  * per-subprocess InitAmiSSL()/CleanupAmiSSL() pair. */
 int Radio_AmiSslTaskIsOpener(void);
+/* Serializes the shared AmiSSLBase/AmiSSLExtBase/AmiSSLMasterBase/SocketBase
+ * globals and their per-task "have I initialized" bookkeeping against
+ * concurrent use by another task (a playback child tearing down its own
+ * AmiSSL state while the GUI/opener task starts a station probe or favicon
+ * fetch, or vice versa). Nestable by the same task (AmigaOS SignalSemaphore
+ * semantics), so callers that already hold the lock and call back into
+ * another locked helper are safe.
+ *
+ * Radio_AmiSslLock() is a BOUNDED, non-blocking-retry attempt (AttemptSemaphore()
+ * polled with a timeout), not a plain wait: a task wedged inside AmiSSL while
+ * holding this lock (this codebase has already seen CleanupAmiSSL() loop
+ * forever on corrupted internals) must never turn into every other task --
+ * including the one handling the user's Stop click -- blocking uninterruptibly
+ * on an exec semaphore Wait() with no way to react to a signal. Returns 1 if
+ * the lock was acquired, 0 if it gave up (caller proceeds unlocked, same as
+ * if this lock did not exist). Only call Radio_AmiSslUnlock() when Lock()
+ * returned 1 -- releasing a semaphore this task never acquired is undefined.
+ * No-op (returns 0) before Radio_NetworkInit() has run and in non-Amiga
+ * builds. */
+int Radio_AmiSslLock(void);
+void Radio_AmiSslUnlock(void);
 int Radio_IsMemoryPoisoned(void);
 void Radio_MarkMemoryPoisoned(const char *where);
 int Radio_IsTlsPoisoned(void);
@@ -160,6 +181,8 @@ static void Radio_GetAmiSslShared(void **amissl_base, void **amissl_ext_base, vo
     if (amissl_master_base) *amissl_master_base = 0;
 }
 static int Radio_AmiSslTaskIsOpener(void) { return 0; }
+static int Radio_AmiSslLock(void) { return 0; }
+static void Radio_AmiSslUnlock(void) { }
 static int Radio_IsMemoryPoisoned(void) { return 0; }
 static void Radio_MarkMemoryPoisoned(const char *where) { (void)where; }
 static int Radio_IsTlsPoisoned(void) { return 0; }
