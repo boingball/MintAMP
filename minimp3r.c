@@ -3407,22 +3407,32 @@ static void CleanArtworkCache(MrApp *app)
 
 
 /* Uppercased file extension (without the dot) of a URL's path, e.g. "PNG"
- * for ".../icon.png?x=1".  Empty if there's no recognizable extension.
+ * for ".../icon.png?x=1".  The last dot in the final path segment wins,
+ * so thumbnail URLs such as ".../Logo.svg.png" are labelled as PNG rather
+ * than SVG.  Empty if there's no recognizable extension.
  * Used only to label the artwork placeholder so it's visible at a glance
  * which favicon type was rejected (".webp", ".svg", ...). */
 static void MrUrlExtensionUpper(const char *url, char *out, int outSize)
 {
-	const char *q, *dot;
+	const char *q, *hash, *end, *segment, *dot, *p;
 	int len, i, j;
 	if (!out || outSize <= 0) return;
 	out[0] = '\0';
 	if (!url || !url[0]) return;
 	q = strchr(url, '?');
-	len = (int)(q ? (q - url) : (int)strlen(url));
-	dot = url + len;
-	while (dot > url && dot[-1] != '/' && dot[-1] != ':') dot--;
-	while (*dot && dot < url + len && *dot != '.') dot++;
-	if (dot >= url + len) return;
+	hash = strchr(url, '#');
+	end = url + strlen(url);
+	if (q && q < end) end = q;
+	if (hash && hash < end) end = hash;
+	len = (int)(end - url);
+	segment = url + len;
+	while (segment > url && segment[-1] != '/' && segment[-1] != ':') segment--;
+	dot = (const char *)0;
+	for (p = segment; p < end; p++) {
+		if (*p == '.')
+			dot = p;
+	}
+	if (!dot || dot + 1 >= end) return;
 	dot++;
 	for (i = 0, j = 0; dot + i < url + len && dot[i] && j < outSize - 1; i++) {
 		unsigned char c = (unsigned char)dot[i];

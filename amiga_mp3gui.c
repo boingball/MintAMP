@@ -3445,12 +3445,13 @@ static void DrawMusicNoteIcon(struct RastPort *rp, int originX, int originY)
 }
 
 /* Upper-cased file extension of a URL's path (ignoring any query string),
- * e.g. "http://x/icon.jpg?v=2" -> "JPG". Mirrors minimp3r.c's
+ * e.g. "http://x/icon.jpg?v=2" -> "JPG". The last dot in the final path
+ * segment wins, so ".../Logo.svg.png" is reported as PNG. Mirrors minimp3r.c's
  * MrUrlExtensionUpper so both frontends report rejected favicon formats
  * the same way. */
 static void ArtUrlExtensionUpper(const char *url, char *out, int outSize)
 {
-	const char *q, *dot;
+	const char *q, *hash, *end, *segment, *dot, *p;
 	int len, i, j;
 	if (!out || outSize <= 0)
 		return;
@@ -3458,13 +3459,22 @@ static void ArtUrlExtensionUpper(const char *url, char *out, int outSize)
 	if (!url || !url[0])
 		return;
 	q = strchr(url, '?');
-	len = (int)(q ? (q - url) : (int)strlen(url));
-	dot = url + len;
-	while (dot > url && dot[-1] != '/' && dot[-1] != ':')
-		dot--;
-	while (*dot && dot < url + len && *dot != '.')
-		dot++;
-	if (dot >= url + len)
+	hash = strchr(url, '#');
+	end = url + strlen(url);
+	if (q && q < end)
+		end = q;
+	if (hash && hash < end)
+		end = hash;
+	len = (int)(end - url);
+	segment = url + len;
+	while (segment > url && segment[-1] != '/' && segment[-1] != ':')
+		segment--;
+	dot = (const char *)0;
+	for (p = segment; p < end; p++) {
+		if (*p == '.')
+			dot = p;
+	}
+	if (!dot || dot + 1 >= end)
 		return;
 	dot++;
 	for (i = 0, j = 0; dot + i < url + len && dot[i] && j < outSize - 1; i++) {
