@@ -140,6 +140,17 @@ struct Library *AmiSSLMasterBase = NULL;
 struct Library *AmiSSLBase = NULL;
 struct Library *AmiSSLExtBase = NULL;
 static int radio_amissl_initialized = 0;
+typedef struct RadioNetContext {
+    struct Library *socketBase;
+    struct Library *amisslMasterBase;
+    struct Library *amisslBase;
+    struct Library *amisslExtBase;
+    long errnoStore;
+    struct Task *ownerTask;
+    int childOwned;
+    int amiSslInitialized;
+    int amiSslOpened;
+} RadioNetContext;
 /* Set alongside RadioStream::sslStatePoisoned (see Radio_Pump()'s
  * SSL_ERROR_SSL handling) -- mirrors it at file scope so
  * radio_ssl_global_cleanup() can skip CleanupAmiSSL() too, without needing
@@ -273,6 +284,7 @@ struct RadioStream {
     unsigned int stream_buffer_free_count, audio_buffer_free_count, amissl_cleanup_count;
     unsigned int sslFreed, ctxFreed, socketClosed, cleanupDone;
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+    RadioNetContext net;
     SSL *ssl;
     SSL_CTX *ctx;
     int sslHandshakeDone;
@@ -783,6 +795,77 @@ static void set_error(RadioStream *rs, const char *msg);
  * every probe) tears down and recreates state OpenAmiSSLTags() owns. */
 static void *radio_amissl_opener_task = NULL;
 
+static const char *radio_task_name(struct Task *task)
+{
+    return (task && task->tc_Node.ln_Name) ? task->tc_Node.ln_Name : "(unnamed)";
+}
+
+static void radio_net_adopt_context(RadioStream *rs)
+{
+    if (!rs) return;
+    if (rs->net.childOwned) {
+        SocketBase = rs->net.socketBase;
+        AmiSSLMasterBase = rs->net.amisslMasterBase;
+        AmiSSLBase = rs->net.amisslBase;
+        AmiSSLExtBase = rs->net.amisslExtBase;
+    }
+}
+
+static int radio_net_open_child(RadioStream *rs)
+{
+    RadioNetContext *ctx;
+    if (!rs) return -1;
+    ctx = &rs->net;
+    if (ctx->childOwned) {
+        radio_net_adopt_context(rs);
+        return 0;
+    }
+    ctx->ownerTask = FindTask(NULL);
+    ctx->childOwned = 1;
+    ctx->errnoStore = 0;
+    ctx->socketBase = OpenLibrary("bsdsocket.library", 4);
+    if (!ctx->socketBase) {
+        ctx->childOwned = 0;
+        set_error(rs, "AmiSSL unavailable: child bsdsocket.library unavailable");
+        return -1;
+    }
+    ctx->amisslMasterBase = OpenLibrary("amisslmaster.library", AMISSLMASTER_MIN_VERSION);
+    if (!ctx->amisslMasterBase) {
+        CloseLibrary(ctx->socketBase);
+        ctx->socketBase = NULL;
+        ctx->childOwned = 0;
+        set_error(rs, "AmiSSL unavailable: child amisslmaster.library unavailable");
+        return -1;
+    }
+    SocketBase = ctx->socketBase;
+    AmiSSLMasterBase = ctx->amisslMasterBase;
+    if (OpenAmiSSLTags(AMISSL_CURRENT_VERSION,
+                       AmiSSL_UsesOpenSSLStructs, TRUE,
+                       AmiSSL_InitAmiSSL, TRUE,
+                       AmiSSL_GetAmiSSLBase, (ULONG)&ctx->amisslBase,
+                       AmiSSL_GetAmiSSLExtBase, (ULONG)&ctx->amisslExtBase,
+                       AmiSSL_SocketBase, (ULONG)ctx->socketBase,
+                       AmiSSL_ErrNoPtr, (ULONG)&ctx->errnoStore,
+                       TAG_DONE) != 0) {
+        CloseLibrary(ctx->amisslMasterBase);
+        CloseLibrary(ctx->socketBase);
+        memset(ctx, 0, sizeof(*ctx));
+        set_error(rs, "AmiSSL unavailable: child OpenAmiSSLTags failed");
+        return -1;
+    }
+    ctx->amiSslOpened = 1;
+    ctx->amiSslInitialized = 1;
+    radio_openamissltags_count++;
+    AmiSSLBase = ctx->amisslBase;
+    AmiSSLExtBase = ctx->amisslExtBase;
+    radio_amissl_initialized = 1;
+    RADIO_DBG(printf("radio-child-net: session=%lu task=%p name=\"%s\" child SocketBase=%p AmiSSLMasterBase=%p AmiSSLBase=%p AmiSSLExtBase=%p ErrNoPtr=%p OpenAmiSSLTags+Init owned=yes\n",
+        rs->session_id, (void *)ctx->ownerTask, radio_task_name(ctx->ownerTask),
+        (void *)ctx->socketBase, (void *)ctx->amisslMasterBase, (void *)ctx->amisslBase,
+        (void *)ctx->amisslExtBase, (void *)&ctx->errnoStore););
+    return 0;
+}
+
 int Radio_AmiSslTaskIsOpener(void)
 {
     return AmiSSLBase && radio_amissl_opener_task &&
@@ -835,6 +918,20 @@ static int radio_ssl_global_init(RadioStream *rs)
          * never call back into it. */
         set_error(rs, Radio_TlsPoisonedMessage());
         return -1;
+    }
+    if (rs) {
+        locked = Radio_AmiSslLock();
+        if (radio_net_open_child(rs) != 0) {
+            if (locked) Radio_AmiSslUnlock();
+            return -1;
+        }
+        RADIO_DBG(printf("radio-child-net: session=%lu using task-owned network context task=%p name=\"%s\" SocketBase=%p AmiSSLMasterBase=%p AmiSSLBase=%p AmiSSLExtBase=%p ErrNoPtr=%p initialized=%d\n",
+            rs->session_id, (void *)rs->net.ownerTask, radio_task_name(rs->net.ownerTask),
+            (void *)rs->net.socketBase, (void *)rs->net.amisslMasterBase,
+            (void *)rs->net.amisslBase, (void *)rs->net.amisslExtBase,
+            (void *)&rs->net.errnoStore, rs->net.amiSslInitialized););
+        if (locked) Radio_AmiSslUnlock();
+        return 0;
     }
     /* Locked from here on (best-effort -- see Radio_AmiSslLock()'s comment):
      * everything below reads/writes SocketBase, AmiSSLBase/AmiSSLExtBase/
@@ -975,6 +1072,52 @@ static void radio_ssl_global_cleanup(void)
     RADIO_DBG(printf("radio-ssl-diag: cleanup EXIT  initialized=%d base=%p ext=%p master=%p\n", radio_amissl_initialized, (void *)AmiSSLBase, (void *)AmiSSLExtBase, (void *)AmiSSLMasterBase););
     if (locked) Radio_AmiSslUnlock();
     Radio_DebugCheckExecMem("after child AmiSSL cleanup");
+}
+
+static void radio_net_close_child(RadioStream *rs)
+{
+    RadioNetContext *ctx;
+    int locked;
+    if (!rs) return;
+    ctx = &rs->net;
+    if (!ctx->childOwned) return;
+    locked = Radio_AmiSslLock();
+    radio_net_adopt_context(rs);
+    RADIO_DBG(printf("radio-child-net: cleanup ENTER session=%lu task=%p name=\"%s\" SocketBase=%p AmiSSLMasterBase=%p AmiSSLBase=%p AmiSSLExtBase=%p ErrNoPtr=%p opened=%d initialized=%d\n",
+        rs->session_id, (void *)ctx->ownerTask, radio_task_name(ctx->ownerTask),
+        (void *)ctx->socketBase, (void *)ctx->amisslMasterBase, (void *)ctx->amisslBase,
+        (void *)ctx->amisslExtBase, (void *)&ctx->errnoStore, ctx->amiSslOpened,
+        ctx->amiSslInitialized););
+    if (ctx->amiSslOpened && ctx->amisslBase) {
+        if (radio_amissl_task_poisoned || Radio_IsTlsPoisoned()) {
+            RADIO_DBG(printf("radio-child-net: CloseAmiSSL skipped (%s poison) session=%lu leaking child AmiSSL bases\n",
+                radio_amissl_task_poison_reason[0] ? radio_amissl_task_poison_reason : "unknown",
+                rs->session_id););
+        } else {
+            CloseAmiSSL();
+            radio_closeamissl_count++;
+            RADIO_DBG(printf("radio-child-net: CloseAmiSSL done session=%lu closeamissl_count=%ld\n",
+                rs->session_id, radio_closeamissl_count););
+        }
+    }
+    ctx->amiSslOpened = 0;
+    ctx->amiSslInitialized = 0;
+    radio_amissl_initialized = 0;
+    AmiSSLBase = NULL;
+    AmiSSLExtBase = NULL;
+    if (ctx->amisslMasterBase) {
+        CloseLibrary(ctx->amisslMasterBase);
+        ctx->amisslMasterBase = NULL;
+    }
+    AmiSSLMasterBase = NULL;
+    if (ctx->socketBase) {
+        CloseLibrary(ctx->socketBase);
+        ctx->socketBase = NULL;
+    }
+    SocketBase = NULL;
+    RADIO_DBG(printf("radio-child-net: cleanup EXIT session=%lu child-owned network bases closed\n", rs->session_id););
+    memset(ctx, 0, sizeof(*ctx));
+    if (locked) Radio_AmiSslUnlock();
 }
 
 static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode);
@@ -1611,6 +1754,7 @@ static void reset_parser(RadioStream *rs)
 static int connect_http(RadioStream *rs){
     struct sockaddr_in sa; char req[1024]; int n; int cr;
 #if defined(AMIGA_M68K)
+    radio_net_adopt_context(rs);
     if(!SocketBase) SocketBase=OpenLibrary("bsdsocket.library",4); if(!SocketBase){ set_error(rs,"bsdsocket.library unavailable"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: bsdsocket open failed\n")); return -1; }
 #endif
     if (radio_is_stopping(rs)) return -1;
@@ -2184,7 +2328,7 @@ void Radio_Close(RadioStream *rs)
     Radio_DebugCheckExecMem("after SSL_CTX_free/skip");
     rs->amissl_cleanup_count++;
     Radio_DebugCheckExecMem("before AmiSSL cleanup/skip");
-    radio_ssl_global_cleanup();
+    radio_net_close_child(rs);
     Radio_DebugCheckExecMem("after AmiSSL cleanup/skip");
 #endif
     radio_debug_mem_report(rs->session_id, "after stop cleanup");
