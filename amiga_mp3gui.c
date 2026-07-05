@@ -7184,14 +7184,16 @@ static void StartPlayback(HelixAmp3Gui *gui)
 
 	if (IsRadioInputName(gui->inputName)) {
 		static char radioWorkerArgs[2048];
+		static char radioWorkerCommand[2300];
 		GuiBuildRadioWorkerArgs(radioWorkerArgs, sizeof(radioWorkerArgs), gGuiPlayer.argv, gGuiPlayer.argc);
-		RADIO_DBG(printf("radio-worker: launching separate executable amiga_mp3dec.fastexp args=\"%s\"\n", radioWorkerArgs);)
-		gGuiPlayer.process = CreateNewProcTags(NP_Command, (ULONG)"amiga_mp3dec.fastexp",
-			NP_Arguments, (ULONG)radioWorkerArgs,
-			NP_Name, (ULONG)"MiniAMP3 playback",
-			NP_Priority, 0, NP_StackSize, 262144, NP_CurrentDir, dirLock,
-			NP_Output, nilOut, NP_CloseOutput, nilOut ? TRUE : FALSE,
-			NP_CopyVars, FALSE, TAG_DONE);
+		sprintf(radioWorkerCommand, "Run >NIL: amiga_mp3dec.fastexp %s", radioWorkerArgs);
+		RADIO_DBG(printf("radio-worker: launching separate executable via Execute: %s\n", radioWorkerCommand);)
+		if (Execute((STRPTR)radioWorkerCommand, (BPTR)0, nilOut)) {
+			gGuiPlayer.process = (struct Process *)FindTask(NULL); /* non-NULL launch sentinel; worker owns network state */
+			if (nilOut) { Close(nilOut); nilOut = (BPTR)0; }
+			if (dirLock) { UnLock(dirLock); dirLock = (BPTR)0; }
+		} else
+			gGuiPlayer.process = NULL;
 	} else if (nilOut) {
 		gGuiPlayer.process = CreateNewProcTags(NP_Entry, (ULONG)PlaybackEntry,
 			NP_Name, (ULONG)"MiniAMP3 playback",
