@@ -549,6 +549,7 @@ typedef struct MrApp {
 	struct MsgPort   *donePort;
 	char              radioWorkerPortName[32];
 	char              radioWorkerControlPortName[32];
+	char              radioWorkerTaskName[64];
 	int               radioWorkerPortAdded;
 	int               externalRadioWorker;
 
@@ -1507,8 +1508,6 @@ static int PlaybackProcessStillExists(void)
 
 	Forbid();
 	task = FindTask((STRPTR)"minimp3r playback");
-	if (!task) task = FindTask((STRPTR)"amiga_mp3dec.fastexp");
-	if (!task) task = FindTask((STRPTR)"amiga_mp3dec");
 	Permit();
 	return task != NULL;
 }
@@ -1693,17 +1692,27 @@ static void StartPlayback(MrApp *app)
 
 	if (MrIsRadioInput(app->inputName)) {
 		static char radioWorkerArgs[2048];
-		static char radioWorkerCommand[2300];
+		BPTR radioWorkerSeg;
 		MrBuildRadioWorkerArgs(radioWorkerArgs, sizeof(radioWorkerArgs), gPlayer.argv, gPlayer.argc);
-		sprintf(radioWorkerCommand, "Run >NIL: amiga_mp3dec.fastexp %s", radioWorkerArgs);
-		RADIO_DBG(printf("radio-worker: launching separate executable via Execute: %s\n", radioWorkerCommand);)
-		if (Execute((STRPTR)radioWorkerCommand, (BPTR)0, nilOut)) {
-			gPlayer.process = (struct Process *)FindTask((STRPTR)"amiga_mp3dec.fastexp");
-			if (!gPlayer.process) gPlayer.process = (struct Process *)FindTask((STRPTR)"amiga_mp3dec");
-			if (nilOut) { Close(nilOut); nilOut = (BPTR)0; }
-			if (dirLock) { UnLock(dirLock); dirLock = (BPTR)0; }
-		} else
-			gPlayer.process = NULL;
+		sprintf(app->radioWorkerTaskName, "minimp3r radio %08lx", app->playbackRunId);
+		radioWorkerSeg = LoadSeg((STRPTR)"amiga_mp3dec.fastexp");
+		RADIO_DBG(printf("radio-worker: launching separate executable task=\"%s\" args=\"%s\" seg=%lx\n", app->radioWorkerTaskName, radioWorkerArgs, (unsigned long)radioWorkerSeg);)
+		if (radioWorkerSeg) {
+			gPlayer.process = CreateNewProcTags(
+				NP_Seglist,     radioWorkerSeg,
+				NP_FreeSeglist, TRUE,
+				NP_Arguments,   (ULONG)radioWorkerArgs,
+				NP_Name,        (ULONG)app->radioWorkerTaskName,
+				NP_Priority,    0,
+				NP_StackSize,   262144,
+				NP_CurrentDir,  dirLock,
+				NP_Output,      nilOut,
+				NP_CloseOutput, TRUE,
+				NP_CopyVars,    FALSE,
+				TAG_DONE);
+			if (!gPlayer.process)
+				UnLoadSeg(radioWorkerSeg);
+		}
 	} else {
 		gPlayer.process = CreateNewProcTags(
 			NP_Entry,      (ULONG)PlaybackEntry,
@@ -1717,7 +1726,7 @@ static void StartPlayback(MrApp *app)
 			TAG_DONE);
 	}
 
-	if (!gPlayer.process && !app->externalRadioWorker) {
+	if (!gPlayer.process) {
 		Close(nilOut);
 		if (dirLock)
 			UnLock(dirLock);
@@ -1834,9 +1843,10 @@ static void StopPlayback(MrApp *app)
 	 * signal path. */
 	(void)MrSendRadioWorkerStop(app);
 	Forbid();
-	child = FindTask((STRPTR)"minimp3r playback");
-	if (!child && MrIsRadioInput(app->inputName)) child = FindTask((STRPTR)"amiga_mp3dec.fastexp");
-	if (!child && MrIsRadioInput(app->inputName)) child = FindTask((STRPTR)"amiga_mp3dec");
+	if (app->externalRadioWorker && app->radioWorkerTaskName[0])
+		child = FindTask((STRPTR)app->radioWorkerTaskName);
+	else
+		child = FindTask((STRPTR)"minimp3r playback");
 	if (child)
 		Signal(child, SIGBREAKF_CTRL_C);
 	Permit();
