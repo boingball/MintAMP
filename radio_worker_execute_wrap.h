@@ -15,6 +15,11 @@
  * a real task name that the existing Stop fallback can find and signal with
  * SIGBREAKF_CTRL_C.
  *
+ * Important: request a CLI context.  The decoder is a command-line program and
+ * relies on its C startup parsing NP_Arguments into argc/argv.  Without NP_Cli
+ * some AmigaOS environments can create the process but leave the decoder with
+ * no usable CLI argv, which looks like the GUI sitting forever in Buffering.
+ *
  * Longer term, the frontends should call CreateNewProcTags() directly with a
  * per-run unique NP_Name.  This shim is deliberately narrow: non-radio Execute()
  * calls fall through to dos.library Execute().
@@ -61,6 +66,7 @@ static LONG MiniAmp3ExecuteTrackedRadioWorker(STRPTR command, BPTR input, BPTR o
         NP_Command,     (ULONG)"amiga_mp3dec.fastexp",
         NP_Arguments,   (ULONG)args,
         NP_Name,        (ULONG)"amiga_mp3dec.fastexp",
+        NP_Cli,         TRUE,
         NP_Priority,    0,
         NP_StackSize,   262144,
         NP_CurrentDir,  dirLock,
