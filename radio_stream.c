@@ -1107,6 +1107,7 @@ static void radio_net_close_child(RadioStream *rs)
 
 static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode);
 static void radio_ssl_close_stream(RadioStream *rs);
+static void radio_ssl_free_ctx(RadioStream *rs);
 static void radio_abort_current_socket(RadioStream *rs);
 static void close_current_socket(RadioStream *rs);
 
@@ -1173,32 +1174,10 @@ static int radio_ssl_do_handshake(RadioStream *rs)
             RADIO_DBG(printf("SSL_CONNECT_FATAL session=%lu err=%d lib_error=%08lx (%s)\n",
                 rs ? rs->session_id : 0, e, ssl_lib_error, ssl_error_buf[0] ? ssl_error_buf : "none"););
             if (rs && radio_ssl_error_is_fatal(e)) {
-                /* Fatal AmiSSL-level handshake failure -- quarantine this
-                 * session's SSL/SSL_CTX exactly like a fatal SSL_read fault.
-                 * An f111.rndfnk.com run disproved the assumption that
-                 * handshake-failure frees are safe: SSL_connect failed with
-                 * "0A0C0103 internal error", SSL_free and SSL_CTX_free then
-                 * appeared to succeed, and CleanupAmiSSL() looped endless
-                 * AN_BadFreeAddr alerts walking the damaged internals. After
-                 * ANY fatal AmiSSL error, nothing of that session may be
-                 * freed again. HTTPS itself stays enabled. */
-                const char *reason = (e == SSL_ERROR_SYSCALL && ssl_lib_error == 0) ?
-                    "ssl-connect-syscall" : "ssl-connect-fatal";
-                rs->sslStatePoisoned = 1;
-                rs->fatalStop = 1;
-                rs->noReconnect = 1;
                 rs->lastSslError = e;
-                strcpy(rs->lastSslOp, reason);
-                radio_amissl_task_poisoned = 1;
-                strcpy(radio_amissl_task_poison_reason, reason);
-                RADIO_DBG(printf("radio-safety: TLS session poisoned reason=%s session=%lu\n", reason, rs->session_id));
-                if (!rs->tlsFaultCounted) {
-                    rs->tlsFaultCounted = 1;
-                    Radio_ReportTlsFault(e == SSL_ERROR_SSL ? "SSL_ERROR_SSL from SSL_connect" :
-                        (e == SSL_ERROR_SYSCALL && ssl_lib_error == 0) ? "SSL_ERROR_SYSCALL (empty queue) from SSL_connect" :
-                        "fatal AmiSSL error queue from SSL_connect");
-                }
-                RADIO_DBG(printf("radio-tls: session=%lu handshake SSL state quarantined -- will skip SSL_free/SSL_CTX_free/CleanupAmiSSL\n", rs->session_id));
+                strcpy(rs->lastSslOp, (e == SSL_ERROR_SYSCALL && ssl_lib_error == 0) ?
+                    "ssl-connect-syscall" : "ssl-connect-fatal");
+                RADIO_DBG(printf("radio-tls: session=%lu handshake failed; normal cleanup will free SSL/CTX and allow another HTTPS station\n", rs->session_id));
             }
             /* Drain the rest of the queue so the failure cannot masquerade
              * as a later session's fault. */
@@ -1216,77 +1195,25 @@ static int radio_ssl_connect(RadioStream *rs)
     int set_fd_ok;
     radio_net_adopt_context(rs);
     if (radio_ssl_global_init(rs) != 0) return -1;
-    /* rs->ctx persists across reconnects within this task (see
-     * radio_ssl_free_ctx(), only called once from Radio_Close()) -- a
-     * dropped stream can reconnect up to RADIO_RECONNECT_MAX (10) times,
-     * and rebuilding a whole new SSL_CTX (with its own cert-verify setup)
-     * on every one of those, on top of a fresh SSL_CTX per station switch,
-     * multiplies AmiSSL's create/destroy cycle count well beyond what's
-     * actually needed -- only a fresh SSL object is required per connection
-     * attempt, per normal OpenSSL practice. */
-    if (rs->ctx && rs->sslStatePoisoned) {
-        /* This ctx survived a prior SSL_ERROR_SSL on this same reconnecting
-         * session (see Radio_Pump()) and was deliberately leaked rather
-         * than freed, since AmiSSL's own internal state may already be
-         * corrupted. Reusing it for a fresh SSL_new() here would be exactly
-         * the "call back into corrupted AmiSSL state" this app is trying to
-         * avoid -- orphan it and force a brand new SSL_CTX for the retry
-         * instead, same as if this were the first connection attempt. */
-        RADIO_DBG(printf("radio-resource: session=%lu orphaning poisoned SSL_CTX %p instead of reusing it for reconnect\n", rs->session_id, (void *)rs->ctx));
-        if (radio_active_ssl_ctx_count > 0) radio_active_ssl_ctx_count--;
-        rs->ctx = NULL;
-        rs->ctxFreed = 1;
-        rs->sslStatePoisoned = 0;
-    }
+    if (rs->ctx && !rs->ctxFreed) radio_ssl_free_ctx(rs);
     if (!rs->ctx) {
         method = SSLv23_client_method();
         if (!method) { set_error(rs, "AmiSSL init failed"); return -1; }
         rs->ctx = SSL_CTX_new(method);
         if (rs->ctx) { rs->ctxFreed = 0; radio_active_ssl_ctx_count++; RADIO_DBG(printf("radio-resource: session=%lu SSL_CTX allocated active_ssl_ctx_count=%ld\n", rs->session_id, radio_active_ssl_ctx_count)); }
         if (!rs->ctx) { set_error(rs, "AmiSSL init failed"); return -1; }
-#ifdef RADIO_SSL_VERIFY_PEER
-        /* SSLCERTS=1 build: verify the server's certificate chain against
-         * AmiSSL's installed root CA bundle -- SSL_CTX_set_default_verify_paths()
-         * picks it up the same way it would on any other OpenSSL-based build --
-         * and the hostname against the certificate, instead of accepting
-         * anything.  Falls back to no verification if the cert store can't be
-         * loaded at all (e.g. AmiSSL's update pack with the root certs was
-         * never installed), rather than refusing to play: a missing/broken
-         * cert store shouldn't be able to break streaming outright. */
-        if (SSL_CTX_set_default_verify_paths(rs->ctx)) {
-            SSL_CTX_set_verify(rs->ctx, SSL_VERIFY_PEER, NULL);
-            RADIO_DBG(printf("radio-tls: cert verification enabled session=%lu host=%s\n", rs->session_id, rs->host););
-        } else {
-            SSL_CTX_set_verify(rs->ctx, SSL_VERIFY_NONE, NULL);
-            RADIO_DBG(printf("radio-tls: cert store unavailable, verification disabled session=%lu\n", rs->session_id););
-        }
-#else
-        /* No CA bundle path assumed by default; skip cert verification for
-         * streams.  Build with SSLCERTS=1 to verify against AmiSSL's
-         * installed root certs instead (see above). */
         SSL_CTX_set_verify(rs->ctx, SSL_VERIFY_NONE, NULL);
-#endif
 #ifdef SSL_OP_IGNORE_UNEXPECTED_EOF
-        /* OpenSSL 3.x (AmiSSL v5): report a peer that drops the connection
-         * without close_notify as a clean SSL_ERROR_ZERO_RETURN
-         * end-of-stream instead of the fatal SSL_ERROR_SSL "0A000126
-         * unexpected eof while reading" -- the exact fatal error path that
-         * corrupted AmiSSL's internals on f121.rndfnk.com and forced the
-         * whole TLS-fault quarantine machinery to engage. Streaming servers
-         * drop connections abruptly all the time (expiring tokenized URLs
-         * especially), and a truncation "attack" on a public radio stream
-         * is not a meaningful threat, so the clean-EOF interpretation is
-         * strictly better here: the session just reconnects, with no fault,
-         * no quarantine, no leak. */
+        /* OpenSSL 3.x (AmiSSL v5): treat a peer that drops the connection
+         * without close_notify as SSL_ERROR_ZERO_RETURN. Streaming servers
+         * drop connections abruptly, and each HTTPS attempt now has fresh
+         * SSL/CTX objects that are cleaned up after the attempt. */
         SSL_CTX_set_options(rs->ctx, SSL_OP_IGNORE_UNEXPECTED_EOF);
 #endif
     }
     rs->ssl = SSL_new(rs->ctx);
     if (rs->ssl) {
         rs->sslFreed = 0;
-        /* sslReadCloseSeen refers to the *previous* SSL object's clean
-         * close; this is a brand new one, so it must not inherit the
-         * SSL_free skip. */
         rs->sslReadCloseSeen = 0;
         radio_active_ssl_count++;
         RADIO_DBG(printf("radio-resource: session=%lu SSL allocated active_ssl_count=%ld\n", rs->session_id, radio_active_ssl_count));
@@ -1317,7 +1244,7 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
     if (!rs) return;
     radio_net_adopt_context(rs);
     RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: HTTPS cleanup start mode=%s ssl=%p ctx=%p fd=%ld handshake=%d\n", radio_close_mode_name(mode), (void *)rs->ssl, (void *)rs->ctx, (long)rs->sock, rs->sslHandshakeDone));
-    if (mode == RADIO_CLOSE_GRACEFUL && !rs->sslStatePoisoned && !Radio_IsTlsPoisoned() && rs->ssl && rs->sslHandshakeDone && rs->sock != RADIO_INVALID_SOCKET && !rs->socketClosed) {
+    if (mode == RADIO_CLOSE_GRACEFUL && !Radio_IsMemoryPoisoned() && rs->ssl && rs->sslHandshakeDone && rs->sock != RADIO_INVALID_SOCKET && !rs->socketClosed) {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_shutdown start ssl=%p\n", (void *)rs->ssl));
         SSL_shutdown(rs->ssl);
         shutdown_called = 1;
@@ -1329,34 +1256,15 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
         radio_close_mode_name(mode), rs->session_id, (int)rs->status, rs->sslHandshakeDone,
         shutdown_called ? "called" : "skipped", (void *)rs->ssl, (void *)rs->ctx, (long)rs->sock, radio_open_socket_count););
     if (rs->ssl && !rs->sslFreed) {
-        /* Pre-SSL_free guard log: every field a post-mortem needs to tell
-         * whether this object was safe to free, without having to scroll
-         * back to find the fault that (maybe) poisoned it. */
-        RADIO_DBG(printf("radio-safety: pre-SSL_free guard session=%lu ssl=%p ctx=%p fd=%ld lastSslError=%d lastSslOp=%s sslStatePoisoned=%d tlsPoisoned=%d memoryPoisoned=%d\n",
+        RADIO_DBG(printf("radio-safety: pre-SSL_free guard session=%lu ssl=%p ctx=%p fd=%ld lastSslError=%d lastSslOp=%s memoryPoisoned=%d\n",
             rs->session_id, (void *)rs->ssl, (void *)rs->ctx, (long)rs->sock,
             rs->lastSslError, rs->lastSslOp[0] ? rs->lastSslOp : "none",
-            rs->sslStatePoisoned, Radio_IsTlsPoisoned(), Radio_IsMemoryPoisoned()));
-        if (rs->sslStatePoisoned || Radio_IsTlsPoisoned() || Radio_IsMemoryPoisoned()) {
-            /* Poisoned session: an f121.rndfnk.com run proved SSL_free()
-             * after a fatal record-layer error corrupts the exec heap
-             * (AN_BadFreeAddr mid-SSL_free, deadend AN_MemCorrupt after).
-             * Leak the object and quarantine this task's CleanupAmiSSL()
-             * and the final CloseAmiSSL() walk. Only an actually poisoned
-             * session may take this path -- a healthy stop must free
-             * normally, or every stop leaks and CloseAmiSSL() never runs. */
-            RADIO_DBG(printf("radio-cleanup: SSL_free skipped (%s poison) session=%lu ssl=%p leaking to avoid AmiSSL cleanup crash\n",
-                rs->lastSslOp[0] ? rs->lastSslOp : "poisoned", rs->session_id, (void *)rs->ssl));
+            Radio_IsMemoryPoisoned()));
+        if (Radio_IsMemoryPoisoned()) {
+            RADIO_DBG(printf("radio-cleanup: SSL_free skipped (memory poison) session=%lu ssl=%p leaking to avoid heap damage\n",
+                rs->session_id, (void *)rs->ssl));
             radio_amissl_task_poisoned = 1;
             radio_tls_shutdown_quarantine = 1;
-        } else if (rs->sslReadCloseSeen) {
-            /* Not poisoned -- a clean SSL_ERROR_ZERO_RETURN close, per
-             * radio_stream_probe.c's rb_probe_ssl_read_retrying(). Leak just
-             * this one SSL object rather than risk an unsafe SSL_free() on
-             * classic AmiSSL after this close path; no task-wide quarantine,
-             * no CleanupAmiSSL skip, HTTPS stays enabled for the next
-             * session/reconnect. */
-            RADIO_DBG(printf("radio-cleanup: SSL_free skipped (zero-return) session=%lu ssl=%p leaking (not poisoned, HTTPS stays enabled)\n",
-                rs->session_id, (void *)rs->ssl));
         } else {
             RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_free start ssl=%p\n", (void *)rs->ssl));
             SSL_free(rs->ssl);
@@ -1370,10 +1278,7 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
     } else {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_free skipped\n"));
     }
-    /* rs->ctx is deliberately NOT freed here -- it's reused across
-     * reconnects within this task (see radio_ssl_connect()). It's only
-     * freed once, by radio_ssl_free_ctx(), when this session is exiting for
-     * good (Radio_Close()). */
+    radio_ssl_free_ctx(rs);
     RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: HTTPS cleanup complete\n"));
 }
 
@@ -1382,18 +1287,15 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
  * peer-closed state. */
 static void radio_ssl_close_stream(RadioStream *rs) { radio_ssl_close_stream_mode(rs, RADIO_CLOSE_ABORT); }
 
-/* Final, once-per-task free of the SSL_CTX kept alive across this session's
- * reconnects (see radio_ssl_connect()). Called once from Radio_Close(). */
+/* Free the per-attempt SSL_CTX. HTTPS attempts do not reuse SSL_CTX objects. */
 static void radio_ssl_free_ctx(RadioStream *rs)
 {
     if (!rs) return;
     radio_net_adopt_context(rs);
     if (rs->ctx && !rs->ctxFreed) {
-        if (rs->sslStatePoisoned || Radio_IsTlsPoisoned() || Radio_IsMemoryPoisoned()) {
-            /* Same poison gate as SSL_free() above: only an actually
-             * poisoned session leaks its ctx and quarantines cleanup. */
-            RADIO_DBG(printf("radio-cleanup: SSL_CTX_free skipped (%s poison) session=%lu ctx=%p leaking to avoid AmiSSL cleanup crash\n",
-                rs->lastSslOp[0] ? rs->lastSslOp : "poisoned", rs->session_id, (void *)rs->ctx));
+        if (Radio_IsMemoryPoisoned()) {
+            RADIO_DBG(printf("radio-cleanup: SSL_CTX_free skipped (memory poison) session=%lu ctx=%p leaking to avoid heap damage\n",
+                rs->session_id, (void *)rs->ctx));
             radio_amissl_task_poisoned = 1;
             radio_tls_shutdown_quarantine = 1;
         } else {
@@ -1484,28 +1386,14 @@ static int radio_send_all(RadioStream *rs, const char *buf, int len)
                 if (e == SSL_ERROR_WANT_WRITE || e == SSL_ERROR_WANT_READ) {
                     radio_backoff_sleep(); tries++; continue;
                 }
-                /* Same fatal-fault quarantine as SSL_connect()/SSL_read():
-                 * after SSL_ERROR_SSL or a non-empty error queue this
-                 * session's objects must never be freed again. */
+                /* Normal TLS write failure: record it and let the per-attempt cleanup free SSL/CTX. */
                 ssl_lib_error = ERR_get_error();
                 RADIO_DBG(printf("radio-ssl-write: session=%lu write failed ssl_error=%d lib_error=%08lx\n", rs->session_id, e, ssl_lib_error));
                 if (radio_ssl_error_is_fatal(e)) {
-                    const char *reason = (e == SSL_ERROR_SYSCALL && ssl_lib_error == 0) ?
-                        "ssl-write-syscall" : "ssl-write-fatal";
-                    rs->sslStatePoisoned = 1;
-                    rs->fatalStop = 1;
-                    rs->noReconnect = 1;
                     rs->lastSslError = e;
-                    strcpy(rs->lastSslOp, reason);
-                    radio_amissl_task_poisoned = 1;
-                    strcpy(radio_amissl_task_poison_reason, reason);
-                    RADIO_DBG(printf("radio-safety: TLS session poisoned reason=%s session=%lu\n", reason, rs->session_id));
-                    if (!rs->tlsFaultCounted) {
-                        rs->tlsFaultCounted = 1;
-                        Radio_ReportTlsFault(e == SSL_ERROR_SSL ? "SSL_ERROR_SSL from SSL_write" :
-                            (e == SSL_ERROR_SYSCALL && ssl_lib_error == 0) ? "SSL_ERROR_SYSCALL (empty queue) from SSL_write" :
-                            "fatal AmiSSL error queue from SSL_write");
-                    }
+                    strcpy(rs->lastSslOp, (e == SSL_ERROR_SYSCALL && ssl_lib_error == 0) ?
+                        "ssl-write-syscall" : "ssl-write-fatal");
+                    RADIO_DBG(printf("radio-ssl-write: session=%lu fatal write failure; normal cleanup will free SSL/CTX\n", rs->session_id));
                     ERR_clear_error();
                 }
             }
@@ -2598,15 +2486,7 @@ int Radio_Pump(RadioStream *rs)
             RADIO_DBG(printf("radio-ssl-read: session=%lu SSL_get_error=%d ret=%d fd=%ld\n", rs->session_id, e, n, (long)rs->sock));
             if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) wb = 1;
             else if (e == SSL_ERROR_ZERO_RETURN) {
-                /* A clean TLS close_notify EOF -- not fatal, HTTPS is not
-                 * quarantined and this session is not poisoned. But mirror
-                 * radio_stream_probe.c's rb_probe_ssl_read_retrying(): AmiSSL
-                 * can still leave SSL_free() unsafe for the object that saw
-                 * this specific close, so skip freeing *this object only*
-                 * (radio_ssl_close_stream_mode() checks the flag) without any
-                 * task-wide poisoning or HTTPS disablement. */
-                rs->sslReadCloseSeen = 1;
-                RADIO_DBG(printf("radio-ssl-read: session=%lu SSL_ERROR_ZERO_RETURN seen -- will skip SSL_free on close\n", rs->session_id));
+                RADIO_DBG(printf("radio-ssl-read: session=%lu SSL_ERROR_ZERO_RETURN clean close\n", rs->session_id));
             }
             else {
                 /* Not a "call again later" condition -- a real record-layer
@@ -2625,47 +2505,11 @@ int Radio_Pump(RadioStream *rs)
                 RADIO_DBG(printf("radio-ssl-read: session=%lu read failed ssl_error=%d lib_error=%08lx (%s)\n",
                     rs->session_id, e, ssl_lib_error, ssl_error_buf[0] ? ssl_error_buf : "none"));
                 if (radio_ssl_error_is_fatal(e)) {
-                    /* A fatal fault inside SSL_read(): a record-layer failure
-                     * (SSL_ERROR_SSL / non-empty error queue) or a bare
-                     * socket-level SSL_ERROR_SYSCALL with nothing in the
-                     * error queue to explain it -- AmiSSL's SSL_get_error()
-                     * cannot always attach a reason to the latter, but it is
-                     * exactly as fatal: this session's SSL/SSL_CTX must never
-                     * be freed again. An f121.rndfnk.com run that hit
-                     * "0A000126 unexpected eof while reading" and then freed
-                     * them normally crashed with AN_BadFreeAddr *inside* the
-                     * following SSL_free() and a deadend AN_MemCorrupt right
-                     * after -- AmiSSL's own bookkeeping is not safe to walk
-                     * after this error, single shared instance or not.
-                     * Quarantine (leak) the objects and skip this task's
-                     * CleanupAmiSSL(), exactly like the original poison
-                     * handling -- but unlike it, HTTPS stays enabled: a fresh
-                     * session gets fresh objects (and a reconnect of this
-                     * session orphans the ctx, see radio_ssl_connect()). Only
-                     * repeated faults blow the fuse into a full hard poison;
-                     * each session counts toward it once, so one flaky
-                     * station's reconnect loop cannot brick HTTPS on its
-                     * own. */
-                    const char *reason = (e == SSL_ERROR_SYSCALL && ssl_lib_error == 0) ?
-                        "ssl-read-syscall" : "ssl-read-fatal";
-                    rs->sslStatePoisoned = 1;
-                    rs->fatalStop = 1;
-                    rs->noReconnect = 1;
                     rs->lastSslError = e;
-                    strcpy(rs->lastSslOp, reason);
-                    radio_amissl_task_poisoned = 1;
-                    strcpy(radio_amissl_task_poison_reason, reason);
-                    RADIO_DBG(printf("radio-safety: TLS session poisoned reason=%s session=%lu\n", reason, rs->session_id));
-                    if (!rs->tlsFaultCounted) {
-                        rs->tlsFaultCounted = 1;
-                        Radio_ReportTlsFault(e == SSL_ERROR_SSL ? "SSL_ERROR_SSL from SSL_read" :
-                            (e == SSL_ERROR_SYSCALL && ssl_lib_error == 0) ? "SSL_ERROR_SYSCALL (empty queue) from SSL_read" :
-                            "fatal AmiSSL error queue from SSL_read");
-                    } else {
-                        RADIO_DBG(printf("radio-tls: repeat TLS fault in session=%lu (already counted) -- quarantining objects again\n", rs->session_id));
-                    }
+                    strcpy(rs->lastSslOp, (e == SSL_ERROR_SYSCALL && ssl_lib_error == 0) ?
+                        "ssl-read-syscall" : "ssl-read-fatal");
+                    RADIO_DBG(printf("radio-ssl-read: session=%lu fatal read failure; normal cleanup will free SSL/CTX\n", rs->session_id));
                     ERR_clear_error();
-                    RADIO_DBG(printf("radio-ssl-read: session=%lu SSL state quarantined -- will skip SSL_free/SSL_CTX_free/CleanupAmiSSL on close\n", rs->session_id));
                 }
             }
         }

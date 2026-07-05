@@ -211,13 +211,12 @@ drop the probe fallback in GUI builds).
   (`radio_stream.c:823-825`, `radio_stream_probe.c:684-686`,
   `amissl_https_get.c:193-195`) and at both `OpenAmiSSLTags` sites. Correct
   (subject to the shared-errno caveat in F4).
-- **Rule 10 (TLS-error path):** on `SSL_ERROR_SSL`/fatal error-queue faults
-  from `SSL_connect`/`SSL_read` the code stops the stream, quarantines only
-  that session's objects as needed, and keeps HTTPS enabled so another HTTPS
-  station can be tried. The host-blocking path was removed; the optional
-  "parent-side AmiSSL soft reset" is not implemented (allowed — it is
-  optional). Hard-disable on heap corruption works for playback but not probes
-  (see F3).
+- **Rule 10 (TLS-error path):** on normal TLS failures from
+  `SSL_connect`/`SSL_read`/`SSL_write`, playback records diagnostics and then
+  runs the normal per-attempt cleanup (`SSL_free`, `SSL_CTX_free`, socket close,
+  child AmiSSL/library close, and parent-global restore). The host-blocking path
+  remains removed, so another HTTPS station can be tried. Hard-disable remains
+  reserved for detected heap/memory corruption (see F3).
 - **`amissl_https_get.c`** is fully compliant and is the correct reference
   pattern for the manual (no `AmiSSL_InitAmiSSL`) lifecycle:
   `OpenAmiSSLTags` → explicit `InitAmiSSL` → SSL use → `CleanupAmiSSL` →
