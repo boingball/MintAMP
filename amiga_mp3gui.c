@@ -3075,6 +3075,10 @@ static int LoadRadioFaviconImage(HelixAmp3Gui *gui)
 		RADIO_DBG(printf("radio-art: no favicon URL for current station\n");)
 		return 0;
 	}
+	if (Radio_PlaybackOwnsNetwork()) {
+		RADIO_DBG(printf("radio-art: skipped favicon fetch while radio playback child owns networking\n");)
+		return 0;
+	}
 	RADIO_DBG(printf("radio-art: fetching favicon url=%s\n", gui->currentRadioFavicon);)
 	rc = rb_probe_fetch_binary(gui->currentRadioFavicon, response, (int)sizeof(response),
 		&bytes, contentType, (int)sizeof(contentType));
@@ -5534,6 +5538,11 @@ static void RadioDoSearch(HelixAmp3Gui *app)
 	int rc;
 	char filterMsg[192];
 
+	if (Radio_PlaybackOwnsNetwork()) {
+		RADIO_DBG(printf("radio-browser: search skipped while radio playback child owns networking\n");)
+		RadioSetStatus(app, "Radio playback owns networking; search after stopping.");
+		return;
+	}
 	RadioSetStatus(app, "Searching Radio Browser...");
 	text = NULL;
 	GT_GetGadgetAttrs(nameGad, app->rbWin, NULL, GTST_String, (ULONG)(void *)&text, TAG_DONE);
@@ -5743,6 +5752,11 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 		RadioSetStatus(app, "Queued stream; stopping previous stream...");
 		if (!gGuiPlayer.stopRequested)
 			StopPlayback(app);
+		return;
+	}
+	if (Radio_PlaybackOwnsNetwork()) {
+		RADIO_DBG(printf("radio-probe: play/probe skipped while radio playback child owns networking\n");)
+		RadioSetStatus(app, "Radio playback owns networking; stop before probing another stream.");
 		return;
 	}
 	if (app->rbShowingFavourites) {

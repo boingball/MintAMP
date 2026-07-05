@@ -1400,6 +1400,10 @@ static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
 
     if (!url || !info || !peek_len || peek_buf_size < 0 || (peek_buf_size > 0 && !peek_buf))
         return RB_STREAM_PROBE_ERR_BAD_ARG;
+    if (Radio_PlaybackOwnsNetwork()) {
+        RADIO_DBG(printf("rb-probe: skipped stream probe while radio playback child owns networking url=\"%s\"\n", url);)
+        return RB_STREAM_PROBE_ERR_DISABLED;
+    }
     if (Radio_IsMemoryPoisoned()) {
         /* Corrupt heap: no probe of any kind (not even plain HTTP/DNS) may
          * run again this app run -- see docs/amissl-lifecycle-audit.md F3. */
@@ -1602,6 +1606,10 @@ static int rb_probe_fetch_binary_impl(const char *url, unsigned char *out_buf, i
     int redirects;
 
     if (!url || !out_buf || out_buf_size <= 0 || !out_len) return RB_STREAM_PROBE_ERR_BAD_ARG;
+    if (Radio_PlaybackOwnsNetwork()) {
+        RADIO_DBG(printf("rb-probe: skipped binary fetch while radio playback child owns networking url=\"%s\"\n", url);)
+        return RB_STREAM_PROBE_ERR_DISABLED;
+    }
     if (Radio_IsMemoryPoisoned()) {
         /* Corrupt heap: no fetch of any kind (favicon/artwork included) may
          * run again this app run -- see docs/amissl-lifecycle-audit.md F3. */
