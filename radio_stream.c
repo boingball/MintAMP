@@ -848,6 +848,11 @@ static int radio_net_open_child(RadioStream *rs)
     return 0;
 }
 
+int Radio_PlaybackOwnsNetwork(void)
+{
+    return radio_playback_network_owned != 0;
+}
+
 int Radio_AmiSslTaskIsOpener(void)
 {
     return AmiSSLBase && radio_amissl_opener_task &&
@@ -1128,6 +1133,7 @@ static int radio_ssl_do_handshake(RadioStream *rs)
 {
     int tries;
     int last_error = 0;
+    radio_net_adopt_context(rs);
     /* Start with a clean OpenSSL error queue: a stale entry left by an
      * earlier failed connection would otherwise be misread as this
      * connection's fatal error by the fault handling below. */
@@ -1208,6 +1214,7 @@ static int radio_ssl_connect(RadioStream *rs)
 {
     const SSL_METHOD *method;
     int set_fd_ok;
+    radio_net_adopt_context(rs);
     if (radio_ssl_global_init(rs) != 0) return -1;
     /* rs->ctx persists across reconnects within this task (see
      * radio_ssl_free_ctx(), only called once from Radio_Close()) -- a
@@ -1285,14 +1292,10 @@ static int radio_ssl_connect(RadioStream *rs)
         RADIO_DBG(printf("radio-resource: session=%lu SSL allocated active_ssl_count=%ld\n", rs->session_id, radio_active_ssl_count));
     }
     if (!rs->ssl) { radio_ssl_close_stream(rs); set_error(rs, "AmiSSL init failed"); return -1; }
-#ifdef RADIO_SSL_VERIFY_PEER
-    /* SNI and hostname verification only matter once we're actually
-     * checking the chain; sending SNI unconditionally would be a (probably
-     * harmless) behavior change to the default no-verify build that wasn't
-     * asked for here. */
 #ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
     SSL_set_tlsext_host_name(rs->ssl, rs->host);
 #endif
+#ifdef RADIO_SSL_VERIFY_PEER
     {
         X509_VERIFY_PARAM *verify_param = SSL_get0_param(rs->ssl);
         if (verify_param) X509_VERIFY_PARAM_set1_host(verify_param, rs->host, 0);
@@ -1312,6 +1315,7 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
 {
     int shutdown_called = 0;
     if (!rs) return;
+    radio_net_adopt_context(rs);
     RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: HTTPS cleanup start mode=%s ssl=%p ctx=%p fd=%ld handshake=%d\n", radio_close_mode_name(mode), (void *)rs->ssl, (void *)rs->ctx, (long)rs->sock, rs->sslHandshakeDone));
     if (mode == RADIO_CLOSE_GRACEFUL && !rs->sslStatePoisoned && !Radio_IsTlsPoisoned() && rs->ssl && rs->sslHandshakeDone && rs->sock != RADIO_INVALID_SOCKET && !rs->socketClosed) {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_shutdown start ssl=%p\n", (void *)rs->ssl));
@@ -1383,6 +1387,7 @@ static void radio_ssl_close_stream(RadioStream *rs) { radio_ssl_close_stream_mod
 static void radio_ssl_free_ctx(RadioStream *rs)
 {
     if (!rs) return;
+    radio_net_adopt_context(rs);
     if (rs->ctx && !rs->ctxFreed) {
         if (rs->sslStatePoisoned || Radio_IsTlsPoisoned() || Radio_IsMemoryPoisoned()) {
             /* Same poison gate as SSL_free() above: only an actually
@@ -1406,6 +1411,11 @@ static void radio_ssl_free_ctx(RadioStream *rs)
 }
 #endif /* AMIGA_M68K && HAVE_AMISSL */
 
+#if !defined(AMIGA_M68K) || !defined(HAVE_AMISSL)
+static void radio_net_adopt_context(RadioStream *rs) { (void)rs; }
+int Radio_PlaybackOwnsNetwork(void) { return 0; }
+#endif
+
 /* Drive a non-blocking connect() to completion by re-issuing connect() and
  * yielding with Delay() between tries, so the connect never blocks (and so
  * never freezes WinUAE's emulation).  Returns 0 on success, -1 on failure or
@@ -1415,6 +1425,7 @@ static void radio_ssl_free_ctx(RadioStream *rs)
 static int radio_wait_connected(RadioStream *rs, struct sockaddr_in *sa)
 {
     int tries;
+    radio_net_adopt_context(rs);
     RADIO_DBG(printf("radio-connect: session=%lu wait_connected enter fd=%ld host=%s\n", rs ? rs->session_id : 0, rs ? (long)rs->sock : -1L, rs ? rs->host : ""););
     /* ~6s budget at 40ms/poll; generous for a slow stream server. */
     for (tries = 0; tries < 150; tries++) {
@@ -1450,12 +1461,14 @@ static int radio_wait_connected(RadioStream *rs, struct sockaddr_in *sa)
 static int radio_send_all(RadioStream *rs, const char *buf, int len)
 {
     int sent = 0, tries = 0;
+    radio_net_adopt_context(rs);
     while (sent < len && tries < 150) {
         int r;
         if (radio_is_stopping(rs))
             return -1;
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
         if (rs->isSSL && rs->ssl) {
+            radio_net_adopt_context(rs);
             RADIO_DBG(printf("radio-ssl-write: session=%lu sslHandshakeDone=%d before SSL_write\n", rs->session_id, rs->sslHandshakeDone););
             if (rs->sslHandshakeDone != 1) {
                 RADIO_DBG(printf("radio-ssl-write: ERROR session=%lu skipped SSL_write because handshake is incomplete sslHandshakeDone=%d\n", rs->session_id, rs->sslHandshakeDone););
@@ -1835,6 +1848,7 @@ static int connect_http(RadioStream *rs){
 static void radio_abort_current_socket(RadioStream *rs)
 {
     if (!rs) return;
+    radio_net_adopt_context(rs);
     radio_stream_magic_valid(rs, "radio_abort_current_socket");
     if (rs->sock != RADIO_INVALID_SOCKET && !rs->socketClosed) {
         long closing_fd = (long)rs->sock;
@@ -1876,6 +1890,7 @@ static void close_current_socket_mode(RadioStream *rs, RadioCloseMode mode)
 {
     long before;
     if (!rs) return;
+    radio_net_adopt_context(rs);
     radio_stream_magic_valid(rs, "close_current_socket");
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     if (rs->sock == RADIO_INVALID_SOCKET && rs->socketClosed &&
@@ -2556,6 +2571,7 @@ int Radio_Pump(RadioStream *rs)
     unsigned char b[1024];
     int n, wb;
     if (!rs || rs->status == RADIO_STATUS_ERROR) return -1;
+    radio_net_adopt_context(rs);
     if (rs->fatalStop) { set_error(rs, "TLS read failed"); return -1; }
     if (radio_is_stopping(rs)) { close_current_socket(rs); rs->status = RADIO_STATUS_CLOSED; return 0; }
     if (rs->sock == RADIO_INVALID_SOCKET) {
@@ -2573,6 +2589,7 @@ int Radio_Pump(RadioStream *rs)
             close_current_socket(rs);
             return -1;
         }
+        radio_net_adopt_context(rs);
         n = (int)SSL_read(rs->ssl, (char *)b, requested);
         RADIO_DBG(printf("radio-ssl-read: session=%lu ssl=%p ctx=%p fd=%ld dst=%p dst_cap=%d requested=%d returned=%d fill=%lu ring_free=%lu\n",
             rs->session_id, (void *)rs->ssl, (void *)rs->ctx, (long)rs->sock, (void *)b, (int)sizeof(b), requested, n, rs->used, rs->size > rs->used ? rs->size - rs->used : 0));

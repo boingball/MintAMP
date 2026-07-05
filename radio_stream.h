@@ -102,6 +102,7 @@ int Radio_HasNetwork(void);
  * machine without AmiSSL installed (always false in builds without
  * HAVE_AMISSL). */
 int Radio_HasHttps(void);
+int Radio_PlaybackOwnsNetwork(void);
 /* Shared AmiSSL instance opened by Radio_NetworkInit()/radio_stream.c, for
  * radio_stream_probe.c to adopt instead of opening a second instance (its
  * weak-symbol copies of the bases do not reliably merge with the strong
@@ -203,6 +204,7 @@ static void Radio_GetNetworkBases(void **socket_base, void **amissl_base, void *
 }
 static int Radio_HasNetwork(void) { return 0; }
 static int Radio_HasHttps(void) { return 0; }
+static int Radio_PlaybackOwnsNetwork(void) { return 0; }
 static void Radio_GetAmiSslShared(void **amissl_base, void **amissl_ext_base, void **amissl_master_base)
 {
     if (amissl_base) *amissl_base = 0;
