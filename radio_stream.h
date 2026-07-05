@@ -59,6 +59,18 @@ const char *Radio_GetContentType(RadioStream *rs);
 const char *Radio_GetError(RadioStream *rs);
 int Radio_GetBitrate(RadioStream *rs);
 int Radio_GetBufferedBytes(RadioStream *rs);
+/* For diagnostic logging only (e.g. tagging a message with which stream
+ * session it belongs to from outside radio_stream.c, where RadioStream is
+ * opaque).  Returns 0 for a NULL stream. */
+unsigned long Radio_GetSessionId(RadioStream *rs);
+/* True once a fatal TLS fault (SSL_ERROR_SSL/SYSCALL/unknown from
+ * SSL_connect/SSL_read/SSL_write, or detected ring corruption) has marked
+ * this session's object graph unsafe. Callers outside radio_stream.c (the
+ * playback child's main()/InputSourceClose() teardown) must not free the
+ * decoder context or the fast-input-memory buffer for a fatal session --
+ * see Radio_Close()'s own ring-buffer/RadioStream-struct quarantine for the
+ * same reasoning. Returns 0 for a NULL stream. */
+int Radio_IsSessionFatal(RadioStream *rs);
 const char *Radio_StatusText(RadioStatus status);
 /* Open the process-wide network libraries (bsdsocket.library + AmiSSL)
  * exactly once, at application startup.  Safe to call more than once (a
@@ -73,6 +85,13 @@ void Radio_NetworkInit(void);
 void Radio_NetworkShutdown(void);
 void Radio_GetNetworkStats(long *active_stream_sessions, long *active_stream_tasks,
     long *open_socket_count, long *active_ssl_count, long *active_ssl_ctx_count);
+/* Wider resource snapshot for a caller that wants to confirm every prior
+ * session's resources have actually reached zero before starting a new one
+ * (a queued station switch), not just that the old child Task is gone. */
+void Radio_GetTeardownStats(long *active_stream_sessions, long *active_stream_tasks,
+    long *open_socket_count, long *playback_open_socket_count,
+    long *active_decoder_count, long *active_audio_buffer_count,
+    long *active_stream_buffer_count);
 void Radio_GetNetworkBases(void **socket_base, void **amissl_base, void **amissl_master_base);
 /* True once Radio_NetworkInit() has successfully opened bsdsocket.library --
  * lets the GUI grey out internet-radio features up front on a machine with
@@ -155,6 +174,8 @@ static const char *Radio_GetContentType(RadioStream *rs) { (void)rs; return ""; 
 static const char *Radio_GetError(RadioStream *rs) { (void)rs; return "radio support not built"; }
 static int Radio_GetBitrate(RadioStream *rs) { (void)rs; return 0; }
 static int Radio_GetBufferedBytes(RadioStream *rs) { (void)rs; return 0; }
+static unsigned long Radio_GetSessionId(RadioStream *rs) { (void)rs; return 0; }
+static int Radio_IsSessionFatal(RadioStream *rs) { (void)rs; return 0; }
 static void Radio_NetworkInit(void) { }
 static void Radio_NetworkShutdown(void) { }
 static void Radio_GetNetworkStats(long *active_stream_sessions, long *active_stream_tasks,
@@ -165,6 +186,19 @@ static void Radio_GetNetworkStats(long *active_stream_sessions, long *active_str
     if (open_socket_count) *open_socket_count = 0;
     if (active_ssl_count) *active_ssl_count = 0;
     if (active_ssl_ctx_count) *active_ssl_ctx_count = 0;
+}
+static void Radio_GetTeardownStats(long *active_stream_sessions, long *active_stream_tasks,
+    long *open_socket_count, long *playback_open_socket_count,
+    long *active_decoder_count, long *active_audio_buffer_count,
+    long *active_stream_buffer_count)
+{
+    if (active_stream_sessions) *active_stream_sessions = 0;
+    if (active_stream_tasks) *active_stream_tasks = 0;
+    if (open_socket_count) *open_socket_count = 0;
+    if (playback_open_socket_count) *playback_open_socket_count = 0;
+    if (active_decoder_count) *active_decoder_count = 0;
+    if (active_audio_buffer_count) *active_audio_buffer_count = 0;
+    if (active_stream_buffer_count) *active_stream_buffer_count = 0;
 }
 static void Radio_GetNetworkBases(void **socket_base, void **amissl_base, void **amissl_master_base)
 {

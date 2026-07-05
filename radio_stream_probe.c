@@ -227,6 +227,18 @@ typedef struct RbProbeTransport {
 } RbProbeTransport;
 
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+/* Same classification as radio_ssl_error_is_fatal() in radio_stream.c:
+ * WANT_READ/WANT_WRITE means retry, ZERO_RETURN is a clean close handled by
+ * its own callers before this is consulted, and everything else -- including
+ * SSL_ERROR_SYSCALL with an empty error queue, previously missed here too --
+ * is a fatal fault after which this transport's SSL/SSL_CTX must never be
+ * freed. */
+static int rb_probe_ssl_error_is_fatal(int e)
+{
+    return e != SSL_ERROR_WANT_READ && e != SSL_ERROR_WANT_WRITE &&
+        e != SSL_ERROR_ZERO_RETURN;
+}
+
 /* SSL_read() can legitimately need several calls (WANT_READ/WANT_WRITE) even
  * on a nominally blocking socket -- same reasoning as the SSL_connect() retry
  * in rb_probe_transport_open().  dst_cap and fill are only for the debug
@@ -268,17 +280,25 @@ static int rb_probe_ssl_read_retrying(RbProbeTransport *transport, char *dst, in
                 ERR_error_string_n(ssl_lib_error, ssl_error_buf, sizeof(ssl_error_buf));
             RADIO_DBG(printf("rb-probe-ssl-read: session=%lu read failed ssl_error=%d lib_error=%08lx (%s)\n",
                 transport->session_id, ssl_err, ssl_lib_error, ssl_error_buf[0] ? ssl_error_buf : "none"));
-            if (ssl_err == SSL_ERROR_SSL || ssl_lib_error != 0) {
+            if (rb_probe_ssl_error_is_fatal(ssl_err)) {
                 /* Survivable, but this transport's SSL/SSL_CTX must never
                  * be freed: SSL_free() after a fatal SSL_read error crashes
                  * inside AmiSSL (see the matching handler in radio_stream.c's
-                 * Radio_Pump()). Quarantine the objects and skip this task's
-                 * next CleanupAmiSSL(); HTTPS itself stays enabled and the
-                 * repeated-fault fuse still hard-poisons eventually. */
+                 * Radio_Pump()). Includes SSL_ERROR_SYSCALL with an empty
+                 * error queue, previously missed here -- a bare socket-level
+                 * fault is exactly as fatal as a record-layer one. Quarantine
+                 * the objects and skip this task's next CleanupAmiSSL();
+                 * HTTPS itself stays enabled and the repeated-fault fuse
+                 * still hard-poisons eventually. */
+                const char *reason = (ssl_err == SSL_ERROR_SYSCALL && ssl_lib_error == 0) ?
+                    "probe-ssl-read-syscall" : (ssl_err == SSL_ERROR_SSL ? "probe-ssl-read-ssl-error" : "probe-ssl-read-fatal");
                 transport->sslStatePoisoned = 1;
                 rb_probe_amissl_dirty = 1;
                 Radio_NoteTlsFaultHost(transport->host);
-                Radio_ReportTlsFault(ssl_err == SSL_ERROR_SSL ? "probe SSL_ERROR_SSL from SSL_read" : "probe fatal AmiSSL error queue from SSL_read");
+                RADIO_DBG(printf("radio-safety: TLS session poisoned reason=%s session=%lu\n", reason, transport->session_id));
+                Radio_ReportTlsFault(ssl_err == SSL_ERROR_SSL ? "probe SSL_ERROR_SSL from SSL_read" :
+                    (ssl_err == SSL_ERROR_SYSCALL && ssl_lib_error == 0) ? "probe SSL_ERROR_SYSCALL (empty queue) from SSL_read" :
+                    "probe fatal AmiSSL error queue from SSL_read");
                 ERR_clear_error();
                 RADIO_DBG(printf("rb-probe-ssl-read: session=%lu SSL state quarantined -- will skip SSL_free/SSL_CTX_free/CleanupAmiSSL on close\n", transport->session_id));
             }
@@ -948,7 +968,7 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *host
                 ERR_error_string_n(ssl_lib_error, ssl_error_buf, sizeof(ssl_error_buf));
             RADIO_DBG(printf("rb-probe TLS: SSL_connect rc=%d SSL_get_error=%d error=\"%s\" verify=disabled method=SSLv23_client_method\n",
                    ssl_connect_rc, ssl_error, ssl_error_buf[0] ? ssl_error_buf : "none");)
-            if (ssl_error == SSL_ERROR_SSL || ssl_lib_error != 0) {
+            if (rb_probe_ssl_error_is_fatal(ssl_error)) {
                 /* Fatal AmiSSL-level handshake failure: quarantine, exactly
                  * like a fatal SSL_read fault. An f111.rndfnk.com run
                  * disproved "handshake-failure frees are safe": SSL_connect
@@ -956,11 +976,18 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *host
                  * frees appeared to succeed, and CleanupAmiSSL() then looped
                  * endless AN_BadFreeAddr alerts walking the damaged
                  * internals. After ANY fatal AmiSSL error nothing of that
-                 * session may be freed again; HTTPS itself stays enabled. */
+                 * session may be freed again; HTTPS itself stays enabled.
+                 * Includes SSL_ERROR_SYSCALL with an empty error queue,
+                 * previously missed here. */
+                const char *reason = (ssl_error == SSL_ERROR_SYSCALL && ssl_lib_error == 0) ?
+                    "probe-ssl-connect-syscall" : (ssl_error == SSL_ERROR_SSL ? "probe-ssl-connect-ssl-error" : "probe-ssl-connect-fatal");
                 transport->sslStatePoisoned = 1;
                 rb_probe_amissl_dirty = 1;
                 Radio_NoteTlsFaultHost(transport->host);
-                Radio_ReportTlsFault(ssl_error == SSL_ERROR_SSL ? "probe SSL_ERROR_SSL from SSL_connect" : "probe fatal AmiSSL error queue from SSL_connect");
+                RADIO_DBG(printf("radio-safety: TLS session poisoned reason=%s session=%lu\n", reason, transport->session_id));
+                Radio_ReportTlsFault(ssl_error == SSL_ERROR_SSL ? "probe SSL_ERROR_SSL from SSL_connect" :
+                    (ssl_error == SSL_ERROR_SYSCALL && ssl_lib_error == 0) ? "probe SSL_ERROR_SYSCALL (empty queue) from SSL_connect" :
+                    "probe fatal AmiSSL error queue from SSL_connect");
             }
             /* Drain the queue so this failure cannot masquerade as a later
              * session's fault. */
@@ -1082,11 +1109,18 @@ static int rb_probe_send_all(RbProbeTransport *transport, const char *buf, int l
                  * and the host is blocked for the run. */
                 ssl_lib_error = ERR_get_error();
                 RADIO_DBG(printf("rb-probe-ssl-write: session=%lu write failed ssl_error=%d lib_error=%08lx\n", transport->session_id, e, ssl_lib_error);)
-                if (e == SSL_ERROR_SSL || ssl_lib_error != 0) {
+                if (rb_probe_ssl_error_is_fatal(e)) {
+                    /* Includes SSL_ERROR_SYSCALL with an empty error queue,
+                     * previously missed here -- see rb_probe_ssl_read_retrying(). */
+                    const char *reason = (e == SSL_ERROR_SYSCALL && ssl_lib_error == 0) ?
+                        "probe-ssl-write-syscall" : (e == SSL_ERROR_SSL ? "probe-ssl-write-ssl-error" : "probe-ssl-write-fatal");
                     transport->sslStatePoisoned = 1;
                     rb_probe_amissl_dirty = 1;
                     Radio_NoteTlsFaultHost(transport->host);
-                    Radio_ReportTlsFault(e == SSL_ERROR_SSL ? "probe SSL_ERROR_SSL from SSL_write" : "probe fatal AmiSSL error queue from SSL_write");
+                    RADIO_DBG(printf("radio-safety: TLS session poisoned reason=%s session=%lu\n", reason, transport->session_id));
+                    Radio_ReportTlsFault(e == SSL_ERROR_SSL ? "probe SSL_ERROR_SSL from SSL_write" :
+                        (e == SSL_ERROR_SYSCALL && ssl_lib_error == 0) ? "probe SSL_ERROR_SYSCALL (empty queue) from SSL_write" :
+                        "probe fatal AmiSSL error queue from SSL_write");
                     ERR_clear_error();
                 }
             }
@@ -1318,6 +1352,7 @@ const char *rb_probe_error_text(int rc)
     case RB_STREAM_PROBE_ERR_TLS_HANDSHAKE: return "TLS handshake failed";
     case RB_STREAM_PROBE_ERR_TLS_POISONED: return "HTTPS disabled after memory corruption; reboot before using HTTPS.";
     case RB_STREAM_PROBE_ERR_MEM_POISONED: return "Memory corruption detected; restart MiniAMP3 before playing radio.";
+    case RB_STREAM_PROBE_ERR_DISABLED: return "Artwork/favicon fetch disabled (MP3_NO_ARTWORK test mode)";
     case RB_STREAM_PROBE_ERR_HTTP_STATUS: return "Stream unavailable (server returned an error status)";
     default: return "Stream probe failed";
     }
@@ -1699,10 +1734,27 @@ static int rb_probe_fetch_binary_impl(const char *url, unsigned char *out_buf, i
 
 /* Public entry point; see rb_probe_stream_url() above for why the per-task
  * AmiSSL/socket cleanup always runs regardless of which path returned. */
+/* Test mode (MP3_NO_ARTWORK=1 in the environment): refuse every binary fetch
+ * (station favicon/artwork) so a radio soak test can run with the GUI's
+ * probe/artwork path removed from the equation while still exercising
+ * network+SSL+decode+audio cleanup for the actual stream. */
+static int rb_probe_artwork_disabled(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *v = getenv("MP3_NO_ARTWORK");
+        cached = (v && *v && *v != '0') ? 1 : 0;
+    }
+    return cached;
+}
+
 int rb_probe_fetch_binary(const char *url, unsigned char *out_buf, int out_buf_size,
                         int *out_len, char *out_content_type, int out_content_type_size)
 {
-    int rc = rb_probe_fetch_binary_impl(url, out_buf, out_buf_size, out_len,
+    int rc;
+    if (rb_probe_artwork_disabled())
+        return RB_STREAM_PROBE_ERR_DISABLED;
+    rc = rb_probe_fetch_binary_impl(url, out_buf, out_buf_size, out_len,
                                          out_content_type, out_content_type_size);
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     rb_probe_cleanup_amissl();

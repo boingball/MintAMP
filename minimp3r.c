@@ -646,6 +646,7 @@ static void CloseRadioWindow(MrApp *app);
 static void OpenRadioWindow(MrApp *app);
 static void HandleRadioWindow(MrApp *app);
 static void HandleDoneSignal(MrApp *app);
+static void FinalizePlayback(MrApp *app);
 static void RadioSetStatus(MrApp *app, const char *text);
 static int SetStatusIfChanged(MrApp *app, const char *text);
 static void SetStatus(MrApp *app, const char *text);
@@ -735,14 +736,23 @@ static int AppHasActivePlaybackChild(const MrApp *app)
 		 gPlayer.process || gPlayer.task || PlaybackProcessStillExists());
 }
 
-static void AppCloseShutdown(MrApp *app)
+/* Returns 1 if the playback child is confirmed gone (safe to dispose the
+ * shared browser/network/GUI objects it can touch), 0 if it is still active
+ * or wedged -- the caller must then leak those objects and exit without
+ * touching them rather than free/close something the child still holds a
+ * reference to (Radio_NetworkShutdown() closing bsdsocket.library/AmiSSL out
+ * from under a child that still owns an open socket/SSL context was seen
+ * interleaving with in-flight ring/ICY writes right before an exec-heap
+ * corruption). */
+static int AppCloseShutdown(MrApp *app)
 {
 	if (!app)
-		return;
+		return 1;
 	app->shuttingDown = 1;
 	AppCloseDebug("begin", app);
 	AppCloseDebug("playback state", app);
 	if (AppHasActivePlaybackChild(app)) {
+		RADIO_DBG(printf("APP_CLOSE: stopping playback\n");)
 		AppCloseDebug("stop active playback if needed", app);
 		if (!StopPlaybackAndWait(app, 500, "Failed to stop previous stream")) {
 			/* The child missed the first stop request (e.g. it was stalled
@@ -760,6 +770,7 @@ static void AppCloseShutdown(MrApp *app)
 			 * the whole task, at the cost of leaking the wedged child (no
 			 * safe way to force-kill a task stuck inside a library call). */
 			int wedgedTicks;
+			RADIO_DBG(printf("APP_CLOSE: waiting child\n");)
 			for (wedgedTicks = 0; wedgedTicks < APP_CLOSE_WEDGED_CHILD_MAX_TICKS &&
 				PlaybackProcessStillExists(); wedgedTicks++) {
 				struct Task *child;
@@ -773,17 +784,39 @@ static void AppCloseShutdown(MrApp *app)
 				HandleDoneSignal(app);
 				Delay(5);
 			}
-			if (PlaybackProcessStillExists())
+			if (PlaybackProcessStillExists()) {
 				RADIO_DBG(printf("app-close: giving up on wedged playback child after %d ticks, leaking it\n", wedgedTicks);)
+				RADIO_DBG(printf("APP_CLOSE: child still active after timeout -- leaking shared browser/network/GUI objects, skipping disposal\n");)
+				return 0;
+			}
 			HandleDoneSignal(app);
 		}
 	} else {
 		AppCloseDebug("playback already idle, skip stop", app);
 		AppCloseDebug("playback idle, no stop needed", app);
 	}
+	RADIO_DBG(printf("APP_CLOSE: child done\n");)
+	/* HandleDoneSignal() -> FinalizePlayback() should already have run by
+	 * now (that's what clears playbackActive/playbackDonePending in the
+	 * loops above); this is a belt-and-suspenders catch for the case where
+	 * the child task exited (PlaybackProcessStillExists() false) without the
+	 * done message ever being drained here, so a wedged/lost message cannot
+	 * leave playbackActive stuck true and this function still returns "safe
+	 * to dispose" regardless. */
+	if (app->playbackActive || app->playbackDonePending) {
+		HandleDoneSignal(app);
+		if (app->playbackActive || app->playbackDonePending)
+			FinalizePlayback(app);
+	}
+	RADIO_DBG(printf("APP_CLOSE: finalize done\n");)
+	/* Let audio.device/DOS settle after the child task's exit before this
+	 * task starts touching the shared objects it used. */
+	Delay(10);
+	RADIO_DBG(printf("APP_CLOSE: now disposing GUI/network\n");)
 	AppCloseDebug("dispose radio browser controller", app);
 	AppCloseDebug("free favourites/search results", app);
 	AppCloseDebug("dispose GUI objects", app);
+	return 1;
 }
 
 static void SafeCopy(char *dst, size_t size, const char *src)
@@ -1509,7 +1542,7 @@ static void StartPlayback(MrApp *app)
 	if (!MrVerifyAppMagic(app, "StartPlayback"))
 		return;
 	if (Radio_IsMemoryPoisoned()) {
-		SetStatus(app, "Memory corruption detected - restart app");
+		SetStatus(app, "Memory corruption detected. Save log and reboot before using MiniAMP3 again.");
 		RADIO_DBG(printf("radio-memory: refusing StartPlayback after MiniMem/ring corruption url=\"%s\"\n", app->inputName);)
 		return;
 	}
@@ -1717,6 +1750,47 @@ static int StopPlaybackAndWait(MrApp *app, int ticks, const char *timeoutStatus)
 	RADIO_DBG(printf("radio-session: stop timeout details childTask=%p session=%lu currentStage=\"%s\" lastStartup=\"%s\" lastCleanup=\"%s\" currentUrl=\"%s\" lastReadDecode=\"%s\" stopFlag=%d donePosted=%d\n", gPlayer.task, gPlayer.sessionId, gPlayer.stage ? (const char *)gPlayer.stage : "", gPlayer.startupStage ? (const char *)gPlayer.startupStage : "", gPlayer.cleanupStage ? (const char *)gPlayer.cleanupStage : "", gPlayer.url, gPlayer.lastIoState ? (const char *)gPlayer.lastIoState : "", gPlayer.stopRequested, gPlayer.donePosted);)
 	return 0;
 }
+/* Test mode (MP3_NO_QUEUED_STREAM_SWITCH=1 in the environment): a station
+ * selected while another stream is active/stopping is never remembered as a
+ * queued switch.  FinalizePlayback() just returns to idle and the user has
+ * to press Play again.  If reboots stop happening with this set, the
+ * queued-switch state machine (not the single-session teardown path) is the
+ * corruptor. */
+static int MrNoQueuedStreamSwitchEnabled(void)
+{
+	static int cached = -1;
+	if (cached < 0) {
+		const char *v = getenv("MP3_NO_QUEUED_STREAM_SWITCH");
+		cached = (v && *v && *v != '0') ? 1 : 0;
+	}
+	return cached;
+}
+
+/* Diagnostic-only: logs whether every resource counter from the just-torn-down
+ * session has actually reached zero before a queued stream is allowed to
+ * start.  Does not block -- these are expected to already be zero by the
+ * time FinalizePlayback() runs (Radio_Close() drops them before the child
+ * ever posts its done message), so this only ever fires as a warning if that
+ * invariant is somehow violated. */
+static void MrLogQueuedStreamReadiness(MrApp *app, const char *where)
+{
+	long sessions = 0, tasks = 0, sockets = 0, playbackSockets = 0;
+	long decoders = 0, audioBuffers = 0, streamBuffers = 0;
+	int stillExists = PlaybackProcessStillExists();
+
+	Radio_GetTeardownStats(&sessions, &tasks, &sockets, &playbackSockets,
+		&decoders, &audioBuffers, &streamBuffers);
+	RADIO_DBG(printf("radio-teardown: queued-switch readiness (%s) activeChildCount=%lu processStillExists=%d "
+		"active_stream_sessions=%ld active_stream_tasks=%ld open_socket_count=%ld playback_open_socket_count=%ld "
+		"active_decoder_count=%ld active_audio_buffer_count=%ld active_stream_buffer_count=%ld\n",
+		where, app->activeChildCount, stillExists, sessions, tasks, sockets, playbackSockets,
+		decoders, audioBuffers, streamBuffers));
+	if (stillExists || app->activeChildCount != 0 || sessions != 0 || tasks != 0 ||
+		sockets != 0 || playbackSockets != 0 || decoders != 0 || audioBuffers != 0 || streamBuffers != 0)
+		RADIO_DBG(printf("radio-teardown: WARNING queued-switch readiness (%s) found a nonzero counter -- "
+			"old session's resources may not be fully released\n", where));
+}
+
 static void FinalizePlayback(MrApp *app)
 {
 	int stoppedByUser = app->stoppedByUser;
@@ -1779,7 +1853,7 @@ static void FinalizePlayback(MrApp *app)
 	RADIO_DBG(printf("radio-guard: after FinalizePlayback\n");)
 	if (Radio_IsMemoryPoisoned()) {
 		if (app->queuedStreamUrl[0] || app->playlistNextPending)
-			SetStatus(app, "Memory corruption detected - restart app");
+			SetStatus(app, "Memory corruption detected. Save log and reboot before using MiniAMP3 again.");
 		app->queuedStreamUrl[0] = '\0';
 		app->playlistNextPending = 0;
 		RADIO_DBG(printf("radio-memory: queued/next stream suppressed after memory poison session=%lu\n", gPlayer.sessionId);)
@@ -1797,7 +1871,17 @@ static void FinalizePlayback(MrApp *app)
 	}
 	if (app->queuedStreamUrl[0]) {
 		app->queuedStreamUrl[0] = '\0';
+		if (MrNoQueuedStreamSwitchEnabled()) {
+			RADIO_DBG(printf("radio-teardown: MP3_NO_QUEUED_STREAM_SWITCH active -- discarding queued stream session=%lu\n",
+				gPlayer.sessionId));
+			SetStatus(app, "Stopped - press Play to start the next stream.");
+			return;
+		}
+		MrLogQueuedStreamReadiness(app, "before queued stream start");
 		RadioSetStatus(app, "Starting queued stream...");
+		/* Give audio.device/DOS a moment to settle after the old child's
+		 * task exit and resource teardown before the new probe/child starts. */
+		Delay(10);
 		RadioDoProbeAndPlay(app);
 		return;
 	}
@@ -4652,7 +4736,7 @@ static void RadioDoProbeAndPlay(MrApp *app)
 	RadioSetStatus(app, msg);
 	RADIO_DBG(printf("radio-ui: new stream start url=\"%s\"\n", info.final_url);)
 	if (Radio_IsMemoryPoisoned()) {
-		RadioSetStatus(app, "Memory corruption detected - restart app");
+		RadioSetStatus(app, "Memory corruption detected. Save log and reboot before using MiniAMP3 again.");
 		RADIO_DBG(printf("radio-memory: refusing station switch after MiniMem/ring corruption url=\"%s\"\n", info.final_url);)
 		return;
 	}
@@ -4722,6 +4806,18 @@ static void HandleRadioWindow(MrApp *app)
 		switch (result & WMHI_CLASSMASK) {
 		case WMHI_CLOSEWINDOW: CloseRadioWindow(app); return;
 		case WMHI_GADGETUP:
+			/* Memory corruption detected: refuse every radio-browser action
+			 * (search/play/add-fav/favourites/up/down/scheme/country) that
+			 * could probe, fetch, or start playback against a heap already
+			 * known to be damaged -- only Close is still allowed, since the
+			 * user must still be able to get out of this window. No queued
+			 * stream may survive this either. */
+			if (Radio_IsMemoryPoisoned() && (result & WMHI_GADGETMASK) != RB_GID_CLOSE) {
+				RadioSetStatus(app, "Memory corruption detected. Save log and reboot before using MiniAMP3 again.");
+				app->queuedStreamUrl[0] = '\0';
+				app->playlistNextPending = 0;
+				break;
+			}
 			switch (result & WMHI_GADGETMASK) {
 			case RB_GID_SEARCH_TEXT: case RB_GID_SEARCH: RadioDoSearch(app); break;
 			case RB_GID_RADIO_RESULTS: RadioSelectResult(app, (ULONG)code); break;
@@ -5528,8 +5624,26 @@ static int MrMainReal(int argc, char **argv)
 		}
 	}
 
-	/* Ordered, idempotent app-close teardown. */
-	AppCloseShutdown(&app);
+	/* Ordered, idempotent app-close teardown. Only proceed to dispose the
+	 * GUI/browser/network objects the playback child can touch if it is
+	 * confirmed gone -- a wedged child means those objects are leaked
+	 * (and CloseLibs()/Radio_NetworkShutdown() skipped) rather than freed
+	 * or closed out from under a task that might still reference them. */
+	if (!AppCloseShutdown(&app)) {
+		RADIO_DBG(printf("app-close: wedged playback child, exiting without disposing GUI/network objects\n");)
+		return 0;
+	}
+	if (Radio_IsMemoryPoisoned()) {
+		/* Corrupt exec heap: SaveSettings()/MrCloseWindow()'s DisposeObject()/
+		 * Radio_NetworkShutdown()/CloseLibs() all allocate or free memory
+		 * (GadTools teardown, bsdsocket.library/AmiSSL closure) that could
+		 * write through the same already-damaged allocator state that
+		 * poisoned the session. Skip every further disposal step and exit
+		 * as directly as possible -- a leak here is recoverable with a
+		 * reboot; another corrupting free is not. */
+		RADIO_DBG(printf("APP_CLOSE: memory corruption detected -- skipping SaveSettings/GUI dispose/Radio_NetworkShutdown/CloseLibs, exiting directly\n");)
+		return 0;
+	}
 
 	SyncFromGadgets(&app);
 	SaveSettings(&app);

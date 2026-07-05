@@ -1608,19 +1608,53 @@ static void InputSourceInitAmigaDos(InputSource *input, BPTR amigaFile)
 }
 #endif
 
+/* Test mode (MP3_POST_AUDIO_LEAK_TEST=1 in the environment): the caller skips
+ * MP3FreeDecoder()/InputSourceClose() entirely and leaks the decoder, ring
+ * buffer, and RadioStream struct instead of freeing them.  See the call site
+ * in main()'s radio-streaming teardown. */
+static int AmigaPostAudioLeakTestEnabled(void)
+{
+	static int cached = -1;
+	if (cached < 0) {
+		const char *v = getenv("MP3_POST_AUDIO_LEAK_TEST");
+		cached = (v && *v && *v != '0') ? 1 : 0;
+	}
+	return cached;
+}
+
 static void InputSourceClose(InputSource *input)
 {
+	int radioFatal = 0;
+
 	if (!input)
 		return;
 #if ENABLE_RADIO
 	RADIO_STOP_DEBUG_PRINTF(("radio-stop: InputSourceClose entered\n"));
+	radioFatal = input->radio ? Radio_IsSessionFatal(input->radio) : 0;
+	RADIO_DBG(printf("radio-teardown: before fast-input-memory free/skip session=%lu ptr=%p size=%lu fatal=%d\n",
+		input->radio ? Radio_GetSessionId(input->radio) : 0UL, (void *)input->memory, input->memorySize, radioFatal));
+	Radio_DebugCheckExecMem("before fast input memory free/skip");
 #endif
-	FreeFastInputMemory(input->memory, input->memorySize);
+	if (radioFatal) {
+		/* Fatal TLS teardown quarantine (see Radio_IsSessionFatal()): this
+		 * buffer may have been mid-write from the same corrupted AmiSSL/
+		 * bsdsocket state that poisoned the session -- leak it instead of
+		 * risking a free-list write into already-damaged exec memory. */
+		RADIO_DBG(printf("radio-teardown: fast-input-memory free skipped (fatal TLS quarantine) session=%lu -- leaking\n",
+			input->radio ? Radio_GetSessionId(input->radio) : 0UL));
+	} else {
+		FreeFastInputMemory(input->memory, input->memorySize);
+	}
 	input->memory = NULL;
 	input->memorySize = 0;
 	input->memoryPos = 0;
+#if ENABLE_RADIO
+	Radio_DebugCheckExecMem("after fast input memory free/skip");
+#endif
 	if (input->radio) {
 		RadioStream *radio = input->radio;
+		RADIO_DBG(printf("radio-teardown: before first Radio_RequestStop (InputSourceClose) session=%lu\n",
+			Radio_GetSessionId(radio)));
 		Radio_RequestStop(radio);
 		input->radio = NULL;
 		GuiMarkRadioStopped();
@@ -5890,6 +5924,9 @@ typedef struct PlaybackCleanupStatus {
 	unsigned long workBuffersFreed;
 	unsigned long canaryErrors;
 	unsigned long devicesClosed;
+	/* Buffers whose IO could not be confirmed retired: leaked on purpose
+	 * instead of freed, so audio.device cannot DMA into freed memory. */
+	unsigned long quarantinedBuffers;
 } PlaybackCleanupStatus;
 
 static void PlaybackCleanupStatusInit(PlaybackCleanupStatus *status)
@@ -5934,6 +5971,8 @@ static void PrintPlaybackCleanupStatus(const DecodeOptions *opt,
 		status->workBuffersFreed);
 	printf("debug-cleanup: playback buffer canaries: %s (%lu errors)\n",
 		status->canaryErrors ? "CORRUPTED" : "ok", status->canaryErrors);
+	printf("debug-cleanup: buffers quarantined (IO not confirmed retired): %lu\n",
+		status->quarantinedBuffers);
 #ifdef RADIO_DEBUG
 #undef printf
 #define printf MiniAmp3Printf
@@ -5970,12 +6009,30 @@ static int AmigaAudioLiveSlots(int stereo)
 #define PLAYBACK_GUARD_BYTES 0UL
 #endif
 
+/* Cleanup progresses strictly forward through these stages; AmigaAudioClose()
+ * records the current one before each group of operations so a duplicate
+ * call (or a crash mid-cleanup) can be diagnosed from the last stage logged
+ * instead of guessing which step was in flight. */
+typedef enum {
+	AUDIO_CLEANUP_NOT_STARTED = 0,
+	AUDIO_CLEANUP_ABORTING_IO,
+	AUDIO_CLEANUP_CLOSING_DEVICE,
+	AUDIO_CLEANUP_FREEING_BUFFERS,
+	AUDIO_CLEANUP_DONE
+} AudioCleanupState;
+
 typedef struct AmigaAudioPlayer {
 	struct MsgPort *port;
 	struct IOAudio *req[3][2];
 	struct IOAudio *closeReq[2]; /* dedicated close request per channel */
 	int deviceOpen[2];
 	int sent[3][2];
+	/* Set by AmigaAudioReapOutstanding() when a request's completion could
+	 * not be confirmed (bounded CheckIO spin timed out): audio.device may
+	 * still hold/DMA the buffer that request's ioa_Data points at, so
+	 * AmigaAudioClose() must not free that slot/channel's chip or work
+	 * buffer even though the IORequest itself gets leaked. */
+	int ioUnsafe[3][2];
 	int prepared[3];
 	int stereo;
 	unsigned int period;
@@ -5990,16 +6047,30 @@ typedef struct AmigaAudioPlayer {
 	unsigned long workBytes;
 	int workChip;
 	volatile int cleanupStarted;
+	AudioCleanupState cleanupState;
 	int debugCleanup;
 	int stopping;
 	int outputStride;
 	int debugPlay;
 	int startupVolumeDebugPrinted;
 	unsigned long cleanupInvocationCount;
+	unsigned long sessionId;
 	UWORD requestVolume;
 	unsigned short lastVolumePercent;
 	unsigned long lastVolumeSequence;
 } AmigaAudioPlayer;
+
+static const char *AmigaAudioCleanupStateName(AudioCleanupState state)
+{
+	switch (state) {
+	case AUDIO_CLEANUP_NOT_STARTED:    return "NOT_STARTED";
+	case AUDIO_CLEANUP_ABORTING_IO:    return "ABORTING_IO";
+	case AUDIO_CLEANUP_CLOSING_DEVICE: return "CLOSING_DEVICE";
+	case AUDIO_CLEANUP_FREEING_BUFFERS:return "FREEING_BUFFERS";
+	case AUDIO_CLEANUP_DONE:           return "DONE";
+	default:                           return "UNKNOWN";
+	}
+}
 
 static int PlaybackBufferCanaryOk(const void *base, unsigned long bytes)
 {
@@ -6098,6 +6169,78 @@ static void AmigaAudioCleanupTrace4(const AmigaAudioPlayer *player,
 #endif
 }
 
+static void AmigaAudioCleanupTraceState(const AmigaAudioPlayer *player,
+	const char *msg, AudioCleanupState state, unsigned long count)
+{
+#ifndef RADIO_DEBUG
+	if (!player || !player->debugCleanup)
+		return;
+	printf("debug-cleanup: %s state=%s cleanup#=%lu\n",
+		msg, AmigaAudioCleanupStateName(state), count);
+#else
+	if (!player)
+		return;
+	RadioDebugUnsuppressedPrintf("debug-cleanup: %s state=%s cleanup#=%lu\n",
+		msg, AmigaAudioCleanupStateName(state), count);
+#endif
+}
+
+/* Full-detail allocation/free trace for every guarded audio cleanup object:
+ * session id, slot, channel, pointer, size, owner (what the buffer is) and
+ * the call site that allocated/freed it.  Same gating as
+ * AmigaAudioCleanupTrace()/AmigaAudioCleanupTrace4() above. */
+static void AmigaAudioLogBufferEvent(const AmigaAudioPlayer *player,
+	const char *event, const char *owner, const char *site,
+	long slot, long ch, const void *ptr, unsigned long size)
+{
+#ifndef RADIO_DEBUG
+	if (!player || !player->debugCleanup)
+		return;
+	printf("debug-cleanup: %s owner=%s site=%s session=%lu slot=%ld ch=%ld ptr=%p size=%lu cleanup#=%lu\n",
+		event, owner, site, player->sessionId, slot, ch, ptr, size,
+		player->cleanupInvocationCount);
+#else
+	if (!player)
+		return;
+	RadioDebugUnsuppressedPrintf("debug-cleanup: %s owner=%s site=%s session=%lu slot=%ld ch=%ld ptr=%p size=%lu cleanup#=%lu\n",
+		event, owner, site, player->sessionId, slot, ch, ptr, size,
+		player->cleanupInvocationCount);
+#endif
+}
+
+/* Temporary diagnostic mode (MP3_SAFE_CLEANUP_LEAK_TEST=1 in the environment):
+ * AbortIO/WaitIO/reap and CloseDevice run exactly as normal, but chip/work
+ * buffers, IORequests and the message port are deliberately leaked instead of
+ * freed/deleted.  If the recoverable exec alerts stop happening with this
+ * set, the root cause is confirmed to be a use-after-free/double-free
+ * somewhere in the normal free/delete path below rather than in AbortIO,
+ * WaitIO, or CloseDevice themselves. */
+static int AmigaAudioSafeCleanupLeakTestEnabled(void)
+{
+	static int cached = -1;
+	if (cached < 0) {
+		const char *v = getenv("MP3_SAFE_CLEANUP_LEAK_TEST");
+		cached = (v && *v && *v != '0') ? 1 : 0;
+	}
+	return cached;
+}
+
+/* Test mode (MP3_NO_AUDIO_SINK=1 in the environment): network, SSL and the
+ * decoder all run exactly as normal, but audio.device is never opened and no
+ * CMD_WRITE is ever submitted -- chip/work buffers still get allocated, and
+ * still get torn down by AmigaAudioClose(), but nothing DMAs into them.  If
+ * a soak run in this mode never corrupts exec memory, the corruptor is in
+ * audio output/cleanup, not in the network/SSL/decoder pipeline. */
+static int AmigaAudioNoSinkEnabled(void)
+{
+	static int cached = -1;
+	if (cached < 0) {
+		const char *v = getenv("MP3_NO_AUDIO_SINK");
+		cached = (v && *v && *v != '0') ? 1 : 0;
+	}
+	return cached;
+}
+
 static unsigned long AmigaAudioDrainReplies(AmigaAudioPlayer *player)
 {
 	unsigned long drained = 0;
@@ -6139,6 +6282,14 @@ static void AmigaAudioReapOutstanding(AmigaAudioPlayer *player)
 					spins++;
 				}
 				if (!CheckIO(req)) {
+					/* Ownership was never handed back by audio.device: it may
+					 * still complete this CMD_WRITE and DMA/write into
+					 * ioa_Data at any time.  Mark the slot/channel unsafe so
+					 * AmigaAudioClose() quarantines (leaks) its buffer and
+					 * IORequest instead of freeing them out from under the
+					 * device -- freeing here is exactly the corrupt-after-
+					 * cleanup bug this file exists to prevent. */
+					player->ioUnsafe[i][ch] = 1;
 					AmigaAudioCleanupTrace4(player,
 						"request index=%ld channel=%ld never completed after AbortIO -- leaking IORequest\n",
 						(unsigned long)i, (unsigned long)ch, 0, 0);
@@ -6148,9 +6299,11 @@ static void AmigaAudioReapOutstanding(AmigaAudioPlayer *player)
 #endif
 			WaitIO(req);
 			player->sent[i][ch] = 0;
+			player->ioUnsafe[i][ch] = 0;
 			AmigaAudioCleanupTrace4(player,
 				"request index=%ld channel=%ld reaped after abort\n",
 				(unsigned long)i, (unsigned long)ch, 0, 0);
+			Radio_DebugCheckExecMem("audio cleanup: after WaitIO/reap");
 		}
 	}
 }
@@ -6160,12 +6313,19 @@ static void AmigaAudioClose(AmigaAudioPlayer *player,
 {
 	int i;
 	int ch;
+	int leakTest;
 
 	if (!player)
 		return;
+	leakTest = AmigaAudioSafeCleanupLeakTestEnabled();
+	if (leakTest)
+		AmigaAudioCleanupTrace(player, "MP3_SAFE_CLEANUP_LEAK_TEST active: buffers/IORequests/message port will be leaked, not freed\n");
 	if (player->cleanupStarted) {
-		AmigaAudioCleanupTrace4(player, "cleanupComplete already set duplicate cleanup count=%lu\n",
-			player->cleanupInvocationCount, 0, 0, 0);
+		/* Idempotency guard: a second call must never touch objects the
+		 * first call already freed/deleted/NULLed.  Log the state the first
+		 * call reached and return untouched. */
+		AmigaAudioCleanupTraceState(player, "cleanup already started -- ignoring duplicate call",
+			player->cleanupState, player->cleanupInvocationCount);
 		return;
 	}
 	player->cleanupStarted = 1;
@@ -6176,6 +6336,8 @@ static void AmigaAudioClose(AmigaAudioPlayer *player,
 		(unsigned long)player->outputStride, 0);
 	AmigaAudioCleanupTrace(player, "volume control request: none allocated (next-buffer ioa_Volume updates)\n");
 	gGuiPlaybackStatus.cleanupStage = GUIPLAY_CLEANUP_ABORT_REAP;
+	player->cleanupState = AUDIO_CLEANUP_ABORTING_IO;
+	Radio_DebugCheckExecMem("audio cleanup: before AbortIO");
 	/* First request cancellation for the entire ring, then reap it in a second
 	 * pass.  Waiting one slot at a time lets audio.device advance the next queued
 	 * write between AbortIO calls and can prolong or stall Stop while the queue is
@@ -6193,6 +6355,7 @@ static void AmigaAudioClose(AmigaAudioPlayer *player,
 					aborted = 1;
 					if (status)
 						status->ioAborted++;
+					Radio_DebugCheckExecMem("audio cleanup: after AbortIO");
 				} else if (status) {
 					status->ioCompleted++;
 				}
@@ -6210,60 +6373,117 @@ static void AmigaAudioClose(AmigaAudioPlayer *player,
 	 * requests complete near-instantly, so this does not stall Stop; see
 	 * AmigaAudioReapOutstanding() for the bounded-wait escape hatch. */
 	AmigaAudioReapOutstanding(player);
+	player->cleanupState = AUDIO_CLEANUP_CLOSING_DEVICE;
 	/* CloseDevice after reaping: uses closeReq (not req[0][ch]) so it never
 	 * reuses an IORequest that carried a CMD_WRITE. */
-	for (ch = 0; ch < 2; ch++) {
-		if (player->deviceOpen[ch] && player->closeReq[ch]) {
-			CloseDevice((struct IORequest *)player->closeReq[ch]);
-			AmigaAudioCleanupTrace4(player, "channel=%ld device closed=1\n",
-				(unsigned long)ch, 0, 0, 0);
-			player->deviceOpen[ch] = 0;
-			if (status)
-				status->devicesClosed++;
-		}
+	if (player->deviceOpen[0] && player->closeReq[0]) {
+		CloseDevice((struct IORequest *)player->closeReq[0]);
+		AmigaAudioCleanupTrace4(player, "channel=%ld device closed=1\n", 0, 0, 0, 0);
+		player->deviceOpen[0] = 0;
+		if (status)
+			status->devicesClosed++;
 	}
+	Radio_DebugCheckExecMem("audio cleanup: after CloseDevice channel 0");
+	if (player->deviceOpen[1] && player->closeReq[1]) {
+		CloseDevice((struct IORequest *)player->closeReq[1]);
+		AmigaAudioCleanupTrace4(player, "channel=%ld device closed=1\n", 1, 0, 0, 0);
+		player->deviceOpen[1] = 0;
+		if (status)
+			status->devicesClosed++;
+	}
+	Radio_DebugCheckExecMem("audio cleanup: after CloseDevice channel 1");
 	gGuiPlaybackStatus.cleanupStage = GUIPLAY_CLEANUP_DEVICE_CLOSED;
 	{
 		unsigned long drained = AmigaAudioDrainReplies(player);
 		AmigaAudioCleanupTrace4(player, "reply drained=%ld\n",
 			drained, 0, 0, 0);
 	}
+	player->cleanupState = AUDIO_CLEANUP_FREEING_BUFFERS;
 	for (i = 0; i < AMIGA_AUDIO_PLAYBACK_SLOTS; i++) {
 		for (ch = 0; ch < 2; ch++) {
+			/* Verify IO ownership before freeing: only free a slot/channel's
+			 * chip/work buffer if its IO was never submitted, completed on
+			 * its own (CheckIO), or was aborted AND successfully reaped by
+			 * AmigaAudioReapOutstanding().  If ioUnsafe is set the device
+			 * never handed the buffer back -- quarantine (leak) it instead
+			 * of freeing memory audio.device may still be writing into. */
 			if (player->splitBase[i][ch]) {
-				AmigaFreeGuarded(&player->splitBase[i][ch],
-					(player->stereo && ch == 0) ? player->splitBytes * 2UL : player->splitBytes,
-					1, status);
-				player->splitBuf[i][ch] = NULL;
-				if (player->stereo && ch == 0)
-					player->splitBuf[i][1] = NULL;
-				AmigaAudioCleanupTrace4(player, "slot=%ld channel=%ld chip buffer freed\n",
+				unsigned long size = (player->stereo && ch == 0) ?
+					player->splitBytes * 2UL : player->splitBytes;
+				if (player->ioUnsafe[i][ch] || leakTest) {
+					AmigaAudioLogBufferEvent(player, "quarantine", "chip-buffer",
+						"AmigaAudioClose", i, ch, player->splitBase[i][ch], size);
+					player->splitBase[i][ch] = NULL;
+					player->splitBuf[i][ch] = NULL;
+					if (player->stereo && ch == 0)
+						player->splitBuf[i][1] = NULL;
+					if (status)
+						status->quarantinedBuffers++;
+				} else {
+					AmigaAudioLogBufferEvent(player, "free", "chip-buffer",
+						"AmigaAudioClose", i, ch, player->splitBase[i][ch], size);
+					AmigaFreeGuarded(&player->splitBase[i][ch], size, 1, status);
+					player->splitBuf[i][ch] = NULL;
+					if (player->stereo && ch == 0)
+						player->splitBuf[i][1] = NULL;
+					if (status)
+						status->chipBuffersFreed++;
+				}
+				AmigaAudioCleanupTrace4(player, "slot=%ld channel=%ld chip buffer step done\n",
 					(unsigned long)i, (unsigned long)ch, 0, 0);
-				if (status)
-					status->chipBuffersFreed++;
+				Radio_DebugCheckExecMem("audio cleanup: after freeing chip buffer");
 			}
 			if (player->splitWorkBase[i][ch]) {
-				AmigaFreeGuarded(&player->splitWorkBase[i][ch],
-					player->splitWorkBytes, 0, status);
-				player->splitWorkBuf[i][ch] = NULL;
-				AmigaAudioCleanupTrace4(player, "slot=%ld channel=%ld work buffer freed\n",
+				if (player->ioUnsafe[i][ch] || leakTest) {
+					AmigaAudioLogBufferEvent(player, "quarantine", "work-buffer-split",
+						"AmigaAudioClose", i, ch, player->splitWorkBase[i][ch],
+						player->splitWorkBytes);
+					player->splitWorkBase[i][ch] = NULL;
+					player->splitWorkBuf[i][ch] = NULL;
+					if (status)
+						status->quarantinedBuffers++;
+				} else {
+					AmigaAudioLogBufferEvent(player, "free", "work-buffer-split",
+						"AmigaAudioClose", i, ch, player->splitWorkBase[i][ch],
+						player->splitWorkBytes);
+					AmigaFreeGuarded(&player->splitWorkBase[i][ch],
+						player->splitWorkBytes, 0, status);
+					player->splitWorkBuf[i][ch] = NULL;
+					if (status)
+						status->workBuffersFreed++;
+				}
+				AmigaAudioCleanupTrace4(player, "slot=%ld channel=%ld work buffer step done\n",
 					(unsigned long)i, (unsigned long)ch, 0, 0);
-				if (status)
-					status->workBuffersFreed++;
+				Radio_DebugCheckExecMem("audio cleanup: after freeing work buffer");
 			}
 		}
 		if (player->workBase[i]) {
-			AmigaFreeGuarded(&player->workBase[i], player->workBytes,
-				player->workChip, status);
-			player->workBuf[i] = NULL;
-			AmigaAudioCleanupTrace4(player, "slot=%ld work buffer freed\n",
-				(unsigned long)i, 0, 0, 0);
-			if (status) {
-				if (player->workChip)
-					status->chipBuffersFreed++;
-				else
-					status->workBuffersFreed++;
+			/* Mono work buffer is shared by both channels' writes for this
+			 * slot: unsafe if either channel's IO was never confirmed retired. */
+			int unsafe = player->ioUnsafe[i][0] || player->ioUnsafe[i][1] || leakTest;
+			if (unsafe) {
+				AmigaAudioLogBufferEvent(player, "quarantine", "work-buffer-mono",
+					"AmigaAudioClose", i, -1, player->workBase[i], player->workBytes);
+				player->workBase[i] = NULL;
+				player->workBuf[i] = NULL;
+				if (status)
+					status->quarantinedBuffers++;
+			} else {
+				AmigaAudioLogBufferEvent(player, "free", "work-buffer-mono",
+					"AmigaAudioClose", i, -1, player->workBase[i], player->workBytes);
+				AmigaFreeGuarded(&player->workBase[i], player->workBytes,
+					player->workChip, status);
+				player->workBuf[i] = NULL;
+				if (status) {
+					if (player->workChip)
+						status->chipBuffersFreed++;
+					else
+						status->workBuffersFreed++;
+				}
 			}
+			AmigaAudioCleanupTrace4(player, "slot=%ld work buffer step done\n",
+				(unsigned long)i, 0, 0, 0);
+			Radio_DebugCheckExecMem("audio cleanup: after freeing work buffer");
 		}
 	}
 	gGuiPlaybackStatus.cleanupStage = GUIPLAY_CLEANUP_BUFFERS_FREED;
@@ -6273,7 +6493,7 @@ static void AmigaAudioClose(AmigaAudioPlayer *player,
 			for (ch = 0; ch < 2; ch++) {
 				if (!player->req[i][ch])
 					continue;
-				if (player->sent[i][ch]) {
+				if (player->sent[i][ch] || player->ioUnsafe[i][ch] || leakTest) {
 					/* Never completed after AbortIO (see
 					 * AmigaAudioReapOutstanding()): the device may still
 					 * reply into it, so deleting it would recreate the
@@ -6286,42 +6506,54 @@ static void AmigaAudioClose(AmigaAudioPlayer *player,
 					continue;
 				}
 				DeleteIORequest((struct IORequest *)player->req[i][ch]);
+				player->req[i][ch] = NULL;
 				AmigaAudioCleanupTrace4(player, "slot=%ld channel=%ld IORequest deleted\n",
 					(unsigned long)i, (unsigned long)ch, 0, 0);
-				player->req[i][ch] = NULL;
+				Radio_DebugCheckExecMem("audio cleanup: after deleting IORequest");
 				if (status)
 					status->ioRequestsDeleted++;
 			}
 		}
 		for (ch = 0; ch < 2; ch++) {
 			if (player->closeReq[ch]) {
+				if (leakTest) {
+					AmigaAudioCleanupTrace4(player, "channel=%ld closeReq leaked (MP3_SAFE_CLEANUP_LEAK_TEST)\n",
+						(unsigned long)ch, 0, 0, 0);
+					player->closeReq[ch] = NULL;
+					continue;
+				}
 				DeleteIORequest((struct IORequest *)player->closeReq[ch]);
+				player->closeReq[ch] = NULL;
 				AmigaAudioCleanupTrace4(player, "channel=%ld closeReq deleted\n",
 					(unsigned long)ch, 0, 0, 0);
-				player->closeReq[ch] = NULL;
+				Radio_DebugCheckExecMem("audio cleanup: after deleting closeReq");
 				if (status)
 					status->ioRequestsDeleted++;
 			}
 		}
 		if (player->port) {
-			if (leaked_requests) {
+			if (leaked_requests || leakTest) {
 				AmigaAudioCleanupTrace4(player, "message port leaked (%ld unreaped IORequests may still reply to it)\n",
 					(unsigned long)leaked_requests, 0, 0, 0);
 				player->port = NULL;
 			} else {
+				Radio_DebugCheckExecMem("audio cleanup: before deleting message port");
 				DeleteMsgPort(player->port);
-				AmigaAudioCleanupTrace(player, "message port deleted\n");
 				player->port = NULL;
+				AmigaAudioCleanupTrace(player, "message port deleted\n");
+				Radio_DebugCheckExecMem("audio cleanup: after deleting message port");
 				if (status)
 					status->messagePortsDeleted++;
 			}
 		}
 	}
-	/* The leak decisions above are recorded; reset sent[] so a reused
-	 * player cannot mistake a future IORequest for a submitted one. */
+	/* The leak decisions above are recorded; reset sent[]/ioUnsafe[] so a
+	 * reused player cannot mistake a future IORequest for a submitted one. */
 	for (i = 0; i < AMIGA_AUDIO_PLAYBACK_SLOTS; i++)
-		for (ch = 0; ch < 2; ch++)
+		for (ch = 0; ch < 2; ch++) {
 			player->sent[i][ch] = 0;
+			player->ioUnsafe[i][ch] = 0;
+		}
 	player->stereo = 0;
 	player->period = 0;
 	player->splitBytes = 0;
@@ -6330,7 +6562,11 @@ static void AmigaAudioClose(AmigaAudioPlayer *player,
 	player->workChip = 0;
 	gGuiPlaybackStatus.cleanupStage = GUIPLAY_CLEANUP_COMPLETE;
 	gGuiPlaybackStatus.cleanupComplete = 1;
-	AmigaAudioCleanupTrace(player, "cleanupComplete set=1\n");
+	player->cleanupState = AUDIO_CLEANUP_DONE;
+	AmigaAudioCleanupTraceState(player, "cleanupComplete set=1", player->cleanupState,
+		player->cleanupInvocationCount);
+	AmigaAudioCleanupTrace4(player, "quarantined buffers=%lu\n",
+		status ? status->quarantinedBuffers : 0, 0, 0, 0);
 	Radio_DebugCheckExecMem("after audio device cleanup");
 }
 
@@ -6353,7 +6589,12 @@ static int AmigaAudioOpenOne(AmigaAudioPlayer *player, int ch,
 	player->req[0][ch]->ioa_Request.io_Message.mn_Node.ln_Pri = ADALLOC_MINPREC;
 	player->req[0][ch]->ioa_Data = (UBYTE *)channels;
 	player->req[0][ch]->ioa_Length = channelCount;
-	{
+	if (AmigaAudioNoSinkEnabled()) {
+		AmigaAudioCleanupTrace4(player, "MP3_NO_AUDIO_SINK active: audio.device ch=%ld not opened\n",
+			(unsigned long)ch, 0, 0, 0);
+		/* deviceOpen[ch] stays 0: AmigaAudioClose() must not CloseDevice() a
+		 * unit that was never OpenDevice()'d. */
+	} else {
 		int openDeviceResult;
 
 		GuiPublishStartupStage(GUISTART_OPEN_DEVICE);
@@ -6377,8 +6618,8 @@ static int AmigaAudioOpenOne(AmigaAudioPlayer *player, int ch,
 		}
 		if (openDeviceResult != 0)
 			return -1;
+		player->deviceOpen[ch] = 1;
 	}
-	player->deviceOpen[ch] = 1;
 	{
 		/* Allocate a dedicated IORequest for CloseDevice so req[0][ch] remains
 		 * free for CMD_WRITE even when CloseDevice is called mid-playback. */
@@ -6415,7 +6656,10 @@ static int AmigaAudioOpen(AmigaAudioPlayer *player, unsigned int period,
 	UBYTE leftChannels[] = { 1, 8 };
 	UBYTE rightChannels[] = { 2, 4 };
 	int i;
+	static unsigned long gAmigaAudioSessionCounter = 0;
 	memset(player, 0, sizeof(*player));
+	player->sessionId = ++gAmigaAudioSessionCounter;
+	player->cleanupState = AUDIO_CLEANUP_NOT_STARTED;
 	player->period = period;
 	player->stereo = stereo;
 	player->debugPlay = gMiniAmp3DebugPlayRequested;
@@ -6454,6 +6698,9 @@ static int AmigaAudioOpen(AmigaAudioPlayer *player, unsigned int period,
 					gPlaybackInterrupted = 0;
 				return -1;
 			}
+			AmigaAudioLogBufferEvent(player, "alloc", "chip-buffer-stereo",
+				"AmigaAudioOpen", i, 0, player->splitBase[i][0],
+				player->splitBytes * 2UL);
 			player->splitBuf[i][1] = player->splitBuf[i][0] + player->splitBytes;
 			player->splitBase[i][1] = NULL;
 		}
@@ -6478,6 +6725,9 @@ static int AmigaAudioOpen(AmigaAudioPlayer *player, unsigned int period,
 					gPlaybackInterrupted = 0;
 				return -1;
 			}
+			AmigaAudioLogBufferEvent(player, "alloc", "chip-buffer-mono",
+				"AmigaAudioOpen", i, 0, player->splitBase[i][0],
+				player->splitBytes);
 		}
 		if (AmigaAudioOpenOne(player, 0, monoChannels, sizeof(monoChannels)) != 0) {
 			int wasInterrupted = gPlaybackInterrupted;
@@ -6572,6 +6822,13 @@ static void AmigaAudioCommitOne(AmigaAudioPlayer *player, int index, int ch)
 {
 	if (gPlaybackInterrupted || player->stopping)
 		return;
+	if (AmigaAudioNoSinkEnabled()) {
+		/* Never submitted: leave sent[index][ch] at 0 so AmigaAudioWait()
+		 * does not block on a CMD_WRITE that was never issued, and so
+		 * AmigaAudioClose() never AbortIO()/WaitIO()s or frees anything
+		 * tied to a request audio.device was never given. */
+		return;
+	}
 	player->req[index][ch]->ioa_Request.io_Command = CMD_WRITE;
 	player->req[index][ch]->ioa_Request.io_Flags = ADIOF_PERVOL;
 	player->req[index][ch]->ioa_Request.io_Error = 0;
@@ -6837,6 +7094,9 @@ static int AmigaAudioAllocWorkBuffers(AmigaAudioPlayer *player, int stereo,
 						&player->splitWorkBase[i][ch]);
 				if (!player->splitWorkBuf[i][ch])
 					return -1;
+				AmigaAudioLogBufferEvent(player, "alloc", "work-buffer-split",
+					"AmigaAudioAllocWorkBuffers", i, ch,
+					player->splitWorkBase[i][ch], player->splitWorkBytes);
 			}
 		}
 	} else {
@@ -6847,6 +7107,9 @@ static int AmigaAudioAllocWorkBuffers(AmigaAudioPlayer *player, int stereo,
 				&player->workBase[i]);
 			if (!player->workBuf[i])
 				return -1;
+			AmigaAudioLogBufferEvent(player, "alloc", "work-buffer-mono",
+				"AmigaAudioAllocWorkBuffers", i, -1,
+				player->workBase[i], bytes);
 		}
 	}
 	return 0;
@@ -8971,8 +9234,22 @@ static int AmigaPlayStreamingGeneric(InputSource *input,
 			fprintf(stderr, "generic decoder: startup timed out before PCM output\n");
 			if (ops && ops->info && ops->info->extensions &&
 				StrCaseCmp(ops->info->extensions, "aac") == 0) {
-				fprintf(stderr, "radio-aac-startup: AAC stream start timeout before first decoded frame\n");
-				Radio_FailStartup(input->radio, "AAC stream start timeout");
+				/* A fatal SSL/TLS fault (see radio_ssl_error_is_fatal()) already
+				 * fails the stream and sets a specific error ("TLS read/write/
+				 * connect failed") well before this generic startup-timeout
+				 * budget runs out. Radio_FailStartup() unconditionally
+				 * overwrites rs->error with the generic timeout message,
+				 * clobbering that diagnosis and reporting a misleading
+				 * timeout for what was actually an immediate fatal TLS
+				 * failure. Only call it for a genuine timeout: no data,
+				 * still no error already recorded. */
+				if (input->radio && Radio_GetStatus(input->radio) == RADIO_STATUS_ERROR) {
+					fprintf(stderr, "radio-aac-startup: stream already failed (%s), not overwriting with timeout\n",
+						Radio_GetError(input->radio));
+				} else {
+					fprintf(stderr, "radio-aac-startup: AAC stream start timeout before first decoded frame\n");
+					Radio_FailStartup(input->radio, "AAC stream start timeout");
+				}
 			}
 			stream.decodeError = 1;
 			GuiSetPlaybackPhase(GUIPLAY_PHASE_ERROR);
@@ -9742,10 +10019,16 @@ cleanup:
 	gGuiPlaybackStatus.phase = GUIPLAY_PHASE_STOPPING;
 	gGuiPlaybackStatus.cleanupComplete = 0;
 	AmigaAudioClose(&player, &cleanupStatus);
+	RADIO_DBG(printf("radio-audio: AmigaAudioClose returned session=%lu\n",
+		(input && input->radio) ? Radio_GetSessionId(input->radio) : 0UL));
+	RADIO_DBG(printf("radio-audio: entering post-audio cleanup session=%lu\n",
+		(input && input->radio) ? Radio_GetSessionId(input->radio) : 0UL));
 	gGuiPlaybackStatus.phase = GUIPLAY_PHASE_DONE;
 	if (cleanupStatus.canaryErrors)
 		err = -1;
 	PrintPlaybackCleanupStatus(opt, &cleanupStatus);
+	RADIO_DBG(printf("radio-audio: leaving post-audio cleanup session=%lu\n",
+		(input && input->radio) ? Radio_GetSessionId(input->radio) : 0UL));
 	return err;
 }
 
@@ -10481,19 +10764,56 @@ int main(int argc, char **argv)
 #ifndef AMIGA_M68K
 		signal(SIGINT, SIG_DFL);
 #endif
-		printf("radio-teardown: MP3 path MP3FreeDecoder start\n");
-		MP3FreeDecoder(decoder);
-		Radio_CheckMiniMem("after decoder cleanup");
-		printf("radio-teardown: MP3 path InputSourceClose start\n");
-		InputSourceClose(&input);
-		CloseInputFile(&infile, opt.debugCleanup);
-		gTiming = NULL;
-		MP3SetDecodeCoreProfileEnabled(0);
-		printf("radio-teardown: MP3 path freeing resolvedOutName=%p\n", (void *)resolvedOutName);
-		free(resolvedOutName);
-		printf("radio-teardown: MP3 path freeing normalized args\n");
-		AmigaFreeNormalizedArgs(&normalized);
-		printf("radio-teardown: MP3 path returning from main playErr=%d\n", playErr);
+		{
+			unsigned long teardownSessionId = (input.radio) ? Radio_GetSessionId(input.radio) : 0UL;
+			int teardownFatal = (input.radio) ? Radio_IsSessionFatal(input.radio) : 0;
+
+			RADIO_DBG(printf("radio-teardown: post-audio cleanup begin session=%lu fatal=%d\n", teardownSessionId, teardownFatal));
+			if (AmigaPostAudioLeakTestEnabled()) {
+				/* Test mode (MP3_POST_AUDIO_LEAK_TEST=1): deliberately skip
+				 * MP3FreeDecoder()/InputSourceClose() (which frees the
+				 * decoder, the radio ring buffer, and the RadioStream
+				 * struct/socket/SSL context via Radio_Close()) and leak them
+				 * instead.  If a reboot that used to happen right here stops
+				 * happening with this set, the corruptor is a use-after-free
+				 * or double-free in that free/close path, not in
+				 * AmigaAudioClose() (already fixed) or upstream of it. */
+				RADIO_DBG(printf("radio-teardown: MP3_POST_AUDIO_LEAK_TEST active -- leaking decoder/ring/stream session=%lu\n",
+					teardownSessionId));
+			} else {
+				Radio_DebugCheckExecMem("before decoder free/skip");
+				if (teardownFatal) {
+					/* Fatal TLS teardown quarantine (see
+					 * Radio_IsSessionFatal()): the decoder context is part of
+					 * the same child-owned object graph the fatal fault may
+					 * have damaged by corrupting exec memory around it --
+					 * leak it instead of risking MP3FreeDecoder() writing
+					 * into/through already-damaged heap state. */
+					RADIO_DBG(printf("radio-teardown: decoder free skipped (fatal TLS quarantine) session=%lu -- leaking\n",
+						teardownSessionId));
+				} else {
+					RADIO_DBG(printf("radio-teardown: before decoder free session=%lu\n", teardownSessionId));
+					MP3FreeDecoder(decoder);
+					RADIO_DBG(printf("radio-teardown: after decoder free session=%lu\n", teardownSessionId));
+				}
+				Radio_DebugCheckExecMem("after decoder free/skip");
+				Radio_CheckMiniMem("after decoder cleanup");
+				RADIO_DBG(printf("radio-teardown: before Radio_Close second stop phase (InputSourceClose) session=%lu\n",
+					teardownSessionId));
+				InputSourceClose(&input);
+				RADIO_DBG(printf("radio-teardown: after InputSourceClose/Radio_Close session=%lu\n", teardownSessionId));
+				CloseInputFile(&infile, opt.debugCleanup);
+			}
+			gTiming = NULL;
+			MP3SetDecodeCoreProfileEnabled(0);
+			RADIO_DBG(printf("radio-teardown: freeing resolvedOutName=%p session=%lu\n",
+				(void *)resolvedOutName, teardownSessionId));
+			free(resolvedOutName);
+			RADIO_DBG(printf("radio-teardown: freeing normalized args session=%lu\n", teardownSessionId));
+			AmigaFreeNormalizedArgs(&normalized);
+			RADIO_DBG(printf("radio-teardown: post-audio cleanup end, returning from main playErr=%d session=%lu\n",
+				playErr, teardownSessionId));
+		}
 		return playErr == 0 ? 0 : 1;
 	}
 

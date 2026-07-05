@@ -47,7 +47,11 @@ enum {
     RB_STREAM_PROBE_ERR_TLS_POISONED = -17,
     /* MiniMem/heap corruption detected earlier this run: every probe/fetch
      * (HTTP and HTTPS alike) is refused until app restart. */
-    RB_STREAM_PROBE_ERR_MEM_POISONED = -18
+    RB_STREAM_PROBE_ERR_MEM_POISONED = -18,
+    /* MP3_NO_ARTWORK=1 in the environment: binary fetches (favicon/artwork)
+     * are refused so a radio soak test can isolate audio-cleanup corruption
+     * from the GUI's favicon/artwork fetch path. */
+    RB_STREAM_PROBE_ERR_DISABLED = -19
 };
 
 const char *rb_probe_error_text(int rc);
