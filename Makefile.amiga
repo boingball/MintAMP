@@ -114,7 +114,7 @@ HALFASM_TEST_CPPFLAGS := -DAMIGA_M68K_ASM_FDCT32
 FAST030_ASM_SOURCES := real/amiga_m68k_polyphase.S
 AMIGA_HUNK_FAST_PREFERRED := python3 tools/amiga_fast_preferred_hunks.py
 
-.PHONY: all fast030 radio030 sslradio030 amissl-get-test amissl-free-repro-test rb-stream-probe-test prof030 gui guir sslgui sslguir fast030-halfasm-test gui-halfasm-test decoder-modules clean print-command print-fast030-command print-gui-command print-guir-command
+.PHONY: all fast030 radio030 sslradio030 amissl-get-test amissl-free-repro-test amissl-spawn-repro-test rb-stream-probe-test prof030 gui guir sslgui sslguir fast030-halfasm-test gui-halfasm-test decoder-modules clean print-command print-fast030-command print-gui-command print-guir-command
 
 all: $(TARGET) decoder-modules
 
@@ -134,6 +134,8 @@ amissl-get-test: amissl_https_get
 
 amissl-free-repro-test: amissl_ssl_free_repro
 
+amissl-spawn-repro-test: amissl_spawn_repro
+
 rb-stream-probe-test: rb_stream_probe_test
 
 # Standalone AmiSSL smoke test: deliberately links only this file and no
@@ -149,6 +151,13 @@ amissl_https_get: amissl_https_get.c
 # for MP3_REPRO_MODE/MP3_REPRO_STATION_FILE/etc.
 amissl_ssl_free_repro: amissl_ssl_free_repro.c
 	$(CC) $(CFLAGS_COMMON) $(CPPFLAGS_COMMON) -DHAVE_AMISSL $(SSL_CPPFLAGS) $(DEBUG_CPPFLAGS) $(EXTRA_CFLAGS) -o $@ amissl_ssl_free_repro.c
+	$(AMIGA_HUNK_FAST_PREFERRED) $@
+
+# Parent/child AmiSSL concurrency repro: parent owns the shared AmiSSL instance
+# while a CreateNewProcTags() child reuses the same SocketBase/AmiSSL_ErrNoPtr
+# and both perform HTTPS connect/read/free churn concurrently.
+amissl_spawn_repro: amissl_spawn_repro.c
+	$(CC) $(CFLAGS_COMMON) $(CPPFLAGS_COMMON) -DHAVE_AMISSL $(SSL_CPPFLAGS) $(DEBUG_CPPFLAGS) $(EXTRA_CFLAGS) -o $@ amissl_spawn_repro.c
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
 
 rb_stream_probe_test: radio_stream_probe.c radio_stream_probe.h
