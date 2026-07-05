@@ -1,14 +1,17 @@
 /* AmiSSL parent/child concurrency repro.
  *
- * This is a second harness beside amissl_ssl_free_repro.c. The first harness
- * proves single-task HTTPS connect/read/free churn is stable. This one follows
- * the app shape more closely:
+ * This harness follows the real app shape more closely than the single-task
+ * amissl_ssl_free_repro.c:
  *
  *   - parent opens bsdsocket.library and the shared AmiSSL instance
  *   - parent keeps doing small HTTPS probe-style transactions
  *   - child is spawned with CreateNewProcTags()
  *   - child uses the same global SocketBase/AmiSSLBase/AmiSSLExtBase and the
- *     same AmiSSL_ErrNoPtr storage while it does its own HTTPS stream churn
+ *     same AmiSSL_ErrNoPtr storage while it does HTTPS stream churn
+ *
+ * Ctrl-C is handled cooperatively: the parent sets a shared stop flag, the
+ * child unwinds first, and only then does the parent close the shared AmiSSL
+ * instance. Do not hard-break this test unless it is already wedged.
  *
  * Build:
  *   make -f Makefile.amiga amissl-spawn-repro-test
@@ -36,6 +39,7 @@ int main(void) { puts("amissl_spawn_repro must be built for AmigaOS with HAVE_AM
 #include <proto/exec.h>
 #include <proto/dos.h>
 #include <proto/bsdsocket.h>
+#include <dos/dos.h>
 #include <dos/dostags.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -84,6 +88,7 @@ static const Station g_stations[STATION_COUNT] = {
 };
 
 static int g_shared_amissl_errno = 0;
+static volatile int g_stop_requested = 0;
 static volatile int g_child_started = 0;
 static volatile int g_child_done = 0;
 static volatile int g_child_rc = 0;
@@ -97,6 +102,18 @@ static void progress(const char *msg) { puts(msg); fflush(stdout); }
 static void progressf_int(const char *prefix, int value) { printf("%s%d\n", prefix, value); fflush(stdout); }
 static void progressf_ptr(const char *prefix, void *value) { printf("%s%p\n", prefix, value); fflush(stdout); }
 static void sleep_tick(void) { Delay(2); }
+
+static int stop_requested(const char *role)
+{
+    if (g_stop_requested) return 1;
+    if (SetSignal(0, 0) & SIGBREAKF_CTRL_C) {
+        g_stop_requested = 1;
+        printf("%s: Ctrl-C seen; requesting cooperative shutdown\n", role ? role : "repro");
+        fflush(stdout);
+        return 1;
+    }
+    return 0;
+}
 
 static int env_int(const char *name, int default_val)
 {
@@ -124,6 +141,7 @@ static long tcp_connect_blocking(const char *role, const char *host, int port)
     struct sockaddr_in sa;
     long s;
 
+    if (stop_requested(role)) return -1;
     he = gethostbyname(host);
     if (!he || !he->h_addr_list || !he->h_addr_list[0]) {
         printf("%s: DNS lookup failed host=%s\n", role, host);
@@ -131,6 +149,7 @@ static long tcp_connect_blocking(const char *role, const char *host, int port)
         return -1;
     }
 
+    if (stop_requested(role)) return -1;
     s = socket(AF_INET, SOCK_STREAM, 0);
     if (s == -1) {
         printf("%s: socket failed errno=%ld shared_errno=%d\n", role, Errno(), g_shared_amissl_errno);
@@ -186,8 +205,9 @@ static int tls_handshake(const char *role, SSL_CTX **ctx, SSL **ssl, long sock, 
     SSL_set_fd(*ssl, (int)sock);
 
     for (tries = 0; tries < 250; tries++) {
-        int r = SSL_connect(*ssl);
-        int e;
+        int r, e;
+        if (stop_requested(role)) return -1;
+        r = SSL_connect(*ssl);
         if (r == 1) return 0;
         e = SSL_get_error(*ssl, r);
         if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) { sleep_tick(); continue; }
@@ -207,7 +227,7 @@ static int send_request(const char *role, SSL *ssl, const char *host, const char
     n = snprintf(req, sizeof(req),
         "GET %s HTTP/1.1\r\n"
         "Host: %s\r\n"
-        "User-Agent: BoingPlayer-amissl-spawn-repro/0.1 AmigaOS\r\n"
+        "User-Agent: BoingPlayer-amissl-spawn-repro/0.2 AmigaOS\r\n"
         "Icy-MetaData: 1\r\n"
         "Accept: */*\r\n"
         "Connection: close\r\n\r\n",
@@ -216,8 +236,9 @@ static int send_request(const char *role, SSL *ssl, const char *host, const char
 
     sent = 0;
     for (tries = 0; tries < 250 && sent < n; tries++) {
-        int r = SSL_write(ssl, req + sent, n - sent);
-        int e;
+        int r, e;
+        if (stop_requested(role)) return -1;
+        r = SSL_write(ssl, req + sent, n - sent);
         if (r > 0) { sent += r; continue; }
         e = SSL_get_error(ssl, r);
         if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) { sleep_tick(); continue; }
@@ -229,13 +250,14 @@ static int send_request(const char *role, SSL *ssl, const char *host, const char
 
 static int read_chunks(const char *role, SSL *ssl, int want_reads)
 {
-    static char buf[READ_BUF_SIZE];
+    char buf[READ_BUF_SIZE];
     int reads_ok = 0;
     int spin = 0;
 
     while (reads_ok < want_reads) {
-        int n = SSL_read(ssl, buf, sizeof(buf));
-        int e;
+        int n, e;
+        if (stop_requested(role)) return reads_ok;
+        n = SSL_read(ssl, buf, sizeof(buf));
         if (n > 0) {
             reads_ok++;
             spin = 0;
@@ -267,15 +289,16 @@ static int stream_once(const char *role, const Station *st, int attempt, int rea
     int rc = 0;
     int reads_ok;
 
+    if (stop_requested(role)) return 0;
     printf("%s: attempt=%d url=https://%s:%d%s SocketBase=%p AmiSSLBase=%p ErrNoPtr=%p\n",
         role, attempt, st->host, st->port, st->path,
         (void *)SocketBase, (void *)AmiSSLBase, (void *)&g_shared_amissl_errno);
     fflush(stdout);
 
     sock = tcp_connect_blocking(role, st->host, st->port);
-    if (sock == -1) return -1;
-    if (tls_handshake(role, &ctx, &ssl, sock, st->host) != 0) { rc = -1; goto cleanup; }
-    if (send_request(role, ssl, st->host, st->path) != 0) { rc = -1; goto cleanup; }
+    if (sock == -1) return g_stop_requested ? 0 : -1;
+    if (tls_handshake(role, &ctx, &ssl, sock, st->host) != 0) { rc = g_stop_requested ? 0 : -1; goto cleanup; }
+    if (send_request(role, ssl, st->host, st->path) != 0) { rc = g_stop_requested ? 0 : -1; goto cleanup; }
 
     reads_ok = read_chunks(role, ssl, reads);
     if (reads_ok < 0) rc = -1;
@@ -316,7 +339,7 @@ static void child_entry(void)
     }
     progress("child: InitAmiSSL OK");
 
-    for (i = 0; i < g_child_iters; i++) {
+    for (i = 0; i < g_child_iters && !stop_requested("child"); i++) {
         int rc;
         g_child_attempt = i + 1;
         rc = stream_once("child", &g_stations[i % STATION_COUNT], i + 1, g_child_reads);
@@ -390,10 +413,10 @@ int main(void)
     if (!child) { progress("parent: CreateNewProcTags failed"); close_parent_amissl(); return 1; }
 
     wait_tries = 0;
-    while (!g_child_started && wait_tries < 250) { sleep_tick(); wait_tries++; }
+    while (!g_child_started && wait_tries < 250 && !stop_requested("parent")) { sleep_tick(); wait_tries++; }
     progressf_int("parent: child_started=", g_child_started);
 
-    while (!g_child_done) {
+    while (!g_child_done && !stop_requested("parent")) {
         int rc;
         parent_loops++;
         rc = stream_once("parent-probe", &g_stations[parent_loops % STATION_COUNT], parent_loops, g_parent_reads);
@@ -404,11 +427,19 @@ int main(void)
         sleep_tick();
     }
 
-    printf("parent: child finished child_rc=%d child_attempt=%d parent_loops=%d parent_faults=%d\n",
-        g_child_rc, g_child_attempt, parent_loops, parent_faults);
+    if (g_stop_requested && !g_child_done) {
+        int tries;
+        progress("parent: waiting for child to honour stop before closing shared AmiSSL");
+        for (tries = 0; tries < 500 && !g_child_done; tries++) sleep_tick();
+        progressf_int("parent: child_done_after_wait=", g_child_done);
+    }
+
+    printf("parent: child finished child_rc=%d child_attempt=%d parent_loops=%d parent_faults=%d stop=%d\n",
+        g_child_rc, g_child_attempt, parent_loops, parent_faults, g_stop_requested);
     fflush(stdout);
 
     close_parent_amissl();
+    if (g_stop_requested) return 0;
     return (g_child_rc || parent_faults) ? 2 : 0;
 }
 
