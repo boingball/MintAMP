@@ -186,9 +186,9 @@ sslguir:
 
 prof030: $(PROF030_TARGET)
 
-gui: $(GUI_TARGET) decoder-modules
+gui: $(GUI_TARGET) $(FAST030_TARGET) decoder-modules
 
-guir: $(GUIR_TARGET) decoder-modules
+guir: $(GUIR_TARGET) $(FAST030_TARGET) decoder-modules
 
 fast030-halfasm-test: $(FAST030_HALFASM_TEST_TARGET)
 

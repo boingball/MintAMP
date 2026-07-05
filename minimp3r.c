@@ -1532,6 +1532,34 @@ static void PlaybackEntry(void)
 	RADIO_DBG(printf("radio-teardown: child PlaybackEntry exiting (task will terminate) session=%lu\n", gPlayer.sessionId);)
 }
 
+
+/* Radio network ownership boundary: bsdsocket.library/AmiSSL library bases are
+ * task/process-owned here; same-image CreateNewProcTags children must not use
+ * parent/global SocketBase/AmiSSL state.  Radio playback is therefore launched
+ * as a separate decoder executable so DNS, socket/connect, SSL_connect/read and
+ * SSL/CTX/AmiSSL cleanup happen in that executable's own data segment. */
+static void MrBuildRadioWorkerArgs(char *out, int outSize, char **argv, int argc)
+{
+	int i;
+	int pos = 0;
+	if (!out || outSize <= 0) return;
+	out[0] = '\0';
+	for (i = 1; i < argc; i++) {
+		const char *a = argv[i] ? argv[i] : "";
+		int needQuote = strchr(a, ' ') || strchr(a, '\t') || strchr(a, '"');
+		if (pos + 4 >= outSize) break;
+		if (i > 1) out[pos++] = ' ';
+		if (needQuote) out[pos++] = '"';
+		while (*a && pos + 3 < outSize) {
+			if (*a == '"') out[pos++] = '\'';
+			else out[pos++] = *a;
+			a++;
+		}
+		if (needQuote && pos + 1 < outSize) out[pos++] = '"';
+	}
+	out[pos] = '\0';
+}
+
 static void StartPlayback(MrApp *app)
 {
 	struct Process *thisProc;
@@ -1613,16 +1641,33 @@ static void StartPlayback(MrApp *app)
 		return;
 	}
 
-	gPlayer.process = CreateNewProcTags(
-		NP_Entry,      (ULONG)PlaybackEntry,
-		NP_Name,       (ULONG)"minimp3r playback",
-		NP_Priority,   0,
-		NP_StackSize,  262144,
-		NP_CurrentDir, dirLock,
-		NP_Output,     nilOut,
-		NP_CloseOutput, TRUE,
-		NP_CopyVars,   FALSE,
-		TAG_DONE);
+	if (MrIsRadioInput(app->inputName)) {
+		static char radioWorkerArgs[2048];
+		MrBuildRadioWorkerArgs(radioWorkerArgs, sizeof(radioWorkerArgs), gPlayer.argv, gPlayer.argc);
+		RADIO_DBG(printf("radio-worker: launching separate executable amiga_mp3dec.fastexp args=\"%s\"\n", radioWorkerArgs);)
+		gPlayer.process = CreateNewProcTags(
+			NP_Command,    (ULONG)"amiga_mp3dec.fastexp",
+			NP_Arguments,  (ULONG)radioWorkerArgs,
+			NP_Name,       (ULONG)"minimp3r playback",
+			NP_Priority,   0,
+			NP_StackSize,  262144,
+			NP_CurrentDir, dirLock,
+			NP_Output,     nilOut,
+			NP_CloseOutput, TRUE,
+			NP_CopyVars,   FALSE,
+			TAG_DONE);
+	} else {
+		gPlayer.process = CreateNewProcTags(
+			NP_Entry,      (ULONG)PlaybackEntry,
+			NP_Name,       (ULONG)"minimp3r playback",
+			NP_Priority,   0,
+			NP_StackSize,  262144,
+			NP_CurrentDir, dirLock,
+			NP_Output,     nilOut,
+			NP_CloseOutput, TRUE,
+			NP_CopyVars,   FALSE,
+			TAG_DONE);
+	}
 
 	if (!gPlayer.process) {
 		Close(nilOut);

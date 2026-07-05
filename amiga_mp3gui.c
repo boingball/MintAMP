@@ -2372,6 +2372,34 @@ static void HandleDoneSignal(HelixAmp3Gui *gui);
 static void SaveArtworkCache(HelixAmp3Gui *gui);
 static void BuildArtColorPens(HelixAmp3Gui *gui);
 static void ReleaseArtColorPens(HelixAmp3Gui *gui);
+
+/* Radio network ownership boundary: bsdsocket.library/AmiSSL library bases are
+ * task/process-owned here; same-image CreateNewProcTags children must not use
+ * parent/global SocketBase/AmiSSL state.  Radio playback is therefore launched
+ * as a separate decoder executable so DNS, socket/connect, SSL_connect/read and
+ * SSL/CTX/AmiSSL cleanup happen in that executable's own data segment. */
+static void GuiBuildRadioWorkerArgs(char *out, int outSize, char **argv, int argc)
+{
+	int i;
+	int pos = 0;
+	if (!out || outSize <= 0) return;
+	out[0] = '\0';
+	for (i = 1; i < argc; i++) {
+		const char *a = argv[i] ? argv[i] : "";
+		int needQuote = strchr(a, ' ') || strchr(a, '\t') || strchr(a, '"');
+		if (pos + 4 >= outSize) break;
+		if (i > 1) out[pos++] = ' ';
+		if (needQuote) out[pos++] = '"';
+		while (*a && pos + 3 < outSize) {
+			if (*a == '"') out[pos++] = '\'';
+			else out[pos++] = *a;
+			a++;
+		}
+		if (needQuote && pos + 1 < outSize) out[pos++] = '"';
+	}
+	out[pos] = '\0';
+}
+
 static void StartPlayback(HelixAmp3Gui *gui);
 static void ClosePlaylistWindow(HelixAmp3Gui *gui);
 static void OpenPlaylistWindow(HelixAmp3Gui *gui);
@@ -7154,11 +7182,19 @@ static void StartPlayback(HelixAmp3Gui *gui)
 	nilOut = (BPTR)0;
 #endif
 
-	if (nilOut) {
+	if (IsRadioInputName(gui->inputName)) {
+		static char radioWorkerArgs[2048];
+		GuiBuildRadioWorkerArgs(radioWorkerArgs, sizeof(radioWorkerArgs), gGuiPlayer.argv, gGuiPlayer.argc);
+		RADIO_DBG(printf("radio-worker: launching separate executable amiga_mp3dec.fastexp args=\"%s\"\n", radioWorkerArgs);)
+		gGuiPlayer.process = CreateNewProcTags(NP_Command, (ULONG)"amiga_mp3dec.fastexp",
+			NP_Arguments, (ULONG)radioWorkerArgs,
+			NP_Name, (ULONG)"MiniAMP3 playback",
+			NP_Priority, 0, NP_StackSize, 262144, NP_CurrentDir, dirLock,
+			NP_Output, nilOut, NP_CloseOutput, nilOut ? TRUE : FALSE,
+			NP_CopyVars, FALSE, TAG_DONE);
+	} else if (nilOut) {
 		gGuiPlayer.process = CreateNewProcTags(NP_Entry, (ULONG)PlaybackEntry,
 			NP_Name, (ULONG)"MiniAMP3 playback",
-			/* Keep playback at normal priority so CPU-bound decoding does not
-			 * starve the GadTools event loop and make Stop hard to press. */
 			NP_Priority, 0,
 			NP_StackSize, 262144,
 			NP_CurrentDir, dirLock,
@@ -7169,8 +7205,6 @@ static void StartPlayback(HelixAmp3Gui *gui)
 	} else {
 		gGuiPlayer.process = CreateNewProcTags(NP_Entry, (ULONG)PlaybackEntry,
 			NP_Name, (ULONG)"MiniAMP3 playback",
-			/* Keep playback at normal priority so CPU-bound decoding does not
-			 * starve the GadTools event loop and make Stop hard to press. */
 			NP_Priority, 0,
 			NP_StackSize, 262144,
 			NP_CurrentDir, dirLock,
