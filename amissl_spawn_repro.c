@@ -9,18 +9,23 @@
  *   - child uses the same global SocketBase/AmiSSLBase/AmiSSLExtBase and the
  *     same AmiSSL_ErrNoPtr storage while it does HTTPS stream churn
  *
+ * The default is now deliberately fast churn: short reads, non-blocking TCP
+ * connect polling, and per-attempt progress from the child. This is intended
+ * to prove whether both tasks can repeatedly create/read/free SSL objects at
+ * the same time, not whether one long stream can play forever.
+ *
  * Ctrl-C is handled cooperatively: the parent sets a shared stop flag, the
  * child unwinds first, and only then does the parent close the shared AmiSSL
  * instance. Do not hard-break this test unless it is already wedged.
  *
  * Build:
- *   make -f Makefile.amiga amissl-spawn-repro-test
+ *   make -f Makefile.amiga amissl-free-repro-test RADIO=1 SSL=1
  *
  * Run:
  *   amissl_spawn_repro
- *   setenv MP3_SPAWN_CHILD_ITERS 500
- *   setenv MP3_SPAWN_CHILD_READS 250
- *   setenv MP3_SPAWN_PARENT_READS 40
+ *   setenv MP3_SPAWN_CHILD_ITERS 1000
+ *   setenv MP3_SPAWN_CHILD_READS 10
+ *   setenv MP3_SPAWN_PARENT_READS 10
  *   amissl_spawn_repro
  */
 
@@ -69,6 +74,15 @@ struct Library *AmiSSLExtBase = NULL;
 #ifndef EAGAIN
 #define EAGAIN EWOULDBLOCK
 #endif
+#ifndef EINPROGRESS
+#define EINPROGRESS 36
+#endif
+#ifndef EALREADY
+#define EALREADY 37
+#endif
+#ifndef EISCONN
+#define EISCONN 56
+#endif
 
 typedef struct Station {
     const char *host;
@@ -93,15 +107,31 @@ static volatile int g_child_started = 0;
 static volatile int g_child_done = 0;
 static volatile int g_child_rc = 0;
 static volatile int g_child_attempt = 0;
+static volatile int g_child_completed = 0;
+static volatile int g_parent_completed = 0;
+static volatile int g_child_amissl_cleaned = 0;
+static volatile int g_parent_amissl_closed = 0;
 
-static int g_child_iters = 200;
-static int g_child_reads = 200;
-static int g_parent_reads = 25;
+static int g_child_iters = 500;
+static int g_child_reads = 10;
+static int g_parent_reads = 10;
+static int g_connect_tries = 150;
+static int g_read_idle_spins = 75;
 
 static void progress(const char *msg) { puts(msg); fflush(stdout); }
 static void progressf_int(const char *prefix, int value) { printf("%s%d\n", prefix, value); fflush(stdout); }
 static void progressf_ptr(const char *prefix, void *value) { printf("%s%p\n", prefix, value); fflush(stdout); }
 static void sleep_tick(void) { Delay(2); }
+
+static int role_is_child(const char *role)
+{
+    return role && role[0] == 'c' && role[1] == 'h' && role[2] == 'i' && role[3] == 'l' && role[4] == 'd';
+}
+
+static int role_amissl_already_cleaned(const char *role)
+{
+    return role_is_child(role) ? g_child_amissl_cleaned : g_parent_amissl_closed;
+}
 
 static int stop_requested(const char *role)
 {
@@ -124,9 +154,11 @@ static int env_int(const char *name, int default_val)
 
 static void load_config(void)
 {
-    g_child_iters = env_int("MP3_SPAWN_CHILD_ITERS", 200);
-    g_child_reads = env_int("MP3_SPAWN_CHILD_READS", 200);
-    g_parent_reads = env_int("MP3_SPAWN_PARENT_READS", 25);
+    g_child_iters = env_int("MP3_SPAWN_CHILD_ITERS", 500);
+    g_child_reads = env_int("MP3_SPAWN_CHILD_READS", 10);
+    g_parent_reads = env_int("MP3_SPAWN_PARENT_READS", 10);
+    g_connect_tries = env_int("MP3_SPAWN_CONNECT_TRIES", 150);
+    g_read_idle_spins = env_int("MP3_SPAWN_READ_IDLE_SPINS", 75);
 }
 
 static void set_nonblocking(long s)
@@ -135,11 +167,17 @@ static void set_nonblocking(long s)
     IoctlSocket(s, FIONBIO, (char *)&nb);
 }
 
-static long tcp_connect_blocking(const char *role, const char *host, int port)
+static int connect_errno_is_progress(long e)
+{
+    return e == EWOULDBLOCK || e == EAGAIN || e == EINPROGRESS || e == EALREADY;
+}
+
+static long tcp_connect_polling(const char *role, const char *host, int port)
 {
     struct hostent *he;
     struct sockaddr_in sa;
     long s;
+    int tries;
 
     if (stop_requested(role)) return -1;
     he = gethostbyname(host);
@@ -156,20 +194,34 @@ static long tcp_connect_blocking(const char *role, const char *host, int port)
         fflush(stdout);
         return -1;
     }
+    set_nonblocking(s);
 
     memset(&sa, 0, sizeof(sa));
     sa.sin_family = AF_INET;
     sa.sin_port = htons((unsigned short)port);
     memcpy(&sa.sin_addr, he->h_addr_list[0], (size_t)he->h_length);
 
-    if (connect(s, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
-        printf("%s: connect failed errno=%ld shared_errno=%d\n", role, Errno(), g_shared_amissl_errno);
-        fflush(stdout);
-        CloseSocket(s);
-        return -1;
+    for (tries = 0; tries < g_connect_tries; tries++) {
+        int cr;
+        long e;
+        if (stop_requested(role)) { CloseSocket(s); return -1; }
+        cr = connect(s, (struct sockaddr *)&sa, sizeof(sa));
+        if (cr == 0) return s;
+        e = Errno();
+        if (e == EISCONN) return s;
+        if (!connect_errno_is_progress(e)) {
+            printf("%s: TCP connect failed errno=%ld shared_errno=%d tries=%d\n", role, e, g_shared_amissl_errno, tries + 1);
+            fflush(stdout);
+            CloseSocket(s);
+            return -1;
+        }
+        sleep_tick();
     }
-    set_nonblocking(s);
-    return s;
+
+    printf("%s: TCP connect timed out host=%s shared_errno=%d tries=%d\n", role, host, g_shared_amissl_errno, g_connect_tries);
+    fflush(stdout);
+    CloseSocket(s);
+    return -1;
 }
 
 static void log_ssl_error(const char *role, const char *where, SSL *ssl, int ret)
@@ -189,6 +241,12 @@ static int tls_handshake(const char *role, SSL_CTX **ctx, SSL **ssl, long sock, 
     const SSL_METHOD *method = SSLv23_client_method();
     int tries;
     if (!method) return -1;
+
+    if (role_amissl_already_cleaned(role)) {
+        printf("%s: STALE-LIFECYCLE guard: refusing SSL_CTX_new after task AmiSSL cleanup/close\n", role);
+        fflush(stdout);
+        return -1;
+    }
 
     *ctx = SSL_CTX_new(method);
     if (!*ctx) { printf("%s: SSL_CTX_new failed\n", role); fflush(stdout); return -1; }
@@ -227,7 +285,7 @@ static int send_request(const char *role, SSL *ssl, const char *host, const char
     n = snprintf(req, sizeof(req),
         "GET %s HTTP/1.1\r\n"
         "Host: %s\r\n"
-        "User-Agent: BoingPlayer-amissl-spawn-repro/0.2 AmigaOS\r\n"
+        "User-Agent: BoingPlayer-amissl-spawn-repro/0.3 AmigaOS\r\n"
         "Icy-MetaData: 1\r\n"
         "Accept: */*\r\n"
         "Connection: close\r\n\r\n",
@@ -261,12 +319,15 @@ static int read_chunks(const char *role, SSL *ssl, int want_reads)
         if (n > 0) {
             reads_ok++;
             spin = 0;
-            if ((reads_ok % 100) == 0) { printf("%s: reads_ok=%d\n", role, reads_ok); fflush(stdout); }
             continue;
         }
         e = SSL_get_error(ssl, n);
         if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
-            if (++spin > 750) { printf("%s: read idle timeout reads_ok=%d\n", role, reads_ok); fflush(stdout); return reads_ok; }
+            if (++spin > g_read_idle_spins) {
+                printf("%s: read idle timeout reads_ok=%d spin=%d\n", role, reads_ok, spin);
+                fflush(stdout);
+                return reads_ok;
+            }
             sleep_tick();
             continue;
         }
@@ -281,11 +342,53 @@ static int read_chunks(const char *role, SSL *ssl, int want_reads)
     return reads_ok;
 }
 
+static void guarded_ssl_free(const char *role, SSL **ssl, int *freed)
+{
+    if (!ssl || !*ssl) return;
+    if (*freed) {
+        printf("%s: STALE-POINTER guard: duplicate SSL_free attempt ssl=%p\n", role, (void *)*ssl);
+        fflush(stdout);
+        return;
+    }
+    if (role_amissl_already_cleaned(role)) {
+        printf("%s: STALE-LIFECYCLE guard: SSL_free after task AmiSSL cleanup/close ssl=%p\n", role, (void *)*ssl);
+        fflush(stdout);
+        return;
+    }
+    printf("%s: cleanup SSL_free start ssl=%p\n", role, (void *)*ssl); fflush(stdout);
+    SSL_free(*ssl);
+    printf("%s: cleanup SSL_free done\n", role); fflush(stdout);
+    *freed = 1;
+    *ssl = NULL;
+}
+
+static void guarded_ctx_free(const char *role, SSL_CTX **ctx, int *freed)
+{
+    if (!ctx || !*ctx) return;
+    if (*freed) {
+        printf("%s: STALE-POINTER guard: duplicate SSL_CTX_free attempt ctx=%p\n", role, (void *)*ctx);
+        fflush(stdout);
+        return;
+    }
+    if (role_amissl_already_cleaned(role)) {
+        printf("%s: STALE-LIFECYCLE guard: SSL_CTX_free after task AmiSSL cleanup/close ctx=%p\n", role, (void *)*ctx);
+        fflush(stdout);
+        return;
+    }
+    printf("%s: cleanup SSL_CTX_free start ctx=%p\n", role, (void *)*ctx); fflush(stdout);
+    SSL_CTX_free(*ctx);
+    printf("%s: cleanup SSL_CTX_free done\n", role); fflush(stdout);
+    *freed = 1;
+    *ctx = NULL;
+}
+
 static int stream_once(const char *role, const Station *st, int attempt, int reads)
 {
     long sock = -1;
     SSL_CTX *ctx = NULL;
     SSL *ssl = NULL;
+    int ssl_freed = 0;
+    int ctx_freed = 0;
     int rc = 0;
     int reads_ok;
 
@@ -295,25 +398,19 @@ static int stream_once(const char *role, const Station *st, int attempt, int rea
         (void *)SocketBase, (void *)AmiSSLBase, (void *)&g_shared_amissl_errno);
     fflush(stdout);
 
-    sock = tcp_connect_blocking(role, st->host, st->port);
+    sock = tcp_connect_polling(role, st->host, st->port);
     if (sock == -1) return g_stop_requested ? 0 : -1;
     if (tls_handshake(role, &ctx, &ssl, sock, st->host) != 0) { rc = g_stop_requested ? 0 : -1; goto cleanup; }
     if (send_request(role, ssl, st->host, st->path) != 0) { rc = g_stop_requested ? 0 : -1; goto cleanup; }
 
     reads_ok = read_chunks(role, ssl, reads);
     if (reads_ok < 0) rc = -1;
+    printf("%s: result attempt=%d reads_ok=%d rc=%d\n", role, attempt, reads_ok < 0 ? -1 : reads_ok, rc);
+    fflush(stdout);
 
 cleanup:
-    if (ssl) {
-        printf("%s: cleanup SSL_free start ssl=%p\n", role, (void *)ssl); fflush(stdout);
-        SSL_free(ssl);
-        printf("%s: cleanup SSL_free done\n", role); fflush(stdout);
-    }
-    if (ctx) {
-        printf("%s: cleanup SSL_CTX_free start ctx=%p\n", role, (void *)ctx); fflush(stdout);
-        SSL_CTX_free(ctx);
-        printf("%s: cleanup SSL_CTX_free done\n", role); fflush(stdout);
-    }
+    guarded_ssl_free(role, &ssl, &ssl_freed);
+    guarded_ctx_free(role, &ctx, &ctx_freed);
     if (sock != -1) CloseSocket(sock);
     return rc;
 }
@@ -344,11 +441,15 @@ static void child_entry(void)
         g_child_attempt = i + 1;
         rc = stream_once("child", &g_stations[i % STATION_COUNT], i + 1, g_child_reads);
         if (rc != 0) faults++;
+        g_child_completed = i + 1;
+        printf("child: completed=%d/%d faults=%d stop=%d\n", g_child_completed, g_child_iters, faults, g_stop_requested);
+        fflush(stdout);
         sleep_tick();
     }
 
     progress("child: CleanupAmiSSL start");
     CleanupAmiSSL(TAG_DONE);
+    g_child_amissl_cleaned = 1;
     progress("child: CleanupAmiSSL done");
     g_child_rc = faults ? 2 : 0;
     g_child_done = 1;
@@ -384,7 +485,14 @@ static int open_parent_amissl(void)
 
 static void close_parent_amissl(void)
 {
-    if (AmiSSLBase) { progress("parent: CloseAmiSSL start"); CloseAmiSSL(); progress("parent: CloseAmiSSL done"); AmiSSLBase = NULL; AmiSSLExtBase = NULL; }
+    if (AmiSSLBase) {
+        progress("parent: CloseAmiSSL start");
+        CloseAmiSSL();
+        g_parent_amissl_closed = 1;
+        progress("parent: CloseAmiSSL done");
+        AmiSSLBase = NULL;
+        AmiSSLExtBase = NULL;
+    }
     if (AmiSSLMasterBase) { CloseLibrary(AmiSSLMasterBase); AmiSSLMasterBase = NULL; }
     if (SocketBase) { CloseLibrary(SocketBase); SocketBase = NULL; }
 }
@@ -395,12 +503,16 @@ int main(void)
     int parent_faults = 0;
     int parent_loops = 0;
     int wait_tries;
+    int last_child_completed = 0;
+    int child_stall_loops = 0;
 
     progress("AmiSSL parent/child shared SocketBase concurrency repro");
     load_config();
     progressf_int("config: child_iters=", g_child_iters);
     progressf_int("config: child_reads=", g_child_reads);
     progressf_int("config: parent_reads=", g_parent_reads);
+    progressf_int("config: connect_tries=", g_connect_tries);
+    progressf_int("config: read_idle_spins=", g_read_idle_spins);
 
     if (open_parent_amissl() != 0) { close_parent_amissl(); return 1; }
 
@@ -421,8 +533,18 @@ int main(void)
         parent_loops++;
         rc = stream_once("parent-probe", &g_stations[parent_loops % STATION_COUNT], parent_loops, g_parent_reads);
         if (rc != 0) parent_faults++;
-        printf("parent: loop=%d child_attempt=%d child_done=%d parent_faults=%d shared_errno=%d\n",
-            parent_loops, g_child_attempt, g_child_done, parent_faults, g_shared_amissl_errno);
+        g_parent_completed = parent_loops;
+
+        if (g_child_completed == last_child_completed) child_stall_loops++;
+        else { last_child_completed = g_child_completed; child_stall_loops = 0; }
+        if (child_stall_loops == 25 || child_stall_loops == 100 || child_stall_loops == 250) {
+            printf("parent: WARNING child completion stalled parent_loops=%d child_attempt=%d child_completed=%d stall_loops=%d\n",
+                parent_loops, g_child_attempt, g_child_completed, child_stall_loops);
+            fflush(stdout);
+        }
+
+        printf("parent: loop=%d child_attempt=%d child_completed=%d child_done=%d parent_faults=%d shared_errno=%d\n",
+            parent_loops, g_child_attempt, g_child_completed, g_child_done, parent_faults, g_shared_amissl_errno);
         fflush(stdout);
         sleep_tick();
     }
@@ -434,8 +556,8 @@ int main(void)
         progressf_int("parent: child_done_after_wait=", g_child_done);
     }
 
-    printf("parent: child finished child_rc=%d child_attempt=%d parent_loops=%d parent_faults=%d stop=%d\n",
-        g_child_rc, g_child_attempt, parent_loops, parent_faults, g_stop_requested);
+    printf("parent: child finished child_rc=%d child_attempt=%d child_completed=%d parent_loops=%d parent_faults=%d stop=%d\n",
+        g_child_rc, g_child_attempt, g_child_completed, parent_loops, parent_faults, g_stop_requested);
     fflush(stdout);
 
     close_parent_amissl();
