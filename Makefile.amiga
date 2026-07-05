@@ -132,7 +132,7 @@ sslradio030:
 
 amissl-get-test: amissl_https_get
 
-amissl-free-repro-test: amissl_ssl_free_repro
+amissl-free-repro-test: amissl_ssl_free_repro amissl_spawn_repro
 
 amissl-spawn-repro-test: amissl_spawn_repro
 
