@@ -797,6 +797,10 @@ static int radio_net_open_child(RadioStream *rs)
     RadioNetContext *ctx;
     if (!rs) return -1;
     ctx = &rs->net;
+    RADIO_DBG(printf("LIFECYCLE session=%lu child-open-start openamissl_count=%ld closeamissl_count=%ld active_ssl=%ld active_ctx=%ld open_socket=%ld playback_socket=%ld\n",
+        rs->session_id, radio_openamissltags_count, radio_closeamissl_count,
+        radio_active_ssl_count, radio_active_ssl_ctx_count, radio_open_socket_count,
+        radio_playback_open_socket_count););
     if (ctx->childOwned) {
         radio_net_adopt_context(rs);
         return 0;
@@ -816,7 +820,10 @@ static int radio_net_open_child(RadioStream *rs)
     }
     ctx->amisslMasterBase = OpenLibrary("amisslmaster.library", AMISSLMASTER_MIN_VERSION);
     if (!ctx->amisslMasterBase) {
+        RADIO_DBG(printf("BEFORE CloseLibrary(bsdsocket) session=%lu base=%p (amisslmaster open fail)\n",
+            rs->session_id, (void *)ctx->socketBase););
         CloseLibrary(ctx->socketBase);
+        RADIO_DBG(printf("AFTER CloseLibrary(bsdsocket) session=%lu (amisslmaster open fail)\n", rs->session_id););
         ctx->socketBase = NULL;
         ctx->childOwned = 0;
         set_error(rs, "AmiSSL unavailable: child amisslmaster.library unavailable");
@@ -825,6 +832,9 @@ static int radio_net_open_child(RadioStream *rs)
     radio_playback_network_owned = 1;
     SocketBase = ctx->socketBase;
     AmiSSLMasterBase = ctx->amisslMasterBase;
+    RADIO_DBG(printf("BEFORE OpenAmiSSLTags session=%lu task=%p SocketBase=%p AmiSSLMasterBase=%p ErrNoPtr=%p\n",
+        rs->session_id, (void *)ctx->ownerTask, (void *)ctx->socketBase,
+        (void *)ctx->amisslMasterBase, (void *)&ctx->errnoStore););
     if (OpenAmiSSLTags(AMISSL_CURRENT_VERSION,
                        AmiSSL_UsesOpenSSLStructs, TRUE,
                        AmiSSL_InitAmiSSL, TRUE,
@@ -833,8 +843,17 @@ static int radio_net_open_child(RadioStream *rs)
                        AmiSSL_SocketBase, (ULONG)ctx->socketBase,
                        AmiSSL_ErrNoPtr, (ULONG)&ctx->errnoStore,
                        TAG_DONE) != 0) {
+        RADIO_DBG(printf("AFTER OpenAmiSSLTags fail session=%lu SocketBase=%p AmiSSLMasterBase=%p AmiSSLBase=%p AmiSSLExtBase=%p ErrNoPtr=%p\n",
+            rs->session_id, (void *)ctx->socketBase, (void *)ctx->amisslMasterBase,
+            (void *)ctx->amisslBase, (void *)ctx->amisslExtBase, (void *)&ctx->errnoStore););
+        RADIO_DBG(printf("BEFORE CloseLibrary(amisslmaster) session=%lu base=%p (OpenAmiSSLTags fail)\n",
+            rs->session_id, (void *)ctx->amisslMasterBase););
         CloseLibrary(ctx->amisslMasterBase);
+        RADIO_DBG(printf("AFTER CloseLibrary(amisslmaster) session=%lu (OpenAmiSSLTags fail)\n", rs->session_id););
+        RADIO_DBG(printf("BEFORE CloseLibrary(bsdsocket) session=%lu base=%p (OpenAmiSSLTags fail)\n",
+            rs->session_id, (void *)ctx->socketBase););
         CloseLibrary(ctx->socketBase);
+        RADIO_DBG(printf("AFTER CloseLibrary(bsdsocket) session=%lu (OpenAmiSSLTags fail)\n", rs->session_id););
         SocketBase = ctx->savedSocketBase;
         AmiSSLMasterBase = ctx->savedAmiSSLMasterBase;
         AmiSSLBase = ctx->savedAmiSSLBase;
@@ -844,6 +863,9 @@ static int radio_net_open_child(RadioStream *rs)
         set_error(rs, "AmiSSL unavailable: child OpenAmiSSLTags failed");
         return -1;
     }
+    RADIO_DBG(printf("AFTER OpenAmiSSLTags success session=%lu SocketBase=%p AmiSSLMasterBase=%p AmiSSLBase=%p AmiSSLExtBase=%p ErrNoPtr=%p\n",
+        rs->session_id, (void *)ctx->socketBase, (void *)ctx->amisslMasterBase,
+        (void *)ctx->amisslBase, (void *)ctx->amisslExtBase, (void *)&ctx->errnoStore););
     ctx->amiSslOpened = 1;
     ctx->amiSslInitialized = 1;
     radio_openamissltags_count++;
@@ -1086,11 +1108,11 @@ static void radio_net_close_child(RadioStream *rs)
         (void *)ctx->amisslExtBase, (void *)&ctx->errnoStore, ctx->amiSslOpened,
         ctx->amiSslInitialized););
     if (ctx->amiSslOpened && ctx->amisslBase) {
-        RADIO_DBG(printf("radio-child-net: CloseAmiSSL start session=%lu base=%p\n",
+        RADIO_DBG(printf("BEFORE CloseAmiSSL session=%lu base=%p\n",
             rs->session_id, (void *)ctx->amisslBase););
         CloseAmiSSL();
         radio_closeamissl_count++;
-        RADIO_DBG(printf("radio-child-net: CloseAmiSSL done session=%lu closeamissl_count=%ld\n",
+        RADIO_DBG(printf("AFTER CloseAmiSSL session=%lu closeamissl_count=%ld\n",
             rs->session_id, radio_closeamissl_count););
     }
     ctx->amiSslOpened = 0;
@@ -1102,12 +1124,18 @@ static void radio_net_close_child(RadioStream *rs)
     AmiSSLBase = ctx->savedAmiSSLBase;
     AmiSSLExtBase = ctx->savedAmiSSLExtBase;
     if (ctx->amisslMasterBase && closeChildBases) {
+        RADIO_DBG(printf("BEFORE CloseLibrary(amisslmaster) session=%lu base=%p\n",
+            rs->session_id, (void *)ctx->amisslMasterBase););
         CloseLibrary(ctx->amisslMasterBase);
+        RADIO_DBG(printf("AFTER CloseLibrary(amisslmaster) session=%lu\n", rs->session_id););
         ctx->amisslMasterBase = NULL;
     }
     AmiSSLMasterBase = ctx->savedAmiSSLMasterBase;
     if (ctx->socketBase && closeChildBases) {
+        RADIO_DBG(printf("BEFORE CloseLibrary(bsdsocket) session=%lu base=%p\n",
+            rs->session_id, (void *)ctx->socketBase););
         CloseLibrary(ctx->socketBase);
+        RADIO_DBG(printf("AFTER CloseLibrary(bsdsocket) session=%lu\n", rs->session_id););
         ctx->socketBase = NULL;
     }
     SocketBase = ctx->savedSocketBase;
@@ -1115,6 +1143,10 @@ static void radio_net_close_child(RadioStream *rs)
         rs->session_id, closeChildBases ? "closed" : "leaked-after-poison",
         (void *)SocketBase, (void *)AmiSSLMasterBase, (void *)AmiSSLBase, (void *)AmiSSLExtBase););
     memset(ctx, 0, sizeof(*ctx));
+    RADIO_DBG(printf("LIFECYCLE session=%lu child-close-done openamissl_count=%ld closeamissl_count=%ld active_ssl=%ld active_ctx=%ld open_socket=%ld playback_socket=%ld childOwned=0 parent_restored=1\n",
+        rs->session_id, radio_openamissltags_count, radio_closeamissl_count,
+        radio_active_ssl_count, radio_active_ssl_ctx_count, radio_open_socket_count,
+        radio_playback_open_socket_count););
     if (locked) Radio_AmiSslUnlock();
 }
 
@@ -1154,14 +1186,23 @@ static int radio_ssl_do_handshake(RadioStream *rs)
     for (tries = 0; tries < 150; tries++) {
         int r, e;
         if (radio_is_stopping(rs)) return -1;
+        RADIO_DBG(printf("BEFORE SSL_connect session=%lu attempt=%d ssl=%p ctx=%p fd=%ld\n",
+            rs ? rs->session_id : 0, tries + 1, rs ? (void *)rs->ssl : 0,
+            rs ? (void *)rs->ctx : 0, rs ? (long)rs->sock : -1L););
         r = SSL_connect(rs->ssl);
         if (r == 1) {
+            RADIO_DBG(printf("AFTER SSL_connect success session=%lu attempt=%d ret=%d ssl=%p ctx=%p fd=%ld\n",
+                rs ? rs->session_id : 0, tries + 1, r, rs ? (void *)rs->ssl : 0,
+                rs ? (void *)rs->ctx : 0, rs ? (long)rs->sock : -1L););
             RADIO_DBG(printf("SSL_CONNECT_ATTEMPT session=%lu attempt=%d ret=%d err=0 fd=%ld ssl=%p ctx=%p handshake=%d\n", rs ? rs->session_id : 0, tries + 1, r, rs ? (long)rs->sock : -1L, rs ? (void *)rs->ssl : 0, rs ? (void *)rs->ctx : 0, rs ? rs->sslHandshakeDone : 0););
             if (rs) rs->sslHandshakeDone = 1;
             RADIO_DBG(printf("SSL_CONNECT_DONE session=%lu\n", rs ? rs->session_id : 0););
             return 0;
         }
         e = SSL_get_error(rs->ssl, r);
+        RADIO_DBG(printf("AFTER SSL_connect fail session=%lu attempt=%d ret=%d ssl_error=%d ssl=%p ctx=%p fd=%ld\n",
+            rs ? rs->session_id : 0, tries + 1, r, e, rs ? (void *)rs->ssl : 0,
+            rs ? (void *)rs->ctx : 0, rs ? (long)rs->sock : -1L););
         last_error = e;
         RADIO_DBG(printf("SSL_CONNECT_ATTEMPT session=%lu attempt=%d ret=%d err=%d fd=%ld ssl=%p ctx=%p handshake=%d\n", rs ? rs->session_id : 0, tries + 1, r, e, rs ? (long)rs->sock : -1L, rs ? (void *)rs->ssl : 0, rs ? (void *)rs->ctx : 0, rs ? rs->sslHandshakeDone : 0););
         if (e == SSL_ERROR_WANT_READ) {
@@ -1193,13 +1234,10 @@ static int radio_ssl_do_handshake(RadioStream *rs)
                  * start from fresh per-child AmiSSL state. */
                 const char *reason = (e == SSL_ERROR_SYSCALL && ssl_lib_error == 0) ?
                     "ssl-connect-syscall" : "ssl-connect-fatal";
-                rs->sslStatePoisoned = 1;
                 rs->fatalStop = 1;
                 rs->noReconnect = 1;
                 rs->lastSslError = e;
                 strcpy(rs->lastSslOp, reason);
-                radio_amissl_task_poisoned = 1;
-                strcpy(radio_amissl_task_poison_reason, reason);
                 Radio_NoteTlsFaultHost(rs->host);
                 RADIO_DBG(printf("radio-safety: TLS session fault reason=%s session=%lu\n", reason, rs->session_id));
                 if (!rs->tlsFaultCounted) {
@@ -1231,7 +1269,11 @@ static int radio_ssl_connect(RadioStream *rs)
     if (!rs->ctx) {
         method = SSLv23_client_method();
         if (!method) { set_error(rs, "AmiSSL init failed"); return -1; }
+        RADIO_DBG(printf("BEFORE SSL_CTX_new session=%lu method=%p SocketBase=%p AmiSSLBase=%p ErrNoPtr=%p\n",
+            rs->session_id, (void *)method, (void *)SocketBase, (void *)AmiSSLBase,
+            (void *)&rs->net.errnoStore););
         rs->ctx = SSL_CTX_new(method);
+        RADIO_DBG(printf("AFTER SSL_CTX_new session=%lu ctx=%p\n", rs->session_id, (void *)rs->ctx););
         if (rs->ctx) { rs->ctxFreed = 0; radio_active_ssl_ctx_count++; RADIO_DBG(printf("radio-resource: session=%lu SSL_CTX allocated active_ssl_ctx_count=%ld\n", rs->session_id, radio_active_ssl_ctx_count)); }
         if (!rs->ctx) { set_error(rs, "AmiSSL init failed"); return -1; }
 #ifdef RADIO_SSL_VERIFY_PEER
@@ -1271,7 +1313,9 @@ static int radio_ssl_connect(RadioStream *rs)
         SSL_CTX_set_options(rs->ctx, SSL_OP_IGNORE_UNEXPECTED_EOF);
 #endif
     }
+    RADIO_DBG(printf("BEFORE SSL_new session=%lu ctx=%p\n", rs->session_id, (void *)rs->ctx););
     rs->ssl = SSL_new(rs->ctx);
+    RADIO_DBG(printf("AFTER SSL_new session=%lu ssl=%p ctx=%p\n", rs->session_id, (void *)rs->ssl, (void *)rs->ctx););
     if (rs->ssl) {
         rs->sslFreed = 0;
         /* sslReadCloseSeen refers to the *previous* SSL object's clean
@@ -1328,7 +1372,9 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
             rs->sslStatePoisoned, Radio_IsTlsPoisoned(), Radio_IsMemoryPoisoned()));
         {
             RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_free start ssl=%p\n", (void *)rs->ssl));
+            RADIO_DBG(printf("BEFORE SSL_free session=%lu ssl=%p ctx=%p\n", rs->session_id, (void *)rs->ssl, (void *)rs->ctx););
             SSL_free(rs->ssl);
+            RADIO_DBG(printf("AFTER SSL_free session=%lu\n", rs->session_id););
             rs->ssl_free_count++;
             RADIO_DBG(printf("radio-cleanup: SSL_free done session=%lu\n", rs->session_id));
         }
@@ -1341,7 +1387,9 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
     }
     if (rs->ctx && !rs->ctxFreed) {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_CTX_free start ctx=%p\n", (void *)rs->ctx));
+        RADIO_DBG(printf("BEFORE SSL_CTX_free session=%lu ctx=%p\n", rs->session_id, (void *)rs->ctx););
         SSL_CTX_free(rs->ctx);
+        RADIO_DBG(printf("AFTER SSL_CTX_free session=%lu\n", rs->session_id););
         rs->ssl_ctx_free_count++;
         RADIO_DBG(printf("radio-cleanup: SSL_CTX_free done session=%lu\n", rs->session_id));
         rs->ctxFreed = 1;
@@ -1365,7 +1413,9 @@ static void radio_ssl_free_ctx(RadioStream *rs)
     radio_net_adopt_context(rs);
     if (rs->ctx && !rs->ctxFreed) {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_CTX_free start ctx=%p\n", (void *)rs->ctx));
+        RADIO_DBG(printf("BEFORE SSL_CTX_free session=%lu ctx=%p\n", rs->session_id, (void *)rs->ctx););
         SSL_CTX_free(rs->ctx);
+        RADIO_DBG(printf("AFTER SSL_CTX_free session=%lu\n", rs->session_id););
         rs->ssl_ctx_free_count++;
         RADIO_DBG(printf("radio-cleanup: SSL_CTX_free done session=%lu\n", rs->session_id));
         rs->ctxFreed = 1;
@@ -1457,13 +1507,10 @@ static int radio_send_all(RadioStream *rs, const char *buf, int len)
                 if (radio_ssl_error_is_fatal(e)) {
                     const char *reason = (e == SSL_ERROR_SYSCALL && ssl_lib_error == 0) ?
                         "ssl-write-syscall" : "ssl-write-fatal";
-                    rs->sslStatePoisoned = 1;
                     rs->fatalStop = 1;
                     rs->noReconnect = 1;
                     rs->lastSslError = e;
                     strcpy(rs->lastSslOp, reason);
-                    radio_amissl_task_poisoned = 1;
-                    strcpy(radio_amissl_task_poison_reason, reason);
                     Radio_NoteTlsFaultHost(rs->host);
                     RADIO_DBG(printf("radio-safety: TLS session fault reason=%s session=%lu\n", reason, rs->session_id));
                     if (!rs->tlsFaultCounted) {
@@ -1822,8 +1869,10 @@ static void radio_abort_current_socket(RadioStream *rs)
         }
 #endif
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: abort CloseSocket start fd=%ld\n", (long)rs->sock));
+        RADIO_DBG(printf("BEFORE CloseSocket session=%lu fd=%ld\n", rs->session_id, (long)rs->sock););
         rs->socket_close_count++;
         radio_close_socket(rs->sock);
+        RADIO_DBG(printf("AFTER CloseSocket session=%lu fd=%ld\n", rs->session_id, closing_fd););
         rs->sock = RADIO_INVALID_SOCKET;
         rs->socketClosed = 1;
         if (radio_open_socket_count > 0) radio_open_socket_count--;
@@ -2578,13 +2627,10 @@ int Radio_Pump(RadioStream *rs)
                      * standalone repro. */
                     const char *reason = (e == SSL_ERROR_SYSCALL && ssl_lib_error == 0) ?
                         "ssl-read-syscall" : "ssl-read-fatal";
-                    rs->sslStatePoisoned = 1;
                     rs->fatalStop = 1;
                     rs->noReconnect = 1;
                     rs->lastSslError = e;
                     strcpy(rs->lastSslOp, reason);
-                    radio_amissl_task_poisoned = 1;
-                    strcpy(radio_amissl_task_poison_reason, reason);
                     Radio_NoteTlsFaultHost(rs->host);
                     RADIO_DBG(printf("radio-safety: TLS session fault reason=%s session=%lu\n", reason, rs->session_id));
                     if (!rs->tlsFaultCounted) {
