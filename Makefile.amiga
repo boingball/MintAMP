@@ -239,5 +239,6 @@ decoder-modules:
 		CFLAGS="$(CFLAGS_COMMON) $(CPPFLAGS_COMMON) -DHAVE_AMIGA_AUDIO_DEVICE"
 
 clean:
-	rm -f $(TARGET) $(FAST030_TARGET) $(FAST030_HALFASM_TEST_TARGET) $(GUI_TARGET) $(GUIR_TARGET) $(GUI_HALFASM_TEST_TARGET)
+	rm -f $(TARGET) $(FAST030_TARGET) $(FAST030_HALFASM_TEST_TARGET) $(GUI_TARGET) $(GUIR_TARGET) $(GUI_HALFASM_TEST_TARGET) \
+		amissl_https_get amissl_ssl_free_repro amissl_spawn_repro rb_stream_probe_test
 	$(MAKE) -C decoders clean
