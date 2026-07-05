@@ -17,9 +17,14 @@
  * the command-style argv it expects while still keeping the decoder in its own
  * loaded program image/data segment, so bsdsocket.library/AmiSSL ownership stays
  * separated from the GUI.
+ *
+ * The Makefile currently pre-includes this header for complete GUI link lines
+ * that also contain .S assembly sources.  Keep the wrapper completely invisible
+ * while the assembler is preprocessing .S files, otherwise C typedefs from
+ * stdarg/stddef leak into the assembler input.
  */
 
-#if defined(AMIGA_M68K)
+#if defined(AMIGA_M68K) && !defined(__ASSEMBLER__)
 #include <stdarg.h>
 #include <string.h>
 #include <exec/types.h>
@@ -151,6 +156,6 @@ static struct Process *MiniAmp3CreateNewProcTagsWrapped(ULONG firstTag, ...)
 #undef CreateNewProcTags
 #endif
 #define CreateNewProcTags(...) MiniAmp3CreateNewProcTagsWrapped(__VA_ARGS__)
-#endif /* AMIGA_M68K */
+#endif /* AMIGA_M68K && !__ASSEMBLER__ */
 
 #endif /* RADIO_WORKER_PROC_WRAP_H */
