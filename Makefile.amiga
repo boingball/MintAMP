@@ -68,7 +68,7 @@ PNG_CPPFLAGS := -DENABLE_PNG_ARTWORK -DLODEPNG_NO_COMPILE_ENCODER \
 # from-scratch fixed-point subset decoder -- no floating point, no third-
 # party library, see svgdec.h).  Disable with -DENABLE_SVG_ARTWORK=0 in
 # EXTRA_CFLAGS and drop svgdec.c from GUIR_SOURCES below to also shrink
-# the binary; the C-level guard alone only skips the decode calls.
+# the binary; the C-level guard alone skips only the decode calls.
 
 SOURCES := amiga_mp3dec.c miniamp_memguard.c $(RADIO_SOURCES) $(DECODER_SOURCES)
 # miniamp_memguard.c compiles to nothing unless HEAPGUARD=1 (see
@@ -113,6 +113,11 @@ GUI_HALFASM_TEST_TARGET := miniamp3.fdcthalf-test
 HALFASM_TEST_CPPFLAGS := -DAMIGA_M68K_ASM_FDCT32
 FAST030_ASM_SOURCES := real/amiga_m68k_polyphase.S
 AMIGA_HUNK_FAST_PREFERRED := python3 tools/amiga_fast_preferred_hunks.py
+# Tactical PR #455 shim: the frontends still call Execute("Run >NIL:
+# amiga_mp3dec.fastexp ...") for external radio.  Pre-include a narrow wrapper
+# so that exact command becomes CreateNewProcTags(NP_Command/NP_Arguments) with
+# a real task name Stop can signal.
+RADIO_WORKER_EXEC_WRAP_CPPFLAGS := -include radio_worker_execute_wrap.h
 
 .PHONY: all fast030 radio030 sslradio030 amissl-get-test amissl-free-repro-test amissl-spawn-repro-test amissl-exec-repro-test rb-stream-probe-test prof030 gui guir sslgui sslguir fast030-halfasm-test gui-halfasm-test decoder-modules clean print-command print-fast030-command print-gui-command print-guir-command
 
@@ -195,7 +200,7 @@ fast030-halfasm-test: $(FAST030_HALFASM_TEST_TARGET)
 gui-halfasm-test: $(GUI_HALFASM_TEST_TARGET)
 
 $(GUI_TARGET): $(GUI_SOURCES) amiga_mp3dec.c $(DECODER_SOURCES) $(FAST030_ASM_SOURCES)
-	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(SSL_CPPFLAGS) $(SSLCERTS_CPPFLAGS) $(DEBUG_CPPFLAGS) $(EXTRA_CFLAGS) \
+	$(CC) $(FAST030_CFLAGS) $(RADIO_WORKER_EXEC_WRAP_CPPFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(SSL_CPPFLAGS) $(SSLCERTS_CPPFLAGS) $(DEBUG_CPPFLAGS) $(EXTRA_CFLAGS) \
 		-o $@ $(GUI_SOURCES) $(DECODER_SOURCES) $(FAST030_ASM_SOURCES)
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
 
@@ -203,7 +208,7 @@ $(GUI_TARGET): $(GUI_SOURCES) amiga_mp3dec.c $(DECODER_SOURCES) $(FAST030_ASM_SO
 # as the GadTools GUI since it targets 030+/3.5/3.9 machines.  minimp3r.c
 # #includes amiga_mp3dec.c, so only the shared decoder modules are linked.
 $(GUIR_TARGET): $(GUIR_SOURCES) amiga_mp3dec.c $(DECODER_SOURCES) $(FAST030_ASM_SOURCES)
-	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(SSL_CPPFLAGS) $(SSLCERTS_CPPFLAGS) $(PNG_CPPFLAGS) $(DEBUG_CPPFLAGS) $(EXTRA_CFLAGS) \
+	$(CC) $(FAST030_CFLAGS) $(RADIO_WORKER_EXEC_WRAP_CPPFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(SSL_CPPFLAGS) $(SSLCERTS_CPPFLAGS) $(PNG_CPPFLAGS) $(DEBUG_CPPFLAGS) $(EXTRA_CFLAGS) \
 		-o $@ $(GUIR_SOURCES) $(DECODER_SOURCES) $(FAST030_ASM_SOURCES)
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
 
@@ -233,11 +238,11 @@ print-command:
 	@printf '%s\n' '$(AMIGA_HUNK_FAST_PREFERRED) $(TARGET)'
 
 print-gui-command:
-	@printf '%s\n' '$(CC) $(CFLAGS_COMMON) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(EXTRA_CFLAGS) -o $(GUI_TARGET) $(GUI_SOURCES)'
+	@printf '%s\n' '$(CC) $(FAST030_CFLAGS) $(RADIO_WORKER_EXEC_WRAP_CPPFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(EXTRA_CFLAGS) -o $(GUI_TARGET) $(GUI_SOURCES) $(DECODER_SOURCES) $(FAST030_ASM_SOURCES)'
 	@printf '%s\n' '$(AMIGA_HUNK_FAST_PREFERRED) $(GUI_TARGET)'
 
 print-guir-command:
-	@printf '%s\n' '$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(PNG_CPPFLAGS) $(EXTRA_CFLAGS) -o $(GUIR_TARGET) $(GUIR_SOURCES) $(DECODER_SOURCES) $(FAST030_ASM_SOURCES)'
+	@printf '%s\n' '$(CC) $(FAST030_CFLAGS) $(RADIO_WORKER_EXEC_WRAP_CPPFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(PNG_CPPFLAGS) $(EXTRA_CFLAGS) -o $(GUIR_TARGET) $(GUIR_SOURCES) $(DECODER_SOURCES) $(FAST030_ASM_SOURCES)'
 	@printf '%s\n' '$(AMIGA_HUNK_FAST_PREFERRED) $(GUIR_TARGET)'
 
 print-fast030-command:
