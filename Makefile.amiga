@@ -114,7 +114,7 @@ HALFASM_TEST_CPPFLAGS := -DAMIGA_M68K_ASM_FDCT32
 FAST030_ASM_SOURCES := real/amiga_m68k_polyphase.S
 AMIGA_HUNK_FAST_PREFERRED := python3 tools/amiga_fast_preferred_hunks.py
 
-.PHONY: all fast030 radio030 sslradio030 amissl-get-test rb-stream-probe-test prof030 gui guir sslgui sslguir fast030-halfasm-test gui-halfasm-test decoder-modules clean print-command print-fast030-command print-gui-command print-guir-command
+.PHONY: all fast030 radio030 sslradio030 amissl-get-test amissl-free-repro-test rb-stream-probe-test prof030 gui guir sslgui sslguir fast030-halfasm-test gui-halfasm-test decoder-modules clean print-command print-fast030-command print-gui-command print-guir-command
 
 all: $(TARGET) decoder-modules
 
@@ -132,6 +132,8 @@ sslradio030:
 
 amissl-get-test: amissl_https_get
 
+amissl-free-repro-test: amissl_ssl_free_repro
+
 rb-stream-probe-test: rb_stream_probe_test
 
 # Standalone AmiSSL smoke test: deliberately links only this file and no
@@ -139,6 +141,14 @@ rb-stream-probe-test: rb_stream_probe_test
 # unambiguous while debugging library vector crashes.
 amissl_https_get: amissl_https_get.c
 	$(CC) $(CFLAGS_COMMON) $(CPPFLAGS_COMMON) -DHAVE_AMISSL $(SSL_CPPFLAGS) $(DEBUG_CPPFLAGS) $(EXTRA_CFLAGS) -o $@ amissl_https_get.c
+	$(AMIGA_HUNK_FAST_PREFERRED) $@
+
+# Minimal SSL_free()-after-SSL_ERROR_SYSCALL reproducer for the AmiSSL bug
+# report (docs/amissl-lifecycle-audit.md has the full lifecycle audit this
+# file's approach is based on). See amissl_ssl_free_repro.c's header comment
+# for MP3_REPRO_MODE/MP3_REPRO_STATION_FILE/etc.
+amissl_ssl_free_repro: amissl_ssl_free_repro.c
+	$(CC) $(CFLAGS_COMMON) $(CPPFLAGS_COMMON) -DHAVE_AMISSL $(SSL_CPPFLAGS) $(DEBUG_CPPFLAGS) $(EXTRA_CFLAGS) -o $@ amissl_ssl_free_repro.c
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
 
 rb_stream_probe_test: radio_stream_probe.c radio_stream_probe.h
