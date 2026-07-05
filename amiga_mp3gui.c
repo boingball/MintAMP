@@ -5254,7 +5254,7 @@ static void GuiClose(HelixAmp3Gui *gui)
 			if (((RadioWorkerIpcMessage *)msg)->magic == RADIO_WORKER_IPC_MAGIC)
 				FreeMem(msg, sizeof(RadioWorkerIpcMessage));
 		}
-		if (gui->radioWorkerPortAdded) { RemovePort(gui->donePort); gui->radioWorkerPortAdded = 0; }
+		if (gui->radioWorkerPortAdded) { RemPort(gui->donePort); gui->radioWorkerPortAdded = 0; }
 		DeleteMsgPort(gui->donePort);
 		gui->donePort = NULL;
 	}

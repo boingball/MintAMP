@@ -5771,7 +5771,7 @@ static int MrMainReal(int argc, char **argv)
 			if (((RadioWorkerIpcMessage *)m)->magic == RADIO_WORKER_IPC_MAGIC)
 				FreeMem(m, sizeof(RadioWorkerIpcMessage));
 		}
-		if (app.radioWorkerPortAdded) { RemovePort(app.donePort); app.radioWorkerPortAdded = 0; }
+		if (app.radioWorkerPortAdded) { RemPort(app.donePort); app.radioWorkerPortAdded = 0; }
 		DeleteMsgPort(app.donePort);
 		app.donePort = NULL;
 	}
