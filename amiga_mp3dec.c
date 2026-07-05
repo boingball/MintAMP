@@ -10,6 +10,7 @@
 #include <string.h>
 #include "miniamp_memguard.h"
 #include "radio_stream.h"
+#include "radio_worker_ipc.h"
 #include <time.h>
 #include <stdarg.h>
 #ifndef AMIGA_M68K
@@ -378,6 +379,8 @@ typedef struct DecodeOptions {
 	int startupVolumeSelftest;
 	int bufferSeconds;
 	int volumePercent;
+	const char *radioWorkerPortName;
+	unsigned long radioWorkerRunId;
 	int fastMem;
 	int info;
 	int noMonoMSSideSkip;
@@ -728,6 +731,7 @@ static void PrintUsage(const char *prog)
 		FAKE_STEREO_DEFAULT_SHIFT);
 	printf("  --play-fast-path accepted alias; --play already uses reduced-overhead playback\n");
 	printf("  --decode-then-play decode whole MP3 to RAM, then play (debug for --play)\n");
+	printf("  --radio-worker-port NAME internal GUI IPC port for external radio worker\n");
 	printf("  --selftest-play-cleanup open/submit/cleanup audio.device five times\n");
 	printf("  --selftest-startup-volume verify startup CMD_WRITE volume setup\n");
 	printf("  --play-lifecycle-test legacy alias for --selftest-play-cleanup\n");
@@ -951,6 +955,14 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			if (++i >= argc)
 				return -1;
 			opt->radioCodecHint = argv[i];
+		} else if (!strcmp(argv[i], "--radio-worker-port")) {
+			if (++i >= argc)
+				return -1;
+			opt->radioWorkerPortName = argv[i];
+		} else if (!strcmp(argv[i], "--radio-worker-run-id")) {
+			if (++i >= argc)
+				return -1;
+			opt->radioWorkerRunId = strtoul(argv[i], NULL, 0);
 		} else if (!strcmp(argv[i], "--decode-then-play")) {
 			opt->play = 1;
 			opt->decodeThenPlay = 1;
@@ -5641,6 +5653,55 @@ typedef struct GuiPlaybackStatus {
 
 GuiPlaybackStatus gGuiPlaybackStatus;
 
+static const char *gRadioWorkerPortName = NULL;
+static unsigned long gRadioWorkerRunId = 0;
+
+static void GuiWorkerCopyString(char *dst, unsigned long dstSize, volatile const char *src)
+{
+	unsigned long i;
+	if (!dst || dstSize == 0) return;
+	if (!src) { dst[0] = '\0'; return; }
+	for (i = 0; i + 1 < dstSize && src[i]; i++) dst[i] = src[i];
+	dst[i] = '\0';
+}
+
+static void GuiSendRadioWorkerEvent(unsigned long event)
+{
+#if defined(AMIGA_M68K)
+	struct MsgPort *port;
+	RadioWorkerIpcMessage *m;
+	if (!gRadioWorkerPortName || !gRadioWorkerPortName[0]) return;
+	m = (RadioWorkerIpcMessage *)AllocMem(sizeof(*m), MEMF_PUBLIC | MEMF_CLEAR);
+	if (!m) return;
+	m->msg.mn_Node.ln_Type = NT_MESSAGE;
+	m->msg.mn_Length = sizeof(*m);
+	m->magic = RADIO_WORKER_IPC_MAGIC;
+	m->runId = gRadioWorkerRunId;
+	m->event = event;
+	m->phase = gGuiPlaybackStatus.phase;
+	m->radioStatus = gGuiPlaybackStatus.radioStatus;
+	m->radioActive = gGuiPlaybackStatus.radioActive;
+	m->radioBitrateKbps = gGuiPlaybackStatus.radioBitrateKbps;
+	m->radioBufferedBytes = gGuiPlaybackStatus.radioBufferedBytes;
+	m->radioMetaInt = gGuiPlaybackStatus.radioMetaInt;
+	GuiWorkerCopyString(m->radioTitle, sizeof(m->radioTitle), gGuiPlaybackStatus.radioTitle);
+	GuiWorkerCopyString(m->radioStationName, sizeof(m->radioStationName), gGuiPlaybackStatus.radioStationName);
+	GuiWorkerCopyString(m->radioGenre, sizeof(m->radioGenre), gGuiPlaybackStatus.radioGenre);
+	GuiWorkerCopyString(m->radioStreamUrl, sizeof(m->radioStreamUrl), gGuiPlaybackStatus.radioStreamUrl);
+	GuiWorkerCopyString(m->radioContentType, sizeof(m->radioContentType), gGuiPlaybackStatus.radioContentType);
+	GuiWorkerCopyString(m->radioError, sizeof(m->radioError), gGuiPlaybackStatus.radioError);
+	Forbid();
+	port = FindPort((STRPTR)gRadioWorkerPortName);
+	if (port)
+		PutMsg(port, &m->msg);
+	Permit();
+	if (!port)
+		FreeMem(m, sizeof(*m));
+#else
+	(void)event;
+#endif
+}
+
 static void GuiCopyVolatileString(volatile char *dst, unsigned long dstSize, const char *src)
 {
 	unsigned long i;
@@ -5668,6 +5729,7 @@ static void GuiPublishRadioMetadata(RadioStream *radio)
 	GuiCopyVolatileString(gGuiPlaybackStatus.radioStreamUrl, sizeof(gGuiPlaybackStatus.radioStreamUrl), Radio_GetStreamUrl(radio));
 	GuiCopyVolatileString(gGuiPlaybackStatus.radioContentType, sizeof(gGuiPlaybackStatus.radioContentType), Radio_GetContentType(radio));
 	GuiCopyVolatileString(gGuiPlaybackStatus.radioError, sizeof(gGuiPlaybackStatus.radioError), Radio_GetError(radio));
+	GuiSendRadioWorkerEvent(RADIO_WORKER_EVENT_STATUS);
 }
 
 
@@ -5686,6 +5748,7 @@ static void GuiMarkRadioErrorText(const char *message)
 	GuiMarkRadioError();
 	GuiCopyVolatileString(gGuiPlaybackStatus.radioError, sizeof(gGuiPlaybackStatus.radioError),
 		message && message[0] ? message : "radio stream failed");
+	GuiSendRadioWorkerEvent(RADIO_WORKER_EVENT_ERROR);
 }
 
 static void GuiMarkRadioStopped(void)
@@ -5700,6 +5763,7 @@ static void GuiMarkRadioStopped(void)
 	GuiCopyVolatileString(gGuiPlaybackStatus.radioGenre, sizeof(gGuiPlaybackStatus.radioGenre), "");
 	GuiCopyVolatileString(gGuiPlaybackStatus.radioStreamUrl, sizeof(gGuiPlaybackStatus.radioStreamUrl), "");
 	GuiCopyVolatileString(gGuiPlaybackStatus.radioContentType, sizeof(gGuiPlaybackStatus.radioContentType), "");
+	GuiSendRadioWorkerEvent(RADIO_WORKER_EVENT_DONE);
 }
 
 #define GUIPLAY_PHASE_IDLE      0   /* not playing */
@@ -10169,6 +10233,11 @@ int main(int argc, char **argv)
 		AmigaFreeNormalizedArgs(&normalized);
 		return 1;
 	}
+	gRadioWorkerPortName = opt.radioWorkerPortName;
+	gRadioWorkerRunId = opt.radioWorkerRunId;
+	if (gRadioWorkerPortName && gRadioWorkerPortName[0])
+		GuiSendRadioWorkerEvent(RADIO_WORKER_EVENT_STARTED);
+
 	if (opt.help) {
 		PrintUsage(argv && argv[0] ? argv[0] : "amiga_mp3dec");
 		AmigaFreeNormalizedArgs(&normalized);

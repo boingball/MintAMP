@@ -56,6 +56,7 @@
 #include "lodepng.h"
 #include "svgdec.h"
 #include "radio_stream.h"
+#include "radio_worker_ipc.h"
 #include "radio_browser_controller.h"
 #include "radio_browser_http.h"
 
@@ -546,6 +547,9 @@ typedef struct MrApp {
 	struct timerequest *timerReq;
 	int               timerRunning;
 	struct MsgPort   *donePort;
+	char              radioWorkerPortName[32];
+	int               radioWorkerPortAdded;
+	int               externalRadioWorker;
 
 	char  inputName[MR_MAX_PATH];
 	char  lastDrawer[MR_MAX_PATH];
@@ -645,6 +649,36 @@ static void OpenPlaylistWindow(MrApp *app);
 static void CloseRadioWindow(MrApp *app);
 static void OpenRadioWindow(MrApp *app);
 static void HandleRadioWindow(MrApp *app);
+
+static int MrHandleRadioWorkerMessage(MrApp *app, struct Message *msg)
+{
+	RadioWorkerIpcMessage *m = (RadioWorkerIpcMessage *)msg;
+	int done = 0;
+	if (m->magic != RADIO_WORKER_IPC_MAGIC)
+		return 0;
+	if (m->runId == app->playbackRunId) {
+		gGuiPlaybackStatus.runId = m->runId;
+		gGuiPlaybackStatus.phase = m->phase;
+		gGuiPlaybackStatus.radioActive = m->radioActive;
+		gGuiPlaybackStatus.radioStatus = m->radioStatus;
+		gGuiPlaybackStatus.radioBitrateKbps = m->radioBitrateKbps;
+		gGuiPlaybackStatus.radioBufferedBytes = m->radioBufferedBytes;
+		gGuiPlaybackStatus.radioMetaInt = m->radioMetaInt;
+		GuiCopyVolatileString(gGuiPlaybackStatus.radioTitle, sizeof(gGuiPlaybackStatus.radioTitle), m->radioTitle);
+		GuiCopyVolatileString(gGuiPlaybackStatus.radioStationName, sizeof(gGuiPlaybackStatus.radioStationName), m->radioStationName);
+		GuiCopyVolatileString(gGuiPlaybackStatus.radioGenre, sizeof(gGuiPlaybackStatus.radioGenre), m->radioGenre);
+		GuiCopyVolatileString(gGuiPlaybackStatus.radioStreamUrl, sizeof(gGuiPlaybackStatus.radioStreamUrl), m->radioStreamUrl);
+		GuiCopyVolatileString(gGuiPlaybackStatus.radioContentType, sizeof(gGuiPlaybackStatus.radioContentType), m->radioContentType);
+		GuiCopyVolatileString(gGuiPlaybackStatus.radioError, sizeof(gGuiPlaybackStatus.radioError), m->radioError);
+		if (m->event == RADIO_WORKER_EVENT_DONE || m->event == RADIO_WORKER_EVENT_ERROR) {
+			gDoneRunId = m->runId;
+			done = 1;
+		}
+	}
+	FreeMem(m, sizeof(*m));
+	return done;
+}
+
 static void HandleDoneSignal(MrApp *app);
 static void FinalizePlayback(MrApp *app);
 static void RadioSetStatus(MrApp *app, const char *text);
@@ -1368,6 +1402,14 @@ static void BuildPlaybackArgs(MrApp *app, MrPlayArgs *args)
 	AddArg(args, "--play");
 	if (isRadio) {
 		AddArg(args, "--radio-stream");
+		if (app->radioWorkerPortName[0]) {
+			char runId[16];
+			AddArg(args, "--radio-worker-port");
+			AddArg(args, app->radioWorkerPortName);
+			AddArg(args, "--radio-worker-run-id");
+			sprintf(runId, "%lu", app->playbackRunId);
+			AddArg(args, runId);
+		}
 		if (app->haveRadioHostAddr) {
 			AddArg(args, "--radio-host-addr-be");
 			sprintf(num, "%lu", app->radioHostAddrBe);
@@ -1462,6 +1504,8 @@ static int PlaybackProcessStillExists(void)
 
 	Forbid();
 	task = FindTask((STRPTR)"minimp3r playback");
+	if (!task) task = FindTask((STRPTR)"amiga_mp3dec.fastexp");
+	if (!task) task = FindTask((STRPTR)"amiga_mp3dec");
 	Permit();
 	return task != NULL;
 }
@@ -1595,9 +1639,11 @@ static void StartPlayback(MrApp *app)
 		return;
 	}
 
-	/* Drain any stale done message and re-arm the static message node. */
-	while ((stale = GetMsg(app->donePort)) != NULL)
-		;
+	/* Drain any stale done/worker messages and re-arm the static message node. */
+	while ((stale = GetMsg(app->donePort)) != NULL) {
+		if (((RadioWorkerIpcMessage *)stale)->magic == RADIO_WORKER_IPC_MAGIC)
+			FreeMem(stale, sizeof(RadioWorkerIpcMessage));
+	}
 	memset(&gDoneMsg, 0, sizeof(gDoneMsg));
 	gDoneMsg.msg.mn_Length = sizeof(gDoneMsg);
 	gDoneMsg.msg.mn_Node.ln_Type = NT_MESSAGE;
@@ -1621,6 +1667,7 @@ static void StartPlayback(MrApp *app)
 	gPlayer.cleanupStage = "";
 	gPlayer.lastIoState = "";
 	gPlayer.donePosted = 0;
+	app->externalRadioWorker = MrIsRadioInput(app->inputName) ? 1 : 0;
 	app->lastChildExitReason[0] = '\0';
 	app->lastChildError[0] = '\0';
 	app->lastRadioError[0] = '\0';
@@ -1648,7 +1695,8 @@ static void StartPlayback(MrApp *app)
 		sprintf(radioWorkerCommand, "Run >NIL: amiga_mp3dec.fastexp %s", radioWorkerArgs);
 		RADIO_DBG(printf("radio-worker: launching separate executable via Execute: %s\n", radioWorkerCommand);)
 		if (Execute((STRPTR)radioWorkerCommand, (BPTR)0, nilOut)) {
-			gPlayer.process = (struct Process *)FindTask(NULL); /* non-NULL launch sentinel; worker owns network state */
+			gPlayer.process = (struct Process *)FindTask((STRPTR)"amiga_mp3dec.fastexp");
+			if (!gPlayer.process) gPlayer.process = (struct Process *)FindTask((STRPTR)"amiga_mp3dec");
 			if (nilOut) { Close(nilOut); nilOut = (BPTR)0; }
 			if (dirLock) { UnLock(dirLock); dirLock = (BPTR)0; }
 		} else
@@ -1666,7 +1714,7 @@ static void StartPlayback(MrApp *app)
 			TAG_DONE);
 	}
 
-	if (!gPlayer.process) {
+	if (!gPlayer.process && !app->externalRadioWorker) {
 		Close(nilOut);
 		if (dirLock)
 			UnLock(dirLock);
@@ -1759,6 +1807,8 @@ static void StopPlayback(MrApp *app)
 	 * child already being torn down by DOS. */
 	Forbid();
 	child = FindTask((STRPTR)"minimp3r playback");
+	if (!child && MrIsRadioInput(app->inputName)) child = FindTask((STRPTR)"amiga_mp3dec.fastexp");
+	if (!child && MrIsRadioInput(app->inputName)) child = FindTask((STRPTR)"amiga_mp3dec");
 	if (child)
 		Signal(child, SIGBREAKF_CTRL_C);
 	Permit();
@@ -1945,6 +1995,11 @@ static void HandleDoneSignal(MrApp *app)
 	if (!app->donePort)
 		return;
 	while ((msg = GetMsg(app->donePort)) != NULL) {
+		if (((RadioWorkerIpcMessage *)msg)->magic == RADIO_WORKER_IPC_MAGIC) {
+			if (MrHandleRadioWorkerMessage(app, msg))
+				gotDone = 1;
+			continue;
+		}
 		gotDone = 1;
 		if (((MrDoneMessage *)msg)->magic != MR_DONE_MAGIC)
 			RADIO_DBG(printf("radio-done: bad done message magic msg=%p magic=%08lx\n", (void *)msg, ((MrDoneMessage *)msg)->magic);)
@@ -5545,6 +5600,13 @@ static int MrMainReal(int argc, char **argv)
 	LoadSettings(&app);
 
 	app.donePort = CreateMsgPort();
+	if (app.donePort) {
+		sprintf(app.radioWorkerPortName, "MRRadio%08lx", (unsigned long)FindTask(NULL));
+		app.donePort->mp_Node.ln_Name = (STRPTR)app.radioWorkerPortName;
+		app.donePort->mp_Node.ln_Pri = 0;
+		AddPort(app.donePort);
+		app.radioWorkerPortAdded = 1;
+	}
 	if (!app.donePort) {
 		fprintf(stderr, "minimp3r: could not create the reply port.\n");
 		CloseLibs();
@@ -5705,8 +5767,11 @@ static int MrMainReal(int argc, char **argv)
 	RADIO_DBG(printf("app-close: CloseTimer done\n");)
 	if (app.donePort) {
 		struct Message *m;
-		while ((m = GetMsg(app.donePort)) != NULL)
-			;
+		while ((m = GetMsg(app.donePort)) != NULL) {
+			if (((RadioWorkerIpcMessage *)m)->magic == RADIO_WORKER_IPC_MAGIC)
+				FreeMem(m, sizeof(RadioWorkerIpcMessage));
+		}
+		if (app.radioWorkerPortAdded) { RemovePort(app.donePort); app.radioWorkerPortAdded = 0; }
 		DeleteMsgPort(app.donePort);
 		app.donePort = NULL;
 	}

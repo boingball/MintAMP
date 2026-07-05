@@ -183,6 +183,7 @@ static char gSupportedExtPattern[512];
 /* #include <graphics/colormap.h> */
 #include "picojpeg.h"
 #include "radio_stream.h"
+#include "radio_worker_ipc.h"
 #include "radio_browser_controller.h"
 #ifndef OBP_FailIfBad
 #define OBP_FailIfBad (TAG_USER + 0x01L)
@@ -511,6 +512,9 @@ typedef struct HelixAmp3Gui {
 	ArtDecodeState artDecode;
 	struct MsgPort *timerPort;
 	struct MsgPort *donePort;
+	char radioWorkerPortName[32];
+	int radioWorkerPortAdded;
+	int externalRadioWorker;
 	struct timerequest *timerReq;
 	struct TextFont *smallFont;
 	int timerOpen;
@@ -2368,6 +2372,36 @@ static void DrawArtPanel(HelixAmp3Gui *gui);
 static void DrawTransportIcons(HelixAmp3Gui *gui);
 static void DrawFilterButton(HelixAmp3Gui *gui);
 static void ApplyHardwareAudioFilter(HelixAmp3Gui *gui);
+
+static int GuiHandleRadioWorkerMessage(HelixAmp3Gui *gui, struct Message *msg)
+{
+	RadioWorkerIpcMessage *m = (RadioWorkerIpcMessage *)msg;
+	int done = 0;
+	if (m->magic != RADIO_WORKER_IPC_MAGIC)
+		return 0;
+	if (m->runId == gui->playbackRunId) {
+		gGuiPlaybackStatus.runId = m->runId;
+		gGuiPlaybackStatus.phase = m->phase;
+		gGuiPlaybackStatus.radioActive = m->radioActive;
+		gGuiPlaybackStatus.radioStatus = m->radioStatus;
+		gGuiPlaybackStatus.radioBitrateKbps = m->radioBitrateKbps;
+		gGuiPlaybackStatus.radioBufferedBytes = m->radioBufferedBytes;
+		gGuiPlaybackStatus.radioMetaInt = m->radioMetaInt;
+		GuiCopyVolatileString(gGuiPlaybackStatus.radioTitle, sizeof(gGuiPlaybackStatus.radioTitle), m->radioTitle);
+		GuiCopyVolatileString(gGuiPlaybackStatus.radioStationName, sizeof(gGuiPlaybackStatus.radioStationName), m->radioStationName);
+		GuiCopyVolatileString(gGuiPlaybackStatus.radioGenre, sizeof(gGuiPlaybackStatus.radioGenre), m->radioGenre);
+		GuiCopyVolatileString(gGuiPlaybackStatus.radioStreamUrl, sizeof(gGuiPlaybackStatus.radioStreamUrl), m->radioStreamUrl);
+		GuiCopyVolatileString(gGuiPlaybackStatus.radioContentType, sizeof(gGuiPlaybackStatus.radioContentType), m->radioContentType);
+		GuiCopyVolatileString(gGuiPlaybackStatus.radioError, sizeof(gGuiPlaybackStatus.radioError), m->radioError);
+		if (m->event == RADIO_WORKER_EVENT_DONE || m->event == RADIO_WORKER_EVENT_ERROR) {
+			gDoneRunId = m->runId;
+			done = 1;
+		}
+	}
+	FreeMem(m, sizeof(*m));
+	return done;
+}
+
 static void HandleDoneSignal(HelixAmp3Gui *gui);
 static void SaveArtworkCache(HelixAmp3Gui *gui);
 static void BuildArtColorPens(HelixAmp3Gui *gui);
@@ -3774,6 +3808,8 @@ static int PlaybackProcessStillExists(void)
 	 * Do not launch another decoder until DOS has actually removed that task. */
 	Forbid();
 	task = FindTask((STRPTR)"MiniAMP3 playback");
+	if (!task) task = FindTask((STRPTR)"amiga_mp3dec.fastexp");
+	if (!task) task = FindTask((STRPTR)"amiga_mp3dec");
 	Permit();
 	return task != NULL;
 }
@@ -3882,6 +3918,7 @@ static void radio_reset_playback_state_after_stop(HelixAmp3Gui *gui, const char 
 	}
 	gGuiPlayer.process = NULL;
 	gGuiPlayer.stopRequested = 0;
+	gui->externalRadioWorker = 0;
 	gPlaybackInterrupted = 0;
 	gDonePort = NULL;
 	gDoneRunId = 0;
@@ -4048,6 +4085,8 @@ static void SignalPlaybackChildCtrlC(void)
 	struct Task *child;
 	Forbid();
 	child = FindTask((STRPTR)"MiniAMP3 playback");
+	if (!child && IsRadioInputName(gui->inputName)) child = FindTask((STRPTR)"amiga_mp3dec.fastexp");
+	if (!child && IsRadioInputName(gui->inputName)) child = FindTask((STRPTR)"amiga_mp3dec");
 	if (child)
 		Signal(child, SIGBREAKF_CTRL_C);
 	Permit();
@@ -4325,8 +4364,14 @@ static void HandleDoneSignal(HelixAmp3Gui *gui)
 		return;
 
 	gotDone = 0;
-	while ((msg = GetMsg(gui->donePort)) != NULL)
+	while ((msg = GetMsg(gui->donePort)) != NULL) {
+		if (((RadioWorkerIpcMessage *)msg)->magic == RADIO_WORKER_IPC_MAGIC) {
+			if (GuiHandleRadioWorkerMessage(gui, msg))
+				gotDone = 1;
+			continue;
+		}
 		gotDone = 1;
+	}
 	if (!gotDone) {
 		/* No message on the port — but if playbackDonePending is already set
 		 * (polled ahead by HandleTimerSignal), still check if we can finalize. */
@@ -5147,6 +5192,11 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	}
 	gui->donePort = CreateMsgPort();
 	if (gui->donePort) {
+		sprintf(gui->radioWorkerPortName, "MGRadio%08lx", (unsigned long)FindTask(NULL));
+		gui->donePort->mp_Node.ln_Name = (STRPTR)gui->radioWorkerPortName;
+		gui->donePort->mp_Node.ln_Pri = 0;
+		AddPort(gui->donePort);
+		gui->radioWorkerPortAdded = 1;
 		memset(&gDoneMsg, 0, sizeof(gDoneMsg));
 		gDoneMsg.mn_Length = sizeof(gDoneMsg);
 		gDoneMsg.mn_Node.ln_Type = NT_MESSAGE;
@@ -5200,8 +5250,11 @@ static void GuiClose(HelixAmp3Gui *gui)
 		struct Message *msg;
 
 		gDonePort = NULL;
-		while ((msg = GetMsg(gui->donePort)) != NULL)
-			;
+		while ((msg = GetMsg(gui->donePort)) != NULL) {
+			if (((RadioWorkerIpcMessage *)msg)->magic == RADIO_WORKER_IPC_MAGIC)
+				FreeMem(msg, sizeof(RadioWorkerIpcMessage));
+		}
+		if (gui->radioWorkerPortAdded) { RemovePort(gui->donePort); gui->radioWorkerPortAdded = 0; }
 		DeleteMsgPort(gui->donePort);
 		gui->donePort = NULL;
 	}
@@ -6808,6 +6861,14 @@ static void BuildPlaybackArgs(HelixAmp3Gui *gui, HelixAmp3Args *args)
 	AddArg(args, "--play");
 	if (is_url_path(gui->inputName)) {
 		AddArg(args, "--radio-stream");
+		if (gui->radioWorkerPortName[0]) {
+			char runId[16];
+			AddArg(args, "--radio-worker-port");
+			AddArg(args, gui->radioWorkerPortName);
+			AddArg(args, "--radio-worker-run-id");
+			sprintf(runId, "%lu", gui->playbackRunId);
+			AddArg(args, runId);
+		}
 		if (gui->haveRadioHostAddr) {
 			AddArg(args, "--radio-host-addr-be");
 			sprintf(num, "%lu", gui->radioHostAddrBe);
@@ -7125,8 +7186,10 @@ static void StartPlayback(HelixAmp3Gui *gui)
 	{
 		struct Message *stale;
 
-		while ((stale = GetMsg(gui->donePort)) != NULL)
-			;
+		while ((stale = GetMsg(gui->donePort)) != NULL) {
+			if (((RadioWorkerIpcMessage *)stale)->magic == RADIO_WORKER_IPC_MAGIC)
+				FreeMem(stale, sizeof(RadioWorkerIpcMessage));
+		}
 	}
 	memset(&gDoneMsg, 0, sizeof(gDoneMsg));
 	gDoneMsg.mn_Length = sizeof(gDoneMsg);
@@ -7166,6 +7229,7 @@ static void StartPlayback(HelixAmp3Gui *gui)
 	gGuiPlayer.argv = gGuiArgs.argv;
 	gGuiPlayer.stopRequested = 0;
 	gPlaybackInterrupted = 0;
+	gui->externalRadioWorker = IsRadioInputName(gui->inputName) ? 1 : 0;
 	gGuiFirstUiProgressLogged = 0;
 	gDonePort = gui->donePort;
 	gDoneRunId = 0;
@@ -7189,7 +7253,8 @@ static void StartPlayback(HelixAmp3Gui *gui)
 		sprintf(radioWorkerCommand, "Run >NIL: amiga_mp3dec.fastexp %s", radioWorkerArgs);
 		RADIO_DBG(printf("radio-worker: launching separate executable via Execute: %s\n", radioWorkerCommand);)
 		if (Execute((STRPTR)radioWorkerCommand, (BPTR)0, nilOut)) {
-			gGuiPlayer.process = (struct Process *)FindTask(NULL); /* non-NULL launch sentinel; worker owns network state */
+			gGuiPlayer.process = (struct Process *)FindTask((STRPTR)"amiga_mp3dec.fastexp");
+			if (!gGuiPlayer.process) gGuiPlayer.process = (struct Process *)FindTask((STRPTR)"amiga_mp3dec");
 			if (nilOut) { Close(nilOut); nilOut = (BPTR)0; }
 			if (dirLock) { UnLock(dirLock); dirLock = (BPTR)0; }
 		} else
@@ -7213,7 +7278,7 @@ static void StartPlayback(HelixAmp3Gui *gui)
 			NP_CopyVars, FALSE,
 			TAG_DONE);
 	}
-	if (!gGuiPlayer.process) {
+	if (!gGuiPlayer.process && !gui->externalRadioWorker) {
 		if (nilOut)
 			Close(nilOut);
 		if (dirLock)
