@@ -41,6 +41,7 @@ extern struct Library *AmiSSLMasterBase;
 
 volatile int gMiniAmp3EmbeddedPlayback;
 static int gMiniAmp3DebugPlayRequested;
+static void GuiPollRadioWorkerControl(void);
 
 #if defined(AMIGA_M68K)
 /* Shared GUI/decoder stop latch. */
@@ -380,6 +381,7 @@ typedef struct DecodeOptions {
 	int bufferSeconds;
 	int volumePercent;
 	const char *radioWorkerPortName;
+	const char *radioWorkerControlPortName;
 	unsigned long radioWorkerRunId;
 	int fastMem;
 	int info;
@@ -732,6 +734,7 @@ static void PrintUsage(const char *prog)
 	printf("  --play-fast-path accepted alias; --play already uses reduced-overhead playback\n");
 	printf("  --decode-then-play decode whole MP3 to RAM, then play (debug for --play)\n");
 	printf("  --radio-worker-port NAME internal GUI IPC port for external radio worker\n");
+	printf("  --radio-worker-control-port NAME internal GUI control port for external radio worker\n");
 	printf("  --selftest-play-cleanup open/submit/cleanup audio.device five times\n");
 	printf("  --selftest-startup-volume verify startup CMD_WRITE volume setup\n");
 	printf("  --play-lifecycle-test legacy alias for --selftest-play-cleanup\n");
@@ -963,6 +966,10 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			if (++i >= argc)
 				return -1;
 			opt->radioWorkerRunId = strtoul(argv[i], NULL, 0);
+		} else if (!strcmp(argv[i], "--radio-worker-control-port")) {
+			if (++i >= argc)
+				return -1;
+			opt->radioWorkerControlPortName = argv[i];
 		} else if (!strcmp(argv[i], "--decode-then-play")) {
 			opt->play = 1;
 			opt->decodeThenPlay = 1;
@@ -1707,6 +1714,7 @@ static size_t InputSourceRead(InputSource *input, void *dest, size_t bytes)
 	}
 	if (input && input->radio) {
 		RadioStatus status;
+		GuiPollRadioWorkerControl();
 		if (gPlaybackInterrupted) {
 			Radio_RequestStop(input->radio);
 			GuiMarkRadioStopped();
@@ -1792,6 +1800,7 @@ static void InputSourceSeek(InputSource *input, unsigned long pos)
 static int FastInputPreloadStopRequested(void)
 {
 #ifdef HAVE_AMIGA_AUDIO_DEVICE
+	GuiPollRadioWorkerControl();
 	if (SetSignal(0, 0) & SIGBREAKF_CTRL_C)
 		gPlaybackInterrupted = 1;
 #endif
@@ -5654,8 +5663,60 @@ typedef struct GuiPlaybackStatus {
 GuiPlaybackStatus gGuiPlaybackStatus;
 
 static const char *gRadioWorkerPortName = NULL;
+static const char *gRadioWorkerControlPortName = NULL;
 static unsigned long gRadioWorkerRunId = 0;
+#if defined(AMIGA_M68K)
+static struct MsgPort *gRadioWorkerControlPort = NULL;
+static int gRadioWorkerControlPortAdded = 0;
+#endif
 
+
+static void GuiOpenRadioWorkerControlPort(void)
+{
+#if defined(AMIGA_M68K)
+	if (!gRadioWorkerControlPortName || !gRadioWorkerControlPortName[0] || gRadioWorkerControlPort)
+		return;
+	gRadioWorkerControlPort = CreateMsgPort();
+	if (gRadioWorkerControlPort) {
+		gRadioWorkerControlPort->mp_Node.ln_Name = (STRPTR)gRadioWorkerControlPortName;
+		gRadioWorkerControlPort->mp_Node.ln_Pri = 0;
+		AddPort(gRadioWorkerControlPort);
+		gRadioWorkerControlPortAdded = 1;
+	}
+#endif
+}
+
+static void GuiPollRadioWorkerControl(void)
+{
+#if defined(AMIGA_M68K)
+	struct Message *msg;
+	if (!gRadioWorkerControlPort) return;
+	while ((msg = GetMsg(gRadioWorkerControlPort)) != NULL) {
+		RadioWorkerIpcMessage *m = (RadioWorkerIpcMessage *)msg;
+		if (m->magic == RADIO_WORKER_IPC_MAGIC &&
+			m->runId == gRadioWorkerRunId &&
+			m->event == RADIO_WORKER_EVENT_STOP)
+			gPlaybackInterrupted = 1;
+		FreeMem(m, sizeof(RadioWorkerIpcMessage));
+	}
+#endif
+}
+
+static void GuiCloseRadioWorkerControlPort(void)
+{
+#if defined(AMIGA_M68K)
+	struct Message *msg;
+	if (!gRadioWorkerControlPort) return;
+	while ((msg = GetMsg(gRadioWorkerControlPort)) != NULL)
+		FreeMem(msg, sizeof(RadioWorkerIpcMessage));
+	if (gRadioWorkerControlPortAdded) {
+		RemPort(gRadioWorkerControlPort);
+		gRadioWorkerControlPortAdded = 0;
+	}
+	DeleteMsgPort(gRadioWorkerControlPort);
+	gRadioWorkerControlPort = NULL;
+#endif
+}
 static void GuiWorkerCopyString(char *dst, unsigned long dstSize, volatile const char *src)
 {
 	unsigned long i;
@@ -10234,7 +10295,9 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	gRadioWorkerPortName = opt.radioWorkerPortName;
+	gRadioWorkerControlPortName = opt.radioWorkerControlPortName;
 	gRadioWorkerRunId = opt.radioWorkerRunId;
+	GuiOpenRadioWorkerControlPort();
 	if (gRadioWorkerPortName && gRadioWorkerPortName[0])
 		GuiSendRadioWorkerEvent(RADIO_WORKER_EVENT_STARTED);
 
@@ -11240,6 +11303,7 @@ int main(int argc, char **argv)
 	gTiming = NULL;
 	MP3SetDecodeCoreProfileEnabled(0);
 	free(resolvedOutName);
+	GuiCloseRadioWorkerControlPort();
 	AmigaFreeNormalizedArgs(&normalized);
 
 	return verifyError ? 1 : 0;

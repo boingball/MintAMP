@@ -10,6 +10,7 @@
 #define RADIO_WORKER_EVENT_STATUS  2
 #define RADIO_WORKER_EVENT_ERROR   3
 #define RADIO_WORKER_EVENT_DONE    4
+#define RADIO_WORKER_EVENT_STOP    5
 
 typedef struct RadioWorkerIpcMessage {
     struct Message msg;

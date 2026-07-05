@@ -513,6 +513,7 @@ typedef struct HelixAmp3Gui {
 	struct MsgPort *timerPort;
 	struct MsgPort *donePort;
 	char radioWorkerPortName[32];
+	char radioWorkerControlPortName[32];
 	int radioWorkerPortAdded;
 	int externalRadioWorker;
 	struct timerequest *timerReq;
@@ -4080,9 +4081,33 @@ static void FinalizePlayback(HelixAmp3Gui *gui)
 	}
 }
 
-static void SignalPlaybackChildCtrlC(void)
+
+static int GuiSendRadioWorkerStop(HelixAmp3Gui *gui)
+{
+	RadioWorkerIpcMessage *m;
+	struct MsgPort *port;
+	if (!gui || !gui->externalRadioWorker || !gui->radioWorkerControlPortName[0])
+		return 0;
+	m = (RadioWorkerIpcMessage *)AllocMem(sizeof(*m), MEMF_PUBLIC | MEMF_CLEAR);
+	if (!m) return 0;
+	m->msg.mn_Node.ln_Type = NT_MESSAGE;
+	m->msg.mn_Length = sizeof(*m);
+	m->magic = RADIO_WORKER_IPC_MAGIC;
+	m->runId = gui->playbackRunId;
+	m->event = RADIO_WORKER_EVENT_STOP;
+	Forbid();
+	port = FindPort((STRPTR)gui->radioWorkerControlPortName);
+	if (port)
+		PutMsg(port, &m->msg);
+	Permit();
+	if (!port) { FreeMem(m, sizeof(*m)); return 0; }
+	return 1;
+}
+
+static void SignalPlaybackChildCtrlC(HelixAmp3Gui *gui)
 {
 	struct Task *child;
+	(void)GuiSendRadioWorkerStop(gui);
 	Forbid();
 	child = FindTask((STRPTR)"MiniAMP3 playback");
 	if (!child && IsRadioInputName(gui->inputName)) child = FindTask((STRPTR)"amiga_mp3dec.fastexp");
@@ -4106,7 +4131,7 @@ static void HandleTimerSignal(HelixAmp3Gui *gui)
 
 	if (gui->playbackActive && !gui->playbackDonePending && gGuiPlayer.stopRequested) {
 		gPlaybackInterrupted = 1;
-		SignalPlaybackChildCtrlC();
+		SignalPlaybackChildCtrlC(gui);
 	}
 
 	/* Poll the done port on every tick while playback is active so that a
@@ -5193,6 +5218,7 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	gui->donePort = CreateMsgPort();
 	if (gui->donePort) {
 		sprintf(gui->radioWorkerPortName, "MGRadio%08lx", (unsigned long)FindTask(NULL));
+		sprintf(gui->radioWorkerControlPortName, "MGCtl%08lx", (unsigned long)FindTask(NULL));
 		gui->donePort->mp_Node.ln_Name = (STRPTR)gui->radioWorkerPortName;
 		gui->donePort->mp_Node.ln_Pri = 0;
 		AddPort(gui->donePort);
@@ -6868,6 +6894,8 @@ static void BuildPlaybackArgs(HelixAmp3Gui *gui, HelixAmp3Args *args)
 			AddArg(args, "--radio-worker-run-id");
 			sprintf(runId, "%lu", gui->playbackRunId);
 			AddArg(args, runId);
+			AddArg(args, "--radio-worker-control-port");
+			AddArg(args, gui->radioWorkerControlPortName);
 		}
 		if (gui->haveRadioHostAddr) {
 			AddArg(args, "--radio-host-addr-be");
@@ -7353,7 +7381,7 @@ static void StopPlayback(HelixAmp3Gui *gui)
 	 * address/size passed to FreeMem() -- not a signal-delivery alert; the
 	 * Forbid/FindTask guard here is unrelated defensive hygiene, not a fix
 	 * for that alert.) */
-	SignalPlaybackChildCtrlC();
+	SignalPlaybackChildCtrlC(gui);
 	SetStatus(gui, "Stopping...");
 }
 
@@ -7416,7 +7444,7 @@ static void WaitForPlaybackShutdown(HelixAmp3Gui *gui)
 		 * FreeMem() -- not a signal-delivery alert; see the note above
 		 * StopPlayback()'s equivalent guard.) */
 		if (!gui->playbackDonePending)
-			SignalPlaybackChildCtrlC();
+			SignalPlaybackChildCtrlC(gui);
 		Delay(1);
 	}
 }

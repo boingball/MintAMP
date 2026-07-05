@@ -548,6 +548,7 @@ typedef struct MrApp {
 	int               timerRunning;
 	struct MsgPort   *donePort;
 	char              radioWorkerPortName[32];
+	char              radioWorkerControlPortName[32];
 	int               radioWorkerPortAdded;
 	int               externalRadioWorker;
 
@@ -1409,6 +1410,8 @@ static void BuildPlaybackArgs(MrApp *app, MrPlayArgs *args)
 			AddArg(args, "--radio-worker-run-id");
 			sprintf(runId, "%lu", app->playbackRunId);
 			AddArg(args, runId);
+			AddArg(args, "--radio-worker-control-port");
+			AddArg(args, app->radioWorkerControlPortName);
 		}
 		if (app->haveRadioHostAddr) {
 			AddArg(args, "--radio-host-addr-be");
@@ -1751,6 +1754,29 @@ static void StartPlayback(MrApp *app)
 	SetGauge(app, 0);
 }
 
+
+static int MrSendRadioWorkerStop(MrApp *app)
+{
+	RadioWorkerIpcMessage *m;
+	struct MsgPort *port;
+	if (!app || !app->externalRadioWorker || !app->radioWorkerControlPortName[0])
+		return 0;
+	m = (RadioWorkerIpcMessage *)AllocMem(sizeof(*m), MEMF_PUBLIC | MEMF_CLEAR);
+	if (!m) return 0;
+	m->msg.mn_Node.ln_Type = NT_MESSAGE;
+	m->msg.mn_Length = sizeof(*m);
+	m->magic = RADIO_WORKER_IPC_MAGIC;
+	m->runId = app->playbackRunId;
+	m->event = RADIO_WORKER_EVENT_STOP;
+	Forbid();
+	port = FindPort((STRPTR)app->radioWorkerControlPortName);
+	if (port)
+		PutMsg(port, &m->msg);
+	Permit();
+	if (!port) { FreeMem(m, sizeof(*m)); return 0; }
+	return 1;
+}
+
 static void StopPlayback(MrApp *app)
 {
 	struct Task *child;
@@ -1803,8 +1829,10 @@ static void StopPlayback(MrApp *app)
 	}
 
 	/* Wake the child immediately so it does not sit in WaitIO for the rest of
-	 * a multi-second audio buffer.  Forbid()/FindTask() guards against the
-	 * child already being torn down by DOS. */
+	 * a multi-second audio buffer.  External radio workers receive a control
+	 * message on their unique per-run port; file playback keeps the same-image
+	 * signal path. */
+	(void)MrSendRadioWorkerStop(app);
 	Forbid();
 	child = FindTask((STRPTR)"minimp3r playback");
 	if (!child && MrIsRadioInput(app->inputName)) child = FindTask((STRPTR)"amiga_mp3dec.fastexp");
@@ -5602,6 +5630,7 @@ static int MrMainReal(int argc, char **argv)
 	app.donePort = CreateMsgPort();
 	if (app.donePort) {
 		sprintf(app.radioWorkerPortName, "MRRadio%08lx", (unsigned long)FindTask(NULL));
+		sprintf(app.radioWorkerControlPortName, "MRCtl%08lx", (unsigned long)FindTask(NULL));
 		app.donePort->mp_Node.ln_Name = (STRPTR)app.radioWorkerPortName;
 		app.donePort->mp_Node.ln_Pri = 0;
 		AddPort(app.donePort);
