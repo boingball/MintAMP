@@ -149,11 +149,13 @@ typedef struct RadioNetContext {
     struct Library *savedAmiSSLMasterBase;
     struct Library *savedAmiSSLBase;
     struct Library *savedAmiSSLExtBase;
+    void *savedAmiSslOpenerTask;
     long errnoStore;
     struct Task *ownerTask;
     int childOwned;
     int amiSslInitialized;
     int amiSslOpened;
+    int savedAmiSslInitialized;
 } RadioNetContext;
 static volatile int radio_playback_network_owned = 0;
 /* Set alongside RadioStream::sslStatePoisoned (see Radio_Pump()'s
@@ -454,52 +456,6 @@ void Radio_ReportTlsFault(const char *where)
         radio_tls_fault_count, where ? where : "",
         radio_poison_session_id, radio_poison_url[0] ? radio_poison_url : ""));
     (void)where;
-}
-
-/* Hosts that triggered a fatal AmiSSL fault this run. The fault can corrupt
- * memory INSIDE the failing AmiSSL call itself (an exec AN_BadFreeAddr alert
- * has been observed raised from within SSL_read, before the app regains
- * control), so quarantining objects afterwards is not enough for a repeat
- * offender: the only real protection is to never speak TLS to that host
- * again until restart. Other hosts stay fully usable. */
-#define RADIO_TLS_FAULT_HOSTS_MAX 8
-static char radio_tls_fault_hosts[RADIO_TLS_FAULT_HOSTS_MAX][256];
-static int radio_tls_fault_host_count = 0;
-
-static int radio_host_equal_nocase(const char *a, const char *b)
-{
-    while (*a && *b) {
-        char ca = *a, cb = *b;
-        if (ca >= 'A' && ca <= 'Z') ca = (char)(ca - 'A' + 'a');
-        if (cb >= 'A' && cb <= 'Z') cb = (char)(cb - 'A' + 'a');
-        if (ca != cb) return 0;
-        a++; b++;
-    }
-    return *a == *b;
-}
-
-void Radio_NoteTlsFaultHost(const char *host)
-{
-    int i;
-    if (!host || !host[0]) return;
-    for (i = 0; i < radio_tls_fault_host_count; i++)
-        if (radio_host_equal_nocase(radio_tls_fault_hosts[i], host)) return;
-    if (radio_tls_fault_host_count >= RADIO_TLS_FAULT_HOSTS_MAX) return;
-    strncpy(radio_tls_fault_hosts[radio_tls_fault_host_count], host,
-        sizeof(radio_tls_fault_hosts[0]) - 1);
-    radio_tls_fault_hosts[radio_tls_fault_host_count][sizeof(radio_tls_fault_hosts[0]) - 1] = '\0';
-    radio_tls_fault_host_count++;
-    RADIO_DBG(printf("radio-tls: host \"%s\" blocked for HTTPS until restart (TLS fault) blocked_host_count=%d\n",
-        host, radio_tls_fault_host_count));
-}
-
-int Radio_IsTlsFaultHost(const char *host)
-{
-    int i;
-    if (!host || !host[0]) return 0;
-    for (i = 0; i < radio_tls_fault_host_count; i++)
-        if (radio_host_equal_nocase(radio_tls_fault_hosts[i], host)) return 1;
-    return 0;
 }
 
 void Radio_MarkTlsPoisoned(const char *where)
@@ -832,6 +788,8 @@ static int radio_net_open_child(RadioStream *rs)
     ctx->savedAmiSSLMasterBase = AmiSSLMasterBase;
     ctx->savedAmiSSLBase = AmiSSLBase;
     ctx->savedAmiSSLExtBase = AmiSSLExtBase;
+    ctx->savedAmiSslInitialized = radio_amissl_initialized;
+    ctx->savedAmiSslOpenerTask = radio_amissl_opener_task;
     ctx->socketBase = OpenLibrary("bsdsocket.library", 4);
     if (!ctx->socketBase) {
         ctx->childOwned = 0;
@@ -843,6 +801,12 @@ static int radio_net_open_child(RadioStream *rs)
         CloseLibrary(ctx->socketBase);
         ctx->socketBase = NULL;
         ctx->childOwned = 0;
+        SocketBase = ctx->savedSocketBase;
+        AmiSSLMasterBase = ctx->savedAmiSSLMasterBase;
+        AmiSSLBase = ctx->savedAmiSSLBase;
+        AmiSSLExtBase = ctx->savedAmiSSLExtBase;
+        radio_amissl_initialized = ctx->savedAmiSslInitialized;
+        radio_amissl_opener_task = ctx->savedAmiSslOpenerTask;
         set_error(rs, "AmiSSL unavailable: child amisslmaster.library unavailable");
         return -1;
     }
@@ -863,6 +827,8 @@ static int radio_net_open_child(RadioStream *rs)
         AmiSSLMasterBase = ctx->savedAmiSSLMasterBase;
         AmiSSLBase = ctx->savedAmiSSLBase;
         AmiSSLExtBase = ctx->savedAmiSSLExtBase;
+        radio_amissl_initialized = ctx->savedAmiSslInitialized;
+        radio_amissl_opener_task = ctx->savedAmiSslOpenerTask;
         radio_playback_network_owned = 0;
         memset(ctx, 0, sizeof(*ctx));
         set_error(rs, "AmiSSL unavailable: child OpenAmiSSLTags failed");
@@ -874,16 +840,12 @@ static int radio_net_open_child(RadioStream *rs)
     AmiSSLBase = ctx->amisslBase;
     AmiSSLExtBase = ctx->amisslExtBase;
     radio_amissl_initialized = 1;
+    radio_amissl_opener_task = (void *)ctx->ownerTask;
     RADIO_DBG(printf("radio-child-net: session=%lu task=%p name=\"%s\" child SocketBase=%p AmiSSLMasterBase=%p AmiSSLBase=%p AmiSSLExtBase=%p ErrNoPtr=%p OpenAmiSSLTags+Init owned=yes\n",
         rs->session_id, (void *)ctx->ownerTask, radio_task_name(ctx->ownerTask),
         (void *)ctx->socketBase, (void *)ctx->amisslMasterBase, (void *)ctx->amisslBase,
         (void *)ctx->amisslExtBase, (void *)&ctx->errnoStore););
     return 0;
-}
-
-int Radio_PlaybackOwnsNetwork(void)
-{
-    return radio_playback_network_owned != 0;
 }
 
 int Radio_AmiSslTaskIsOpener(void)
@@ -1098,7 +1060,6 @@ static void radio_net_close_child(RadioStream *rs)
 {
     RadioNetContext *ctx;
     int locked;
-    int closeChildBases = 1;
     if (!rs) return;
     ctx = &rs->net;
     if (!ctx->childOwned) return;
@@ -1110,38 +1071,32 @@ static void radio_net_close_child(RadioStream *rs)
         (void *)ctx->amisslExtBase, (void *)&ctx->errnoStore, ctx->amiSslOpened,
         ctx->amiSslInitialized););
     if (ctx->amiSslOpened && ctx->amisslBase) {
-        if (radio_amissl_task_poisoned || Radio_IsTlsPoisoned()) {
-            RADIO_DBG(printf("radio-child-net: CloseAmiSSL skipped (%s poison) session=%lu leaking child AmiSSL bases\n",
-                radio_amissl_task_poison_reason[0] ? radio_amissl_task_poison_reason : "unknown",
-                rs->session_id););
-            closeChildBases = 0;
-        } else {
-            CloseAmiSSL();
-            radio_closeamissl_count++;
-            RADIO_DBG(printf("radio-child-net: CloseAmiSSL done session=%lu closeamissl_count=%ld\n",
-                rs->session_id, radio_closeamissl_count););
-        }
+        CloseAmiSSL();
+        radio_closeamissl_count++;
+        RADIO_DBG(printf("radio-child-net: CloseAmiSSL done session=%lu closeamissl_count=%ld\n",
+            rs->session_id, radio_closeamissl_count););
     }
     ctx->amiSslOpened = 0;
     ctx->amiSslInitialized = 0;
-    radio_amissl_initialized = 0;
-    radio_playback_network_owned = 0;
+    radio_amissl_initialized = ctx->savedAmiSslInitialized;
+    radio_amissl_opener_task = ctx->savedAmiSslOpenerTask;
     AmiSSLBase = ctx->savedAmiSSLBase;
     AmiSSLExtBase = ctx->savedAmiSSLExtBase;
-    if (ctx->amisslMasterBase && closeChildBases) {
+    if (ctx->amisslMasterBase) {
         CloseLibrary(ctx->amisslMasterBase);
         ctx->amisslMasterBase = NULL;
     }
     AmiSSLMasterBase = ctx->savedAmiSSLMasterBase;
-    if (ctx->socketBase && closeChildBases) {
+    if (ctx->socketBase) {
         CloseLibrary(ctx->socketBase);
         ctx->socketBase = NULL;
     }
     SocketBase = ctx->savedSocketBase;
-    RADIO_DBG(printf("radio-child-net: cleanup EXIT session=%lu child-owned network bases %s restored SocketBase=%p AmiSSLMasterBase=%p AmiSSLBase=%p AmiSSLExtBase=%p\n",
-        rs->session_id, closeChildBases ? "closed" : "leaked-after-poison",
-        (void *)SocketBase, (void *)AmiSSLMasterBase, (void *)AmiSSLBase, (void *)AmiSSLExtBase););
+    RADIO_DBG(printf("radio-child-net: cleanup EXIT session=%lu child-owned network bases closed; restored SocketBase=%p AmiSSLMasterBase=%p AmiSSLBase=%p AmiSSLExtBase=%p initialized=%d opener_task=%p\n",
+        rs->session_id, (void *)SocketBase, (void *)AmiSSLMasterBase, (void *)AmiSSLBase,
+        (void *)AmiSSLExtBase, radio_amissl_initialized, radio_amissl_opener_task););
     memset(ctx, 0, sizeof(*ctx));
+    radio_playback_network_owned = 0;
     if (locked) Radio_AmiSslUnlock();
 }
 
@@ -1173,7 +1128,6 @@ static int radio_ssl_do_handshake(RadioStream *rs)
 {
     int tries;
     int last_error = 0;
-    radio_net_adopt_context(rs);
     /* Start with a clean OpenSSL error queue: a stale entry left by an
      * earlier failed connection would otherwise be misread as this
      * connection's fatal error by the fault handling below. */
@@ -1231,7 +1185,6 @@ static int radio_ssl_do_handshake(RadioStream *rs)
                 strcpy(rs->lastSslOp, reason);
                 radio_amissl_task_poisoned = 1;
                 strcpy(radio_amissl_task_poison_reason, reason);
-                Radio_NoteTlsFaultHost(rs->host);
                 RADIO_DBG(printf("radio-safety: TLS session poisoned reason=%s session=%lu\n", reason, rs->session_id));
                 if (!rs->tlsFaultCounted) {
                     rs->tlsFaultCounted = 1;
@@ -1255,12 +1208,6 @@ static int radio_ssl_connect(RadioStream *rs)
 {
     const SSL_METHOD *method;
     int set_fd_ok;
-    radio_net_adopt_context(rs);
-    if (Radio_IsTlsFaultHost(rs->host)) {
-        set_error(rs, "station triggered a TLS fault; blocked until app restart");
-        RADIO_DBG(printf("radio-tls: session=%lu refusing TLS to fault-blocked host \"%s\"\n", rs->session_id, rs->host));
-        return -1;
-    }
     if (radio_ssl_global_init(rs) != 0) return -1;
     /* rs->ctx persists across reconnects within this task (see
      * radio_ssl_free_ctx(), only called once from Radio_Close()) -- a
@@ -1365,7 +1312,6 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
 {
     int shutdown_called = 0;
     if (!rs) return;
-    radio_net_adopt_context(rs);
     RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: HTTPS cleanup start mode=%s ssl=%p ctx=%p fd=%ld handshake=%d\n", radio_close_mode_name(mode), (void *)rs->ssl, (void *)rs->ctx, (long)rs->sock, rs->sslHandshakeDone));
     if (mode == RADIO_CLOSE_GRACEFUL && !rs->sslStatePoisoned && !Radio_IsTlsPoisoned() && rs->ssl && rs->sslHandshakeDone && rs->sock != RADIO_INVALID_SOCKET && !rs->socketClosed) {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_shutdown start ssl=%p\n", (void *)rs->ssl));
@@ -1437,7 +1383,6 @@ static void radio_ssl_close_stream(RadioStream *rs) { radio_ssl_close_stream_mod
 static void radio_ssl_free_ctx(RadioStream *rs)
 {
     if (!rs) return;
-    radio_net_adopt_context(rs);
     if (rs->ctx && !rs->ctxFreed) {
         if (rs->sslStatePoisoned || Radio_IsTlsPoisoned() || Radio_IsMemoryPoisoned()) {
             /* Same poison gate as SSL_free() above: only an actually
@@ -1461,11 +1406,6 @@ static void radio_ssl_free_ctx(RadioStream *rs)
 }
 #endif /* AMIGA_M68K && HAVE_AMISSL */
 
-#if !defined(AMIGA_M68K) || !defined(HAVE_AMISSL)
-static void radio_net_adopt_context(RadioStream *rs) { (void)rs; }
-int Radio_PlaybackOwnsNetwork(void) { return 0; }
-#endif
-
 /* Drive a non-blocking connect() to completion by re-issuing connect() and
  * yielding with Delay() between tries, so the connect never blocks (and so
  * never freezes WinUAE's emulation).  Returns 0 on success, -1 on failure or
@@ -1475,7 +1415,6 @@ int Radio_PlaybackOwnsNetwork(void) { return 0; }
 static int radio_wait_connected(RadioStream *rs, struct sockaddr_in *sa)
 {
     int tries;
-    radio_net_adopt_context(rs);
     RADIO_DBG(printf("radio-connect: session=%lu wait_connected enter fd=%ld host=%s\n", rs ? rs->session_id : 0, rs ? (long)rs->sock : -1L, rs ? rs->host : ""););
     /* ~6s budget at 40ms/poll; generous for a slow stream server. */
     for (tries = 0; tries < 150; tries++) {
@@ -1511,7 +1450,6 @@ static int radio_wait_connected(RadioStream *rs, struct sockaddr_in *sa)
 static int radio_send_all(RadioStream *rs, const char *buf, int len)
 {
     int sent = 0, tries = 0;
-    radio_net_adopt_context(rs);
     while (sent < len && tries < 150) {
         int r;
         if (radio_is_stopping(rs))
@@ -1535,8 +1473,7 @@ static int radio_send_all(RadioStream *rs, const char *buf, int len)
                 }
                 /* Same fatal-fault quarantine as SSL_connect()/SSL_read():
                  * after SSL_ERROR_SSL or a non-empty error queue this
-                 * session's objects must never be freed again, and the host
-                 * is blocked for the run. */
+                 * session's objects must never be freed again. */
                 ssl_lib_error = ERR_get_error();
                 RADIO_DBG(printf("radio-ssl-write: session=%lu write failed ssl_error=%d lib_error=%08lx\n", rs->session_id, e, ssl_lib_error));
                 if (radio_ssl_error_is_fatal(e)) {
@@ -1549,7 +1486,6 @@ static int radio_send_all(RadioStream *rs, const char *buf, int len)
                     strcpy(rs->lastSslOp, reason);
                     radio_amissl_task_poisoned = 1;
                     strcpy(radio_amissl_task_poison_reason, reason);
-                    Radio_NoteTlsFaultHost(rs->host);
                     RADIO_DBG(printf("radio-safety: TLS session poisoned reason=%s session=%lu\n", reason, rs->session_id));
                     if (!rs->tlsFaultCounted) {
                         rs->tlsFaultCounted = 1;
@@ -1789,8 +1725,15 @@ static void reset_parser(RadioStream *rs)
 
 static int connect_http(RadioStream *rs){
     struct sockaddr_in sa; char req[1024]; int n; int cr;
-#if defined(AMIGA_M68K)
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+    if (radio_net_open_child(rs) != 0) return -1;
+    RADIO_DBG(printf("radio-child-net: session=%lu child-owned context active before DNS/socket/connect/TLS SocketBase=%p AmiSSLMasterBase=%p AmiSSLBase=%p AmiSSLExtBase=%p initialized=%d opener_task=%p\n",
+        rs->session_id, (void *)SocketBase, (void *)AmiSSLMasterBase, (void *)AmiSSLBase,
+        (void *)AmiSSLExtBase, radio_amissl_initialized, radio_amissl_opener_task););
+#elif defined(AMIGA_M68K)
     radio_net_adopt_context(rs);
+#endif
+#if defined(AMIGA_M68K)
     if(!SocketBase) SocketBase=OpenLibrary("bsdsocket.library",4); if(!SocketBase){ set_error(rs,"bsdsocket.library unavailable"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: bsdsocket open failed\n")); return -1; }
 #endif
     if (radio_is_stopping(rs)) return -1;
@@ -1805,6 +1748,8 @@ static int connect_http(RadioStream *rs){
         RADIO_DBG(printf("radio-dns: session=%lu using cached probe DNS %s\n", rs->session_id, addr_text););
     } else {
         struct hostent *he;
+        RADIO_DBG(printf("radio-child-net: before DNS session=%lu host=%s SocketBase=%p\n",
+            rs->session_id, rs->host, (void *)SocketBase););
         RADIO_DBG(printf("radio-dns: WARNING blocking DNS lookup in playback child host=%s\n", rs->host););
 #if defined(AMIGA_M68K)
         /* gethostbyname() is a genuinely blocking bsdsocket.library call with
@@ -1845,11 +1790,15 @@ static int connect_http(RadioStream *rs){
         rs->haveHostAddr=1;
     }
     if (radio_is_stopping(rs)) return -1;
+    RADIO_DBG(printf("radio-child-net: before socket session=%lu host=%s SocketBase=%p\n",
+        rs->session_id, rs->host, (void *)SocketBase););
     rs->sock=socket(AF_INET,SOCK_STREAM,0); if(rs->sock!=RADIO_INVALID_SOCKET){ rs->socketClosed = 0; rs->closeCleanupDone = 0; radio_open_socket_count++; radio_playback_open_socket_count++; RADIO_DBG(printf("radio-socket: playback socket opened session=%lu host=%s fd=%ld open_socket_count=%ld playback_open_socket_count=%ld\n", rs->session_id, rs->host, (long)rs->sock, radio_open_socket_count, radio_playback_open_socket_count);) } if(rs->sock==RADIO_INVALID_SOCKET){ radio_log_socket_failure(rs, "playback", "socket"); set_error(rs,"Cannot create socket - TCP stack may still be releasing previous stream"); return -1; }
     /* Go non-blocking BEFORE connect so the connect never stalls the machine. */
     radio_set_nonblocking(rs->sock);
     memset(&sa,0,sizeof(sa)); sa.sin_family=AF_INET; sa.sin_port=htons((unsigned short)rs->port); sa.sin_addr=rs->hostAddr;
     if (radio_is_stopping(rs)) { close_current_socket(rs); return -1; }
+    RADIO_DBG(printf("radio-child-net: before connect session=%lu fd=%ld host=%s SocketBase=%p\n",
+        rs->session_id, (long)rs->sock, rs->host, (void *)SocketBase););
     RADIO_DBG(printf("radio-connect: session=%lu initial connect() fd=%ld host=%s port=%d\n", rs->session_id, (long)rs->sock, rs->host, rs->port););
     cr=connect(rs->sock,(struct sockaddr*)&sa,sizeof(sa));
     RADIO_DBG(printf("radio-connect: session=%lu initial connect() cr=%d errno=%ld\n", rs->session_id, cr, cr < 0 ? radio_sock_errno() : 0L););
@@ -1859,6 +1808,9 @@ static int connect_http(RadioStream *rs){
     RADIO_DBG(printf("radio-connect: session=%lu TCP connected, starting SSL/HTTP request phase isSSL=%d\n", rs->session_id, rs->isSSL););
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     if (rs->isSSL) {
+        RADIO_DBG(printf("radio-child-net: before TLS session=%lu fd=%ld host=%s SocketBase=%p AmiSSLBase=%p AmiSSLExtBase=%p\n",
+            rs->session_id, (long)rs->sock, rs->host, (void *)SocketBase,
+            (void *)AmiSSLBase, (void *)AmiSSLExtBase););
         rs->sslHandshakeDone = 0;
         if (radio_ssl_connect(rs) != 0) { close_current_socket(rs); return -1; }
         rs->streamStateFlags |= TLS_DONE;
@@ -1883,7 +1835,6 @@ static int connect_http(RadioStream *rs){
 static void radio_abort_current_socket(RadioStream *rs)
 {
     if (!rs) return;
-    radio_net_adopt_context(rs);
     radio_stream_magic_valid(rs, "radio_abort_current_socket");
     if (rs->sock != RADIO_INVALID_SOCKET && !rs->socketClosed) {
         long closing_fd = (long)rs->sock;
@@ -1925,7 +1876,6 @@ static void close_current_socket_mode(RadioStream *rs, RadioCloseMode mode)
 {
     long before;
     if (!rs) return;
-    radio_net_adopt_context(rs);
     radio_stream_magic_valid(rs, "close_current_socket");
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     if (rs->sock == RADIO_INVALID_SOCKET && rs->socketClosed &&
@@ -2606,7 +2556,6 @@ int Radio_Pump(RadioStream *rs)
     unsigned char b[1024];
     int n, wb;
     if (!rs || rs->status == RADIO_STATUS_ERROR) return -1;
-    radio_net_adopt_context(rs);
     if (rs->fatalStop) { set_error(rs, "TLS read failed"); return -1; }
     if (radio_is_stopping(rs)) { close_current_socket(rs); rs->status = RADIO_STATUS_CLOSED; return 0; }
     if (rs->sock == RADIO_INVALID_SOCKET) {
@@ -2689,7 +2638,6 @@ int Radio_Pump(RadioStream *rs)
                     strcpy(rs->lastSslOp, reason);
                     radio_amissl_task_poisoned = 1;
                     strcpy(radio_amissl_task_poison_reason, reason);
-                    Radio_NoteTlsFaultHost(rs->host);
                     RADIO_DBG(printf("radio-safety: TLS session poisoned reason=%s session=%lu\n", reason, rs->session_id));
                     if (!rs->tlsFaultCounted) {
                         rs->tlsFaultCounted = 1;

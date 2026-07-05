@@ -102,7 +102,6 @@ int Radio_HasNetwork(void);
  * machine without AmiSSL installed (always false in builds without
  * HAVE_AMISSL). */
 int Radio_HasHttps(void);
-int Radio_PlaybackOwnsNetwork(void);
 /* Shared AmiSSL instance opened by Radio_NetworkInit()/radio_stream.c, for
  * radio_stream_probe.c to adopt instead of opening a second instance (its
  * weak-symbol copies of the bases do not reliably merge with the strong
@@ -142,11 +141,6 @@ void Radio_MarkTlsPoisoned(const char *where);
  * and HTTPS stays enabled -- always. Only detected memory corruption
  * hard-poisons HTTPS (Radio_MarkTlsPoisoned()). */
 void Radio_ReportTlsFault(const char *where);
-/* Per-run blocklist of hosts that triggered a fatal AmiSSL fault: the fault
- * can corrupt memory inside the failing AmiSSL call itself, so a known
- * offender must not be contacted over TLS again until restart. */
-void Radio_NoteTlsFaultHost(const char *host);
-int Radio_IsTlsFaultHost(const char *host);
 const char *Radio_TlsPoisonedMessage(void);
 /* First (root-cause) reason AmiSSL was marked poisoned this run, or
  * "not-poisoned". */
@@ -209,7 +203,6 @@ static void Radio_GetNetworkBases(void **socket_base, void **amissl_base, void *
 }
 static int Radio_HasNetwork(void) { return 0; }
 static int Radio_HasHttps(void) { return 0; }
-static int Radio_PlaybackOwnsNetwork(void) { return 0; }
 static void Radio_GetAmiSslShared(void **amissl_base, void **amissl_ext_base, void **amissl_master_base)
 {
     if (amissl_base) *amissl_base = 0;
@@ -224,8 +217,6 @@ static void Radio_MarkMemoryPoisoned(const char *where) { (void)where; }
 static int Radio_IsTlsPoisoned(void) { return 0; }
 static void Radio_MarkTlsPoisoned(const char *where) { (void)where; }
 static void Radio_ReportTlsFault(const char *where) { (void)where; }
-static void Radio_NoteTlsFaultHost(const char *host) { (void)host; }
-static int Radio_IsTlsFaultHost(const char *host) { (void)host; return 0; }
 static const char *Radio_TlsPoisonedMessage(void) { return "HTTPS disabled after memory corruption; reboot before using HTTPS."; }
 static const char *Radio_TlsPoisonReason(void) { return "not-poisoned"; }
 static int Radio_CheckMiniMem(const char *where) { (void)where; return 0; }

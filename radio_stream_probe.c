@@ -294,7 +294,6 @@ static int rb_probe_ssl_read_retrying(RbProbeTransport *transport, char *dst, in
                     "probe-ssl-read-syscall" : (ssl_err == SSL_ERROR_SSL ? "probe-ssl-read-ssl-error" : "probe-ssl-read-fatal");
                 transport->sslStatePoisoned = 1;
                 rb_probe_amissl_dirty = 1;
-                Radio_NoteTlsFaultHost(transport->host);
                 RADIO_DBG(printf("radio-safety: TLS session poisoned reason=%s session=%lu\n", reason, transport->session_id));
                 Radio_ReportTlsFault(ssl_err == SSL_ERROR_SSL ? "probe SSL_ERROR_SSL from SSL_read" :
                     (ssl_err == SSL_ERROR_SYSCALL && ssl_lib_error == 0) ? "probe SSL_ERROR_SYSCALL (empty queue) from SSL_read" :
@@ -817,15 +816,6 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *host
     struct sockaddr_in sa;
 
     if (!transport || !host) return RB_STREAM_PROBE_ERR_BAD_ARG;
-#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-    if (use_ssl && Radio_IsTlsFaultHost(host)) {
-        /* This host already triggered a fatal AmiSSL fault this run --
-         * the fault can corrupt memory inside the failing call itself,
-         * so don't give it a second chance until restart. */
-        RADIO_DBG(printf("rb-probe: refusing TLS to fault-blocked host \"%s\"\n", host);)
-        return RB_STREAM_PROBE_ERR_TLS_HANDSHAKE;
-    }
-#endif
     transport->sock = RB_PROBE_INVALID_SOCKET;
     transport->isSSL = 0;
     transport->session_id = rb_probe_next_session_id++;
@@ -983,7 +973,6 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *host
                     "probe-ssl-connect-syscall" : (ssl_error == SSL_ERROR_SSL ? "probe-ssl-connect-ssl-error" : "probe-ssl-connect-fatal");
                 transport->sslStatePoisoned = 1;
                 rb_probe_amissl_dirty = 1;
-                Radio_NoteTlsFaultHost(transport->host);
                 RADIO_DBG(printf("radio-safety: TLS session poisoned reason=%s session=%lu\n", reason, transport->session_id));
                 Radio_ReportTlsFault(ssl_error == SSL_ERROR_SSL ? "probe SSL_ERROR_SSL from SSL_connect" :
                     (ssl_error == SSL_ERROR_SYSCALL && ssl_lib_error == 0) ? "probe SSL_ERROR_SYSCALL (empty queue) from SSL_connect" :
@@ -1116,8 +1105,7 @@ static int rb_probe_send_all(RbProbeTransport *transport, const char *buf, int l
                         "probe-ssl-write-syscall" : (e == SSL_ERROR_SSL ? "probe-ssl-write-ssl-error" : "probe-ssl-write-fatal");
                     transport->sslStatePoisoned = 1;
                     rb_probe_amissl_dirty = 1;
-                    Radio_NoteTlsFaultHost(transport->host);
-                    RADIO_DBG(printf("radio-safety: TLS session poisoned reason=%s session=%lu\n", reason, transport->session_id));
+                        RADIO_DBG(printf("radio-safety: TLS session poisoned reason=%s session=%lu\n", reason, transport->session_id));
                     Radio_ReportTlsFault(e == SSL_ERROR_SSL ? "probe SSL_ERROR_SSL from SSL_write" :
                         (e == SSL_ERROR_SYSCALL && ssl_lib_error == 0) ? "probe SSL_ERROR_SYSCALL (empty queue) from SSL_write" :
                         "probe fatal AmiSSL error queue from SSL_write");
@@ -1400,10 +1388,6 @@ static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
 
     if (!url || !info || !peek_len || peek_buf_size < 0 || (peek_buf_size > 0 && !peek_buf))
         return RB_STREAM_PROBE_ERR_BAD_ARG;
-    if (Radio_PlaybackOwnsNetwork()) {
-        RADIO_DBG(printf("rb-probe: skipped stream probe while radio playback child owns networking url=\"%s\"\n", url);)
-        return RB_STREAM_PROBE_ERR_DISABLED;
-    }
     if (Radio_IsMemoryPoisoned()) {
         /* Corrupt heap: no probe of any kind (not even plain HTTP/DNS) may
          * run again this app run -- see docs/amissl-lifecycle-audit.md F3. */
@@ -1606,10 +1590,6 @@ static int rb_probe_fetch_binary_impl(const char *url, unsigned char *out_buf, i
     int redirects;
 
     if (!url || !out_buf || out_buf_size <= 0 || !out_len) return RB_STREAM_PROBE_ERR_BAD_ARG;
-    if (Radio_PlaybackOwnsNetwork()) {
-        RADIO_DBG(printf("rb-probe: skipped binary fetch while radio playback child owns networking url=\"%s\"\n", url);)
-        return RB_STREAM_PROBE_ERR_DISABLED;
-    }
     if (Radio_IsMemoryPoisoned()) {
         /* Corrupt heap: no fetch of any kind (favicon/artwork included) may
          * run again this app run -- see docs/amissl-lifecycle-audit.md F3. */

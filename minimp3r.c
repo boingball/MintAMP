@@ -3781,10 +3781,6 @@ static int LoadRadioFaviconImage(MrApp *app)
 		RADIO_DBG(printf("radio-art: no favicon URL for current station\n");)
 		return 0;
 	}
-	if (Radio_PlaybackOwnsNetwork()) {
-		RADIO_DBG(printf("radio-art: skipped favicon fetch while radio playback child owns networking\n");)
-		return 0;
-	}
 	RADIO_DBG(printf("radio-art: fetching favicon url=%s\n", app->currentRadioFavicon);)
 	rc = rb_probe_fetch_binary(app->currentRadioFavicon, response, (int)sizeof(response),
 		&bytes, contentType, (int)sizeof(contentType));
@@ -4477,11 +4473,6 @@ static void RadioDoSearch(MrApp *app)
 	int rc;
 	char filterMsg[192];
 	if (app->rbSearchInProgress) { RadioSetStatus(app, "Search already running."); return; }
-	if (Radio_PlaybackOwnsNetwork()) {
-		RADIO_DBG(printf("radio-browser: search skipped while radio playback child owns networking\n");)
-		RadioSetStatus(app, "Radio playback owns networking; search after stopping.");
-		return;
-	}
 	app->rbSearchInProgress = 1;
 	RadioSetStatus(app, "Searching Radio Browser...");
 	if (app->rbSearchGad) GetAttr(STRINGA_TextVal, app->rbSearchGad, (ULONG *)(void *)&text);
@@ -4681,11 +4672,6 @@ static void RadioDoProbeAndPlay(MrApp *app)
 		RADIO_DBG(printf("radio-ui: queued stream while stopping old stream\n");)
 		if (!gPlayer.stopRequested)
 			StopPlayback(app);
-		return;
-	}
-	if (Radio_PlaybackOwnsNetwork()) {
-		RADIO_DBG(printf("radio-probe: play/probe skipped while radio playback child owns networking\n");)
-		RadioSetStatus(app, "Radio playback owns networking; stop before probing another stream.");
 		return;
 	}
 	if (app->rbShowingFavourites) {
