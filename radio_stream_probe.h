@@ -56,6 +56,8 @@ enum {
 
 const char *rb_probe_error_text(int rc);
 int rb_probe_url_looks_hls(const char *url);
+int rb_probe_stream_probe_disabled(void);
+int rb_probe_artwork_disabled(void);
 
 int rb_probe_stream_url(
     const char *url,

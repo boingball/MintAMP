@@ -42,6 +42,15 @@ static int rb_controller_starts_with(const char *s, const char *prefix)
     return 1;
 }
 
+static RbStreamCodec rb_controller_codec_from_station(const char *codec)
+{
+    if (!codec) return RB_STREAM_CODEC_UNKNOWN;
+    if (rb_controller_starts_with(codec, "MP3") || rb_controller_starts_with(codec, "mp3")) return RB_STREAM_CODEC_MP3;
+    if (rb_controller_starts_with(codec, "AAC") || rb_controller_starts_with(codec, "aac")) return RB_STREAM_CODEC_AAC;
+    if (rb_controller_starts_with(codec, "OGG") || rb_controller_starts_with(codec, "ogg")) return RB_STREAM_CODEC_OGG;
+    return RB_STREAM_CODEC_UNKNOWN;
+}
+
 static const char *rb_controller_optional_string(const char *s)
 {
     if (!s || !s[0]) return (const char *)0;
@@ -257,6 +266,17 @@ int rb_controller_probe_selected(
     }
 #endif
 
+    if (rb_probe_stream_probe_disabled()) {
+        memset(info, 0, sizeof(*info));
+        snprintf(info->final_url, sizeof(info->final_url), "%s", url);
+        info->final_url[sizeof(info->final_url) - 1] = '\0';
+        info->codec = rb_controller_codec_from_station(station->codec);
+        info->icy_br = station->bitrate;
+        if (peek_len) *peek_len = 0;
+        RADIO_DBG(printf("radio-probe: stream probe disabled by MP3_NO_STREAM_PROBE, direct playback url=\"%s\"\n", url);)
+        return RB_STREAM_PROBE_OK;
+    }
+
     rc = rb_probe_stream_url(url, info, peek_buf, peek_buf_size, peek_len);
     if (rc == RB_STREAM_PROBE_ERR_HTTP_STATUS) {
         char msg[RB_CONTROLLER_LAST_ERROR_SIZE];
@@ -312,6 +332,11 @@ const char *rb_probe_error_text(int rc)
 int rb_probe_url_looks_hls(const char *url)
 {
     return url && strstr(url, ".m3u8") != (char *)0;
+}
+
+int rb_probe_stream_probe_disabled(void)
+{
+    return 0;
 }
 
 int rb_search_stations(const char *host, const char *name, const char *tag,

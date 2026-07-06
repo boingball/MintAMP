@@ -652,6 +652,12 @@ static long radio_tls_fault_count = 0;
  * working until then). */
 static int radio_tls_shutdown_quarantine = 0;
 
+void Radio_SetTlsFaultContext(unsigned long session_id, const char *url)
+{
+    radio_poison_session_id = session_id;
+    radio_copy_string(radio_poison_url, sizeof(radio_poison_url), url ? url : "");
+}
+
 void Radio_ReportTlsFault(const char *where)
 {
     radio_tls_fault_count++;
@@ -1088,7 +1094,7 @@ static int radio_net_worker_amissl_ready(RadioStream *rs)
  * right now).  With the single-worker architecture every subsystem opens
  * its own private bsdsocket base and none of them ever touch the worker's
  * SocketBase, so there is no more contention to report. */
-int Radio_PlaybackOwnsNetwork(void) { return 0; }
+int Radio_PlaybackOwnsNetwork(void) { return radio_net_worker_streams != NULL; }
 
 /* No per-child InitAmiSSL()/CleanupAmiSSL()/bsdsocket.library close any
  * more: the worker task's own AmiSSL init/instance and bsdsocket base stay

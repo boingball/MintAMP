@@ -3075,6 +3075,10 @@ static int LoadRadioFaviconImage(HelixAmp3Gui *gui)
 		RADIO_DBG(printf("radio-art: no favicon URL for current station\n");)
 		return 0;
 	}
+	if (rb_probe_artwork_disabled()) {
+		RADIO_DBG(printf("radio-art: artwork fetch disabled by MP3_NO_ARTWORK\n");)
+		return 0;
+	}
 	if (Radio_PlaybackOwnsNetwork()) {
 		RADIO_DBG(printf("radio-art: skipped favicon fetch while radio playback child owns networking\n");)
 		return 0;

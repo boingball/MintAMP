@@ -156,6 +156,7 @@ void Radio_MarkTlsPoisoned(const char *where);
  * the failing session's SSL objects are quarantined (leaked, never freed)
  * and HTTPS stays enabled -- always. Only detected memory corruption
  * hard-poisons HTTPS (Radio_MarkTlsPoisoned()). */
+void Radio_SetTlsFaultContext(unsigned long session_id, const char *url);
 void Radio_ReportTlsFault(const char *where);
 const char *Radio_TlsPoisonedMessage(void);
 /* First (root-cause) reason AmiSSL was marked poisoned this run, or
@@ -234,6 +235,7 @@ static int Radio_IsMemoryPoisoned(void) { return 0; }
 static void Radio_MarkMemoryPoisoned(const char *where) { (void)where; }
 static int Radio_IsTlsPoisoned(void) { return 0; }
 static void Radio_MarkTlsPoisoned(const char *where) { (void)where; }
+static void Radio_SetTlsFaultContext(unsigned long session_id, const char *url) { (void)session_id; (void)url; }
 static void Radio_ReportTlsFault(const char *where) { (void)where; }
 static const char *Radio_TlsPoisonedMessage(void) { return "HTTPS disabled after memory corruption; reboot before using HTTPS."; }
 static const char *Radio_TlsPoisonReason(void) { return "not-poisoned"; }
