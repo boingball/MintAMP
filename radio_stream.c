@@ -171,6 +171,8 @@ static int radio_net_worker_pump_active = 0;          /* reentrancy guard for th
 
 static int radio_pump_body(RadioStream *rs);
 static void radio_worker_pump_active_streams(void);
+static void radio_stream_lock(RadioStream *rs);
+static void radio_stream_unlock(RadioStream *rs);
 
 /* ~60s at ~40ms/poll: generous enough to cover connect_http()'s worst-case
  * DNS + TCP connect + TLS handshake budget end to end, while still bounded
@@ -517,8 +519,11 @@ struct RadioStream {
      * for *this object only*, with no task-wide poisoning and no HTTPS
      * disablement. */
     int sslReadCloseSeen;
+    struct SignalSemaphore workerLock;
     struct RadioStream *workerNext;
     int workerRegistered;
+    int workerClosedAck;
+    int workerDetached;
 #endif
     /* Set once a read/write/connect fault is classified fatal (see
      * radio_ssl_error_is_fatal()): this session is done, permanently. No
@@ -880,11 +885,29 @@ static void radio_reset_session_state(RadioStream *rs)
     rs->sslFreed = rs->ctxFreed = rs->socketClosed = rs->cleanupDone = 0;
     rs->closeCleanupDone = 0;
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+    InitSemaphore(&rs->workerLock);
     rs->workerNext = NULL;
     rs->workerRegistered = 0;
+    rs->workerClosedAck = 0;
+    rs->workerDetached = 0;
 #endif
 }
 
+
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+static void radio_stream_lock(RadioStream *rs)
+{
+    if (rs) ObtainSemaphore(&rs->workerLock);
+}
+
+static void radio_stream_unlock(RadioStream *rs)
+{
+    if (rs) ReleaseSemaphore(&rs->workerLock);
+}
+#else
+static void radio_stream_lock(RadioStream *rs) { (void)rs; }
+static void radio_stream_unlock(RadioStream *rs) { (void)rs; }
+#endif
 
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
 static void radio_worker_register_stream(RadioStream *rs)
@@ -904,15 +927,21 @@ static void radio_worker_unregister_stream(RadioStream *rs)
     while (*pp) {
         if (*pp == rs) {
             *pp = rs->workerNext;
+            radio_stream_lock(rs);
             rs->workerNext = NULL;
             rs->workerRegistered = 0;
+            rs->workerClosedAck = 1;
+            radio_stream_unlock(rs);
             RADIO_DBG(printf("radio-net-worker: unregistered pump stream session=%lu\n", rs->session_id););
             return;
         }
         pp = &(*pp)->workerNext;
     }
+    radio_stream_lock(rs);
     rs->workerNext = NULL;
     rs->workerRegistered = 0;
+    rs->workerClosedAck = 1;
+    radio_stream_unlock(rs);
 }
 
 static void radio_worker_unregister_stream_job(void *arg)
@@ -1413,7 +1442,7 @@ static int radio_send_all(RadioStream *rs, const char *buf, int len)
     return sent == len ? 0 : -1;
 }
 
-static void set_status(RadioStream *rs, RadioStatus status) { if (rs && rs->status != RADIO_STATUS_ERROR && rs->status != RADIO_STATUS_CLOSED && rs->status != RADIO_STATUS_STOPPING) rs->status = status; }
+static void set_status(RadioStream *rs, RadioStatus status) { if (rs) { radio_stream_lock(rs); if (rs->status != RADIO_STATUS_ERROR && rs->status != RADIO_STATUS_CLOSED && rs->status != RADIO_STATUS_STOPPING) rs->status = status; radio_stream_unlock(rs); } }
 
 static void radio_copy_metadata_string(char *dst, size_t dstSize, const char *src, const char *label)
 {
@@ -1476,7 +1505,7 @@ static void radio_copy_bytes(char *dst, size_t dstSize, const unsigned char *src
     dst[copyLen] = 0;
 }
 
-static void set_error(RadioStream *rs, const char *msg) { if (rs) { radio_copy_string(rs->error,sizeof(rs->error),msg); rs->status = RADIO_STATUS_ERROR; RADIO_OPEN_DEBUG_PRINTF(("radio-open: %s\n", msg ? msg : "error")); } }
+static void set_error(RadioStream *rs, const char *msg) { if (rs) { radio_stream_lock(rs); radio_copy_string(rs->error,sizeof(rs->error),msg); rs->status = RADIO_STATUS_ERROR; radio_stream_unlock(rs); RADIO_OPEN_DEBUG_PRINTF(("radio-open: %s\n", msg ? msg : "error")); } }
 static void radio_ring_set_canary(RadioStream *rs);
 static int radio_ring_check_canary(RadioStream *rs, const char *where);
 static int ring_write(RadioStream *rs, const unsigned char *p, int n)
@@ -1484,6 +1513,7 @@ static int ring_write(RadioStream *rs, const unsigned char *p, int n)
     int written = 0;
     if (!rs || !p || n <= 0 || !rs->ring || !rs->size) return 0;
     if (radio_ring_check_canary(rs, "before ring_write") < 0) return 0;
+    radio_stream_lock(rs);
     while (written < n && rs->used < rs->size) {
         unsigned long freeBytes = rs->size - rs->used;
         unsigned long endBytes = rs->size - rs->wpos;
@@ -1504,7 +1534,6 @@ static int ring_write(RadioStream *rs, const unsigned char *p, int n)
         RADIO_DBG(printf("radio-ring: write session=%lu icy_state=%d metaint=%d bytes_to_ring=%lu wpos_before=%lu wpos_after=%lu fill_before=%lu fill_after=%lu free_before=%lu free_after=%lu wrapped=%d url=\"%s\"\n",
             rs->session_id, (int)rs->parseState, rs->metaint, todo, beforeWpos, rs->wpos,
             beforeUsed, rs->used, rs->size - beforeUsed, rs->size - rs->used, wrapped, rs->url););
-        if (radio_ring_check_canary(rs, "after ring_write") < 0) break;
     }
     if (written == 0) {
         rs->ringLastWrite = 0;
@@ -1512,9 +1541,11 @@ static int ring_write(RadioStream *rs, const unsigned char *p, int n)
             rs->session_id, (int)rs->parseState, rs->metaint, n, rs->used,
             rs->size > rs->used ? rs->size - rs->used : 0, rs->wpos, rs->size, rs->url););
     }
+    radio_stream_unlock(rs);
+    radio_ring_check_canary(rs, "after ring_write");
     return written;
 }
-static int ring_read(RadioStream *rs, unsigned char *p, int n) { int i=0; if(!rs||!p||n<=0)return 0; if(!rs->headerDone||!rs->decoderStarted){ RADIO_DBG(printf("radio-guard: ring_read refused session=%lu headerDone=%d decoderStarted=%d firstData=%d status=%d used=%lu\n", rs->session_id, rs->headerDone, rs->decoderStarted, rs->firstDataLogged, (int)rs->status, rs->used);); return 0; } if (radio_ring_check_canary(rs, "before ring_read") < 0) return 0; while (i<n && rs->used) { p[i++]=rs->ring[rs->rpos++]; if(rs->rpos>=rs->size)rs->rpos=0; rs->used--; } radio_ring_check_canary(rs, "after ring_read"); return i; }
+static int ring_read(RadioStream *rs, unsigned char *p, int n) { int i=0; if(!rs||!p||n<=0)return 0; radio_stream_lock(rs); if(!rs->headerDone||!rs->decoderStarted){ RADIO_DBG(printf("radio-guard: ring_read refused session=%lu headerDone=%d decoderStarted=%d firstData=%d status=%d used=%lu\n", rs->session_id, rs->headerDone, rs->decoderStarted, rs->firstDataLogged, (int)rs->status, rs->used);); radio_stream_unlock(rs); return 0; } radio_stream_unlock(rs); if (radio_ring_check_canary(rs, "before ring_read") < 0) return 0; radio_stream_lock(rs); while (i<n && rs->used) { p[i++]=rs->ring[rs->rpos++]; if(rs->rpos>=rs->size)rs->rpos=0; rs->used--; } radio_stream_unlock(rs); radio_ring_check_canary(rs, "after ring_read"); return i; }
 static int ci_starts(const char *s,const char *p){ while(*p) { if(tolower((unsigned char)*s++)!=tolower((unsigned char)*p++)) return 0; } return 1; }
 static int ci_equals(const char *a,const char *b){ while(*a&&*b){ if(tolower((unsigned char)*a++)!=tolower((unsigned char)*b++)) return 0; } return *a==0&&*b==0; }
 static char *trim(char *s){ char *e; while(*s&&isspace((unsigned char)*s))s++; e=s+strlen(s); while(e>s&&isspace((unsigned char)e[-1]))*--e=0; return s; }
@@ -2257,10 +2288,12 @@ void Radio_RequestStop(RadioStream *rs)
      * every other stop/error/timeout path already does. */
     mode = RADIO_CLOSE_ABORT;
     RADIO_DBG(printf("radio-cleanup: close mode=%s session=%lu status=%d (Radio_RequestStop)\n", radio_close_mode_name(mode), rs->session_id, (int)rs->status););
+    radio_stream_lock(rs);
     rs->stopping = 1;
     rs->reconnectAttempts = RADIO_RECONNECT_MAX;
     rs->reconnectDelay = 0;
     rs->status = RADIO_STATUS_STOPPING;
+    radio_stream_unlock(rs);
     radio_abort_current_socket(rs);
     RADIO_STOP_DEBUG_PRINTF(("radio-stop: marked stopping\n"));
 }
@@ -2278,10 +2311,27 @@ void Radio_Close(RadioStream *rs)
     RADIO_DBG(printf("radio-teardown: before Radio_Close second stop phase (Radio_RequestStop re-entry) session=%lu\n", rs->session_id));
     Radio_RequestStop(rs);
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-    if (!radio_net_worker_is_self())
-        Radio_RunOnNetWorker(radio_worker_unregister_stream_job, rs);
-    else
+    if (!radio_net_worker_is_self()) {
+        if (!Radio_RunOnNetWorker(radio_worker_unregister_stream_job, rs)) {
+            radio_stream_lock(rs);
+            rs->workerDetached = 1;
+            radio_stream_unlock(rs);
+            RADIO_DBG(printf("radio-net-worker: unregister timed out for session=%lu -- leaking RadioStream/ring because worker may still touch them\n", rs->session_id););
+            return;
+        }
+    } else
         radio_worker_unregister_stream(rs);
+    {
+        int workerClosedAck;
+        radio_stream_lock(rs);
+        workerClosedAck = rs->workerClosedAck;
+        if (!workerClosedAck) rs->workerDetached = 1;
+        radio_stream_unlock(rs);
+        if (!workerClosedAck) {
+            RADIO_DBG(printf("radio-net-worker: unregister returned without close ack for session=%lu -- leaking RadioStream/ring because worker ownership is unclear\n", rs->session_id););
+            return;
+        }
+    }
 #endif
     close_current_socket(rs);
     rs->status = RADIO_STATUS_CLOSED;
@@ -2730,11 +2780,24 @@ int Radio_Pump(RadioStream *rs)
 {
     if (!rs) return -1;
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-    if (rs->status == RADIO_STATUS_ERROR) return -1;
-    if (rs->status == RADIO_STATUS_CLOSED || rs->status == RADIO_STATUS_STOPPING) return 0;
-    if (rs->headerDone && rs->used >= RADIO_START_THRESHOLD && rs->status != RADIO_STATUS_PLAYING)
-        set_status(rs, RADIO_STATUS_PLAYING);
-    return rs->used > 0 ? (int)rs->used : 0;
+    {
+        RadioStatus status;
+        unsigned long used;
+        int headerDone;
+        radio_stream_lock(rs);
+        status = rs->status;
+        used = rs->used;
+        headerDone = rs->headerDone;
+        radio_stream_unlock(rs);
+        if (status == RADIO_STATUS_ERROR) return -1;
+        if (status == RADIO_STATUS_CLOSED || status == RADIO_STATUS_STOPPING) return 0;
+        if (headerDone && used >= RADIO_START_THRESHOLD && status != RADIO_STATUS_PLAYING)
+            set_status(rs, RADIO_STATUS_PLAYING);
+        if (used > 0) return (int)used;
+        if (status == RADIO_STATUS_CONNECTING || status == RADIO_STATUS_BUFFERING || status == RADIO_STATUS_RECONNECTING)
+            radio_backoff_sleep();
+        return 0;
+    }
 #else
     return radio_pump_body(rs);
 #endif
@@ -2742,7 +2805,7 @@ int Radio_Pump(RadioStream *rs)
 
 int Radio_ReadAudio(RadioStream *rs,unsigned char *buf,int maxBytes){ int got; if(!rs||!buf||maxBytes<=0)return 0; if(radio_is_stopping(rs)) return 0; while(!radio_is_stopping(rs) && rs->status!=RADIO_STATUS_PLAYING && rs->used<RADIO_START_THRESHOLD && rs->status!=RADIO_STATUS_ERROR) { if(Radio_Pump(rs)<=0 && !rs->everPlayed && (++rs->zeroBytePumps>=RADIO_ZERO_BYTE_PUMP_MAX || radio_note_start_wait(rs,"radio stream did not buffer audio")<0)) { if(rs->status!=RADIO_STATUS_ERROR) set_error(rs,"radio stream did not buffer audio"); break; } } while(!radio_is_stopping(rs) && rs->used==0 && rs->status!=RADIO_STATUS_ERROR) { if(Radio_Pump(rs)<=0 && !rs->everPlayed && (++rs->zeroBytePumps>=RADIO_ZERO_BYTE_PUMP_MAX || radio_note_start_wait(rs,"radio stream did not deliver audio")<0)) { if(rs->status!=RADIO_STATUS_ERROR) set_error(rs,"radio stream did not deliver audio"); break; } } if(radio_is_stopping(rs)||!rs->headerDone||!rs->decoderStarted||rs->status==RADIO_STATUS_ERROR) return 0; got=ring_read(rs,buf,maxBytes); if(!rs->everPlayed && rs->status==RADIO_STATUS_PLAYING && rs->used<RADIO_LOW_WATER_BYTES) set_status(rs,RADIO_STATUS_BUFFERING); if(rs->status==RADIO_STATUS_BUFFERING && rs->used>=RADIO_START_THRESHOLD) set_status(rs,RADIO_STATUS_PLAYING); return got; }
 int Radio_ReadStartupAudio(RadioStream *rs,unsigned char *buf,int maxBytes,unsigned long timeoutMs){ clock_t start; int got; if(!rs||!buf||maxBytes<=0)return 0; start=clock(); while(!radio_is_stopping(rs)&&rs->used==0&&rs->status!=RADIO_STATUS_ERROR){ if(Radio_Pump(rs)<0)break; if(timeoutMs>0 && (unsigned long)((clock()-start)*1000UL/CLOCKS_PER_SEC)>=timeoutMs){ set_error(rs,"AAC stream start timeout"); close_current_socket(rs); break; } } if(radio_is_stopping(rs)||!rs->headerDone||!rs->decoderStarted||rs->status==RADIO_STATUS_ERROR) return 0; got=ring_read(rs,buf,maxBytes); if(!rs->everPlayed&&rs->headerDone&&rs->status!=RADIO_STATUS_PLAYING&&rs->status!=RADIO_STATUS_ERROR) set_status(rs,RADIO_STATUS_BUFFERING); return got; }
-void Radio_FailStartup(RadioStream *rs,const char *message){ if(!rs)return; set_error(rs,message&&message[0]?message:"AAC stream start timeout"); rs->stopping=1; rs->reconnectAttempts=RADIO_RECONNECT_MAX; rs->reconnectDelay=0; close_current_socket(rs); }
+void Radio_FailStartup(RadioStream *rs,const char *message){ if(!rs)return; set_error(rs,message&&message[0]?message:"AAC stream start timeout"); radio_stream_lock(rs); rs->stopping=1; rs->reconnectAttempts=RADIO_RECONNECT_MAX; rs->reconnectDelay=0; radio_stream_unlock(rs); close_current_socket(rs); }
 RadioStatus Radio_GetStatus(RadioStream *rs){ return rs?rs->status:RADIO_STATUS_CLOSED; }
 const char *Radio_GetTitle(RadioStream *rs){ return rs?rs->title:""; }
 const char *Radio_GetStationName(RadioStream *rs){ return rs?rs->stationName:""; }
