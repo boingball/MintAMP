@@ -167,6 +167,7 @@ static volatile int radio_net_worker_ready = 0;     /* worker finished start-up 
 static volatile int radio_net_worker_libs_ok = 0;   /* worker's bsdsocket.library open succeeded (message loop is running) */
 static volatile int radio_net_worker_https_ok = 0;  /* worker's AmiSSL instance also opened -- HTTPS available */
 static long radio_net_worker_errno_store = 0;       /* worker task's own AmiSSL_ErrNoPtr storage */
+static const char *radio_net_worker_shutdown_stage = "not-started";
 typedef enum {
     RADIO_WORKER_IDLE = 0,
     RADIO_WORKER_PROBING,
@@ -216,6 +217,7 @@ static void radio_net_worker_entry(void)
 {
     struct MsgPort *port;
     int shuttingDown = 0;
+    RadioNetWorkerJob *shutdownJob = NULL;
 
     RADIO_DBG(printf("radio-net-worker: starting task=%p\n", (void *)FindTask(NULL)););
 
@@ -255,11 +257,14 @@ static void radio_net_worker_entry(void)
         for (;;) {
             RadioNetWorkerJob *job;
             while ((job = (RadioNetWorkerJob *)GetMsg(port)) != NULL) {
-                if (job->isShutdown)
+                if (job->isShutdown) {
+                    shutdownJob = job;
                     shuttingDown = 1;
-                else if (job->fn)
-                    job->fn(job->arg);
-                ReplyMsg(&job->msg);
+                } else {
+                    if (job->fn)
+                        job->fn(job->arg);
+                    ReplyMsg(&job->msg);
+                }
             }
             if (shuttingDown) break;
             radio_worker_pump_active_streams();
@@ -267,16 +272,50 @@ static void radio_net_worker_entry(void)
         }
     }
 
-    RADIO_DBG(printf("radio-net-worker: shutting down task=%p\n", (void *)FindTask(NULL)););
-    if (AmiSSLBase) { CloseAmiSSL(); AmiSSLBase = NULL; AmiSSLExtBase = NULL; }
-    if (AmiSSLMasterBase) { CloseLibrary(AmiSSLMasterBase); AmiSSLMasterBase = NULL; }
-    if (SocketBase) { CloseLibrary(SocketBase); SocketBase = NULL; }
+    radio_net_worker_shutdown_stage = "shutdown-begin";
+    RADIO_DBG(printf("radio-net-worker: shutdown begin task=%p shutdownJob=%p\n", (void *)FindTask(NULL), (void *)shutdownJob););
+    if (AmiSSLBase) {
+        radio_net_worker_shutdown_stage = "before CloseAmiSSL";
+        RADIO_DBG(printf("radio-net-worker: before CloseAmiSSL base=%p ext=%p\n", (void *)AmiSSLBase, (void *)AmiSSLExtBase););
+        CloseAmiSSL();
+        AmiSSLBase = NULL;
+        AmiSSLExtBase = NULL;
+        radio_net_worker_shutdown_stage = "after CloseAmiSSL";
+        RADIO_DBG(printf("radio-net-worker: after CloseAmiSSL\n"););
+    }
+    if (AmiSSLMasterBase) {
+        radio_net_worker_shutdown_stage = "before CloseLibrary AmiSSLMasterBase";
+        RADIO_DBG(printf("radio-net-worker: before CloseLibrary AmiSSLMasterBase=%p\n", (void *)AmiSSLMasterBase););
+        CloseLibrary(AmiSSLMasterBase);
+        AmiSSLMasterBase = NULL;
+        radio_net_worker_shutdown_stage = "after CloseLibrary AmiSSLMasterBase";
+        RADIO_DBG(printf("radio-net-worker: after CloseLibrary AmiSSLMasterBase\n"););
+    }
+    if (SocketBase) {
+        radio_net_worker_shutdown_stage = "before CloseLibrary SocketBase";
+        RADIO_DBG(printf("radio-net-worker: before CloseLibrary SocketBase=%p\n", (void *)SocketBase););
+        CloseLibrary(SocketBase);
+        SocketBase = NULL;
+        radio_net_worker_shutdown_stage = "after CloseLibrary SocketBase";
+        RADIO_DBG(printf("radio-net-worker: after CloseLibrary SocketBase\n"););
+    }
     radio_amissl_initialized = 0;
-    if (port) DeleteMsgPort(port);
+    if (port) {
+        radio_net_worker_shutdown_stage = "before DeleteMsgPort";
+        RADIO_DBG(printf("radio-net-worker: before DeleteMsgPort port=%p\n", (void *)port););
+        DeleteMsgPort(port);
+        radio_net_worker_shutdown_stage = "after DeleteMsgPort";
+        RADIO_DBG(printf("radio-net-worker: after DeleteMsgPort\n"););
+    }
     radio_net_worker_port = NULL;
     radio_net_worker_ready = 0;
     radio_net_worker_libs_ok = 0;
     radio_net_worker_https_ok = 0;
+    radio_net_worker_shutdown_stage = "cleanup-complete";
+    if (shutdownJob) {
+        RADIO_DBG(printf("radio-net-worker: shutdown complete; replying to shutdown request\n"););
+        ReplyMsg(&shutdownJob->msg);
+    }
     /* radio_net_worker_task itself is left as-is: Radio_NetworkShutdown()
      * (the only caller that gets here) is about to exit the whole app, and
      * clearing it here would race the exiting worker task with any other
@@ -358,32 +397,51 @@ int Radio_RunOnNetWorker(void (*fn)(void *arg), void *arg)
  * for it to actually do so. Only called once, from Radio_NetworkShutdown(). */
 static int radio_net_worker_stop(void)
 {
-    RadioNetWorkerJob job;
+    RadioNetWorkerJob *job;
     struct MsgPort *replyPort;
     int tries;
+    int stopped;
 
     if (!radio_net_worker_ready || !radio_net_worker_port) return 1; /* never started, or already gone */
 
+    job = (RadioNetWorkerJob *)malloc(sizeof(*job));
+    if (!job) return 0;
     replyPort = CreateMsgPort();
-    if (!replyPort) return 0;
-    memset(&job.msg, 0, sizeof(job.msg));
-    job.msg.mn_ReplyPort = replyPort;
-    job.msg.mn_Length = sizeof(job);
-    job.fn = NULL;
-    job.arg = NULL;
-    job.isShutdown = 1;
-    PutMsg(radio_net_worker_port, &job.msg);
+    if (!replyPort) { free(job); return 0; }
+    memset(&job->msg, 0, sizeof(job->msg));
+    job->msg.mn_ReplyPort = replyPort;
+    job->msg.mn_Length = sizeof(*job);
+    job->fn = NULL;
+    job->arg = NULL;
+    job->isShutdown = 1;
+    PutMsg(radio_net_worker_port, &job->msg);
 
     for (tries = 0; tries < RADIO_NET_WORKER_WAIT_TRIES; tries++) {
-        if (GetMsg(replyPort)) break;
+        if (GetMsg(replyPort)) {
+            stopped = (!radio_net_worker_ready && radio_net_worker_port == NULL &&
+                !radio_net_worker_libs_ok && !radio_net_worker_https_ok);
+            DeleteMsgPort(replyPort);
+            free(job);
+            if (!stopped) {
+                RADIO_DBG(printf("radio-netshutdown: shutdown reply received but final state is not clean stage=\"%s\" workerTask=%p ready=%d port=%p SocketBase=%p AmiSSLBase=%p AmiSSLMasterBase=%p libs_ok=%d https_ok=%d\n",
+                    radio_net_worker_shutdown_stage ? radio_net_worker_shutdown_stage : "<unset>",
+                    (void *)radio_net_worker_task, radio_net_worker_ready,
+                    (void *)radio_net_worker_port, (void *)SocketBase,
+                    (void *)AmiSSLBase, (void *)AmiSSLMasterBase,
+                    radio_net_worker_libs_ok, radio_net_worker_https_ok););
+            }
+            return stopped;
+        }
         Delay(2);
     }
-    DeleteMsgPort(replyPort);
-    /* Give the worker a further bounded moment to finish CloseAmiSSL()/
-     * CloseLibrary() and clear radio_net_worker_ready after replying. */
-    for (tries = 0; tries < RADIO_NET_WORKER_START_TRIES && radio_net_worker_ready; tries++)
-        Delay(2);
-    return !radio_net_worker_ready;
+    RADIO_DBG(printf("radio-netshutdown: shutdown wait timed out stage=\"%s\" workerTask=%p ready=%d port=%p SocketBase=%p AmiSSLBase=%p AmiSSLMasterBase=%p libs_ok=%d https_ok=%d job=%p replyPort=%p\n",
+        radio_net_worker_shutdown_stage ? radio_net_worker_shutdown_stage : "<unset>",
+        (void *)radio_net_worker_task, radio_net_worker_ready,
+        (void *)radio_net_worker_port, (void *)SocketBase,
+        (void *)AmiSSLBase, (void *)AmiSSLMasterBase,
+        radio_net_worker_libs_ok, radio_net_worker_https_ok,
+        (void *)job, (void *)replyPort););
+    return 0;
 }
 #endif /* HAVE_AMISSL */
 #else
@@ -2746,9 +2804,15 @@ void Radio_NetworkShutdown(void)
         if (!radio_net_worker_stop()) {
             RADIO_DBG(printf("radio-netshutdown: net worker did not confirm shutdown within the timeout\n"););
         } else {
-            radio_closeamissl_count++;
-            radio_amisslmaster_close_count++;
-            radio_socket_library_close_count++;
+            if (radio_openamissltags_count > radio_closeamissl_count) {
+                radio_closeamissl_count++;
+                if (radio_amissl_init_count > radio_amissl_cleanup_count)
+                    radio_amissl_cleanup_count++;
+            }
+            if (radio_amisslmaster_open_count > radio_amisslmaster_close_count)
+                radio_amisslmaster_close_count++;
+            if (radio_socket_library_open_count > radio_socket_library_close_count)
+                radio_socket_library_close_count++;
         }
     }
     }
