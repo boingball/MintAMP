@@ -143,9 +143,11 @@ static long radio_closeamissl_count = 0;
  * bsdsocket.library + amisslmaster.library + OpenAmiSSLTags() (with
  * AmiSSL_InitAmiSSL, TRUE and its own private AmiSSL_ErrNoPtr storage,
  * radio_net_worker_errno_store -- never the shared/global errno) exactly
- * once for the whole app run, then services any number of station
- * open/pump/close requests -- each one only creates/frees a per-connection
- * SSL/SSL_CTX/socket, never touching the library bases again -- before
+ * once for the whole app run, then owns the pump loop for every active
+ * station. Station open/close requests are still dispatched to that task,
+ * but steady-state reads happen autonomously there (not as per-pump RPCs),
+ * and each station only creates/frees a per-connection SSL/SSL_CTX/socket,
+ * never touching the library bases again -- before
  * finally closing everything exactly once, in the same order the repro
  * uses, when the app asks it to shut down.
  *
@@ -164,6 +166,11 @@ static volatile int radio_net_worker_ready = 0;     /* worker finished start-up 
 static volatile int radio_net_worker_libs_ok = 0;   /* worker's bsdsocket.library open succeeded (message loop is running) */
 static volatile int radio_net_worker_https_ok = 0;  /* worker's AmiSSL instance also opened -- HTTPS available */
 static long radio_net_worker_errno_store = 0;       /* worker task's own AmiSSL_ErrNoPtr storage */
+static RadioStream *radio_net_worker_streams = NULL;  /* worker-owned list of streams to pump autonomously */
+static int radio_net_worker_pump_active = 0;          /* reentrancy guard for the autonomous pump loop */
+
+static int radio_pump_body(RadioStream *rs);
+static void radio_worker_pump_active_streams(void);
 
 /* ~60s at ~40ms/poll: generous enough to cover connect_http()'s worst-case
  * DNS + TCP connect + TLS handshake budget end to end, while still bounded
@@ -235,7 +242,6 @@ static void radio_net_worker_entry(void)
     if (port) {
         for (;;) {
             RadioNetWorkerJob *job;
-            Wait(1UL << port->mp_SigBit);
             while ((job = (RadioNetWorkerJob *)GetMsg(port)) != NULL) {
                 if (job->isShutdown)
                     shuttingDown = 1;
@@ -244,6 +250,8 @@ static void radio_net_worker_entry(void)
                 ReplyMsg(&job->msg);
             }
             if (shuttingDown) break;
+            radio_worker_pump_active_streams();
+            Delay(2);
         }
     }
 
@@ -509,6 +517,8 @@ struct RadioStream {
      * for *this object only*, with no task-wide poisoning and no HTTPS
      * disablement. */
     int sslReadCloseSeen;
+    struct RadioStream *workerNext;
+    int workerRegistered;
 #endif
     /* Set once a read/write/connect fault is classified fatal (see
      * radio_ssl_error_is_fatal()): this session is done, permanently. No
@@ -869,8 +879,71 @@ static void radio_reset_session_state(RadioStream *rs)
     rs->everPlayed = rs->firstDataLogged = rs->haveHostAddr = 0;
     rs->sslFreed = rs->ctxFreed = rs->socketClosed = rs->cleanupDone = 0;
     rs->closeCleanupDone = 0;
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+    rs->workerNext = NULL;
+    rs->workerRegistered = 0;
+#endif
 }
 
+
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+static void radio_worker_register_stream(RadioStream *rs)
+{
+    if (!rs || rs->workerRegistered) return;
+    rs->workerNext = radio_net_worker_streams;
+    radio_net_worker_streams = rs;
+    rs->workerRegistered = 1;
+    RADIO_DBG(printf("radio-net-worker: registered pump stream session=%lu\n", rs->session_id););
+}
+
+static void radio_worker_unregister_stream(RadioStream *rs)
+{
+    RadioStream **pp;
+    if (!rs || !rs->workerRegistered) return;
+    pp = &radio_net_worker_streams;
+    while (*pp) {
+        if (*pp == rs) {
+            *pp = rs->workerNext;
+            rs->workerNext = NULL;
+            rs->workerRegistered = 0;
+            RADIO_DBG(printf("radio-net-worker: unregistered pump stream session=%lu\n", rs->session_id););
+            return;
+        }
+        pp = &(*pp)->workerNext;
+    }
+    rs->workerNext = NULL;
+    rs->workerRegistered = 0;
+}
+
+static void radio_worker_unregister_stream_job(void *arg)
+{
+    radio_worker_unregister_stream((RadioStream *)arg);
+}
+
+static void radio_worker_pump_active_streams(void)
+{
+    RadioStream *rs;
+    if (radio_net_worker_pump_active) return;
+    radio_net_worker_pump_active = 1;
+    rs = radio_net_worker_streams;
+    while (rs) {
+        RadioStream *next = rs->workerNext;
+        if (rs->status == RADIO_STATUS_ERROR || rs->status == RADIO_STATUS_CLOSED)
+            radio_worker_unregister_stream(rs);
+        else if (rs->used < rs->size) {
+            int budget;
+            for (budget = 0; budget < 8 && rs->used < rs->size; budget++) {
+                if (radio_pump_body(rs) <= 0)
+                    break;
+                if (rs->status == RADIO_STATUS_ERROR || rs->status == RADIO_STATUS_CLOSED)
+                    break;
+            }
+        }
+        rs = next;
+    }
+    radio_net_worker_pump_active = 0;
+}
+#endif
 
 /* Yield the CPU briefly during reconnect backoff.  reconnect_http() is the only
  * pump path that does not block on the socket, so without this the player
@@ -1685,7 +1758,8 @@ static void radio_worker_job_open(void *arg)
 {
     RadioOpenJobArgs *a = (RadioOpenJobArgs *)arg;
     a->result = connect_http(a->rs);
-    if (a->result != 0) close_current_socket(a->rs);
+    if (a->result == 0) radio_worker_register_stream(a->rs);
+    else close_current_socket(a->rs);
 }
 #endif
 
@@ -2203,6 +2277,12 @@ void Radio_Close(RadioStream *rs)
     if (rs->cleanup_count > 1) radio_duplicate_cleanup_warning(rs, "session cleanup", rs->cleanup_count);
     RADIO_DBG(printf("radio-teardown: before Radio_Close second stop phase (Radio_RequestStop re-entry) session=%lu\n", rs->session_id));
     Radio_RequestStop(rs);
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+    if (!radio_net_worker_is_self())
+        Radio_RunOnNetWorker(radio_worker_unregister_stream_job, rs);
+    else
+        radio_worker_unregister_stream(rs);
+#endif
     close_current_socket(rs);
     rs->status = RADIO_STATUS_CLOSED;
     rs->stream_buffer_free_count++;
@@ -2488,9 +2568,10 @@ void Radio_NetworkShutdown(void)
 
 /* The bulk of Radio_Pump()'s work (SSL_read()/recv(), reconnect_http(),
  * close_current_socket() on error/stop) touches bsdsocket.library/AmiSSL, so
- * in HAVE_AMISSL builds this only ever runs as a job on the net worker task
- * -- see Radio_Pump() below, which dispatches it via Radio_RunOnNetWorker().
- * Non-AmiSSL builds still call it directly, unchanged. */
+ * in HAVE_AMISSL builds this only ever runs on the net worker task
+ * -- the net worker's autonomous loop calls this for registered streams.
+ * Radio_Pump() itself is intentionally only a cheap status/buffer check in
+ * those builds. Non-AmiSSL builds still call it directly, unchanged. */
 static int radio_pump_body(RadioStream *rs)
 {
     unsigned char b[1024];
@@ -2645,33 +2726,15 @@ static int radio_pump_body(RadioStream *rs)
     return n;
 }
 
-#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-typedef struct RadioPumpJobArgs {
-    RadioStream *rs;
-    int result;
-} RadioPumpJobArgs;
-
-static void radio_worker_job_pump(void *arg)
-{
-    RadioPumpJobArgs *a = (RadioPumpJobArgs *)arg;
-    a->result = radio_pump_body(a->rs);
-}
-#endif
-
 int Radio_Pump(RadioStream *rs)
 {
     if (!rs) return -1;
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-    {
-        RadioPumpJobArgs pumpArgs;
-        pumpArgs.rs = rs;
-        pumpArgs.result = -1;
-        if (!Radio_RunOnNetWorker(radio_worker_job_pump, &pumpArgs)) {
-            set_error(rs, "AmiSSL unavailable: network worker not running");
-            return -1;
-        }
-        return pumpArgs.result;
-    }
+    if (rs->status == RADIO_STATUS_ERROR) return -1;
+    if (rs->status == RADIO_STATUS_CLOSED || rs->status == RADIO_STATUS_STOPPING) return 0;
+    if (rs->headerDone && rs->used >= RADIO_START_THRESHOLD && rs->status != RADIO_STATUS_PLAYING)
+        set_status(rs, RADIO_STATUS_PLAYING);
+    return rs->used > 0 ? (int)rs->used : 0;
 #else
     return radio_pump_body(rs);
 #endif

@@ -76,8 +76,9 @@ const char *Radio_StatusText(RadioStatus status);
  * it owns its own bsdsocket.library base, its own amisslmaster.library base,
  * its own AmiSSLBase/AmiSSLExtBase and its own AmiSSL_ErrNoPtr storage
  * privately, opens AmiSSL (OpenAmiSSLTags()/InitAmiSSL) exactly once for the
- * app's whole run, and then services any number of station open/pump/close
- * requests via Radio_RunOnNetWorker() -- never reopening any of those bases
+ * app's whole run, and then owns the pump loop for active stations. Open/close
+ * requests still use Radio_RunOnNetWorker(), but Radio_Pump() itself is only
+ * a cheap status/buffer check -- never reopening any of those bases
  * per station switch. Plain-HTTP-only m68k builds without HAVE_AMISSL just
  * open bsdsocket.library directly here instead (no per-task AmiSSL lifecycle
  * to manage). Safe to call more than once (a no-op if already up) and safe
