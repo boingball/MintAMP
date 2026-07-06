@@ -152,11 +152,18 @@ void Radio_LogTestModeSummary(void)
 
     (void)probeTest;
     (void)artworkTest;
+#ifdef RADIO_DEBUG
     printf("radio-runtime: probe=%s artwork=%s abortSslFreePolicy=%s source=%s\n",
         radio_runtime_effective_probe_text(),
         radio_runtime_effective_artwork_text(),
         skipAbortSslFree ? "skip-on-abort" : "free-on-abort",
         source);
+#else
+    (void)skipAbortSslFree;
+    (void)source;
+    (void)radio_runtime_effective_probe_text;
+    (void)radio_runtime_effective_artwork_text;
+#endif
 }
 
 void Radio_LogRuntimeFlagsOnce(void)
