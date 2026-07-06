@@ -2287,6 +2287,8 @@ static void PostCloseLibsAudit(MrApp *app, long portsDrained)
 	}
 }
 
+static void MrCloseWindow(MrApp *app);
+
 static void DisposeGuiObjectsBeforeCloseLibs(MrApp *app)
 {
 	if (!app)
