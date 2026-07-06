@@ -5814,6 +5814,7 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 	}
 	memset(&info, 0, sizeof(info));
 	RadioSetStatus(app, "Checking stream...");
+	Radio_LogTestModeSummary();
 	{
 		int probeDisabled = rb_probe_stream_probe_disabled();
 		printf("radio-probe: flag check MP3_NO_STREAM_PROBE enabled=%d testEnable=%d before selected probe\n", probeDisabled, rb_probe_stream_probe_test_enabled());

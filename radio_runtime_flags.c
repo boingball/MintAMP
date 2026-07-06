@@ -97,6 +97,34 @@ static const char *radio_runtime_flag_printable(const char *value)
     return (value && *value) ? value : "<unset>";
 }
 
+static const char *radio_runtime_effective_probe_text(void)
+{
+    if (radio_runtime_flag_enabled("MP3_NO_STREAM_PROBE")) return "hard-disabled";
+    if (!radio_runtime_flag_enabled("MP3_TEST_ENABLE_STREAM_PROBE")) return "staged-off";
+    return "enabled";
+}
+
+static const char *radio_runtime_effective_artwork_text(void)
+{
+    if (radio_runtime_flag_enabled("MP3_NO_ARTWORK")) return "hard-disabled";
+    if (!radio_runtime_flag_enabled("MP3_TEST_ENABLE_ARTWORK")) return "staged-off";
+    return "enabled";
+}
+
+void Radio_LogTestModeSummary(void)
+{
+    int probeTest = radio_runtime_flag_enabled("MP3_TEST_ENABLE_STREAM_PROBE");
+    int artworkTest = radio_runtime_flag_enabled("MP3_TEST_ENABLE_ARTWORK");
+    int skipAbortSslFree = radio_runtime_flag_enabled("MP3_SKIP_ABORT_SSL_FREE");
+
+    printf("radio-test-mode: probeTest=%d artworkTest=%d skipAbortSslFree=%d effectiveProbe=%s effectiveArtwork=%s\n",
+        probeTest,
+        artworkTest,
+        skipAbortSslFree,
+        radio_runtime_effective_probe_text(),
+        radio_runtime_effective_artwork_text());
+}
+
 void Radio_LogRuntimeFlagsOnce(void)
 {
     static int logged = 0;
@@ -120,4 +148,5 @@ void Radio_LogRuntimeFlagsOnce(void)
             radio_runtime_flag_printable(getvar_value),
             enabled);
     }
+    Radio_LogTestModeSummary();
 }

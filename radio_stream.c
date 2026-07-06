@@ -168,6 +168,10 @@ static volatile int radio_net_worker_libs_ok = 0;   /* worker's bsdsocket.librar
 static volatile int radio_net_worker_https_ok = 0;  /* worker's AmiSSL instance also opened -- HTTPS available */
 static long radio_net_worker_errno_store = 0;       /* worker task's own AmiSSL_ErrNoPtr storage */
 static const char *radio_net_worker_shutdown_stage = "not-started";
+static volatile unsigned long radio_net_worker_heartbeat = 0;
+static volatile unsigned long radio_net_worker_last_session = 0;
+static const char * volatile radio_net_worker_stage = "startup";
+static const char * volatile radio_net_worker_last_op = "none";
 typedef enum {
     RADIO_WORKER_IDLE = 0,
     RADIO_WORKER_PROBING,
@@ -213,6 +217,14 @@ static int radio_net_worker_is_self(void)
  * InitAmiSSL()/CleanupAmiSSL() pair on top of that. */
 int Radio_AmiSslTaskIsOpener(void) { return radio_net_worker_is_self(); }
 
+static void radio_worker_breadcrumb(const char *stage, const char *op, unsigned long session)
+{
+    radio_net_worker_stage = stage ? stage : "<null>";
+    radio_net_worker_last_op = op ? op : "<null>";
+    radio_net_worker_last_session = session;
+    radio_net_worker_heartbeat++;
+}
+
 static void radio_net_worker_entry(void)
 {
     struct MsgPort *port;
@@ -220,6 +232,7 @@ static void radio_net_worker_entry(void)
     RadioNetWorkerJob *shutdownJob = NULL;
 
     RADIO_DBG(printf("radio-net-worker: starting task=%p\n", (void *)FindTask(NULL)););
+    radio_worker_breadcrumb("startup", "worker-entry", 0);
 
     SocketBase = OpenLibrary("bsdsocket.library", 4);
     if (SocketBase) radio_socket_library_open_count++;
@@ -256,13 +269,17 @@ static void radio_net_worker_entry(void)
     if (port) {
         for (;;) {
             RadioNetWorkerJob *job;
+            radio_worker_breadcrumb("worker-loop", "poll", 0);
             while ((job = (RadioNetWorkerJob *)GetMsg(port)) != NULL) {
                 if (job->isShutdown) {
+                    radio_worker_breadcrumb("job-start", "shutdown", 0);
                     shutdownJob = job;
                     shuttingDown = 1;
                 } else {
+                    radio_worker_breadcrumb("job-start", "run", 0);
                     if (job->fn)
                         job->fn(job->arg);
+                    radio_worker_breadcrumb("job-reply", "run", 0);
                     ReplyMsg(&job->msg);
                 }
             }
@@ -273,38 +290,49 @@ static void radio_net_worker_entry(void)
     }
 
     radio_net_worker_shutdown_stage = "shutdown-begin";
+    radio_worker_breadcrumb("shutdown-begin", "shutdown", 0);
     RADIO_DBG(printf("radio-net-worker: shutdown begin task=%p shutdownJob=%p\n", (void *)FindTask(NULL), (void *)shutdownJob););
     if (AmiSSLBase) {
         radio_net_worker_shutdown_stage = "before CloseAmiSSL";
+        radio_worker_breadcrumb("before CloseAmiSSL", "CloseAmiSSL", 0);
+        RADIO_DBG(printf("radio-worker-risk: before CloseAmiSSL workerTask=%p active_ssl=%ld active_ctx=%ld open_socket=%ld\n",
+            (void *)radio_net_worker_task, radio_active_ssl_count, radio_active_ssl_ctx_count, radio_open_socket_count););
         RADIO_DBG(printf("radio-net-worker: before CloseAmiSSL base=%p ext=%p\n", (void *)AmiSSLBase, (void *)AmiSSLExtBase););
         CloseAmiSSL();
         AmiSSLBase = NULL;
         AmiSSLExtBase = NULL;
         radio_net_worker_shutdown_stage = "after CloseAmiSSL";
+        radio_worker_breadcrumb("after CloseAmiSSL", "CloseAmiSSL", 0);
         RADIO_DBG(printf("radio-net-worker: after CloseAmiSSL\n"););
     }
     if (AmiSSLMasterBase) {
         radio_net_worker_shutdown_stage = "before CloseLibrary AmiSSLMasterBase";
+        radio_worker_breadcrumb("before CloseLibrary AmiSSLMasterBase", "CloseLibrary", 0);
         RADIO_DBG(printf("radio-net-worker: before CloseLibrary AmiSSLMasterBase=%p\n", (void *)AmiSSLMasterBase););
         CloseLibrary(AmiSSLMasterBase);
         AmiSSLMasterBase = NULL;
         radio_net_worker_shutdown_stage = "after CloseLibrary AmiSSLMasterBase";
+        radio_worker_breadcrumb("after CloseLibrary AmiSSLMasterBase", "CloseLibrary", 0);
         RADIO_DBG(printf("radio-net-worker: after CloseLibrary AmiSSLMasterBase\n"););
     }
     if (SocketBase) {
         radio_net_worker_shutdown_stage = "before CloseLibrary SocketBase";
+        radio_worker_breadcrumb("before CloseLibrary SocketBase", "CloseLibrary", 0);
         RADIO_DBG(printf("radio-net-worker: before CloseLibrary SocketBase=%p\n", (void *)SocketBase););
         CloseLibrary(SocketBase);
         SocketBase = NULL;
         radio_net_worker_shutdown_stage = "after CloseLibrary SocketBase";
+        radio_worker_breadcrumb("after CloseLibrary SocketBase", "CloseLibrary", 0);
         RADIO_DBG(printf("radio-net-worker: after CloseLibrary SocketBase\n"););
     }
     radio_amissl_initialized = 0;
     if (port) {
         radio_net_worker_shutdown_stage = "before DeleteMsgPort";
+        radio_worker_breadcrumb("before DeleteMsgPort", "DeleteMsgPort", 0);
         RADIO_DBG(printf("radio-net-worker: before DeleteMsgPort port=%p\n", (void *)port););
         DeleteMsgPort(port);
         radio_net_worker_shutdown_stage = "after DeleteMsgPort";
+        radio_worker_breadcrumb("after DeleteMsgPort", "DeleteMsgPort", 0);
         RADIO_DBG(printf("radio-net-worker: after DeleteMsgPort\n"););
     }
     radio_net_worker_port = NULL;
@@ -312,6 +340,7 @@ static void radio_net_worker_entry(void)
     radio_net_worker_libs_ok = 0;
     radio_net_worker_https_ok = 0;
     radio_net_worker_shutdown_stage = "cleanup-complete";
+    radio_worker_breadcrumb("cleanup-complete", "shutdown-reply", 0);
     if (shutdownJob) {
         RADIO_DBG(printf("radio-net-worker: shutdown complete; replying to shutdown request\n"););
         ReplyMsg(&shutdownJob->msg);
@@ -423,8 +452,11 @@ static int radio_net_worker_stop(void)
             DeleteMsgPort(replyPort);
             free(job);
             if (!stopped) {
-                RADIO_DBG(printf("radio-netshutdown: shutdown reply received but final state is not clean stage=\"%s\" workerTask=%p ready=%d port=%p SocketBase=%p AmiSSLBase=%p AmiSSLMasterBase=%p libs_ok=%d https_ok=%d\n",
+                RADIO_DBG(printf("radio-netshutdown: shutdown reply received but final state is not clean shutdownStage=\"%s\" stage=\"%s\" lastOp=\"%s\" lastSession=%lu heartbeat=%lu workerTask=%p ready=%d port=%p SocketBase=%p AmiSSLBase=%p AmiSSLMasterBase=%p libs_ok=%d https_ok=%d\n",
                     radio_net_worker_shutdown_stage ? radio_net_worker_shutdown_stage : "<unset>",
+                    radio_net_worker_stage ? (const char *)radio_net_worker_stage : "<unset>",
+                    radio_net_worker_last_op ? (const char *)radio_net_worker_last_op : "<unset>",
+                    radio_net_worker_last_session, radio_net_worker_heartbeat,
                     (void *)radio_net_worker_task, radio_net_worker_ready,
                     (void *)radio_net_worker_port, (void *)SocketBase,
                     (void *)AmiSSLBase, (void *)AmiSSLMasterBase,
@@ -434,7 +466,10 @@ static int radio_net_worker_stop(void)
         }
         Delay(2);
     }
-    RADIO_DBG(printf("radio-netshutdown: shutdown wait timed out stage=\"%s\" workerTask=%p ready=%d port=%p SocketBase=%p AmiSSLBase=%p AmiSSLMasterBase=%p libs_ok=%d https_ok=%d job=%p replyPort=%p\n",
+    RADIO_DBG(printf("radio-netshutdown: timeout stage=\"%s\" lastOp=\"%s\" lastSession=%lu heartbeat=%lu shutdownStage=\"%s\" workerTask=%p ready=%d port=%p SocketBase=%p AmiSSLBase=%p AmiSSLMasterBase=%p libs_ok=%d https_ok=%d job=%p replyPort=%p\n",
+        radio_net_worker_stage ? (const char *)radio_net_worker_stage : "<unset>",
+        radio_net_worker_last_op ? (const char *)radio_net_worker_last_op : "<unset>",
+        radio_net_worker_last_session, radio_net_worker_heartbeat,
         radio_net_worker_shutdown_stage ? radio_net_worker_shutdown_stage : "<unset>",
         (void *)radio_net_worker_task, radio_net_worker_ready,
         (void *)radio_net_worker_port, (void *)SocketBase,
@@ -597,6 +632,8 @@ struct RadioStream {
     volatile int workerClosedAck;
     volatile int workerDetached;
     volatile int workerAbandoned;
+    volatile int workerPumpInProgress;
+    volatile int workerCloseRequested;
 #endif
     /* Set once a read/write/connect fault is classified fatal (see
      * radio_ssl_error_is_fatal()): this session is done, permanently. No
@@ -896,6 +933,10 @@ static int radio_is_stopping(const RadioStream *rs)
 {
     if (!rs || rs->stopping || rs->status == RADIO_STATUS_STOPPING || rs->status == RADIO_STATUS_CLOSED)
         return 1;
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+    if (rs->workerStopRequested || rs->workerClosing || rs->workerCloseRequested || rs->workerDetached)
+        return 1;
+#endif
     if (radio_external_stop_flag && *radio_external_stop_flag)
         return 1;
 #if defined(AMIGA_M68K)
@@ -986,6 +1027,8 @@ static void radio_reset_session_state(RadioStream *rs)
     rs->workerClosedAck = 0;
     rs->workerDetached = 0;
     rs->workerAbandoned = 0;
+    rs->workerPumpInProgress = 0;
+    rs->workerCloseRequested = 0;
 #endif
 }
 
@@ -1006,6 +1049,41 @@ static void radio_stream_unlock(RadioStream *rs) { (void)rs; }
 #endif
 
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+static void radio_worker_risk_log(const char *stage, RadioStream *rs)
+{
+    unsigned long used = 0;
+    unsigned long freeBytes = 0;
+    RadioStatus status = RADIO_STATUS_CLOSED;
+    long fd = RADIO_INVALID_SOCKET;
+    SSL *ssl = NULL;
+    SSL_CTX *ctx = NULL;
+
+    if (!rs) {
+        radio_worker_breadcrumb(stage, "risk", 0);
+        RADIO_DBG(printf("radio-worker-risk: %s session=0 workerTask=%p\n",
+            stage ? stage : "<null>", (void *)radio_net_worker_task););
+        return;
+    }
+    radio_stream_lock(rs);
+    used = rs->used;
+    freeBytes = rs->size > rs->used ? rs->size - rs->used : 0;
+    status = rs->status;
+    fd = rs->sock;
+    ssl = rs->ssl;
+    ctx = rs->ctx;
+    radio_stream_unlock(rs);
+    radio_worker_breadcrumb(stage, "risk", rs->session_id);
+    RADIO_DBG(printf("radio-worker-risk: %s session=%lu workerTask=%p status=%d used=%lu free=%lu ssl=%p ctx=%p fd=%ld stop=%d closing=%d closeReq=%d registered=%d detached=%d pumpInProgress=%d\n",
+        stage ? stage : "<null>", rs->session_id, (void *)radio_net_worker_task,
+        (int)status, used, freeBytes, (void *)ssl, (void *)ctx, fd,
+        rs->workerStopRequested, rs->workerClosing, rs->workerCloseRequested,
+        rs->workerRegistered, rs->workerDetached, rs->workerPumpInProgress););
+}
+#else
+static void radio_worker_risk_log(const char *stage, RadioStream *rs) { (void)stage; (void)rs; }
+#endif
+
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
 static void radio_worker_register_stream(RadioStream *rs)
 {
     if (!rs || rs->workerRegistered) return;
@@ -1019,6 +1097,18 @@ static void radio_worker_unregister_stream(RadioStream *rs)
 {
     RadioStream **pp;
     if (!rs || !rs->workerRegistered) return;
+    radio_worker_breadcrumb("before stop/unregister", "unregister", rs->session_id);
+    RADIO_DBG(printf("radio-worker: close requested session=%lu pumpInProgress=%d\n",
+        rs->session_id, rs->workerPumpInProgress););
+    radio_stream_lock(rs);
+    rs->workerCloseRequested = 1;
+    radio_stream_unlock(rs);
+    while (rs->workerPumpInProgress) {
+        RADIO_DBG(printf("radio-worker: waiting for pump leave before unregister session=%lu pumpInProgress=%d\n",
+            rs->session_id, rs->workerPumpInProgress););
+        Delay(1);
+    }
+    RADIO_DBG(printf("radio-worker: close proceeding session=%lu pumpInProgress=0\n", rs->session_id););
     pp = &radio_net_worker_streams;
     while (*pp) {
         if (*pp == rs) {
@@ -1032,6 +1122,7 @@ static void radio_worker_unregister_stream(RadioStream *rs)
             radio_stream_unlock(rs);
             if (!radio_net_worker_streams) radio_worker_state = RADIO_WORKER_IDLE;
             RADIO_DBG(printf("radio-net-worker: unregistered pump stream session=%lu\n", rs->session_id););
+            radio_worker_breadcrumb("after stop/unregister", "unregister", rs->session_id);
             return;
         }
         pp = &(*pp)->workerNext;
@@ -1044,6 +1135,7 @@ static void radio_worker_unregister_stream(RadioStream *rs)
     rs->workerDetached = 1;
     radio_stream_unlock(rs);
     if (!radio_net_worker_streams) radio_worker_state = RADIO_WORKER_IDLE;
+    radio_worker_breadcrumb("after stop/unregister", "unregister", rs->session_id);
 }
 
 static void radio_worker_unregister_stream_job(void *arg)
@@ -1057,9 +1149,14 @@ static void radio_worker_close_detach_stream_job(void *arg)
     if (!rs) return;
     radio_worker_state = RADIO_WORKER_CLOSING;
     radio_stream_lock(rs);
+    rs->workerCloseRequested = 1;
     rs->workerClosing = 1;
     radio_stream_unlock(rs);
+    RADIO_DBG(printf("radio-cleanup: active abort begin session=%lu\n", rs->session_id););
+    RADIO_DBG(printf("radio-cleanup: active abort mark closing session=%lu\n", rs->session_id););
+    RADIO_DBG(printf("radio-cleanup: active abort unregister start session=%lu\n", rs->session_id););
     radio_worker_unregister_stream(rs);
+    RADIO_DBG(printf("radio-cleanup: active abort unregister end session=%lu\n", rs->session_id););
     close_current_socket_mode_local(rs, RADIO_CLOSE_ABORT);
     radio_stream_lock(rs);
     rs->workerClosing = 0;
@@ -1067,6 +1164,7 @@ static void radio_worker_close_detach_stream_job(void *arg)
     rs->workerDetached = 1;
     radio_stream_unlock(rs);
     if (!radio_net_worker_streams) radio_worker_state = RADIO_WORKER_IDLE;
+    RADIO_DBG(printf("radio-cleanup: active abort complete session=%lu\n", rs->session_id););
 }
 
 static void radio_worker_pump_active_streams(void)
@@ -1074,16 +1172,46 @@ static void radio_worker_pump_active_streams(void)
     RadioStream *rs;
     if (radio_net_worker_pump_active) return;
     radio_net_worker_pump_active = 1;
+    radio_worker_breadcrumb("pump-active-start", "pump", 0);
     rs = radio_net_worker_streams;
     while (rs) {
         RadioStream *next = rs->workerNext;
-        if (rs->status == RADIO_STATUS_ERROR || rs->status == RADIO_STATUS_CLOSED)
+        int skip = 0;
+        radio_stream_lock(rs);
+        skip = rs->workerStopRequested || rs->workerClosing || rs->workerCloseRequested ||
+            rs->workerDetached || rs->status == RADIO_STATUS_STOPPING ||
+            rs->status == RADIO_STATUS_CLOSED || rs->status == RADIO_STATUS_ERROR;
+        radio_stream_unlock(rs);
+        if (skip) {
+            RADIO_DBG(printf("radio-worker: pump skip stopping/closing session=%lu\n", rs->session_id););
             radio_worker_unregister_stream(rs);
-        else if (rs->used < rs->size) {
+        } else if (rs->used < rs->size) {
             int budget;
             for (budget = 0; budget < 8 && rs->used < rs->size; budget++) {
-                if (radio_pump_body(rs) <= 0)
+                radio_worker_breadcrumb("pump-session", "pump", rs->session_id);
+                radio_stream_lock(rs);
+                if (rs->workerStopRequested || rs->workerClosing || rs->workerCloseRequested ||
+                    rs->workerDetached || rs->status == RADIO_STATUS_STOPPING ||
+                    rs->status == RADIO_STATUS_CLOSED || rs->status == RADIO_STATUS_ERROR) {
+                    radio_stream_unlock(rs);
+                    RADIO_DBG(printf("radio-worker: pump skip before enter session=%lu\n", rs->session_id););
                     break;
+                }
+                rs->workerPumpInProgress = 1;
+                radio_stream_unlock(rs);
+                RADIO_DBG(printf("radio-worker: pump enter session=%lu\n", rs->session_id););
+                if (radio_pump_body(rs) <= 0)
+                {
+                    radio_stream_lock(rs);
+                    rs->workerPumpInProgress = 0;
+                    radio_stream_unlock(rs);
+                    RADIO_DBG(printf("radio-worker: pump leave session=%lu\n", rs->session_id););
+                    break;
+                }
+                radio_stream_lock(rs);
+                rs->workerPumpInProgress = 0;
+                radio_stream_unlock(rs);
+                RADIO_DBG(printf("radio-worker: pump leave session=%lu\n", rs->session_id););
                 if (rs->status == RADIO_STATUS_ERROR || rs->status == RADIO_STATUS_CLOSED)
                     break;
             }
@@ -1396,6 +1524,7 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
     radio_net_adopt_context(rs);
     RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: HTTPS cleanup start mode=%s ssl=%p ctx=%p fd=%ld handshake=%d\n", radio_close_mode_name(mode), (void *)rs->ssl, (void *)rs->ctx, (long)rs->sock, rs->sslHandshakeDone));
     if (mode == RADIO_CLOSE_GRACEFUL && !Radio_IsMemoryPoisoned() && rs->ssl && rs->sslHandshakeDone && rs->sock != RADIO_INVALID_SOCKET && !rs->socketClosed) {
+        radio_worker_risk_log("before SSL_shutdown", rs);
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_shutdown start ssl=%p\n", (void *)rs->ssl));
         SSL_shutdown(rs->ssl);
         shutdown_called = 1;
@@ -1416,6 +1545,7 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
             printf("radio-cleanup: flag check MP3_SKIP_ABORT_SSL_FREE enabled=%d mode=abort session=%lu\n",
                 skip_abort_ssl_free, rs->session_id);
             if (skip_abort_ssl_free) {
+                radio_worker_risk_log("after skipped SSL_free", rs);
                 printf("radio-cleanup: abort SSL_free/SSL_CTX_free skipped by MP3_SKIP_ABORT_SSL_FREE session=%lu ssl=%p ctx=%p\n",
                     rs->session_id, (void *)rs->ssl, (void *)rs->ctx);
                 radio_tls_shutdown_quarantine = 1;
@@ -1437,11 +1567,13 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
             radio_amissl_task_poisoned = 1;
             radio_tls_shutdown_quarantine = 1;
         } else {
+            radio_worker_risk_log("before SSL_free", rs);
             RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_free start ssl=%p\n", (void *)rs->ssl));
             RADIO_DBG(printf("BEFORE SSL_free session=%lu ssl=%p ctx=%p\n",
                 rs->session_id, (void *)rs->ssl, (void *)rs->ctx););
             SSL_free(rs->ssl);
             rs->ssl_free_count++;
+            radio_worker_risk_log("after SSL_free", rs);
             RADIO_DBG(printf("AFTER SSL_free session=%lu ssl_free_count=%u\n",
                 rs->session_id, rs->ssl_free_count););
             RADIO_DBG(printf("radio-cleanup: SSL_free done session=%lu\n", rs->session_id));
@@ -1965,6 +2097,9 @@ static void radio_abort_current_socket_local(RadioStream *rs)
         long closing_fd = (long)rs->sock;
         long before_all = radio_open_socket_count;
         long before_playback = radio_playback_open_socket_count;
+        radio_worker_risk_log("before CloseSocket", rs);
+        RADIO_DBG(printf("radio-cleanup: active abort CloseSocket start session=%lu fd=%ld\n",
+            rs->session_id, closing_fd););
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
         /* rs->ssl (if any) still has this fd wired into its BIO via
          * SSL_set_fd(), but SSL_free() for this session doesn't run until
@@ -1991,6 +2126,7 @@ static void radio_abort_current_socket_local(RadioStream *rs)
             radio_playback_open_socket_count););
         rs->socket_close_count++;
         radio_close_socket(rs->sock);
+        radio_worker_breadcrumb("after CloseSocket", "CloseSocket", rs->session_id);
         RADIO_DBG(printf("radio-cleanup: abort raw socket closed before SSL_free session=%lu fd=%ld\n", rs->session_id, closing_fd);)
         RADIO_DBG(printf("AFTER CloseSocket session=%lu fd=%ld socket_close_count=%u\n",
             rs->session_id, closing_fd, rs->socket_close_count););
@@ -2000,6 +2136,8 @@ static void radio_abort_current_socket_local(RadioStream *rs)
         if (radio_playback_open_socket_count > 0) radio_playback_open_socket_count--;
         RADIO_DBG(printf("radio-socket: playback socket close session=%lu fd=%ld open_socket_count %ld->%ld playback_open_socket_count %ld->%ld\n", rs->session_id, closing_fd, before_all, radio_open_socket_count, before_playback, radio_playback_open_socket_count););
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: abort CloseSocket done\n"));
+        RADIO_DBG(printf("radio-cleanup: active abort CloseSocket end session=%lu fd=%ld\n",
+            rs->session_id, closing_fd););
         RADIO_STOP_DEBUG_PRINTF(("radio-stop: socket aborted\n"));
     } else {
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: abort CloseSocket skipped fd=-1\n"));
@@ -2303,7 +2441,7 @@ static void radio_worker_maybe_log_stats(RadioStream *rs)
 	freeBytes = rs->size > rs->used ? rs->size - rs->used : 0;
 	status = rs->status;
 	radio_stream_unlock(rs);
-	printf("radio-worker: session=%lu pump reads=%lu bytes=%lu wantRead=%lu zero=%lu backpressure=%lu partial=%lu preventedDrop=%lu ringFill=%lu ringFree=%lu status=%d\n",
+	printf("radio-worker: session=%lu pump reads=%lu bytes=%lu wantRead=%lu zero=%lu backpressure=%lu partial=%lu preventedDrop=%lu ringFill=%lu ringFree=%lu status=%d stage=\"%s\" lastOp=\"%s\" heartbeat=%lu\n",
 		rs->session_id,
 		rs->workerReadCalls,
 		rs->workerReadBytes,
@@ -2314,7 +2452,10 @@ static void radio_worker_maybe_log_stats(RadioStream *rs)
 		rs->workerDroppedInputPreventedCount,
 		fill,
 		freeBytes,
-		(int)status);
+		(int)status,
+		radio_net_worker_stage ? (const char *)radio_net_worker_stage : "<unset>",
+		radio_net_worker_last_op ? (const char *)radio_net_worker_last_op : "<unset>",
+		radio_net_worker_heartbeat);
 	rs->workerLastStatsClock = (unsigned long)now;
 }
 
@@ -2493,6 +2634,7 @@ void Radio_RequestStop(RadioStream *rs)
     radio_stream_lock(rs);
     rs->stopping = 1;
     rs->workerStopRequested = 1;
+    rs->workerCloseRequested = 1;
     radio_worker_state = RADIO_WORKER_STOPPING;
     rs->reconnectAttempts = RADIO_RECONNECT_MAX;
     rs->reconnectDelay = 0;
@@ -2859,7 +3001,14 @@ static int radio_pump_body(RadioStream *rs)
     if (!rs || rs->status == RADIO_STATUS_ERROR) return -1;
     radio_net_adopt_context(rs);
     if (rs->fatalStop) { set_error(rs, "TLS read failed"); return -1; }
-    if (radio_is_stopping(rs)) { close_current_socket(rs); rs->status = RADIO_STATUS_CLOSED; return 0; }
+    if (radio_is_stopping(rs)) {
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+        printf("radio-pump: stop/detach observed before SSL_read session=%lu -- no further read\n", rs->session_id);
+        return 0;
+#else
+        close_current_socket(rs); rs->status = RADIO_STATUS_CLOSED; return 0;
+#endif
+    }
     if (rs->sock == RADIO_INVALID_SOCKET) {
         if (!rs->everPlayed) { set_error(rs, "radio stream closed before playback started"); return -1; }
         return reconnect_http(rs);
@@ -2891,7 +3040,25 @@ static int radio_pump_body(RadioStream *rs)
             requested = (int)ringFreeSnapshot;
     }
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+    radio_stream_lock(rs);
+    if (rs->workerStopRequested || rs->workerClosing || rs->workerCloseRequested ||
+        rs->workerDetached || !rs->workerRegistered ||
+        rs->status == RADIO_STATUS_STOPPING || rs->status == RADIO_STATUS_CLOSED ||
+        rs->status == RADIO_STATUS_ERROR) {
+        RadioStatus stopStatus = rs->status;
+        int stopReq = rs->workerStopRequested;
+        int closing = rs->workerClosing;
+        int closeReq = rs->workerCloseRequested;
+        int detached = rs->workerDetached;
+        int registered = rs->workerRegistered;
+        radio_stream_unlock(rs);
+        printf("radio-pump: stop/detach observed before SSL_read session=%lu status=%d stopReq=%d closing=%d closeReq=%d registered=%d detached=%d -- no further read\n",
+            rs->session_id, (int)stopStatus, stopReq, closing, closeReq, registered, detached);
+        return 0;
+    }
+    radio_stream_unlock(rs);
     if (rs->isSSL && rs->ssl) {
+        radio_worker_risk_log("before SSL_read", rs);
         RADIO_DBG(printf("radio-ssl-read: session=%lu sslHandshakeDone=%d before SSL_read\n", rs->session_id, rs->sslHandshakeDone););
         if (rs->sslHandshakeDone != 1) {
             RADIO_DBG(printf("radio-ssl-read: ERROR session=%lu skipped SSL_read because handshake is incomplete sslHandshakeDone=%d\n", rs->session_id, rs->sslHandshakeDone););
@@ -2902,6 +3069,7 @@ static int radio_pump_body(RadioStream *rs)
 	        radio_net_adopt_context(rs);
 	        rs->workerReadCalls++;
 	        n = (int)SSL_read(rs->ssl, (char *)b, requested);
+            radio_worker_risk_log("after SSL_read", rs);
 	        RADIO_DBG(printf("radio-ssl-read: session=%lu ssl=%p ctx=%p fd=%ld dst=%p dst_cap=%d requested=%d returned=%d fill=%lu ring_free=%lu\n",
 	            rs->session_id, (void *)rs->ssl, (void *)rs->ctx, (long)rs->sock, (void *)b, (int)sizeof(b), requested, n, rs->used, rs->size > rs->used ? rs->size - rs->used : 0));
 	        if (n <= 0) {
@@ -2947,7 +3115,14 @@ static int radio_pump_body(RadioStream *rs)
 	    if (n > 0) rs->workerReadBytes += (unsigned long)n;
 	    else rs->workerPumpZeroCount++;
 	    radio_worker_maybe_log_stats(rs);
-	    if (radio_is_stopping(rs)) { close_current_socket(rs); rs->status = RADIO_STATUS_CLOSED; return 0; }
+	    if (radio_is_stopping(rs)) {
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+            printf("radio-pump: stop/detach observed after SSL_read session=%lu -- close deferred to worker close job\n", rs->session_id);
+            return 0;
+#else
+            close_current_socket(rs); rs->status = RADIO_STATUS_CLOSED; return 0;
+#endif
+        }
     /* non-blocking socket (or SSL WANT_READ): no data yet — yield */
     if (n < 0 && wb) {
         radio_backoff_sleep();
@@ -3099,7 +3274,8 @@ int Radio_ReadAudio(RadioStream *rs,unsigned char *buf,int maxBytes)
 	headerDone = rs->headerDone;
 	decoderStarted = rs->decoderStarted;
 	everPlayed = rs->everPlayed;
-	stopping = rs->stopping || rs->workerStopRequested || rs->workerClosing;
+	stopping = rs->stopping || rs->workerStopRequested || rs->workerClosing ||
+		rs->workerCloseRequested || rs->workerDetached;
 	radio_stream_unlock(rs);
 	if(stopping || status==RADIO_STATUS_STOPPING || status==RADIO_STATUS_CLOSED || status==RADIO_STATUS_ERROR)
 		return 0;
