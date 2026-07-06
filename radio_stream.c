@@ -550,6 +550,9 @@ struct RadioStream {
 	unsigned long workerReadBytes;
 	unsigned long workerWantReadCount;
 	unsigned long workerPumpZeroCount;
+	unsigned long workerBackpressureCount;
+	unsigned long workerPartialConsumeCount;
+	unsigned long workerDroppedInputPreventedCount;
 	unsigned long workerLastStatsClock;
 	/* radio_ssl_close_stream_mode()/close_current_socket() can be re-entered
      * (abort path, then Radio_Close()'s own call); once a session has fully
@@ -911,7 +914,9 @@ static void radio_reset_session_state(RadioStream *rs)
     rs->stallPumps = 0;
 	rs->everPlayed = rs->firstDataLogged = rs->haveHostAddr = 0;
 	rs->workerReadCalls = rs->workerReadBytes = rs->workerWantReadCount = 0;
-	rs->workerPumpZeroCount = rs->workerLastStatsClock = 0;
+	rs->workerPumpZeroCount = rs->workerBackpressureCount = 0;
+	rs->workerPartialConsumeCount = rs->workerDroppedInputPreventedCount = 0;
+	rs->workerLastStatsClock = 0;
 	rs->sslFreed = rs->ctxFreed = rs->socketClosed = rs->cleanupDone = 0;
     rs->closeCleanupDone = 0;
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
@@ -2197,7 +2202,7 @@ static int process_bytes(RadioStream *rs, const unsigned char *b, int n)
             continue;
         }
     }
-    return 0;
+    return i;
 }
 
 static int radio_note_start_wait(RadioStream *rs, const char *message)
@@ -2240,12 +2245,15 @@ static void radio_worker_maybe_log_stats(RadioStream *rs)
 	freeBytes = rs->size > rs->used ? rs->size - rs->used : 0;
 	status = rs->status;
 	radio_stream_unlock(rs);
-	printf("radio-worker: session=%lu pump reads=%lu bytes=%lu wantRead=%lu zero=%lu ringFill=%lu ringFree=%lu status=%d\n",
+	printf("radio-worker: session=%lu pump reads=%lu bytes=%lu wantRead=%lu zero=%lu backpressure=%lu partial=%lu preventedDrop=%lu ringFill=%lu ringFree=%lu status=%d\n",
 		rs->session_id,
 		rs->workerReadCalls,
 		rs->workerReadBytes,
 		rs->workerWantReadCount,
 		rs->workerPumpZeroCount,
+		rs->workerBackpressureCount,
+		rs->workerPartialConsumeCount,
+		rs->workerDroppedInputPreventedCount,
 		fill,
 		freeBytes,
 		(int)status);
@@ -2765,7 +2773,9 @@ void Radio_NetworkShutdown(void)
 static int radio_pump_body(RadioStream *rs)
 {
     unsigned char b[1024];
-    int n, wb;
+    int n, wb, requested, consumed;
+    unsigned long usedSnapshot, sizeSnapshot, ringFreeSnapshot;
+    int headerDoneSnapshot, parseStateSnapshot, audioUntilMetaSnapshot, metaLeftSnapshot;
     if (!rs || rs->status == RADIO_STATUS_ERROR) return -1;
     radio_net_adopt_context(rs);
     if (rs->fatalStop) { set_error(rs, "TLS read failed"); return -1; }
@@ -2775,9 +2785,33 @@ static int radio_pump_body(RadioStream *rs)
         return reconnect_http(rs);
     }
     wb = 0;
+    requested = (int)sizeof(b);
+    radio_stream_lock(rs);
+    usedSnapshot = rs->used;
+    sizeSnapshot = rs->size;
+    ringFreeSnapshot = sizeSnapshot > usedSnapshot ? sizeSnapshot - usedSnapshot : 0;
+    headerDoneSnapshot = rs->headerDone;
+    parseStateSnapshot = (int)rs->parseState;
+    audioUntilMetaSnapshot = rs->audioUntilMeta;
+    metaLeftSnapshot = rs->metaLeft;
+    radio_stream_unlock(rs);
+    if (headerDoneSnapshot) {
+        if (ringFreeSnapshot == 0) {
+            rs->workerBackpressureCount++;
+            if (rs->workerBackpressureCount == 1 || (rs->workerBackpressureCount % 25UL) == 0) {
+                printf("radio-worker: backpressure session=%lu ringFill=%lu ringFree=%lu parseState=%d audioUntilMeta=%d metaLeft=%d -- not reading socket\n",
+                    rs->session_id, usedSnapshot, ringFreeSnapshot, parseStateSnapshot,
+                    audioUntilMetaSnapshot, metaLeftSnapshot);
+            }
+            radio_backoff_sleep();
+            radio_worker_maybe_log_stats(rs);
+            return 0;
+        }
+        if ((unsigned long)requested > ringFreeSnapshot)
+            requested = (int)ringFreeSnapshot;
+    }
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     if (rs->isSSL && rs->ssl) {
-        int requested = (int)sizeof(b);
         RADIO_DBG(printf("radio-ssl-read: session=%lu sslHandshakeDone=%d before SSL_read\n", rs->session_id, rs->sslHandshakeDone););
         if (rs->sslHandshakeDone != 1) {
             RADIO_DBG(printf("radio-ssl-read: ERROR session=%lu skipped SSL_read because handshake is incomplete sslHandshakeDone=%d\n", rs->session_id, rs->sslHandshakeDone););
@@ -2827,7 +2861,7 @@ static int radio_pump_body(RadioStream *rs)
 	#endif
 	    {
 	        rs->workerReadCalls++;
-	        n = (int)recv(rs->sock, (char *)b, sizeof(b), 0);
+	        n = (int)recv(rs->sock, (char *)b, requested, 0);
 	        if (n < 0 && radio_would_block()) { wb = 1; rs->workerWantReadCount++; }
 	    }
 	    if (n > 0) rs->workerReadBytes += (unsigned long)n;
@@ -2891,7 +2925,25 @@ static int radio_pump_body(RadioStream *rs)
         rs->firstDataLogged = 1;
     }
     if (!rs->everPlayed) rs->startPumps = 0;
-    if (process_bytes(rs, b, n) < 0) return -1;
+    consumed = process_bytes(rs, b, n);
+    if (consumed < 0) return -1;
+    if (consumed < n) {
+        unsigned long fill, freeBytes;
+        int parseState, audioUntilMeta, metaLeft;
+        rs->workerPartialConsumeCount++;
+        rs->workerDroppedInputPreventedCount += (unsigned long)(n - consumed);
+        radio_stream_lock(rs);
+        fill = rs->used;
+        freeBytes = rs->size > rs->used ? rs->size - rs->used : 0;
+        parseState = (int)rs->parseState;
+        audioUntilMeta = rs->audioUntilMeta;
+        metaLeft = rs->metaLeft;
+        radio_stream_unlock(rs);
+        printf("radio-pump: ERROR would drop input bytes session=%lu consumed=%d total=%d ringFill=%lu ringFree=%lu parseState=%d audioUntilMeta=%d metaLeft=%d\n",
+            rs->session_id, consumed, n, fill, freeBytes, parseState, audioUntilMeta, metaLeft);
+        set_error(rs, "radio pump backpressure would drop stream bytes");
+        return -1;
+    }
     if (rs->status == RADIO_STATUS_PLAYING || rs->everPlayed) {
         clock_t now = clock();
         if (!rs->lastMemReportClock) rs->lastMemReportClock = now;

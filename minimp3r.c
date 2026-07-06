@@ -1473,6 +1473,7 @@ static void PlaybackEntry(void)
 	int earlyStop;
 	int ranDecoder = 0;
 	int postedDone = 0;
+	const char *childExitReason;
 
 	gPlayer.task = FindTask(NULL);
 	gPlayer.stage = "STARTING";
@@ -1505,10 +1506,12 @@ static void PlaybackEntry(void)
 
 	gPlayer.stage = "EXITING";
 	gPlayer.cleanupStage = "cleanup enter";
+	childExitReason = gPlayer.stopRequested ? "stop" :
+		(strstr((const char *)gGuiPlaybackStatus.radioError, "stalled") ? "radio-stalled" :
+			(gGuiPlaybackStatus.radioStatus == RADIO_STATUS_ERROR || gGuiPlaybackStatus.radioError[0] ? "radio-error" : "normal"));
 	RADIO_DBG(printf("radio-session: child begins cleanup session=%lu reason=%s error=\"%s\"\n",
 		gPlayer.sessionId,
-		gPlayer.stopRequested ? "stop" :
-			(gGuiPlaybackStatus.radioStatus == RADIO_STATUS_ERROR || gGuiPlaybackStatus.radioError[0] ? "radio-error" : "normal"),
+		childExitReason,
 		(const char *)gGuiPlaybackStatus.radioError);)
 	gGuiPlaybackStatus.phase = GUIPLAY_PHASE_DONE;
 	gGuiPlaybackStatus.cleanupComplete = 1;
@@ -1532,7 +1535,7 @@ static void PlaybackEntry(void)
 	}
 	if (!postedDone) RADIO_DBG(printf("radio-session: child no done port session=%lu done message not posted\n", gPlayer.sessionId);)
 	gPlayer.stage = "EXITED";
-	RADIO_DBG(printf("child exiting session=%lu reason=%s\n", gPlayer.sessionId, gPlayer.stopRequested ? "stop" : "normal");)
+	RADIO_DBG(printf("child exiting session=%lu reason=%s\n", gPlayer.sessionId, childExitReason);)
 	RADIO_DBG(printf("radio-teardown: child PlaybackEntry exiting (task will terminate) session=%lu\n", gPlayer.sessionId);)
 }
 
@@ -1921,7 +1924,8 @@ static void HandleDoneSignal(MrApp *app)
 
 	MrCopyVolatileString(doneError, sizeof(doneError), gGuiPlaybackStatus.radioError);
 	doneReason = gPlayer.stopRequested ? "stop" :
-		(gGuiPlaybackStatus.radioStatus == RADIO_STATUS_ERROR || doneError[0] ? "error" : "normal");
+		(strstr(doneError, "stalled") ? "radio-stalled" :
+			(gGuiPlaybackStatus.radioStatus == RADIO_STATUS_ERROR || doneError[0] ? "error" : "normal"));
 	doneEverPlayed = gGuiPlaybackStatus.decodedFrames > 0 ? 1 : 0;
 	doneFirstData = gGuiPlaybackStatus.radioBufferedBytes > 0 ? 1 : 0;
 	RADIO_DBG(printf("radio-session: parent receives done message session=%lu doneRun=%lu active=%d pending=%d childExit=\"%s\" childError=\"%s\" everPlayed=%d firstData=%d streamStateBefore=%s\n",

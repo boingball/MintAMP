@@ -139,6 +139,11 @@ static void RadioDebugUnsuppressedPrintf(const char *fmt, ...)
 #define putchar MiniAmp3Putchar
 #define fflush MiniAmp3Fflush
 #define fwrite MiniAmp3Fwrite
+#ifdef RADIO_DEBUG
+#define RADIO_INPUT_DIAG_PRINTF RadioDebugUnsuppressedPrintf
+#else
+#define RADIO_INPUT_DIAG_PRINTF MiniAmp3Printf
+#endif
 
 #if defined(AMIGA_M68K)
 /* Tell AmigaOS to provide at least 256 KB of stack for this executable. */
@@ -1662,7 +1667,7 @@ static void InputSourceClose(InputSource *input)
 			status != RADIO_STATUS_STOPPING &&
 			status != RADIO_STATUS_CLOSED &&
 			(buffered > 0 || (error && !error[0]))) {
-			printf("radio-input: WARNING decoder exiting normal while radio buffered=%d status=%d error=\"%s\" session=%lu\n",
+			RADIO_INPUT_DIAG_PRINTF("radio-input: WARNING decoder exiting normal while radio buffered=%d status=%d error=\"%s\" session=%lu\n",
 				buffered, (int)status, error ? error : "", Radio_GetSessionId(radio));
 		}
 		RADIO_DBG(printf("radio-teardown: before first Radio_RequestStop (InputSourceClose) session=%lu\n",
@@ -1771,7 +1776,7 @@ static size_t InputSourceRead(InputSource *input, void *dest, size_t bytes)
 			}
 
 			if (radio_input_clock_ms() - lastLogMs >= 1000UL) {
-				printf("radio-input: zero read requested=%lu got=0 status=%d buffered=%d error=\"%s\" session=%lu -- waiting, not EOF\n",
+				RADIO_INPUT_DIAG_PRINTF("radio-input: zero read requested=%lu got=0 status=%d buffered=%d error=\"%s\" session=%lu -- waiting, not EOF\n",
 					(unsigned long)bytes,
 					(int)status,
 					buffered,
@@ -1781,7 +1786,7 @@ static size_t InputSourceRead(InputSource *input, void *dest, size_t bytes)
 			}
 
 			if (radio_input_clock_ms() - startMs >= maxWaitMs) {
-				printf("radio-input: live stream read timeout requested=%lu status=%d buffered=%d error=\"%s\" session=%lu\n",
+				RADIO_INPUT_DIAG_PRINTF("radio-input: live stream read timeout requested=%lu status=%d buffered=%d error=\"%s\" session=%lu\n",
 					(unsigned long)bytes,
 					(int)status,
 					buffered,
