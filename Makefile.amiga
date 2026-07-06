@@ -76,6 +76,13 @@ SOURCES := amiga_mp3dec.c miniamp_memguard.c $(RADIO_SOURCES) $(DECODER_SOURCES)
 GUI_SOURCES := amiga_mp3gui.c picojpeg.c miniamp_memguard.c $(RADIO_SOURCES) \
 	radio_browser_controller.c radio_browser.c radio_browser_url.c \
 	radio_browser_http.c radio_browser_json.c radio_stream_probe.c
+# RC1 safety quarantine for the GadTools frontend: the station favicon path
+# fetches and decodes remote artwork from the main Intuition task. Keep it off
+# by default for miniamp3 so a bad/misbehaving station icon cannot wedge the
+# GadTools UI during RC1 testing. Re-enable with:
+#   make -f Makefile.amiga sslgui GADTOOLS_RADIO_ARTWORK=1
+GADTOOLS_RADIO_ARTWORK ?= 0
+GADTOOLS_RADIO_ARTWORK_CPPFLAGS := -DENABLE_RADIO_ARTWORK=$(GADTOOLS_RADIO_ARTWORK)
 # miniamp3 uses gadtools.library via proto/gadtools.h; no linker flag is needed.
 # minimp3r is the ReAction/ClassAct frontend; it pulls amiga_mp3dec.c in itself
 # (like amiga_mp3gui.c) so only the shared decoder modules are listed here.  The
@@ -195,7 +202,7 @@ fast030-halfasm-test: $(FAST030_HALFASM_TEST_TARGET)
 gui-halfasm-test: $(GUI_HALFASM_TEST_TARGET)
 
 $(GUI_TARGET): $(GUI_SOURCES) amiga_mp3dec.c $(DECODER_SOURCES) $(FAST030_ASM_SOURCES)
-	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(SSL_CPPFLAGS) $(SSLCERTS_CPPFLAGS) $(DEBUG_CPPFLAGS) $(EXTRA_CFLAGS) \
+	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(SSL_CPPFLAGS) $(SSLCERTS_CPPFLAGS) $(GADTOOLS_RADIO_ARTWORK_CPPFLAGS) $(DEBUG_CPPFLAGS) $(EXTRA_CFLAGS) \
 		-o $@ $(GUI_SOURCES) $(DECODER_SOURCES) $(FAST030_ASM_SOURCES)
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
 
@@ -224,7 +231,7 @@ $(FAST030_HALFASM_TEST_TARGET): $(SOURCES) $(FAST030_ASM_SOURCES)
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
 
 $(GUI_HALFASM_TEST_TARGET): $(GUI_SOURCES) amiga_mp3dec.c $(DECODER_SOURCES) $(FAST030_ASM_SOURCES)
-	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(HALFASM_TEST_CPPFLAGS) $(EXTRA_CFLAGS) \
+	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(GADTOOLS_RADIO_ARTWORK_CPPFLAGS) $(HALFASM_TEST_CPPFLAGS) $(EXTRA_CFLAGS) \
 		-o $@ $(GUI_SOURCES) $(DECODER_SOURCES) $(FAST030_ASM_SOURCES)
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
 
@@ -233,7 +240,7 @@ print-command:
 	@printf '%s\n' '$(AMIGA_HUNK_FAST_PREFERRED) $(TARGET)'
 
 print-gui-command:
-	@printf '%s\n' '$(CC) $(CFLAGS_COMMON) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(EXTRA_CFLAGS) -o $(GUI_TARGET) $(GUI_SOURCES)'
+	@printf '%s\n' '$(CC) $(CFLAGS_COMMON) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(GADTOOLS_RADIO_ARTWORK_CPPFLAGS) $(EXTRA_CFLAGS) -o $(GUI_TARGET) $(GUI_SOURCES)'
 	@printf '%s\n' '$(AMIGA_HUNK_FAST_PREFERRED) $(GUI_TARGET)'
 
 print-guir-command:
