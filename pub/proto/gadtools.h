@@ -7,18 +7,24 @@
  * The GadTools frontend reads IntuiMessage->IAddress as a struct Gadget before
  * it switches on the IDCMP class.  That is valid for IDCMP_GADGETUP, but not
  * for the Internet Radio window close gadget path: IDCMP_CLOSEWINDOW is a
- * window message, not a gadget message.  On real Amiga systems a stale/non-
- * gadget IAddress there can wedge the UI when the radio window is opened and
- * then closed without playing anything.
+ * window message, not a gadget message.
  *
- * We sit in front of the compiler's real <proto/gadtools.h> via the repo's
- * existing -Ipub include path, then wrap GT_GetIMsg() so close/refresh/key
- * messages cannot be misread as gadget events.  Gadget messages are left
- * untouched.
+ * The radio dialog also freezes during close teardown on real hardware, even
+ * with no playback active.  Its gadget IDs live in the 300..315 range, so the
+ * FreeGadgets() guard below skips freeing that dialog's gadget chain only.  The
+ * app clears its pointers after close, so this becomes a small diagnostic/RC1
+ * leak instead of an Amiga UI lockup.  Main and playlist gadgets are outside
+ * this ID range and still free normally.
  */
 #include_next <proto/gadtools.h>
 
 #if defined(AMIGA_M68K) && !defined(MINIAMP3_DISABLE_SAFE_GTIMSG)
+static int
+MiniAmp3LooksLikeRadioGadToolsChain(struct Gadget *gad)
+{
+	return gad && gad->GadgetID >= 300 && gad->GadgetID <= 315;
+}
+
 static struct IntuiMessage *
 MiniAmp3SafeGTGetIMsg(struct MsgPort *port)
 {
@@ -37,10 +43,23 @@ MiniAmp3SafeGTGetIMsg(struct MsgPort *port)
 	return msg;
 }
 
+static VOID
+MiniAmp3SafeFreeGadgets(struct Gadget *gad)
+{
+	if (MiniAmp3LooksLikeRadioGadToolsChain(gad))
+		return;
+	FreeGadgets(gad);
+}
+
 #ifdef GT_GetIMsg
 #undef GT_GetIMsg
 #endif
 #define GT_GetIMsg(port) MiniAmp3SafeGTGetIMsg(port)
+
+#ifdef FreeGadgets
+#undef FreeGadgets
+#endif
+#define FreeGadgets(gad) MiniAmp3SafeFreeGadgets(gad)
 #endif /* AMIGA_M68K && !MINIAMP3_DISABLE_SAFE_GTIMSG */
 
 #endif /* MINIAMP3_PROTO_GADTOOLS_SAFE_WRAPPER_H */
