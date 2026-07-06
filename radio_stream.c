@@ -670,11 +670,11 @@ const char *Radio_TlsPoisonedMessage(void)
  * the user the rest of their session, so only *detected memory corruption*
  * (ring canary / MiniMem check failures) hard-poisons now. */
 static long radio_tls_fault_count = 0;
-/* Once any SSL_free/SSL_CTX_free/CleanupAmiSSL has been skipped this run,
- * dead tasks have left dangling per-task state inside AmiSSL, so the final
- * CloseAmiSSL() walk at app exit is no longer safe -- Radio_NetworkShutdown()
- * abandons the instance instead (same as hard poison, but HTTPS keeps
- * working until then). */
+/* Diagnostic skip/quarantine marker.  This alone is not enough to abandon
+ * the long-lived worker during Radio_NetworkShutdown(): MP3_SKIP_ABORT_SSL_FREE
+ * intentionally sets it for clean isolation runs with no TLS fault, no memory
+ * poison and no active SSL/socket objects.  Final shutdown is abandoned only
+ * for a real fault/poison condition (see Radio_NetworkShutdown()). */
 static int radio_tls_shutdown_quarantine = 0;
 
 void Radio_SetTlsFaultContext(unsigned long session_id, const char *url)
@@ -2708,7 +2708,10 @@ void Radio_NetworkShutdown(void)
     }
     radio_network_shutdown_started = 1;
 #if defined(HAVE_AMISSL)
-    if (Radio_IsTlsPoisoned() || radio_tls_shutdown_quarantine) {
+    {
+        int abandon_worker = Radio_IsTlsPoisoned() || Radio_IsMemoryPoisoned() ||
+            radio_amissl_task_poisoned || radio_tls_fault_count > 0;
+    if (abandon_worker) {
         /* A fatal SSL fault or detected memory corruption already left the
          * worker's per-task AmiSSL state (or the heap itself) suspect this
          * run -- asking the same worker to run CleanupAmiSSL()-adjacent
@@ -2719,12 +2722,24 @@ void Radio_NetworkShutdown(void)
          * the process exits, same as before. */
         if (Radio_IsTlsPoisoned())
             printf("APP_CLOSE: AmiSSL poisoned, skipping final AmiSSL shutdown\n");
+        else if (Radio_IsMemoryPoisoned())
+            printf("APP_CLOSE: memory poisoned, skipping final AmiSSL shutdown\n");
+        else if (radio_amissl_task_poisoned)
+            printf("APP_CLOSE: AmiSSL task poisoned, skipping final AmiSSL shutdown\n");
         else
             printf("APP_CLOSE: AmiSSL quarantined after TLS fault(s), skipping final AmiSSL shutdown\n");
-        RADIO_DBG(printf("radio-netshutdown: AmiSSL %s (reason=%s, tls_fault_count=%ld), abandoning net worker task=%p without asking it to CloseAmiSSL/CloseLibrary\n",
-            Radio_IsTlsPoisoned() ? "poisoned" : "quarantined",
-            Radio_TlsPoisonReason(), radio_tls_fault_count, (void *)radio_net_worker_task););
+        RADIO_DBG(printf("radio-netshutdown: abandoning net worker task=%p without asking it to CloseAmiSSL/CloseLibrary tls_poisoned=%d memory_poisoned=%d task_poisoned=%d tls_fault_count=%ld shutdown_quarantine=%d reason=%s active_ssl_count=%ld active_ssl_ctx_count=%ld open_socket_count=%ld\n",
+            (void *)radio_net_worker_task, Radio_IsTlsPoisoned(), Radio_IsMemoryPoisoned(),
+            radio_amissl_task_poisoned, radio_tls_fault_count, radio_tls_shutdown_quarantine,
+            Radio_TlsPoisonReason(), radio_active_ssl_count, radio_active_ssl_ctx_count,
+            radio_open_socket_count););
     } else {
+        if (radio_tls_shutdown_quarantine) {
+            RADIO_DBG(printf("radio-netshutdown: shutdown_quarantine=1 but no real fault/poison (tls_fault_count=%ld tls_poisoned=%d memory_poisoned=%d task_poisoned=%d active_ssl_count=%ld active_ssl_ctx_count=%ld open_socket_count=%ld), performing normal worker shutdown\n",
+                radio_tls_fault_count, Radio_IsTlsPoisoned(), Radio_IsMemoryPoisoned(),
+                radio_amissl_task_poisoned, radio_active_ssl_count,
+                radio_active_ssl_ctx_count, radio_open_socket_count););
+        }
         /* Ask the worker task to CloseAmiSSL()/CloseLibrary() (in that
          * order, exactly once, matching amissl_child_worker_repro.c) and
          * exit; radio_net_worker_stop() waits, bounded, for it to finish. */
@@ -2735,6 +2750,7 @@ void Radio_NetworkShutdown(void)
             radio_amisslmaster_close_count++;
             radio_socket_library_close_count++;
         }
+    }
     }
 #else
     if (SocketBase) {
