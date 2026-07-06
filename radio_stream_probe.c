@@ -1425,7 +1425,7 @@ static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
 int rb_probe_stream_probe_test_enabled(void)
 {
     Radio_LogRuntimeFlagsOnce();
-    return radio_runtime_flag_enabled("MP3_TEST_ENABLE_STREAM_PROBE");
+    return !radio_runtime_flag_enabled("MP3_NO_STREAM_PROBE");
 }
 
 int rb_probe_stream_probe_disabled(void)
@@ -1433,13 +1433,14 @@ int rb_probe_stream_probe_disabled(void)
     Radio_LogRuntimeFlagsOnce();
     if (radio_runtime_flag_enabled("MP3_NO_STREAM_PROBE"))
         return 1;
-    return !rb_probe_stream_probe_test_enabled();
+    return 0;
 }
 
 int rb_probe_artwork_test_enabled(void)
 {
     Radio_LogRuntimeFlagsOnce();
-    return radio_runtime_flag_enabled("MP3_TEST_ENABLE_ARTWORK");
+    return !radio_runtime_flag_enabled("MP3_NO_ARTWORK") &&
+        !rb_probe_artwork_disabled_for_run;
 }
 
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
@@ -1521,11 +1522,7 @@ int rb_probe_stream_url(const char *url, RbStreamInfo *info,
                         unsigned char *peek_buf, int peek_buf_size, int *peek_len)
 {
     if (rb_probe_stream_probe_disabled()) {
-        if (radio_runtime_flag_enabled("MP3_NO_STREAM_PROBE")) {
-            printf("radio-probe: stream probe disabled by MP3_NO_STREAM_PROBE, direct playback url=\"%s\"\n", url ? url : "");
-        } else {
-            printf("radio-probe: stream probe staged off until MP3_TEST_ENABLE_STREAM_PROBE=1, direct playback url=\"%s\"\n", url ? url : "");
-        }
+        printf("radio-probe: stream probe disabled by MP3_NO_STREAM_PROBE, direct playback url=\"%s\"\n", url ? url : "");
         if (info) {
             rb_probe_info_init(info);
             rb_probe_set_final_url(info, url ? url : "");
@@ -1932,7 +1929,7 @@ int rb_probe_artwork_disabled(void)
         return 1;
     if (radio_runtime_flag_enabled("MP3_NO_ARTWORK"))
         return 1;
-    return !rb_probe_artwork_test_enabled();
+    return 0;
 }
 
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
@@ -1964,7 +1961,7 @@ int rb_probe_fetch_binary(const char *url, unsigned char *out_buf, int out_buf_s
         } else if (radio_runtime_flag_enabled("MP3_NO_ARTWORK")) {
             printf("radio-art: skipped by MP3_NO_ARTWORK\n");
         } else {
-            printf("radio-art: staged off until MP3_TEST_ENABLE_ARTWORK=1 url=\"%s\"\n", url ? url : "");
+            printf("radio-art: optional artwork unavailable url=\"%s\"\n", url ? url : "");
         }
         return RB_STREAM_PROBE_ERR_DISABLED;
     }

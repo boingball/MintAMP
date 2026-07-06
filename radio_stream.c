@@ -1388,7 +1388,15 @@ static void close_current_socket(RadioStream *rs);
 static int radio_skip_abort_ssl_free(void)
 {
     Radio_LogRuntimeFlagsOnce();
-    return radio_runtime_flag_enabled("MP3_SKIP_ABORT_SSL_FREE");
+    if (radio_runtime_flag_enabled("MP3_ALLOW_ABORT_SSL_FREE"))
+        return 0;
+    if (radio_runtime_flag_enabled("MP3_SKIP_ABORT_SSL_FREE"))
+        return 1;
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+    return 1;
+#else
+    return 0;
+#endif
 }
 
 static int radio_ssl_error_is_fatal(int e)
@@ -1549,11 +1557,21 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
             Radio_IsMemoryPoisoned()));
         if (mode == RADIO_CLOSE_ABORT) {
             int skip_abort_ssl_free = radio_skip_abort_ssl_free();
-            printf("radio-cleanup: flag check MP3_SKIP_ABORT_SSL_FREE enabled=%d mode=abort session=%lu\n",
+            printf("radio-cleanup: abort SSL_free policy skip=%d mode=abort session=%lu source=%s\n",
+                skip_abort_ssl_free, rs->session_id,
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+                radio_runtime_flag_enabled("MP3_ALLOW_ABORT_SSL_FREE") ? "env-allow" :
+                    (radio_runtime_flag_enabled("MP3_SKIP_ABORT_SSL_FREE") ? "env-skip" : "default")
+#else
+                radio_runtime_flag_enabled("MP3_SKIP_ABORT_SSL_FREE") ? "env-skip" : "default"
+#endif
+                );
+            RADIO_DBG(printf("radio-cleanup: flag check MP3_SKIP_ABORT_SSL_FREE enabled=%d mode=abort session=%lu\n",
                 skip_abort_ssl_free, rs->session_id);
+            )
             if (skip_abort_ssl_free) {
                 radio_worker_risk_log("after skipped SSL_free", rs);
-                printf("radio-cleanup: abort SSL_free/SSL_CTX_free skipped by MP3_SKIP_ABORT_SSL_FREE session=%lu ssl=%p ctx=%p\n",
+                printf("radio-cleanup: abort SSL_free/SSL_CTX_free skipped by abort policy session=%lu ssl=%p ctx=%p\n",
                     rs->session_id, (void *)rs->ssl, (void *)rs->ctx);
                 radio_tls_shutdown_quarantine = 1;
                 rs->sslFreed = 1;

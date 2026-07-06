@@ -92,43 +92,77 @@ int radio_runtime_flag_enabled(const char *name)
     return 0;
 }
 
+#ifdef RADIO_DEBUG
 static const char *radio_runtime_flag_printable(const char *value)
 {
     return (value && *value) ? value : "<unset>";
+}
+#endif
+
+static int radio_runtime_flag_is_set(const char *name)
+{
+    return radio_runtime_flag_raw_getenv(name) != NULL ||
+        radio_runtime_flag_raw_getvar(name) != NULL;
 }
 
 static const char *radio_runtime_effective_probe_text(void)
 {
     if (radio_runtime_flag_enabled("MP3_NO_STREAM_PROBE")) return "hard-disabled";
-    if (!radio_runtime_flag_enabled("MP3_TEST_ENABLE_STREAM_PROBE")) return "staged-off";
     return "enabled";
 }
 
 static const char *radio_runtime_effective_artwork_text(void)
 {
     if (radio_runtime_flag_enabled("MP3_NO_ARTWORK")) return "hard-disabled";
-    if (!radio_runtime_flag_enabled("MP3_TEST_ENABLE_ARTWORK")) return "staged-off";
     return "enabled";
+}
+
+static int radio_runtime_abort_ssl_free_skip_default(void)
+{
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+static int radio_runtime_abort_ssl_free_skip_effective(void)
+{
+    if (radio_runtime_flag_enabled("MP3_ALLOW_ABORT_SSL_FREE"))
+        return 0;
+    if (radio_runtime_flag_enabled("MP3_SKIP_ABORT_SSL_FREE"))
+        return 1;
+    return radio_runtime_abort_ssl_free_skip_default();
 }
 
 void Radio_LogTestModeSummary(void)
 {
     int probeTest = radio_runtime_flag_enabled("MP3_TEST_ENABLE_STREAM_PROBE");
     int artworkTest = radio_runtime_flag_enabled("MP3_TEST_ENABLE_ARTWORK");
-    int skipAbortSslFree = radio_runtime_flag_enabled("MP3_SKIP_ABORT_SSL_FREE");
+    int skipAbortSslFree = radio_runtime_abort_ssl_free_skip_effective();
+    const char *source = "default";
 
-    printf("radio-test-mode: probeTest=%d artworkTest=%d skipAbortSslFree=%d effectiveProbe=%s effectiveArtwork=%s\n",
-        probeTest,
-        artworkTest,
-        skipAbortSslFree,
+    if (radio_runtime_flag_is_set("MP3_NO_STREAM_PROBE") ||
+        radio_runtime_flag_is_set("MP3_NO_ARTWORK") ||
+        radio_runtime_flag_is_set("MP3_SKIP_ABORT_SSL_FREE") ||
+        radio_runtime_flag_is_set("MP3_ALLOW_ABORT_SSL_FREE") ||
+        radio_runtime_flag_is_set("MP3_TEST_ENABLE_STREAM_PROBE") ||
+        radio_runtime_flag_is_set("MP3_TEST_ENABLE_ARTWORK"))
+        source = "env";
+
+    (void)probeTest;
+    (void)artworkTest;
+    printf("radio-runtime: probe=%s artwork=%s abortSslFreePolicy=%s source=%s\n",
         radio_runtime_effective_probe_text(),
-        radio_runtime_effective_artwork_text());
+        radio_runtime_effective_artwork_text(),
+        skipAbortSslFree ? "skip-on-abort" : "free-on-abort",
+        source);
 }
 
 void Radio_LogRuntimeFlagsOnce(void)
 {
     static int logged = 0;
-    const char *names[5];
+    const char *names[6];
     int i;
 
     if (logged) return;
@@ -138,7 +172,9 @@ void Radio_LogRuntimeFlagsOnce(void)
     names[2] = "MP3_SKIP_ABORT_SSL_FREE";
     names[3] = "MP3_TEST_ENABLE_STREAM_PROBE";
     names[4] = "MP3_TEST_ENABLE_ARTWORK";
-    for (i = 0; i < 5; i++) {
+    names[5] = "MP3_ALLOW_ABORT_SSL_FREE";
+#ifdef RADIO_DEBUG
+    for (i = 0; i < 6; i++) {
         const char *env_value = radio_runtime_flag_raw_getenv(names[i]);
         const char *getvar_value = radio_runtime_flag_raw_getvar(names[i]);
         int enabled = radio_runtime_flag_enabled(names[i]);
@@ -148,5 +184,9 @@ void Radio_LogRuntimeFlagsOnce(void)
             radio_runtime_flag_printable(getvar_value),
             enabled);
     }
+#else
+    (void)names;
+    (void)i;
+#endif
     Radio_LogTestModeSummary();
 }

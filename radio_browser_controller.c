@@ -275,11 +275,7 @@ int rb_controller_probe_selected(
         info->codec = rb_controller_codec_from_station(station->codec);
         info->icy_br = station->bitrate;
         if (peek_len) *peek_len = 0;
-        if (radio_runtime_flag_enabled("MP3_NO_STREAM_PROBE")) {
-            printf("radio-probe: stream probe disabled by MP3_NO_STREAM_PROBE, direct playback url=\"%s\"\n", url);
-        } else {
-            printf("radio-probe: stream probe staged off until MP3_TEST_ENABLE_STREAM_PROBE=1, direct playback url=\"%s\"\n", url);
-        }
+        printf("radio-probe: stream probe disabled by MP3_NO_STREAM_PROBE, direct playback url=\"%s\"\n", url);
         return RB_STREAM_PROBE_OK;
     }
 
