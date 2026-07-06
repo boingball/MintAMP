@@ -253,7 +253,7 @@ static int rb_probe_ssl_read_retrying(RbProbeTransport *transport, char *dst, in
         int ssl_err;
 
         Radio_SetTlsFaultContext(transport->session_id, transport->url);
-        Radio_DebugCheckExecMem("before probe SSL_read");
+        Radio_DebugCheckExecMem("before first probe SSL_read");
         n = (int)SSL_read(transport->ssl, dst, want);
         RADIO_DBG(printf("rb-probe-ssl-read: session=%lu ssl=%p ctx=%p fd=%ld dst=%p dst_cap=%d requested=%d returned=%d fill=%d ring_free=0\n",
             transport->session_id, (void *)transport->ssl, (void *)transport->ctx, (long)transport->sock, (void *)dst, dst_cap, want, n, fill));
@@ -846,6 +846,7 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *url,
         int ssl_error;
         unsigned long ssl_lib_error;
         char ssl_error_buf[160];
+        char memcheck_where[96];
         int sni_set;
         int tries;
 
@@ -909,9 +910,15 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *url,
          * must not be misread as this connection's fatal error below. */
         ERR_clear_error();
         for (tries = 0; tries < 150; tries++) {
+            sprintf(memcheck_where, "before probe SSL_connect attempt=%d", tries + 1);
+            Radio_DebugCheckExecMem(memcheck_where);
+            RADIO_DBG(printf("rb-probe TLS: BEFORE SSL_connect attempt=%d ssl=%p ctx=%p fd=%ld\n", tries + 1, (void *)transport->ssl, (void *)transport->ctx, (long)transport->sock);)
             ssl_connect_rc = SSL_connect(transport->ssl);
+            ssl_error = (ssl_connect_rc == 1) ? 0 : SSL_get_error(transport->ssl, ssl_connect_rc);
+            RADIO_DBG(printf("rb-probe TLS: AFTER SSL_connect attempt=%d ret=%d err=%d ssl=%p ctx=%p fd=%ld\n", tries + 1, ssl_connect_rc, ssl_error, (void *)transport->ssl, (void *)transport->ctx, (long)transport->sock);)
+            sprintf(memcheck_where, "after probe SSL_connect attempt=%d", tries + 1);
+            Radio_DebugCheckExecMem(memcheck_where);
             if (ssl_connect_rc == 1) break;
-            ssl_error = SSL_get_error(transport->ssl, ssl_connect_rc);
             if (ssl_error == SSL_ERROR_WANT_READ || ssl_error == SSL_ERROR_WANT_WRITE) {
                 rb_probe_backoff_sleep();
                 continue;
@@ -1379,6 +1386,10 @@ int rb_probe_stream_url(const char *url, RbStreamInfo *info,
         return RB_STREAM_PROBE_ERR_DISABLED;
     }
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+    if (!Radio_WorkerIsIdle()) {
+        RADIO_DBG(printf("radio-probe: deferred/skipped because worker not idle state=%s url=\"%s\"\n", Radio_WorkerStateName(), url ? url : "");)
+        return RB_STREAM_PROBE_ERR_DISABLED;
+    }
     RbProbeStreamUrlJobArgs args;
     args.url = url;
     args.info = info;
@@ -1802,6 +1813,10 @@ int rb_probe_fetch_binary(const char *url, unsigned char *out_buf, int out_buf_s
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     {
         RbProbeFetchBinaryJobArgs args;
+        if (!Radio_WorkerIsIdle()) {
+            RADIO_DBG(printf("radio-art: deferred/skipped because worker not idle state=%s url=\"%s\"\n", Radio_WorkerStateName(), url ? url : "");)
+            return RB_STREAM_PROBE_ERR_DISABLED;
+        }
         args.url = url;
         args.out_buf = out_buf;
         args.out_buf_size = out_buf_size;

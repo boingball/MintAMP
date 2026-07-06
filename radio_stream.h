@@ -117,6 +117,8 @@ int Radio_HasNetwork(void);
  * without AmiSSL installed (always false in builds without HAVE_AMISSL). */
 int Radio_HasHttps(void);
 int Radio_PlaybackOwnsNetwork(void);
+int Radio_WorkerIsIdle(void);
+const char *Radio_WorkerStateName(void);
 /* Same private-to-the-worker-task rule as Radio_GetNetworkBases(): only
  * returns non-NULL to the worker task itself, letting radio_stream_probe.c
  * use the one AmiSSL instance the worker already opened instead of opening
@@ -221,6 +223,8 @@ static void Radio_GetNetworkBases(void **socket_base, void **amissl_base, void *
 static int Radio_HasNetwork(void) { return 0; }
 static int Radio_HasHttps(void) { return 0; }
 static int Radio_PlaybackOwnsNetwork(void) { return 0; }
+static int Radio_WorkerIsIdle(void) { return 1; }
+static const char *Radio_WorkerStateName(void) { return "idle"; }
 static void Radio_GetAmiSslShared(void **amissl_base, void **amissl_ext_base, void **amissl_master_base)
 {
     if (amissl_base) *amissl_base = 0;

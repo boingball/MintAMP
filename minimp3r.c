@@ -3782,7 +3782,7 @@ static int LoadRadioFaviconImage(MrApp *app)
 		return 0;
 	}
 	if (rb_probe_artwork_disabled()) {
-		RADIO_DBG(printf("radio-art: artwork fetch disabled by MP3_NO_ARTWORK\n");)
+		RADIO_DBG(printf("radio-art: skipped by MP3_NO_ARTWORK\n");)
 		return 0;
 	}
 	if (Radio_PlaybackOwnsNetwork()) {
@@ -4725,7 +4725,9 @@ static void RadioDoProbeAndPlay(MrApp *app)
 	}
 	memset(&info, 0, sizeof(info));
 	RadioSetStatus(app, "Connecting...");
-	RADIO_DBG(printf("radio-ui: new stream probe start url=\"%s\"\n", rb_station_play_url(st));)
+	if (!rb_probe_stream_probe_disabled()) {
+		RADIO_DBG(printf("radio-ui: new stream probe start url=\"%s\"\n", rb_station_play_url(st));)
+	}
 	rc = rb_controller_probe_selected(&app->rbController, &info, peek, (int)sizeof(peek), &peekLen);
 	RADIO_DBG(printf("radio-ui: new stream probe result rc=%d final=\"%s\" content=\"%s\" codec=%d redirects=%d\n",
 		rc, info.final_url, info.content_type, (int)info.codec, info.redirect_count);)
@@ -4752,8 +4754,13 @@ static void RadioDoProbeAndPlay(MrApp *app)
 	}
 #endif
 	SafeCopy(app->inputName, sizeof(app->inputName), info.final_url);
-	SafeCopy(app->currentRadioFavicon, sizeof(app->currentRadioFavicon), st->favicon);
-	RADIO_DBG(printf("radio-art: station favicon=\"%s\"\n", app->currentRadioFavicon);)
+	if (rb_probe_artwork_disabled()) {
+		app->currentRadioFavicon[0] = '\0';
+		RADIO_DBG(printf("radio-art: skipped by MP3_NO_ARTWORK\n");)
+	} else {
+		SafeCopy(app->currentRadioFavicon, sizeof(app->currentRadioFavicon), st->favicon);
+		RADIO_DBG(printf("radio-art: station favicon=\"%s\"\n", app->currentRadioFavicon);)
+	}
 	app->haveRadioHostAddr = info.have_host_addr;
 	app->radioHostAddrBe = info.host_addr_be;
 	UpdateFileGadget(app);

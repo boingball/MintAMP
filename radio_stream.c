@@ -1137,9 +1137,22 @@ static int radio_net_worker_amissl_ready(RadioStream *rs)
  * right now).  With the single-worker architecture every subsystem opens
  * its own private bsdsocket base and none of them ever touch the worker's
  * SocketBase, so there is no more contention to report. */
-int Radio_PlaybackOwnsNetwork(void) { return radio_net_worker_streams != NULL ||
-    radio_worker_state == RADIO_WORKER_OPENING || radio_worker_state == RADIO_WORKER_PLAYING ||
-    radio_worker_state == RADIO_WORKER_STOPPING || radio_worker_state == RADIO_WORKER_CLOSING; }
+static const char *radio_worker_state_name(RadioWorkerState state)
+{
+    switch (state) {
+        case RADIO_WORKER_IDLE: return "idle";
+        case RADIO_WORKER_PROBING: return "probing";
+        case RADIO_WORKER_OPENING: return "opening";
+        case RADIO_WORKER_PLAYING: return "playing";
+        case RADIO_WORKER_STOPPING: return "stopping";
+        case RADIO_WORKER_CLOSING: return "closing";
+    }
+    return "unknown";
+}
+
+int Radio_WorkerIsIdle(void) { return radio_worker_state == RADIO_WORKER_IDLE && radio_net_worker_streams == NULL; }
+const char *Radio_WorkerStateName(void) { return radio_worker_state_name(radio_worker_state); }
+int Radio_PlaybackOwnsNetwork(void) { return !Radio_WorkerIsIdle(); }
 
 /* No per-child InitAmiSSL()/CleanupAmiSSL()/bsdsocket.library close any
  * more: the worker task's own AmiSSL init/instance and bsdsocket base stay

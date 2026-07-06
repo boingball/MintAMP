@@ -3076,7 +3076,7 @@ static int LoadRadioFaviconImage(HelixAmp3Gui *gui)
 		return 0;
 	}
 	if (rb_probe_artwork_disabled()) {
-		RADIO_DBG(printf("radio-art: artwork fetch disabled by MP3_NO_ARTWORK\n");)
+		RADIO_DBG(printf("radio-art: skipped by MP3_NO_ARTWORK\n");)
 		return 0;
 	}
 	if (Radio_PlaybackOwnsNetwork()) {
@@ -5807,6 +5807,9 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 	}
 	memset(&info, 0, sizeof(info));
 	RadioSetStatus(app, "Checking stream...");
+	if (!rb_probe_stream_probe_disabled()) {
+		RADIO_DBG(printf("radio-ui: new stream probe start url=\"%s\"\n", rb_station_play_url(st));)
+	}
 	rc = rb_controller_probe_selected(&app->rbController, &info, peek, (int)sizeof(peek), &peekLen);
 	if (rc < 0) {
 		radio_reset_playback_state_after_stop(app, "probe-failed");
@@ -5834,8 +5837,13 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 		RadioSetStatus(app, "Stopping current stream before playing selection...");
 		return;
 	}
-	SafeCopy(app->currentRadioFavicon, sizeof(app->currentRadioFavicon), st->favicon);
-	RADIO_DBG(printf("radio-art: station favicon=\"%s\"\n", app->currentRadioFavicon);)
+	if (rb_probe_artwork_disabled()) {
+		app->currentRadioFavicon[0] = '\0';
+		RADIO_DBG(printf("radio-art: skipped by MP3_NO_ARTWORK\n");)
+	} else {
+		SafeCopy(app->currentRadioFavicon, sizeof(app->currentRadioFavicon), st->favicon);
+		RADIO_DBG(printf("radio-art: station favicon=\"%s\"\n", app->currentRadioFavicon);)
+	}
 	SelectInternetStream(app, info.final_url);
 	rb_station_display_name(st, msg, (int)sizeof(msg));
 	SafeCopy(app->currentRadioStationName, sizeof(app->currentRadioStationName), msg);
