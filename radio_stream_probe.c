@@ -230,6 +230,7 @@ typedef struct RbProbeTransport {
     int sslHandshakeDone;
     int sslStatePoisoned;
     int sslReadCloseSeen;
+    int ctxOwnedByTransport;
 #endif
 } RbProbeTransport;
 
@@ -809,7 +810,7 @@ static int rb_probe_recv(RbProbeTransport *transport, void *buf, int want)
     return -1;
 }
 
-static int rb_probe_transport_open(RbProbeTransport *transport, const char *url, const char *host, int port, int use_ssl, unsigned long *host_addr_be)
+static int rb_probe_transport_open_ex(RbProbeTransport *transport, const char *url, const char *host, int port, int use_ssl, unsigned long *host_addr_be, int private_ctx)
 {
     const struct hostent *he;
     struct sockaddr_in sa;
@@ -827,6 +828,7 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *url,
     transport->sslHandshakeDone = 0;
     transport->sslStatePoisoned = 0;
     transport->sslReadCloseSeen = 0;
+    transport->ctxOwnedByTransport = 0;
 #endif
 
 #if defined(AMIGA_M68K) && !defined(RB_STREAM_PROBE_EXTERNAL_SOCKETBASE)
@@ -899,23 +901,38 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *url,
             rb_probe_transport_close(transport);
             return RB_STREAM_PROBE_ERR_CONNECT;
         }
-        if (!rb_probe_shared_ctx) {
-            Radio_DebugCheckExecMem("before probe SSL_CTX_new");
-            rb_probe_shared_ctx = SSL_CTX_new(SSLv23_client_method());
-            Radio_DebugCheckExecMem("after probe SSL_CTX_new");
-            if (rb_probe_shared_ctx) {
-                /* No CA bundle on classic AmigaOS; skip cert verification for streams. */
-                SSL_CTX_set_verify(rb_probe_shared_ctx, SSL_VERIFY_NONE, NULL);
+        if (private_ctx) {
+            Radio_DebugCheckExecMem("before artwork SSL_CTX_new");
+            transport->ctx = SSL_CTX_new(SSLv23_client_method());
+            Radio_DebugCheckExecMem("after artwork SSL_CTX_new");
+            transport->ctxOwnedByTransport = (transport->ctx != NULL);
+            RADIO_DBG(printf("radio-art: per-fetch SSL_CTX_new session=%lu ctx=%p shared_ctx=%p\n",
+                transport->session_id, (void *)transport->ctx, (void *)rb_probe_shared_ctx);)
+            if (transport->ctx) {
+                SSL_CTX_set_verify(transport->ctx, SSL_VERIFY_NONE, NULL);
 #ifdef SSL_OP_IGNORE_UNEXPECTED_EOF
-                /* Treat an abrupt server disconnect as a clean end-of-stream
-                 * instead of the fatal "unexpected eof" SSL_ERROR_SSL -- see the
-                 * matching option (and rationale) in radio_stream.c's
-                 * radio_ssl_connect(). */
-                SSL_CTX_set_options(rb_probe_shared_ctx, SSL_OP_IGNORE_UNEXPECTED_EOF);
+                SSL_CTX_set_options(transport->ctx, SSL_OP_IGNORE_UNEXPECTED_EOF);
 #endif
             }
+        } else {
+            if (!rb_probe_shared_ctx) {
+                Radio_DebugCheckExecMem("before probe SSL_CTX_new");
+                rb_probe_shared_ctx = SSL_CTX_new(SSLv23_client_method());
+                Radio_DebugCheckExecMem("after probe SSL_CTX_new");
+                if (rb_probe_shared_ctx) {
+                    /* No CA bundle on classic AmigaOS; skip cert verification for streams. */
+                    SSL_CTX_set_verify(rb_probe_shared_ctx, SSL_VERIFY_NONE, NULL);
+#ifdef SSL_OP_IGNORE_UNEXPECTED_EOF
+                    /* Treat an abrupt server disconnect as a clean end-of-stream
+                     * instead of the fatal "unexpected eof" SSL_ERROR_SSL -- see the
+                     * matching option (and rationale) in radio_stream.c's
+                     * radio_ssl_connect(). */
+                    SSL_CTX_set_options(rb_probe_shared_ctx, SSL_OP_IGNORE_UNEXPECTED_EOF);
+#endif
+                }
+            }
+            transport->ctx = rb_probe_shared_ctx;
         }
-        transport->ctx = rb_probe_shared_ctx;
         if (!transport->ctx) {
             rb_probe_transport_close(transport);
             return RB_STREAM_PROBE_ERR_CONNECT;
@@ -924,8 +941,6 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *url,
         transport->ssl = SSL_new(transport->ctx);
         Radio_DebugCheckExecMem("after probe SSL_new");
         if (!transport->ssl) {
-            /* transport->ctx is the shared per-run ctx. Never free it here. */
-            transport->ctx = NULL;
             rb_probe_transport_close(transport);
             return RB_STREAM_PROBE_ERR_CONNECT;
         }
@@ -994,20 +1009,29 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *url,
                 RADIO_DBG(printf("radio-cleanup: probe handshake-fail SSL_free/SSL_CTX_free skipped (quarantined/poisoned) session=%lu ssl=%p ctx=%p\n", transport->session_id, (void *)transport->ssl, (void *)transport->ctx);)
                 rb_probe_ssl_free_skipped_poison_count++;
                 transport->ssl = NULL;
+                if (!transport->ctxOwnedByTransport)
+                    rb_probe_shared_ctx = NULL;
                 transport->ctx = NULL;
-                rb_probe_shared_ctx = NULL;
             } else {
                 /* Plain connect timeout (WANT_READ/WANT_WRITE budget
                  * exhausted, empty error queue): the SSL object is healthy
-                 * and freeing it is the normal, safe path. The ctx is the
-                 * shared per-run one and stays alive. */
+                 * and freeing it is the normal, safe path. Shared probe ctx
+                 * stays alive; per-fetch artwork ctx is freed immediately. */
                 rb_probe_debug_mem_report(transport->session_id, "before handshake-fail SSL_free");
                 Radio_DebugCheckExecMem("before probe SSL_free");
                 SSL_free(transport->ssl); transport->ssl = NULL;
                 if (rb_probe_active_ssl_count > 0) rb_probe_active_ssl_count--;
                 Radio_DebugCheckExecMem("after probe SSL_free");
                 rb_probe_debug_mem_report(transport->session_id, "after handshake-fail SSL_free");
+                if (transport->ctxOwnedByTransport && transport->ctx) {
+                    Radio_DebugCheckExecMem("before artwork handshake-fail SSL_CTX_free");
+                    RADIO_DBG(printf("radio-art: per-fetch SSL_CTX_free after handshake failure session=%lu ctx=%p\n",
+                        transport->session_id, (void *)transport->ctx);)
+                    SSL_CTX_free(transport->ctx);
+                    Radio_DebugCheckExecMem("after artwork handshake-fail SSL_CTX_free");
+                }
                 transport->ctx = NULL;
+                transport->ctxOwnedByTransport = 0;
             }
             rb_probe_transport_close(transport);
             return RB_STREAM_PROBE_ERR_TLS_HANDSHAKE;
@@ -1019,6 +1043,16 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *url,
     (void)use_ssl;
 #endif
     return RB_STREAM_PROBE_OK;
+}
+
+static int rb_probe_transport_open(RbProbeTransport *transport, const char *url, const char *host, int port, int use_ssl, unsigned long *host_addr_be)
+{
+    return rb_probe_transport_open_ex(transport, url, host, port, use_ssl, host_addr_be, 0);
+}
+
+static int rb_probe_transport_open_artwork(RbProbeTransport *transport, const char *url, const char *host, int port, int use_ssl)
+{
+    return rb_probe_transport_open_ex(transport, url, host, port, use_ssl, NULL, 1);
 }
 
 static void rb_probe_transport_close_mode(RbProbeTransport *transport, RbProbeCloseMode mode, int http_status)
@@ -1049,9 +1083,11 @@ static void rb_probe_transport_close_mode(RbProbeTransport *transport, RbProbeCl
             rb_probe_ssl_free_skipped_poison_count++;
             transport->ssl = NULL;
             transport->sslHandshakeDone = 0;
-            transport->ctx = NULL;
-            if (transport->sslStatePoisoned || Radio_IsTlsPoisoned())
+            if (!transport->ctxOwnedByTransport &&
+                (transport->sslStatePoisoned || Radio_IsTlsPoisoned()))
                 rb_probe_shared_ctx = NULL;
+            transport->ctx = NULL;
+            transport->ctxOwnedByTransport = 0;
         } else if (transport->ssl) {
             rb_probe_debug_mem_report(transport->session_id, "before close SSL_free");
             Radio_DebugCheckExecMem("before probe SSL_free");
@@ -1067,9 +1103,22 @@ static void rb_probe_transport_close_mode(RbProbeTransport *transport, RbProbeCl
             rb_probe_debug_mem_report(transport->session_id, "after close SSL_free");
             Radio_DebugCheckExecMem("after probe SSL_free");
         }
-        /* transport->ctx is rb_probe_shared_ctx. It is deliberately kept for
-         * the run and never SSL_CTX_free()'d from a per-probe close path. */
-        transport->ctx = NULL;
+        if (transport->ctxOwnedByTransport && transport->ctx) {
+            rb_probe_debug_mem_report(transport->session_id, "before close SSL_CTX_free");
+            Radio_DebugCheckExecMem("before artwork SSL_CTX_free");
+            RADIO_DBG(printf("radio-art: per-fetch SSL_CTX_free session=%lu ctx=%p shared_ctx=%p\n",
+                transport->session_id, (void *)transport->ctx, (void *)rb_probe_shared_ctx);)
+            SSL_CTX_free(transport->ctx);
+            transport->ctx = NULL;
+            transport->ctxOwnedByTransport = 0;
+            rb_probe_debug_mem_report(transport->session_id, "after close SSL_CTX_free");
+            Radio_DebugCheckExecMem("after artwork SSL_CTX_free");
+        } else {
+            /* Shared selected-stream probe ctx is deliberately kept for the
+             * run and freed once by rb_probe_shutdown_tls_context(). Artwork
+             * never uses rb_probe_shared_ctx. */
+            transport->ctx = NULL;
+        }
 #endif
          {
             long closing_fd = (long)transport->sock;
@@ -1766,7 +1815,7 @@ static int rb_probe_fetch_binary_impl(const char *url, unsigned char *out_buf, i
         rc = rb_probe_build_request(request, (int)sizeof(request), &parsed);
         if (rc < 0) return rc;
         request_len = (int)strlen(request);
-        rc = rb_probe_transport_open(&transport, current_url, parsed.host, parsed.port, parsed.isSSL, NULL);
+        rc = rb_probe_transport_open_artwork(&transport, current_url, parsed.host, parsed.port, parsed.isSSL);
         if (rc < 0) return rc;
         rc = rb_probe_send_all(&transport, request, request_len);
         if (rc < 0) {
