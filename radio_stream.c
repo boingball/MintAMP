@@ -566,6 +566,8 @@ static char radio_tls_poison_reason[96];
  * exactly the kind of double-cleanup this file's counters exist to catch. */
 static int radio_network_shutdown_started = 0;
 
+static void radio_copy_string(char *dst, size_t dstSize, const char *src);
+
 static void radio_debug_mem_report(unsigned long session_id, const char *where)
 {
 #if defined(AMIGA_M68K)
