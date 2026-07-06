@@ -2125,9 +2125,12 @@ static void CloseTimer(MrApp *app)
 {
 	if (app->timerReq) {
 		if (app->timerRunning) {
+			RADIO_DBG(printf("app-dispose: before AbortIO timerReq=%p\n", app->timerReq);)
 			AbortIO((struct IORequest *)app->timerReq);
 			WaitIO((struct IORequest *)app->timerReq);
 			app->timerRunning = 0;
+			RADIO_DBG(printf("app-dispose: after AbortIO/WaitIO timerReq\n");)
+			Radio_CheckMiniMem("after timer AbortIO/WaitIO");
 		}
 		if (app->timerReq->tr_node.io_Device)
 			CloseDevice((struct IORequest *)app->timerReq);
@@ -2140,28 +2143,218 @@ static void CloseTimer(MrApp *app)
 	}
 }
 
+static long CountListNodes(const struct List *list)
+{
+	long count = 0;
+	struct Node *node;
+	if (!list || !list->lh_Head)
+		return 0;
+	for (node = list->lh_Head; node && node->ln_Succ; node = node->ln_Succ)
+		count++;
+	return count;
+}
+
+static long DrainMsgPortForClose(struct MsgPort *port, const char *reason)
+{
+	long drained = 0;
+	struct Message *msg;
+	if (!port) {
+		RADIO_DBG(printf("app-close-drain: reason=\"%s\" port=%p drained=%ld\n",
+			reason ? reason : "", port, drained);)
+		return 0;
+	}
+	while ((msg = GetMsg(port)) != NULL)
+		drained++;
+	RADIO_DBG(printf("app-close-drain: reason=\"%s\" port=%p drained=%ld\n",
+		reason ? reason : "", port, drained);)
+	return drained;
+}
+
+static long DrainWindowUserPortForClose(struct Window *win, const char *reason)
+{
+	long drained = 0;
+	struct IntuiMessage *imsg;
+	if (!win || !win->UserPort) {
+		RADIO_DBG(printf("app-close-drain: reason=\"%s\" window=%p port=%p drained=%ld\n",
+			reason ? reason : "", win, win ? win->UserPort : NULL, drained);)
+		return 0;
+	}
+	while ((imsg = (struct IntuiMessage *)GetMsg(win->UserPort)) != NULL) {
+		ReplyMsg((struct Message *)imsg);
+		drained++;
+	}
+	RADIO_DBG(printf("app-close-drain: reason=\"%s\" window=%p port=%p drained=%ld\n",
+		reason ? reason : "", win, win->UserPort, drained);)
+	return drained;
+}
+
+static long DrainGuiPorts(MrApp *app, const char *reason)
+{
+	long drained = 0;
+	if (!app)
+		return 0;
+	drained += DrainWindowUserPortForClose(app->win, reason);
+	drained += DrainWindowUserPortForClose(app->rbWin, reason);
+	drained += DrainWindowUserPortForClose(app->plWin, reason);
+	drained += DrainMsgPortForClose(app->donePort, reason);
+	drained += DrainMsgPortForClose(gDonePort, reason);
+	drained += DrainMsgPortForClose(app->timerPort, reason);
+	return drained;
+}
+
+static void AuditLiveGuiResource(const char *prefix, const char *name, const void *ptr)
+{
+	if (ptr)
+		RADIO_DBG(printf("%s: ERROR live gui resource name=%s ptr=%p\n",
+			prefix ? prefix : "app-close-audit", name ? name : "unknown", ptr);)
+}
+
+static void PreCloseLibsAudit(MrApp *app)
+{
+	long stationNodes;
+	long playlistNodes;
+	long chooserCount;
+	long imageObjects;
+	long hooks;
+	if (!app)
+		return;
+	stationNodes = CountListNodes(&app->rbList);
+	playlistNodes = CountListNodes(&app->plList);
+	chooserCount =
+		(app->rbCodecGad ? 1 : 0) + (app->rbCountryCodeGad ? 1 : 0) +
+		(app->rbSchemeGad ? 1 : 0) + (app->rbLimitGad ? 1 : 0) +
+		(app->rbBitrateGad ? 1 : 0) + (app->qualityGad ? 1 : 0) +
+		(app->channelGad ? 1 : 0) + (app->rateGad ? 1 : 0);
+	imageObjects = app->artGad ? 1 : 0;
+	hooks = 0;
+	RADIO_DBG(printf("app-close-audit: rbWin=%p plWin=%p mainWinObj=%p playerWinObj=%p menuStrip=%p appPort=%p donePort=%p timerPort=%p timerReq=%p\n",
+		app->rbWin, app->plWin, app->winObj, app->plWinObj, app->menuStrip,
+		(void *)0, app->donePort, app->timerPort, app->timerReq);)
+	RADIO_DBG(printf("app-close-audit: stationList=%p stationNodes=%ld playlistNodes=%ld chooserLabels=%p chooserCount=%ld getFileReq=%p imageObjects=%ld hooks=%ld\n",
+		&app->rbList, stationNodes, playlistNodes, (void *)0, chooserCount,
+		app->fileGad, imageObjects, hooks);)
+	RADIO_DBG(printf("app-close-audit: currentArtwork=%p artworkBitmap=%p artworkDTObj=%p listBrowserLabels=%p listBrowserNodes=%p\n",
+		app->artValid ? app->artRGBBuf : NULL, app->artValid ? app->artPenIdx : NULL,
+		(void *)0, &app->rbList, stationNodes ? app->rbList.lh_Head : NULL);)
+	RADIO_DBG(printf("app-close-audit: rbBrowserObj=%p rbListObj=%p rbChooserObj=%p rbGetFileObj=%p playerLayoutObj=%p\n",
+		app->rbWinObj, app->rbListGad, app->rbCodecGad, (void *)0, app->winObj);)
+	AuditLiveGuiResource("app-close-audit", "rbWin", app->rbWin);
+	AuditLiveGuiResource("app-close-audit", "plWin", app->plWin);
+	AuditLiveGuiResource("app-close-audit", "mainWinObj", app->winObj);
+	AuditLiveGuiResource("app-close-audit", "playerWinObj", app->plWinObj);
+	AuditLiveGuiResource("app-close-audit", "radioWinObj", app->rbWinObj);
+	AuditLiveGuiResource("app-close-audit", "menuStrip", app->menuStrip);
+	AuditLiveGuiResource("app-close-audit", "timerReq", app->timerReq);
+	AuditLiveGuiResource("app-close-audit", "timerPort", app->timerPort);
+}
+
+static int GuiPointersNull(MrApp *app)
+{
+	if (!app)
+		return 1;
+	return !app->win && !app->rbWin && !app->plWin && !app->winObj &&
+		!app->rbWinObj && !app->plWinObj && !app->menuStrip &&
+		!app->timerPort && !app->timerReq &&
+		CountListNodes(&app->rbList) == 0 && CountListNodes(&app->plList) == 0 &&
+		!app->rbListGad && !app->plListGad;
+}
+
+static void PostCloseLibsAudit(MrApp *app, long portsDrained)
+{
+	int ptrsNull;
+	if (!app)
+		return;
+	ptrsNull = GuiPointersNull(app);
+	RADIO_DBG(printf("app-close-audit-final: rbWin=%p plWin=%p mainWinObj=%p playerWinObj=%p menuStrip=%p appPort=%p donePort=%p timerPort=%p timerReq=%p\n",
+		app->rbWin, app->plWin, app->winObj, app->plWinObj, app->menuStrip,
+		(void *)0, app->donePort, app->timerPort, app->timerReq);)
+	RADIO_DBG(printf("app-close-audit-final: gui_ptrs_null=%d windowsClosed=%d objectsDisposed=%d listsFreed=%d chooserFreed=%d hooksFreed=%d portsDrained=%d\n",
+		ptrsNull, !app->win && !app->rbWin && !app->plWin,
+		!app->winObj && !app->rbWinObj && !app->plWinObj,
+		CountListNodes(&app->rbList) == 0 && CountListNodes(&app->plList) == 0,
+		!app->rbCodecGad && !app->rbCountryCodeGad && !app->rbSchemeGad &&
+			!app->rbLimitGad && !app->rbBitrateGad,
+		1, portsDrained >= 0);)
+	if (!ptrsNull) {
+		AuditLiveGuiResource("app-close-audit-final", "rbWin", app->rbWin);
+		AuditLiveGuiResource("app-close-audit-final", "plWin", app->plWin);
+		AuditLiveGuiResource("app-close-audit-final", "mainWinObj", app->winObj);
+		AuditLiveGuiResource("app-close-audit-final", "radioWinObj", app->rbWinObj);
+		AuditLiveGuiResource("app-close-audit-final", "playlistWinObj", app->plWinObj);
+		AuditLiveGuiResource("app-close-audit-final", "menuStrip", app->menuStrip);
+		AuditLiveGuiResource("app-close-audit-final", "timerPort", app->timerPort);
+		AuditLiveGuiResource("app-close-audit-final", "timerReq", app->timerReq);
+	}
+}
+
+static void DisposeGuiObjectsBeforeCloseLibs(MrApp *app)
+{
+	if (!app)
+		return;
+	RADIO_DBG(printf("app-dispose: begin\n");)
+	DrainGuiPorts(app, "before dispose");
+	CloseTimer(app);
+	RADIO_DBG(printf("app-dispose: CloseTimer done\n");)
+	RADIO_DBG(printf("app-dispose: before DisposeObject mainWinObj=%p\n", app->winObj);)
+	MrCloseWindow(app);
+	RADIO_DBG(printf("app-dispose: after DisposeObject mainWinObj\n");)
+	Radio_CheckMiniMem("after DisposeObject mainWinObj");
+	if (app->donePort) {
+		DrainMsgPortForClose(app->donePort, "before DeleteMsgPort donePort");
+		DeleteMsgPort(app->donePort);
+		app->donePort = NULL;
+	}
+	gDonePort = NULL;
+	RADIO_DBG(printf("app-dispose: end\n");)
+}
+
 /* ------------------------------------------------------------------------- */
 /* Library / class open / close                                              */
 /* ------------------------------------------------------------------------- */
 
 static void CloseLibs(void)
 {
+	int skipReactionClasses = radio_runtime_flag_enabled("MP3_SKIP_CLOSE_REACTION_CLASSES");
 	RADIO_DBG(printf("app-close: CloseLibs enter Label=%p String=%p FuelGauge=%p CheckBox=%p Slider=%p ListBrowser=%p Chooser=%p GetFile=%p Button=%p Layout=%p Window=%p Utility=%p Intuition=%p\n",
 		LabelBase, StringBase, FuelGaugeBase, CheckBoxBase, SliderBase,
 		ListBrowserBase, ChooserBase, GetFileBase, ButtonBase, LayoutBase, WindowBase, UtilityBase, IntuitionBase);)
-	if (LabelBase)     { CloseLibrary(LabelBase);     LabelBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Label done\n");) }
-	if (StringBase)    { CloseLibrary(StringBase);    StringBase = NULL; RADIO_DBG(printf("app-close: CloseLibs String done\n");) }
-	if (FuelGaugeBase) { CloseLibrary(FuelGaugeBase); FuelGaugeBase = NULL; RADIO_DBG(printf("app-close: CloseLibs FuelGauge done\n");) }
-	if (CheckBoxBase)  { CloseLibrary(CheckBoxBase);  CheckBoxBase = NULL; RADIO_DBG(printf("app-close: CloseLibs CheckBox done\n");) }
-	if (SliderBase)    { CloseLibrary(SliderBase);    SliderBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Slider done\n");) }
-	if (ListBrowserBase) { CloseLibrary(ListBrowserBase); ListBrowserBase = NULL; RADIO_DBG(printf("app-close: CloseLibs ListBrowser done\n");) }
-	if (ChooserBase)   { CloseLibrary(ChooserBase);   ChooserBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Chooser done\n");) }
-	if (GetFileBase)   { CloseLibrary(GetFileBase);   GetFileBase = NULL; RADIO_DBG(printf("app-close: CloseLibs GetFile done\n");) }
-	if (ButtonBase)    { CloseLibrary(ButtonBase);    ButtonBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Button done\n");) }
-	if (LayoutBase)    { CloseLibrary(LayoutBase);    LayoutBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Layout done\n");) }
-	if (WindowBase)    { CloseLibrary(WindowBase);    WindowBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Window done\n");) }
-	if (UtilityBase)   { CloseLibrary(UtilityBase);   UtilityBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Utility done\n");) }
-	if (IntuitionBase) { CloseLibrary((struct Library *)IntuitionBase); IntuitionBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Intuition done\n");) }
+	if (skipReactionClasses) {
+		RADIO_DBG(printf("app-close: CloseLibs diagnostic skip MP3_SKIP_CLOSE_REACTION_CLASSES=1 Label=%p String=%p FuelGauge=%p CheckBox=%p Slider=%p ListBrowser=%p Chooser=%p GetFile=%p Button=%p Layout=%p Window=%p\n",
+			LabelBase, StringBase, FuelGaugeBase, CheckBoxBase, SliderBase,
+			ListBrowserBase, ChooserBase, GetFileBase, ButtonBase, LayoutBase, WindowBase);)
+		LabelBase = StringBase = FuelGaugeBase = CheckBoxBase = SliderBase = NULL;
+		ListBrowserBase = ChooserBase = GetFileBase = ButtonBase = LayoutBase = WindowBase = NULL;
+	} else {
+		if (LabelBase)     { CloseLibrary(LabelBase);     LabelBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Label done\n");) Radio_CheckMiniMem("after CloseLibrary Label"); }
+		if (StringBase)    { CloseLibrary(StringBase);    StringBase = NULL; RADIO_DBG(printf("app-close: CloseLibs String done\n");) Radio_CheckMiniMem("after CloseLibrary String"); }
+		if (FuelGaugeBase) { CloseLibrary(FuelGaugeBase); FuelGaugeBase = NULL; RADIO_DBG(printf("app-close: CloseLibs FuelGauge done\n");) Radio_CheckMiniMem("after CloseLibrary FuelGauge"); }
+		if (CheckBoxBase)  { CloseLibrary(CheckBoxBase);  CheckBoxBase = NULL; RADIO_DBG(printf("app-close: CloseLibs CheckBox done\n");) Radio_CheckMiniMem("after CloseLibrary CheckBox"); }
+		if (SliderBase)    { CloseLibrary(SliderBase);    SliderBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Slider done\n");) Radio_CheckMiniMem("after CloseLibrary Slider"); }
+		if (!radio_runtime_flag_enabled("MP3_SKIP_CLOSE_LISTBROWSER") && ListBrowserBase) {
+			CloseLibrary(ListBrowserBase); ListBrowserBase = NULL; RADIO_DBG(printf("app-close: CloseLibs ListBrowser done\n");) Radio_CheckMiniMem("after CloseLibrary ListBrowser");
+		} else if (ListBrowserBase) {
+			RADIO_DBG(printf("app-close: CloseLibs diagnostic skip MP3_SKIP_CLOSE_LISTBROWSER=1 base=%p\n", ListBrowserBase);)
+			ListBrowserBase = NULL;
+		}
+		if (!radio_runtime_flag_enabled("MP3_SKIP_CLOSE_CHOOSER") && ChooserBase) {
+			CloseLibrary(ChooserBase); ChooserBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Chooser done\n");) Radio_CheckMiniMem("after CloseLibrary Chooser");
+		} else if (ChooserBase) {
+			RADIO_DBG(printf("app-close: CloseLibs diagnostic skip MP3_SKIP_CLOSE_CHOOSER=1 base=%p\n", ChooserBase);)
+			ChooserBase = NULL;
+		}
+		if (!radio_runtime_flag_enabled("MP3_SKIP_CLOSE_GETFILE") && GetFileBase) {
+			CloseLibrary(GetFileBase); GetFileBase = NULL; RADIO_DBG(printf("app-close: CloseLibs GetFile done\n");) Radio_CheckMiniMem("after CloseLibrary GetFile");
+		} else if (GetFileBase) {
+			RADIO_DBG(printf("app-close: CloseLibs diagnostic skip MP3_SKIP_CLOSE_GETFILE=1 base=%p\n", GetFileBase);)
+			GetFileBase = NULL;
+		}
+		if (ButtonBase)    { CloseLibrary(ButtonBase);    ButtonBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Button done\n");) Radio_CheckMiniMem("after CloseLibrary Button"); }
+		if (LayoutBase)    { CloseLibrary(LayoutBase);    LayoutBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Layout done\n");) Radio_CheckMiniMem("after CloseLibrary Layout"); }
+		if (WindowBase)    { CloseLibrary(WindowBase);    WindowBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Window done\n");) Radio_CheckMiniMem("after CloseLibrary Window"); }
+	}
+	if (AslBase)       { CloseLibrary(AslBase);       AslBase = NULL; RADIO_DBG(printf("app-close: CloseLibs ASL done\n");) Radio_CheckMiniMem("after CloseLibrary ASL"); }
+	if (UtilityBase)   { CloseLibrary(UtilityBase);   UtilityBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Utility done\n");) Radio_CheckMiniMem("after CloseLibrary Utility"); }
+	if (IntuitionBase) { CloseLibrary((struct Library *)IntuitionBase); IntuitionBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Intuition done\n");) Radio_CheckMiniMem("after CloseLibrary Intuition"); }
 	RADIO_DBG(printf("app-close: CloseLibs exit\n");)
 }
 
@@ -2581,15 +2774,27 @@ static void MrCloseWindow(MrApp *app)
 	ClosePlaylistWindow(app);
 	RADIO_DBG(printf("app-close: ClosePlaylistWindow done\n");)
 	if (app->win && app->menuStrip) {
+		RADIO_DBG(printf("app-dispose: before ClearMenuStrip win=%p menuStrip=%p\n", app->win, app->menuStrip);)
 		ClearMenuStrip(app->win);
-		RADIO_DBG(printf("app-close: ClearMenuStrip done\n");)
+		RADIO_DBG(printf("app-dispose: after ClearMenuStrip\n");)
+		Radio_CheckMiniMem("after ClearMenuStrip");
 	}
 	app->menuStrip = NULL;
 	if (app->winObj) {
+		RADIO_DBG(printf("app-dispose: before DisposeObject mainWinObj=%p\n", app->winObj);)
 		DisposeObject(app->winObj);	/* disposes the whole gadget tree too */
 		app->winObj = NULL;
 		app->win = NULL;
-		RADIO_DBG(printf("app-close: DisposeObject(winObj) done\n");)
+		app->fileGad = app->rateGad = app->qualityGad = app->channelGad = NULL;
+		app->volumeGad = app->bufferGad = app->fastMemGad = app->fastLowGad = NULL;
+		app->speedGad = app->widthGad = app->delayGad = app->playGad = NULL;
+		app->nextGad = app->stopGad = app->filterGad = app->playlistGad = NULL;
+		app->radioGad = app->timeGad = app->fileInfoGad = app->titleGad = NULL;
+		app->artistGad = app->albumGad = app->trackGad = app->genreGad = NULL;
+		app->ratingGad = app->gaugeGad = app->statusGad = app->artGad = NULL;
+		memset(app->starGad, 0, sizeof(app->starGad));
+		RADIO_DBG(printf("app-dispose: after DisposeObject mainWinObj\n");)
+		Radio_CheckMiniMem("after DisposeObject mainWinObj");
 	}
 	RADIO_DBG(printf("app-close: MrCloseWindow exit\n");)
 }
@@ -4814,14 +5019,30 @@ static Object *RadioButton(ULONG id, const char *text)
 static void CloseRadioWindow(MrApp *app)
 {
 	if (app->rbWinObj) {
-		if (app->rbWin && app->rbListGad)
+		if (app->rbWin && app->rbListGad) {
+			RADIO_DBG(printf("app-dispose: before SetGadgetAttrs detach listbrowser listObj=%p list=%p\n",
+				app->rbListGad, &app->rbList);)
 			SetGadgetAttrs((struct Gadget *)app->rbListGad, app->rbWin, NULL, LISTBROWSER_Labels, (ULONG)~0, TAG_DONE);
+			RADIO_DBG(printf("app-dispose: after detach listbrowser\n");)
+			Radio_CheckMiniMem("after detach radio listbrowser");
+		}
+		RADIO_DBG(printf("app-dispose: before RA_CloseWindow rbWinObj=%p rbWin=%p\n", app->rbWinObj, app->rbWin);)
 		RA_CloseWindow(app->rbWinObj);
 		app->rbWin = NULL;
+		RADIO_DBG(printf("app-dispose: after RA_CloseWindow rbWinObj\n");)
+		RADIO_DBG(printf("app-dispose: before DisposeObject rbWinObj=%p\n", app->rbWinObj);)
 		DisposeObject(app->rbWinObj);
 		app->rbWinObj = NULL;
+		RADIO_DBG(printf("app-dispose: after DisposeObject rbWinObj\n");)
+		Radio_CheckMiniMem("after DisposeObject rbWinObj");
 	}
-	if (app->rbList.lh_Head) FreeListBrowserList(&app->rbList);
+	if (app->rbList.lh_Head) {
+		RADIO_DBG(printf("app-dispose: before FreeListBrowserList list=%p count=%ld\n",
+			&app->rbList, CountListNodes(&app->rbList));)
+		FreeListBrowserList(&app->rbList);
+		RADIO_DBG(printf("app-dispose: after FreeListBrowserList\n");)
+		Radio_CheckMiniMem("after FreeListBrowserList radio");
+	}
 	NewList(&app->rbList);
 	app->rbSearchGad = app->rbCodecGad = app->rbCountryGad = app->rbCountryCodeGad = NULL;
 	app->rbSchemeGad = app->rbLimitGad = app->rbBitrateGad = app->rbListGad = NULL;
@@ -5093,17 +5314,31 @@ static void ClosePlaylistWindow(MrApp *app)
 {
 	if (app->plWinObj) {
 		if (app->plWin && app->plListGad) {
+			RADIO_DBG(printf("app-dispose: before SetGadgetAttrs detach playlist listObj=%p list=%p\n",
+				app->plListGad, &app->plList);)
 			SetGadgetAttrs((struct Gadget *)app->plListGad, app->plWin, NULL,
 				LISTBROWSER_Labels, (ULONG)~0,
 				TAG_DONE);
+			RADIO_DBG(printf("app-dispose: after detach playlist listbrowser\n");)
+			Radio_CheckMiniMem("after detach playlist listbrowser");
 		}
+		RADIO_DBG(printf("app-dispose: before RA_CloseWindow plWinObj=%p plWin=%p\n", app->plWinObj, app->plWin);)
 		RA_CloseWindow(app->plWinObj);
 		app->plWin = NULL;
+		RADIO_DBG(printf("app-dispose: after RA_CloseWindow plWinObj\n");)
+		RADIO_DBG(printf("app-dispose: before DisposeObject playerWinObj=%p\n", app->plWinObj);)
 		DisposeObject(app->plWinObj);
 		app->plWinObj = NULL;
+		RADIO_DBG(printf("app-dispose: after DisposeObject playerWinObj\n");)
+		Radio_CheckMiniMem("after DisposeObject playerWinObj");
 	}
-	if (app->plList.lh_Head)
+	if (app->plList.lh_Head) {
+		RADIO_DBG(printf("app-dispose: before FreeListBrowserList list=%p count=%ld\n",
+			&app->plList, CountListNodes(&app->plList));)
 		FreeListBrowserList(&app->plList);
+		RADIO_DBG(printf("app-dispose: after FreeListBrowserList\n");)
+		Radio_CheckMiniMem("after FreeListBrowserList playlist");
+	}
 	NewList(&app->plList);
 	app->plListGad = NULL;
 	app->plAddGad = NULL;
@@ -5710,17 +5945,12 @@ static int MrMainReal(int argc, char **argv)
 	SyncFromGadgets(&app);
 	SaveSettings(&app);
 	RADIO_DBG(printf("app-close: SaveSettings done\n");)
-	MrCloseWindow(&app);
-	CloseTimer(&app);
-	RADIO_DBG(printf("app-close: CloseTimer done\n");)
-	if (app.donePort) {
-		struct Message *m;
-		while ((m = GetMsg(app.donePort)) != NULL)
-			;
-		DeleteMsgPort(app.donePort);
-		app.donePort = NULL;
-	}
-	RADIO_DBG(printf("app-close: donePort drained\n");)
+	DrainGuiPorts(&app, "before dispose");
+	DisposeGuiObjectsBeforeCloseLibs(&app);
+	DrainGuiPorts(&app, "after DisposeGuiObjectsBeforeCloseLibs");
+	Delay(2);
+	DrainGuiPorts(&app, "after dispose delay");
+	RADIO_DBG(printf("app-close: GUI dispose/drain done\n");)
 	/* Every playback child has been stopped and reaped above, so it is now safe
 	 * to release the shared network libraries (AmiSSL master + bsdsocket.library)
 	 * that the probe/search/streams opened.  Without this the app left
@@ -5731,7 +5961,9 @@ static int MrMainReal(int argc, char **argv)
 	Radio_NetworkShutdown();
 	RADIO_DBG(printf("app-close: Radio_NetworkShutdown done\n");)
 	AppCloseDebug("end", &app);
+	PreCloseLibsAudit(&app);
 	CloseLibs();
+	PostCloseLibsAudit(&app, 1);
 	RADIO_DBG(printf("app-close: CloseLibs done, returning from main\n");)
 	Radio_CheckMiniMem("before app exit");
 	MiniMem_ReportLeaks();
