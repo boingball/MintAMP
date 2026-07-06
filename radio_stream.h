@@ -295,42 +295,23 @@ static int radio_release_printf(const char *fmt, ...)
 #endif
 
 #if defined(AMIGA_M68K) && defined(RB_GID_RADIO_RESULTS) && !defined(RADIO_GADTOOLS_CLOSE_GUARD_INSTALLED)
-static struct Gadget *Radio_GadToolsFindGadgetById(struct Gadget *gad, UWORD gid)
-{
-    while (gad) {
-        if (gad->GadgetID == gid) return gad;
-        gad = gad->NextGadget;
-    }
-    return (struct Gadget *)0;
-}
-
 static int Radio_GadToolsIsRadioWindow(struct Window *win)
 {
     return win && win->Title && strcmp((const char *)win->Title, "Internet Radio") == 0;
 }
 
-static void Radio_GadToolsDetachRadioList(struct Window *win, struct Gadget *gadgets)
-{
-    struct Gadget *listGad;
-    if (!Radio_GadToolsIsRadioWindow(win)) return;
-    listGad = Radio_GadToolsFindGadgetById(gadgets ? gadgets : win->FirstGadget,
-        (UWORD)RB_GID_RADIO_RESULTS);
-    if (!listGad) return;
-    GT_SetGadgetAttrs(listGad, win, NULL,
-        GTLV_Labels, (ULONG)~0,
-        GTLV_Selected, (ULONG)~0,
-        TAG_DONE);
-}
-
 static int Radio_GadToolsGuardModifyIDCMP(struct Window *win, ULONG flags)
 {
-    if (flags == 0) Radio_GadToolsDetachRadioList(win, (struct Gadget *)0);
     return ModifyIDCMP(win, flags);
 }
 
 static UWORD Radio_GadToolsGuardRemoveGList(struct Window *win, struct Gadget *gadgets, WORD num)
 {
-    Radio_GadToolsDetachRadioList(win, gadgets);
+    if (Radio_GadToolsIsRadioWindow(win)) {
+        (void)gadgets;
+        (void)num;
+        return 0;
+    }
     return RemoveGList(win, gadgets, num);
 }
 
