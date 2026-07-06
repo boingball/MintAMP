@@ -3,6 +3,7 @@
 #endif
 #if ENABLE_RADIO
 #include "radio_stream.h"
+#include "radio_stream_probe.h"
 #include "radio_runtime_flags.h"
 #include "amiga_display_text.h"
 #include <stdio.h>
@@ -300,6 +301,7 @@ static void radio_net_worker_entry(void)
     if (AmiSSLBase) {
         radio_net_worker_shutdown_stage = "before CloseAmiSSL";
         radio_worker_breadcrumb("before CloseAmiSSL", "CloseAmiSSL", 0);
+        rb_probe_shutdown_tls_context();
         RADIO_DBG(printf("radio-worker-risk: before CloseAmiSSL workerTask=%p active_ssl=%ld active_ctx=%ld open_socket=%ld\n",
             (void *)radio_net_worker_task, radio_active_ssl_count, radio_active_ssl_ctx_count, radio_open_socket_count););
         RADIO_DBG(printf("radio-net-worker: before CloseAmiSSL base=%p ext=%p\n", (void *)AmiSSLBase, (void *)AmiSSLExtBase););

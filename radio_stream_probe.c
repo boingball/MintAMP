@@ -729,6 +729,38 @@ static void rb_probe_cleanup_amissl(void)
     Radio_DebugCheckExecMem("after probe AmiSSL cleanup");
 }
 
+void rb_probe_shutdown_tls_context(void)
+{
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+    RADIO_DBG(printf("radio-cleanup: probe shutdown TLS context shared_ctx=%p probe_active_ssl_count=%ld probe_open_socket_count=%ld tls_poisoned=%d\n",
+        (void *)rb_probe_shared_ctx, rb_probe_active_ssl_count,
+        rb_probe_open_socket_count, Radio_IsTlsPoisoned());)
+    if (rb_probe_active_ssl_count != 0 || rb_probe_open_socket_count != 0) {
+        RADIO_DBG(printf("radio-cleanup: probe shutdown TLS context dirty active_ssl=%ld open_socket=%ld shared_ctx=%p\n",
+            rb_probe_active_ssl_count, rb_probe_open_socket_count,
+            (void *)rb_probe_shared_ctx);)
+    }
+    if (rb_probe_shared_ctx) {
+        if (!Radio_IsTlsPoisoned()) {
+            Radio_DebugCheckExecMem("before rb_probe_shared_ctx SSL_CTX_free");
+            RADIO_DBG(printf("radio-cleanup: probe shared SSL_CTX_free start ctx=%p\n",
+                (void *)rb_probe_shared_ctx);)
+            SSL_CTX_free(rb_probe_shared_ctx);
+            RADIO_DBG(printf("radio-cleanup: probe shared SSL_CTX_free done\n");)
+            Radio_DebugCheckExecMem("after rb_probe_shared_ctx SSL_CTX_free");
+        } else {
+            RADIO_DBG(printf("radio-cleanup: probe shared SSL_CTX_free skipped (tls poisoned) ctx=%p\n",
+                (void *)rb_probe_shared_ctx);)
+        }
+        rb_probe_shared_ctx = NULL;
+    }
+#endif
+}
+
+#endif
+
+#if !(defined(AMIGA_M68K) && defined(HAVE_AMISSL))
+void rb_probe_shutdown_tls_context(void) { }
 #endif
 
 static void rb_probe_transport_close_mode(RbProbeTransport *transport, RbProbeCloseMode mode, int http_status);

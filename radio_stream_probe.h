@@ -60,6 +60,7 @@ int rb_probe_stream_probe_test_enabled(void);
 int rb_probe_stream_probe_disabled(void);
 int rb_probe_artwork_test_enabled(void);
 int rb_probe_artwork_disabled(void);
+void rb_probe_shutdown_tls_context(void);
 
 int rb_probe_stream_url(
     const char *url,
