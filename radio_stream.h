@@ -16,6 +16,37 @@
 #define RADIO_STOP_DEBUG_PRINTF(x) do { } while (0)
 #endif
 
+#if !defined(RADIO_DEBUG) && !defined(RADIO_RELEASE_PRINTF_FILTER_DISABLED)
+#include <stdio.h>
+#include <stdarg.h>
+#include <string.h>
+/* Release builds should not spam the Shell with the temporary pump/read
+ * diagnostics that were useful during RC1 crash hunting.  Keep real messages
+ * and faults visible, but suppress the known steady-state prefixes.  This
+ * lives in radio_stream.h rather than radio_debug.h so it is applied to the
+ * radio stream users after the embedded decoder has installed/removed its own
+ * printf redirection, avoiding a printf macro redefinition warning. */
+static int radio_release_printf(const char *fmt, ...)
+{
+    int r;
+    va_list ap;
+
+    if (fmt &&
+        (!strncmp(fmt, "radio-read: transient zero", 26) ||
+         !strncmp(fmt, "radio-input: zero read", 22) ||
+         !strncmp(fmt, "radio-worker: session=", 22) ||
+         !strncmp(fmt, "radio-worker: backpressure", 26) ||
+         !strncmp(fmt, "radio-pump: stop/detach observed", 33)))
+        return 0;
+
+    va_start(ap, fmt);
+    r = vprintf(fmt, ap);
+    va_end(ap);
+    return r;
+}
+#define printf radio_release_printf
+#endif
+
 typedef struct RadioStream RadioStream;
 
 typedef enum {
