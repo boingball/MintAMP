@@ -284,6 +284,17 @@ int rb_controller_probe_selected(
     }
 
     rc = rb_probe_stream_url(url, info, peek_buf, peek_buf_size, peek_len);
+    if (rc == RB_STREAM_PROBE_ERR_DISABLED) {
+        memset(info, 0, sizeof(*info));
+        snprintf(info->final_url, sizeof(info->final_url), "%s", url);
+        info->final_url[sizeof(info->final_url) - 1] = '\0';
+        info->codec = rb_controller_codec_from_station(station->codec);
+        info->icy_br = station->bitrate;
+        if (peek_len) *peek_len = 0;
+
+        printf("radio-probe: optional probe unavailable; direct playback url=\"%s\"\n", url);
+        return RB_STREAM_PROBE_OK;
+    }
     if (rc == RB_STREAM_PROBE_ERR_HTTP_STATUS) {
         char msg[RB_CONTROLLER_LAST_ERROR_SIZE];
         snprintf(msg, sizeof(msg), "Stream unavailable (HTTP %d)", info->http_status);
