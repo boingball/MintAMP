@@ -76,8 +76,9 @@ const char *Radio_StatusText(RadioStatus status);
  * it owns its own bsdsocket.library base, its own amisslmaster.library base,
  * its own AmiSSLBase/AmiSSLExtBase and its own AmiSSL_ErrNoPtr storage
  * privately, opens AmiSSL (OpenAmiSSLTags()/InitAmiSSL) exactly once for the
- * app's whole run, and then services any number of station open/pump/close
- * requests via Radio_RunOnNetWorker() -- never reopening any of those bases
+ * app's whole run, and then owns the pump loop for active stations. Open/close
+ * requests still use Radio_RunOnNetWorker(), but Radio_Pump() itself is only
+ * a cheap status/buffer check -- never reopening any of those bases
  * per station switch. Plain-HTTP-only m68k builds without HAVE_AMISSL just
  * open bsdsocket.library directly here instead (no per-task AmiSSL lifecycle
  * to manage). Safe to call more than once (a no-op if already up) and safe
@@ -116,6 +117,8 @@ int Radio_HasNetwork(void);
  * without AmiSSL installed (always false in builds without HAVE_AMISSL). */
 int Radio_HasHttps(void);
 int Radio_PlaybackOwnsNetwork(void);
+int Radio_WorkerIsIdle(void);
+const char *Radio_WorkerStateName(void);
 /* Same private-to-the-worker-task rule as Radio_GetNetworkBases(): only
  * returns non-NULL to the worker task itself, letting radio_stream_probe.c
  * use the one AmiSSL instance the worker already opened instead of opening
@@ -155,6 +158,7 @@ void Radio_MarkTlsPoisoned(const char *where);
  * the failing session's SSL objects are quarantined (leaked, never freed)
  * and HTTPS stays enabled -- always. Only detected memory corruption
  * hard-poisons HTTPS (Radio_MarkTlsPoisoned()). */
+void Radio_SetTlsFaultContext(unsigned long session_id, const char *url);
 void Radio_ReportTlsFault(const char *where);
 const char *Radio_TlsPoisonedMessage(void);
 /* First (root-cause) reason AmiSSL was marked poisoned this run, or
@@ -219,6 +223,8 @@ static void Radio_GetNetworkBases(void **socket_base, void **amissl_base, void *
 static int Radio_HasNetwork(void) { return 0; }
 static int Radio_HasHttps(void) { return 0; }
 static int Radio_PlaybackOwnsNetwork(void) { return 0; }
+static int Radio_WorkerIsIdle(void) { return 1; }
+static const char *Radio_WorkerStateName(void) { return "idle"; }
 static void Radio_GetAmiSslShared(void **amissl_base, void **amissl_ext_base, void **amissl_master_base)
 {
     if (amissl_base) *amissl_base = 0;
@@ -233,6 +239,7 @@ static int Radio_IsMemoryPoisoned(void) { return 0; }
 static void Radio_MarkMemoryPoisoned(const char *where) { (void)where; }
 static int Radio_IsTlsPoisoned(void) { return 0; }
 static void Radio_MarkTlsPoisoned(const char *where) { (void)where; }
+static void Radio_SetTlsFaultContext(unsigned long session_id, const char *url) { (void)session_id; (void)url; }
 static void Radio_ReportTlsFault(const char *where) { (void)where; }
 static const char *Radio_TlsPoisonedMessage(void) { return "HTTPS disabled after memory corruption; reboot before using HTTPS."; }
 static const char *Radio_TlsPoisonReason(void) { return "not-poisoned"; }
@@ -253,4 +260,62 @@ static const char *Radio_StatusText(RadioStatus status)
 }
 #endif
 
+#endif /* RADIO_STREAM_H */
+
+#if !defined(RADIO_DEBUG) && !defined(main) && !defined(RADIO_RELEASE_PRINTF_FILTER_DISABLED) && !defined(RADIO_RELEASE_PRINTF_FILTER_INSTALLED)
+#include <stdio.h>
+#include <stdarg.h>
+#include <string.h>
+static int radio_release_printf(const char *fmt, ...)
+{
+    int r;
+    va_list ap;
+
+    if (fmt &&
+        (!strncmp(fmt, "radio-runtime:", 14) ||
+         !strncmp(fmt, "radio-probe: flag check", 23) ||
+         !strncmp(fmt, "radio-art: flag check", 21) ||
+         !strncmp(fmt, "radio-resource:", 15) ||
+         !strncmp(fmt, "radio-read: transient zero", 26) ||
+         !strncmp(fmt, "radio-input: zero read", 22) ||
+         !strncmp(fmt, "radio-worker: session=", 22) ||
+         !strncmp(fmt, "radio-worker: backpressure", 26) ||
+         !strncmp(fmt, "radio-cleanup: abort SSL_free policy", 36) ||
+         !strncmp(fmt, "radio-cleanup: abort SSL_free/SSL_CTX_free skipped", 51) ||
+         !strncmp(fmt, "radio-pump: stop/detach observed", 33)))
+        return 0;
+
+    va_start(ap, fmt);
+    r = vprintf(fmt, ap);
+    va_end(ap);
+    return r;
+}
+#define printf radio_release_printf
+#define RADIO_RELEASE_PRINTF_FILTER_INSTALLED 1
+#endif
+
+#if defined(AMIGA_M68K) && defined(RB_GID_RADIO_RESULTS) && !defined(RADIO_GADTOOLS_CLOSE_GUARD_INSTALLED)
+static int Radio_GadToolsIsRadioWindow(struct Window *win)
+{
+    return win && win->Title && strcmp((const char *)win->Title, "Internet Radio") == 0;
+}
+
+static int Radio_GadToolsGuardModifyIDCMP(struct Window *win, ULONG flags)
+{
+    return ModifyIDCMP(win, flags);
+}
+
+static UWORD Radio_GadToolsGuardRemoveGList(struct Window *win, struct Gadget *gadgets, WORD num)
+{
+    if (Radio_GadToolsIsRadioWindow(win)) {
+        (void)gadgets;
+        (void)num;
+        return 0;
+    }
+    return RemoveGList(win, gadgets, num);
+}
+
+#define ModifyIDCMP(win, flags) Radio_GadToolsGuardModifyIDCMP((win), (flags))
+#define RemoveGList(win, gadgets, num) Radio_GadToolsGuardRemoveGList((win), (gadgets), (num))
+#define RADIO_GADTOOLS_CLOSE_GUARD_INSTALLED 1
 #endif
