@@ -608,11 +608,11 @@ static int rb_probe_ensure_amissl(void)
          * is the belt-and-braces check on the transport path itself). */
         return -1;
     }
-    /* Same shared globals as radio_stream.c's radio_ssl_global_init() --
-     * this probe runs on the GUI/opener task and can race a playback
-     * child's own InitAmiSSL()/CleanupAmiSSL() on the very same
-     * AmiSSLBase/SocketBase/rb_probe_amissl_initialized state. Best-effort,
-     * bounded lock -- see Radio_AmiSslLock()'s comment in radio_stream.h. */
+    /* This probe now only ever runs on the single net worker task (see
+     * radio_stream.c's Radio_RunOnNetWorker(), which every caller of
+     * rb_probe_stream_url()/rb_probe_fetch_binary() routes through), so
+     * there is no other task racing this state any more -- Radio_AmiSslLock()/
+     * Unlock() are trivial no-ops now, kept only for call-site compatibility. */
     locked = Radio_AmiSslLock();
     rc = rb_probe_ensure_amissl_locked();
     if (locked) Radio_AmiSslUnlock();
@@ -728,9 +728,8 @@ static int rb_probe_ensure_amissl_locked(void)
  * per task or SSL_CTX_new()/SSL_new() crashes in a later task. */
 static void rb_probe_cleanup_amissl(void)
 {
-    /* Same lock as rb_probe_ensure_amissl(): this runs on the GUI/opener
-     * task and can race a playback child's own AmiSSL init/cleanup on the
-     * same shared globals. */
+    /* Same (now-trivial) lock as rb_probe_ensure_amissl() -- see its comment;
+     * this always runs on the single net worker task now. */
     int locked = Radio_AmiSslLock();
     RADIO_DBG(printf("radio-ssl-diag: probe cleanup ENTER probe_init=%d base=%p ext=%p master=%p\n", rb_probe_amissl_initialized, (void *)AmiSSLBase, (void *)AmiSSLExtBase, (void *)AmiSSLMasterBase);)
     if (rb_probe_amissl_initialized && (Radio_IsTlsPoisoned() || rb_probe_amissl_dirty)) {
@@ -1356,16 +1355,55 @@ static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
  * leaving the main/GUI task's AmiSSL session half-open after a flaky stream.
  * The next probe then short-circuited on that stale session and could wedge the
  * whole machine ("play stuck" right after a probe that returned an error). */
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+/* rb_probe_stream_url_impl()'s entire body -- DNS/connect/TLS handshake/
+ * SSL_read()/rb_probe_cleanup_amissl() -- touches bsdsocket.library/AmiSSL,
+ * so per this file's single-net-worker-task rule (see radio_stream.c's
+ * Radio_RunOnNetWorker()) it may only run on that one worker task. Nothing
+ * inside rb_probe_stream_url_impl() itself needs to change: it already only
+ * ever ran in whichever task called rb_probe_stream_url(), and now that is
+ * always the worker task, so its existing rb_probe_ensure_amissl()/
+ * Radio_AmiSslTaskIsOpener() logic (adopt the shared instance, skip a
+ * manual InitAmiSSL() for the opener task) does exactly the right thing
+ * unmodified. */
+typedef struct RbProbeStreamUrlJobArgs {
+    const char *url;
+    RbStreamInfo *info;
+    unsigned char *peek_buf;
+    int peek_buf_size;
+    int *peek_len;
+    int result;
+} RbProbeStreamUrlJobArgs;
+
+static void rb_probe_stream_url_job(void *arg)
+{
+    RbProbeStreamUrlJobArgs *a = (RbProbeStreamUrlJobArgs *)arg;
+    a->result = rb_probe_stream_url_impl(a->url, a->info, a->peek_buf, a->peek_buf_size, a->peek_len);
+    rb_probe_cleanup_amissl();
+}
+#endif
+
 int rb_probe_stream_url(const char *url, RbStreamInfo *info,
                         unsigned char *peek_buf, int peek_buf_size, int *peek_len)
 {
-    int rc = rb_probe_stream_url_impl(url, info, peek_buf, peek_buf_size, peek_len);
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-    rb_probe_cleanup_amissl();
-#elif defined(AMIGA_M68K) && !defined(RB_STREAM_PROBE_EXTERNAL_SOCKETBASE)
+    RbProbeStreamUrlJobArgs args;
+    args.url = url;
+    args.info = info;
+    args.peek_buf = peek_buf;
+    args.peek_buf_size = peek_buf_size;
+    args.peek_len = peek_len;
+    args.result = RB_STREAM_PROBE_ERR_CONNECT;
+    if (!Radio_RunOnNetWorker(rb_probe_stream_url_job, &args))
+        return RB_STREAM_PROBE_ERR_CONNECT;
+    return args.result;
+#else
+    int rc = rb_probe_stream_url_impl(url, info, peek_buf, peek_buf_size, peek_len);
+#if defined(AMIGA_M68K) && !defined(RB_STREAM_PROBE_EXTERNAL_SOCKETBASE)
     rb_probe_release_idle_socketbase();
 #endif
     return rc;
+#endif
 }
 
 static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
@@ -1744,20 +1782,55 @@ static int rb_probe_artwork_disabled(void)
     return cached;
 }
 
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+typedef struct RbProbeFetchBinaryJobArgs {
+    const char *url;
+    unsigned char *out_buf;
+    int out_buf_size;
+    int *out_len;
+    char *out_content_type;
+    int out_content_type_size;
+    int result;
+} RbProbeFetchBinaryJobArgs;
+
+static void rb_probe_fetch_binary_job(void *arg)
+{
+    RbProbeFetchBinaryJobArgs *a = (RbProbeFetchBinaryJobArgs *)arg;
+    a->result = rb_probe_fetch_binary_impl(a->url, a->out_buf, a->out_buf_size,
+        a->out_len, a->out_content_type, a->out_content_type_size);
+    rb_probe_cleanup_amissl();
+}
+#endif
+
 int rb_probe_fetch_binary(const char *url, unsigned char *out_buf, int out_buf_size,
                         int *out_len, char *out_content_type, int out_content_type_size)
 {
-    int rc;
     if (rb_probe_artwork_disabled())
         return RB_STREAM_PROBE_ERR_DISABLED;
-    rc = rb_probe_fetch_binary_impl(url, out_buf, out_buf_size, out_len,
-                                         out_content_type, out_content_type_size);
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-    rb_probe_cleanup_amissl();
-#elif defined(AMIGA_M68K) && !defined(RB_STREAM_PROBE_EXTERNAL_SOCKETBASE)
-    rb_probe_release_idle_socketbase();
+    {
+        RbProbeFetchBinaryJobArgs args;
+        args.url = url;
+        args.out_buf = out_buf;
+        args.out_buf_size = out_buf_size;
+        args.out_len = out_len;
+        args.out_content_type = out_content_type;
+        args.out_content_type_size = out_content_type_size;
+        args.result = RB_STREAM_PROBE_ERR_CONNECT;
+        if (!Radio_RunOnNetWorker(rb_probe_fetch_binary_job, &args))
+            return RB_STREAM_PROBE_ERR_CONNECT;
+        return args.result;
+    }
+#else
+    {
+        int rc = rb_probe_fetch_binary_impl(url, out_buf, out_buf_size, out_len,
+                                             out_content_type, out_content_type_size);
+#if defined(AMIGA_M68K) && !defined(RB_STREAM_PROBE_EXTERNAL_SOCKETBASE)
+        rb_probe_release_idle_socketbase();
 #endif
-    return rc;
+        return rc;
+    }
+#endif
 }
 
 #ifdef RB_STREAM_PROBE_TEST
