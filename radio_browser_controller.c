@@ -10,6 +10,7 @@
 #include "radio_browser_url.h"
 #include "radio_browser_http.h"
 #include "radio_debug.h"
+#include "radio_runtime_flags.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -100,6 +101,7 @@ int rb_controller_search(RadioBrowserController *controller)
     int limit;
     int count;
 
+    Radio_LogRuntimeFlagsOnce();
     if (!controller) return RB_CONTROLLER_ERR_BAD_ARG;
 
     controller->station_count = 0;
@@ -273,7 +275,7 @@ int rb_controller_probe_selected(
         info->codec = rb_controller_codec_from_station(station->codec);
         info->icy_br = station->bitrate;
         if (peek_len) *peek_len = 0;
-        RADIO_DBG(printf("radio-probe: stream probe disabled by MP3_NO_STREAM_PROBE, direct playback url=\"%s\"\n", url);)
+        printf("radio-probe: stream probe disabled by MP3_NO_STREAM_PROBE, direct playback url=\"%s\"\n", url);
         return RB_STREAM_PROBE_OK;
     }
 

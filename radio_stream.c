@@ -3,6 +3,7 @@
 #endif
 #if ENABLE_RADIO
 #include "radio_stream.h"
+#include "radio_runtime_flags.h"
 #include "amiga_display_text.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -1181,12 +1182,8 @@ static void close_current_socket(RadioStream *rs);
  * outcome outside the two known-safe buckets as fatal instead. */
 static int radio_skip_abort_ssl_free(void)
 {
-    static int cached = -1;
-    if (cached < 0) {
-        const char *v = getenv("MP3_SKIP_ABORT_SSL_FREE");
-        cached = (v && *v && *v != '0') ? 1 : 0;
-    }
-    return cached;
+    Radio_LogRuntimeFlagsOnce();
+    return radio_runtime_flag_enabled("MP3_SKIP_ABORT_SSL_FREE");
 }
 
 static int radio_ssl_error_is_fatal(int e)
@@ -1344,20 +1341,25 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
             rs->session_id, (void *)rs->ssl, (void *)rs->ctx, (long)rs->sock,
             rs->lastSslError, rs->lastSslOp[0] ? rs->lastSslOp : "none",
             Radio_IsMemoryPoisoned()));
-        if (mode == RADIO_CLOSE_ABORT && radio_skip_abort_ssl_free()) {
-            RADIO_DBG(printf("radio-cleanup: abort SSL_free/SSL_CTX_free skipped by MP3_SKIP_ABORT_SSL_FREE session=%lu ssl=%p ctx=%p\n",
-                rs->session_id, (void *)rs->ssl, (void *)rs->ctx);)
-            radio_tls_shutdown_quarantine = 1;
-            rs->sslFreed = 1;
-            if (radio_active_ssl_count > 0) radio_active_ssl_count--;
-            rs->ssl = NULL;
-            rs->sslHandshakeDone = 0;
-            if (rs->ctx && !rs->ctxFreed) {
-                rs->ctxFreed = 1;
-                if (radio_active_ssl_ctx_count > 0) radio_active_ssl_ctx_count--;
-                rs->ctx = NULL;
+        if (mode == RADIO_CLOSE_ABORT) {
+            int skip_abort_ssl_free = radio_skip_abort_ssl_free();
+            printf("radio-cleanup: flag check MP3_SKIP_ABORT_SSL_FREE enabled=%d mode=abort session=%lu\n",
+                skip_abort_ssl_free, rs->session_id);
+            if (skip_abort_ssl_free) {
+                printf("radio-cleanup: abort SSL_free/SSL_CTX_free skipped by MP3_SKIP_ABORT_SSL_FREE session=%lu ssl=%p ctx=%p\n",
+                    rs->session_id, (void *)rs->ssl, (void *)rs->ctx);
+                radio_tls_shutdown_quarantine = 1;
+                rs->sslFreed = 1;
+                if (radio_active_ssl_count > 0) radio_active_ssl_count--;
+                rs->ssl = NULL;
+                rs->sslHandshakeDone = 0;
+                if (rs->ctx && !rs->ctxFreed) {
+                    rs->ctxFreed = 1;
+                    if (radio_active_ssl_ctx_count > 0) radio_active_ssl_ctx_count--;
+                    rs->ctx = NULL;
+                }
+                return;
             }
-            return;
         }
         if (Radio_IsMemoryPoisoned()) {
             RADIO_DBG(printf("radio-cleanup: SSL_free skipped (memory poison) session=%lu ssl=%p leaking to avoid heap damage\n",

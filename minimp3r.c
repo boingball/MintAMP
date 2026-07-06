@@ -3777,12 +3777,15 @@ static int LoadRadioFaviconImage(MrApp *app)
 	static unsigned char response[MR_FAVICON_MAX_BYTES];
 	int bytes = 0;
 	int rc;
+	int artworkDisabled;
 	if (!app || !app->currentRadioFavicon[0]) {
 		RADIO_DBG(printf("radio-art: no favicon URL for current station\n");)
 		return 0;
 	}
-	if (rb_probe_artwork_disabled()) {
-		RADIO_DBG(printf("radio-art: skipped by MP3_NO_ARTWORK\n");)
+	artworkDisabled = rb_probe_artwork_disabled();
+	printf("radio-art: flag check MP3_NO_ARTWORK enabled=%d before favicon/artwork fetch\n", artworkDisabled);
+	if (artworkDisabled) {
+		printf("radio-art: skipped by MP3_NO_ARTWORK\n");
 		return 0;
 	}
 	if (Radio_PlaybackOwnsNetwork()) {
@@ -4725,8 +4728,12 @@ static void RadioDoProbeAndPlay(MrApp *app)
 	}
 	memset(&info, 0, sizeof(info));
 	RadioSetStatus(app, "Connecting...");
-	if (!rb_probe_stream_probe_disabled()) {
-		RADIO_DBG(printf("radio-ui: new stream probe start url=\"%s\"\n", rb_station_play_url(st));)
+	{
+		int probeDisabled = rb_probe_stream_probe_disabled();
+		printf("radio-probe: flag check MP3_NO_STREAM_PROBE enabled=%d before selected probe\n", probeDisabled);
+		if (!probeDisabled) {
+			RADIO_DBG(printf("radio-ui: new stream probe start url=\"%s\"\n", rb_station_play_url(st));)
+		}
 	}
 	rc = rb_controller_probe_selected(&app->rbController, &info, peek, (int)sizeof(peek), &peekLen);
 	RADIO_DBG(printf("radio-ui: new stream probe result rc=%d final=\"%s\" content=\"%s\" codec=%d redirects=%d\n",
@@ -4754,12 +4761,16 @@ static void RadioDoProbeAndPlay(MrApp *app)
 	}
 #endif
 	SafeCopy(app->inputName, sizeof(app->inputName), info.final_url);
-	if (rb_probe_artwork_disabled()) {
-		app->currentRadioFavicon[0] = '\0';
-		RADIO_DBG(printf("radio-art: skipped by MP3_NO_ARTWORK\n");)
-	} else {
-		SafeCopy(app->currentRadioFavicon, sizeof(app->currentRadioFavicon), st->favicon);
-		RADIO_DBG(printf("radio-art: station favicon=\"%s\"\n", app->currentRadioFavicon);)
+	{
+		int artworkDisabled = rb_probe_artwork_disabled();
+		printf("radio-art: flag check MP3_NO_ARTWORK enabled=%d before favicon/artwork fetch\n", artworkDisabled);
+		if (artworkDisabled) {
+			app->currentRadioFavicon[0] = '\0';
+			printf("radio-art: skipped by MP3_NO_ARTWORK\n");
+		} else {
+			SafeCopy(app->currentRadioFavicon, sizeof(app->currentRadioFavicon), st->favicon);
+			RADIO_DBG(printf("radio-art: station favicon=\"%s\"\n", app->currentRadioFavicon);)
+		}
 	}
 	app->haveRadioHostAddr = info.have_host_addr;
 	app->radioHostAddrBe = info.host_addr_be;

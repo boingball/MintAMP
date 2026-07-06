@@ -8,6 +8,7 @@
 #include "radio_stream_probe.h"
 #include "radio_debug.h"
 #include "radio_stream.h"
+#include "radio_runtime_flags.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -1330,12 +1331,8 @@ static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
 
 int rb_probe_stream_probe_disabled(void)
 {
-    static int cached = -1;
-    if (cached < 0) {
-        const char *v = getenv("MP3_NO_STREAM_PROBE");
-        cached = (v && *v && *v != '0') ? 1 : 0;
-    }
-    return cached;
+    Radio_LogRuntimeFlagsOnce();
+    return radio_runtime_flag_enabled("MP3_NO_STREAM_PROBE");
 }
 
 /* Public entry point.  Wraps the implementation so the probe's per-task AmiSSL
@@ -1377,7 +1374,7 @@ int rb_probe_stream_url(const char *url, RbStreamInfo *info,
                         unsigned char *peek_buf, int peek_buf_size, int *peek_len)
 {
     if (rb_probe_stream_probe_disabled()) {
-        RADIO_DBG(printf("radio-probe: stream probe disabled by MP3_NO_STREAM_PROBE, direct playback url=\"%s\"\n", url ? url : "");)
+        printf("radio-probe: stream probe disabled by MP3_NO_STREAM_PROBE, direct playback url=\"%s\"\n", url ? url : "");
         if (info) {
             rb_probe_info_init(info);
             rb_probe_set_final_url(info, url ? url : "");
@@ -1777,12 +1774,8 @@ static int rb_probe_fetch_binary_impl(const char *url, unsigned char *out_buf, i
  * network+SSL+decode+audio cleanup for the actual stream. */
 int rb_probe_artwork_disabled(void)
 {
-    static int cached = -1;
-    if (cached < 0) {
-        const char *v = getenv("MP3_NO_ARTWORK");
-        cached = (v && *v && *v != '0') ? 1 : 0;
-    }
-    return cached;
+    Radio_LogRuntimeFlagsOnce();
+    return radio_runtime_flag_enabled("MP3_NO_ARTWORK");
 }
 
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
