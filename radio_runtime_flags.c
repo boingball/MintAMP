@@ -100,7 +100,7 @@ static const char *radio_runtime_flag_printable(const char *value)
 void Radio_LogRuntimeFlagsOnce(void)
 {
     static int logged = 0;
-    const char *names[3];
+    const char *names[5];
     int i;
 
     if (logged) return;
@@ -108,7 +108,9 @@ void Radio_LogRuntimeFlagsOnce(void)
     names[0] = "MP3_NO_STREAM_PROBE";
     names[1] = "MP3_NO_ARTWORK";
     names[2] = "MP3_SKIP_ABORT_SSL_FREE";
-    for (i = 0; i < 3; i++) {
+    names[3] = "MP3_TEST_ENABLE_STREAM_PROBE";
+    names[4] = "MP3_TEST_ENABLE_ARTWORK";
+    for (i = 0; i < 5; i++) {
         const char *env_value = radio_runtime_flag_raw_getenv(names[i]);
         const char *getvar_value = radio_runtime_flag_raw_getvar(names[i]);
         int enabled = radio_runtime_flag_enabled(names[i]);

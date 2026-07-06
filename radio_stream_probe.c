@@ -1320,7 +1320,7 @@ const char *rb_probe_error_text(int rc)
     case RB_STREAM_PROBE_ERR_TLS_HANDSHAKE: return "TLS handshake failed";
     case RB_STREAM_PROBE_ERR_TLS_POISONED: return "HTTPS disabled after memory corruption; reboot before using HTTPS.";
     case RB_STREAM_PROBE_ERR_MEM_POISONED: return "Memory corruption detected; restart MiniAMP3 before playing radio.";
-    case RB_STREAM_PROBE_ERR_DISABLED: return "Probe/fetch disabled by MP3_NO_STREAM_PROBE or MP3_NO_ARTWORK";
+    case RB_STREAM_PROBE_ERR_DISABLED: return "Probe/fetch disabled by runtime flag or staged optional-network gate";
     case RB_STREAM_PROBE_ERR_HTTP_STATUS: return "Stream unavailable (server returned an error status)";
     default: return "Stream probe failed";
     }
@@ -1329,11 +1329,65 @@ const char *rb_probe_error_text(int rc)
 static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
                         unsigned char *peek_buf, int peek_buf_size, int *peek_len);
 
+int rb_probe_stream_probe_test_enabled(void)
+{
+    Radio_LogRuntimeFlagsOnce();
+    return radio_runtime_flag_enabled("MP3_TEST_ENABLE_STREAM_PROBE");
+}
+
 int rb_probe_stream_probe_disabled(void)
 {
     Radio_LogRuntimeFlagsOnce();
-    return radio_runtime_flag_enabled("MP3_NO_STREAM_PROBE");
+    if (radio_runtime_flag_enabled("MP3_NO_STREAM_PROBE"))
+        return 1;
+    return !rb_probe_stream_probe_test_enabled();
 }
+
+int rb_probe_artwork_test_enabled(void)
+{
+    Radio_LogRuntimeFlagsOnce();
+    return radio_runtime_flag_enabled("MP3_TEST_ENABLE_ARTWORK");
+}
+
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+static int rb_probe_optional_network_gate(const char *kind, const char *url)
+{
+    long active_stream_sessions = 0;
+    long active_stream_tasks = 0;
+    long open_socket_count = 0;
+    long active_ssl_count = 0;
+    long active_ssl_ctx_count = 0;
+    int worker_idle;
+
+    Radio_GetNetworkStats(&active_stream_sessions, &active_stream_tasks,
+        &open_socket_count, &active_ssl_count, &active_ssl_ctx_count);
+    worker_idle = Radio_WorkerIsIdle();
+    if (!worker_idle || active_stream_sessions != 0 || active_stream_tasks != 0 ||
+        open_socket_count != 0 || active_ssl_count != 0 ||
+        active_ssl_ctx_count != 0) {
+        RADIO_DBG(printf("radio-%s: deferred/skipped because optional network gate busy state=%s active_stream_sessions=%ld active_stream_tasks=%ld open_socket_count=%ld active_ssl_count=%ld active_ssl_ctx_count=%ld url=\"%s\"\n",
+            kind ? kind : "optional",
+            Radio_WorkerStateName(),
+            active_stream_sessions,
+            active_stream_tasks,
+            open_socket_count,
+            active_ssl_count,
+            active_ssl_ctx_count,
+            url ? url : "");)
+        return 0;
+    }
+    RADIO_DBG(printf("radio-%s: optional network gate pass state=%s active_stream_sessions=%ld active_stream_tasks=%ld open_socket_count=%ld active_ssl_count=%ld active_ssl_ctx_count=%ld url=\"%s\"\n",
+        kind ? kind : "optional",
+        Radio_WorkerStateName(),
+        active_stream_sessions,
+        active_stream_tasks,
+        open_socket_count,
+        active_ssl_count,
+        active_ssl_ctx_count,
+        url ? url : "");)
+    return 1;
+}
+#endif
 
 /* Public entry point.  Wraps the implementation so the probe's per-task AmiSSL
  * and socket state is always torn down, no matter which exit path the impl took.
@@ -1374,7 +1428,11 @@ int rb_probe_stream_url(const char *url, RbStreamInfo *info,
                         unsigned char *peek_buf, int peek_buf_size, int *peek_len)
 {
     if (rb_probe_stream_probe_disabled()) {
-        printf("radio-probe: stream probe disabled by MP3_NO_STREAM_PROBE, direct playback url=\"%s\"\n", url ? url : "");
+        if (radio_runtime_flag_enabled("MP3_NO_STREAM_PROBE")) {
+            printf("radio-probe: stream probe disabled by MP3_NO_STREAM_PROBE, direct playback url=\"%s\"\n", url ? url : "");
+        } else {
+            printf("radio-probe: stream probe staged off until MP3_TEST_ENABLE_STREAM_PROBE=1, direct playback url=\"%s\"\n", url ? url : "");
+        }
         if (info) {
             rb_probe_info_init(info);
             rb_probe_set_final_url(info, url ? url : "");
@@ -1383,10 +1441,8 @@ int rb_probe_stream_url(const char *url, RbStreamInfo *info,
         return RB_STREAM_PROBE_ERR_DISABLED;
     }
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-    if (!Radio_WorkerIsIdle()) {
-        RADIO_DBG(printf("radio-probe: deferred/skipped because worker not idle state=%s url=\"%s\"\n", Radio_WorkerStateName(), url ? url : "");)
+    if (!rb_probe_optional_network_gate("probe", url))
         return RB_STREAM_PROBE_ERR_DISABLED;
-    }
     RbProbeStreamUrlJobArgs args;
     args.url = url;
     args.info = info;
@@ -1396,6 +1452,10 @@ int rb_probe_stream_url(const char *url, RbStreamInfo *info,
     args.result = RB_STREAM_PROBE_ERR_CONNECT;
     if (!Radio_RunOnNetWorker(rb_probe_stream_url_job, &args))
         return RB_STREAM_PROBE_ERR_CONNECT;
+    if (!rb_probe_optional_network_gate("probe", url)) {
+        RADIO_DBG(printf("radio-probe: probe finished but temp transport/counters are not clean url=\"%s\"\n", url ? url : "");)
+        return RB_STREAM_PROBE_ERR_CONNECT;
+    }
     return args.result;
 #else
     int rc = rb_probe_stream_url_impl(url, info, peek_buf, peek_buf_size, peek_len);
@@ -1775,7 +1835,9 @@ static int rb_probe_fetch_binary_impl(const char *url, unsigned char *out_buf, i
 int rb_probe_artwork_disabled(void)
 {
     Radio_LogRuntimeFlagsOnce();
-    return radio_runtime_flag_enabled("MP3_NO_ARTWORK");
+    if (radio_runtime_flag_enabled("MP3_NO_ARTWORK"))
+        return 1;
+    return !rb_probe_artwork_test_enabled();
 }
 
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
@@ -1801,15 +1863,19 @@ static void rb_probe_fetch_binary_job(void *arg)
 int rb_probe_fetch_binary(const char *url, unsigned char *out_buf, int out_buf_size,
                         int *out_len, char *out_content_type, int out_content_type_size)
 {
-    if (rb_probe_artwork_disabled())
+    if (rb_probe_artwork_disabled()) {
+        if (radio_runtime_flag_enabled("MP3_NO_ARTWORK")) {
+            printf("radio-art: skipped by MP3_NO_ARTWORK\n");
+        } else {
+            printf("radio-art: staged off until MP3_TEST_ENABLE_ARTWORK=1 url=\"%s\"\n", url ? url : "");
+        }
         return RB_STREAM_PROBE_ERR_DISABLED;
+    }
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     {
         RbProbeFetchBinaryJobArgs args;
-        if (!Radio_WorkerIsIdle()) {
-            RADIO_DBG(printf("radio-art: deferred/skipped because worker not idle state=%s url=\"%s\"\n", Radio_WorkerStateName(), url ? url : "");)
+        if (!rb_probe_optional_network_gate("art", url))
             return RB_STREAM_PROBE_ERR_DISABLED;
-        }
         args.url = url;
         args.out_buf = out_buf;
         args.out_buf_size = out_buf_size;
@@ -1819,6 +1885,10 @@ int rb_probe_fetch_binary(const char *url, unsigned char *out_buf, int out_buf_s
         args.result = RB_STREAM_PROBE_ERR_CONNECT;
         if (!Radio_RunOnNetWorker(rb_probe_fetch_binary_job, &args))
             return RB_STREAM_PROBE_ERR_CONNECT;
+        if (!rb_probe_optional_network_gate("art", url)) {
+            RADIO_DBG(printf("radio-art: fetch finished but temp transport/counters are not clean url=\"%s\"\n", url ? url : "");)
+            return RB_STREAM_PROBE_ERR_CONNECT;
+        }
         return args.result;
     }
 #else

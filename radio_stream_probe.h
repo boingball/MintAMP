@@ -48,15 +48,17 @@ enum {
     /* MiniMem/heap corruption detected earlier this run: every probe/fetch
      * (HTTP and HTTPS alike) is refused until app restart. */
     RB_STREAM_PROBE_ERR_MEM_POISONED = -18,
-    /* MP3_NO_ARTWORK=1 in the environment: binary fetches (favicon/artwork)
-     * are refused so a radio soak test can isolate audio-cleanup corruption
-     * from the GUI's favicon/artwork fetch path. */
+    /* Runtime/staged optional-network gate disabled the probe/fetch path:
+     * MP3_NO_STREAM_PROBE / MP3_NO_ARTWORK, missing MP3_TEST_ENABLE_*,
+     * or a busy worker/active transport. */
     RB_STREAM_PROBE_ERR_DISABLED = -19
 };
 
 const char *rb_probe_error_text(int rc);
 int rb_probe_url_looks_hls(const char *url);
+int rb_probe_stream_probe_test_enabled(void);
 int rb_probe_stream_probe_disabled(void);
+int rb_probe_artwork_test_enabled(void);
 int rb_probe_artwork_disabled(void);
 
 int rb_probe_stream_url(

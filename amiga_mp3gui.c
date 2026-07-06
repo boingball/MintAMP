@@ -10,6 +10,7 @@
 #include <string.h>
 #include "miniamp_memguard.h"
 #include "amiga_display_text.h"
+#include "radio_runtime_flags.h"
 
 #if defined(AMIGA_M68K)
 #define main HelixAmp3CliMain
@@ -3077,9 +3078,12 @@ static int LoadRadioFaviconImage(HelixAmp3Gui *gui)
 		return 0;
 	}
 	artworkDisabled = rb_probe_artwork_disabled();
-	printf("radio-art: flag check MP3_NO_ARTWORK enabled=%d before favicon/artwork fetch\n", artworkDisabled);
+	printf("radio-art: flag check MP3_NO_ARTWORK enabled=%d testEnable=%d before favicon/artwork fetch\n", artworkDisabled, rb_probe_artwork_test_enabled());
 	if (artworkDisabled) {
-		printf("radio-art: skipped by MP3_NO_ARTWORK\n");
+		if (radio_runtime_flag_enabled("MP3_NO_ARTWORK"))
+			printf("radio-art: skipped by MP3_NO_ARTWORK\n");
+		else
+			printf("radio-art: staged off until MP3_TEST_ENABLE_ARTWORK=1\n");
 		return 0;
 	}
 	if (Radio_PlaybackOwnsNetwork()) {
@@ -5812,7 +5816,7 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 	RadioSetStatus(app, "Checking stream...");
 	{
 		int probeDisabled = rb_probe_stream_probe_disabled();
-		printf("radio-probe: flag check MP3_NO_STREAM_PROBE enabled=%d before selected probe\n", probeDisabled);
+		printf("radio-probe: flag check MP3_NO_STREAM_PROBE enabled=%d testEnable=%d before selected probe\n", probeDisabled, rb_probe_stream_probe_test_enabled());
 		if (!probeDisabled) {
 			RADIO_DBG(printf("radio-ui: new stream probe start url=\"%s\"\n", rb_station_play_url(st));)
 		}
@@ -5846,10 +5850,13 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 	}
 	{
 		int artworkDisabled = rb_probe_artwork_disabled();
-		printf("radio-art: flag check MP3_NO_ARTWORK enabled=%d before favicon/artwork fetch\n", artworkDisabled);
+		printf("radio-art: flag check MP3_NO_ARTWORK enabled=%d testEnable=%d before favicon/artwork fetch\n", artworkDisabled, rb_probe_artwork_test_enabled());
 		if (artworkDisabled) {
 			app->currentRadioFavicon[0] = '\0';
-			printf("radio-art: skipped by MP3_NO_ARTWORK\n");
+			if (radio_runtime_flag_enabled("MP3_NO_ARTWORK"))
+				printf("radio-art: skipped by MP3_NO_ARTWORK\n");
+			else
+				printf("radio-art: staged off until MP3_TEST_ENABLE_ARTWORK=1\n");
 		} else {
 			SafeCopy(app->currentRadioFavicon, sizeof(app->currentRadioFavicon), st->favicon);
 			RADIO_DBG(printf("radio-art: station favicon=\"%s\"\n", app->currentRadioFavicon);)
