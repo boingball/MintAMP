@@ -16,45 +16,6 @@
 #define RADIO_STOP_DEBUG_PRINTF(x) do { } while (0)
 #endif
 
-/* When radio_stream.h is pulled in indirectly by amiga_mp3dec.c while the GUI
- * frontends have temporarily renamed main to HelixAmp3CliMain, do not install
- * the release printf filter.  amiga_mp3dec.c deliberately owns its own
- * printf -> MiniAmp3Printf redirect in that include context. */
-#if defined(main) && !defined(RADIO_RELEASE_PRINTF_FILTER_DISABLED)
-#define RADIO_RELEASE_PRINTF_FILTER_DISABLED 1
-#endif
-
-#if !defined(RADIO_DEBUG) && !defined(RADIO_RELEASE_PRINTF_FILTER_DISABLED)
-#include <stdio.h>
-#include <stdarg.h>
-#include <string.h>
-/* Release builds should not spam the Shell with the temporary pump/read
- * diagnostics that were useful during RC1 crash hunting.  Keep real messages
- * and faults visible, but suppress the known steady-state prefixes.  This
- * lives in radio_stream.h rather than radio_debug.h so it is applied to the
- * standalone radio stream translation unit, while embedded decoder includes
- * keep their own console redirection. */
-static int radio_release_printf(const char *fmt, ...)
-{
-    int r;
-    va_list ap;
-
-    if (fmt &&
-        (!strncmp(fmt, "radio-read: transient zero", 26) ||
-         !strncmp(fmt, "radio-input: zero read", 22) ||
-         !strncmp(fmt, "radio-worker: session=", 22) ||
-         !strncmp(fmt, "radio-worker: backpressure", 26) ||
-         !strncmp(fmt, "radio-pump: stop/detach observed", 33)))
-        return 0;
-
-    va_start(ap, fmt);
-    r = vprintf(fmt, ap);
-    va_end(ap);
-    return r;
-}
-#define printf radio_release_printf
-#endif
-
 typedef struct RadioStream RadioStream;
 
 typedef enum {
@@ -299,4 +260,36 @@ static const char *Radio_StatusText(RadioStatus status)
 }
 #endif
 
+#endif /* RADIO_STREAM_H */
+
+#if !defined(RADIO_DEBUG) && !defined(main) && !defined(RADIO_RELEASE_PRINTF_FILTER_DISABLED) && !defined(RADIO_RELEASE_PRINTF_FILTER_INSTALLED)
+#include <stdio.h>
+#include <stdarg.h>
+#include <string.h>
+static int radio_release_printf(const char *fmt, ...)
+{
+    int r;
+    va_list ap;
+
+    if (fmt &&
+        (!strncmp(fmt, "radio-runtime:", 14) ||
+         !strncmp(fmt, "radio-probe: flag check", 23) ||
+         !strncmp(fmt, "radio-art: flag check", 21) ||
+         !strncmp(fmt, "radio-resource:", 15) ||
+         !strncmp(fmt, "radio-read: transient zero", 26) ||
+         !strncmp(fmt, "radio-input: zero read", 22) ||
+         !strncmp(fmt, "radio-worker: session=", 22) ||
+         !strncmp(fmt, "radio-worker: backpressure", 26) ||
+         !strncmp(fmt, "radio-cleanup: abort SSL_free policy", 36) ||
+         !strncmp(fmt, "radio-cleanup: abort SSL_free/SSL_CTX_free skipped", 51) ||
+         !strncmp(fmt, "radio-pump: stop/detach observed", 33)))
+        return 0;
+
+    va_start(ap, fmt);
+    r = vprintf(fmt, ap);
+    va_end(ap);
+    return r;
+}
+#define printf radio_release_printf
+#define RADIO_RELEASE_PRINTF_FILTER_INSTALLED 1
 #endif
