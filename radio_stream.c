@@ -172,6 +172,11 @@ static volatile unsigned long radio_net_worker_heartbeat = 0;
 static volatile unsigned long radio_net_worker_last_session = 0;
 static const char * volatile radio_net_worker_stage = "startup";
 static const char * volatile radio_net_worker_last_op = "none";
+/* Tentative declarations for shutdown breadcrumbs emitted before the full
+ * resource-counter block appears later in the file. */
+static long radio_open_socket_count;
+static long radio_active_ssl_count;
+static long radio_active_ssl_ctx_count;
 typedef enum {
     RADIO_WORKER_IDLE = 0,
     RADIO_WORKER_PROBING,
