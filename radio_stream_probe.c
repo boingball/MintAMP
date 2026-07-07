@@ -37,6 +37,9 @@ static int RadioStreamProbeLockedPrintf(const char *fmt, ...)
     ReleaseSemaphore(&radio_console_lock);
     return r;
 }
+#ifdef printf
+#undef printf
+#endif
 #define printf RadioStreamProbeLockedPrintf
 #endif
 
