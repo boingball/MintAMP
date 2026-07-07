@@ -336,7 +336,13 @@ static void radio_net_worker_entry(void)
     if (AmiSSLBase) {
         radio_net_worker_shutdown_stage = "before CloseAmiSSL";
         radio_worker_breadcrumb("before CloseAmiSSL", "CloseAmiSSL", 0);
+        /* Only GUI radio-browser builds link radio_stream_probe.c.
+         * The decoder-only fast030 radio build shares this worker teardown
+         * path but has no probe module, so avoid a hard linker dependency
+         * on rb_probe_shutdown_tls_context(). */
+#ifdef RADIO_HAVE_STREAM_PROBE
         rb_probe_shutdown_tls_context();
+#endif
         RADIO_DBG(printf("radio-worker-risk: before CloseAmiSSL workerTask=%p active_ssl=%ld active_ctx=%ld open_socket=%ld\n",
             (void *)radio_net_worker_task, radio_active_ssl_count, radio_active_ssl_ctx_count, radio_open_socket_count););
         RADIO_DBG(printf("radio-net-worker: before CloseAmiSSL base=%p ext=%p\n", (void *)AmiSSLBase, (void *)AmiSSLExtBase););

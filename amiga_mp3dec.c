@@ -192,6 +192,24 @@ static void RadioDebugUnsuppressedPrintf(const char *fmt, ...)
 }
 #endif
 
+#ifdef printf
+#undef printf
+#endif
+#ifdef fprintf
+#undef fprintf
+#endif
+#ifdef fputs
+#undef fputs
+#endif
+#ifdef puts
+#undef puts
+#endif
+#ifdef putchar
+#undef putchar
+#endif
+#ifdef fflush
+#undef fflush
+#endif
 #define printf MiniAmp3Printf
 #define fprintf MiniAmp3Fprintf
 #define fputs MiniAmp3Fputs
