@@ -91,6 +91,9 @@ static int RadioStreamLockedPrintf(const char *fmt, ...)
     ReleaseSemaphore(&radio_console_lock);
     return r;
 }
+#ifdef printf
+#undef printf
+#endif
 #define printf RadioStreamLockedPrintf
 #endif
 
