@@ -15,9 +15,29 @@
 #include <errno.h>
 
 #if defined(AMIGA_M68K)
+#include <stdarg.h>
+#include <exec/semaphores.h>
+#include <proto/exec.h>
+/* Same cross-task shared-stdout race as radio_stream.c (see radio_debug.h's
+ * RADIO_DBG comment for the field evidence): favicon/artwork HTTP fetches
+ * here run concurrently with radio_stream.c/amiga_mp3dec.c's own output.
+ * Redirect every printf() in this file through the same shared
+ * radio_console_lock. */
+extern struct SignalSemaphore radio_console_lock;
+static int RadioBrowserHttpLockedPrintf(const char *fmt, ...)
+{
+    int r;
+    va_list ap;
+    ObtainSemaphore(&radio_console_lock);
+    va_start(ap, fmt);
+    r = vprintf(fmt, ap);
+    va_end(ap);
+    ReleaseSemaphore(&radio_console_lock);
+    return r;
+}
+#define printf RadioBrowserHttpLockedPrintf
 #include <exec/types.h>
 #include <exec/libraries.h>
-#include <proto/exec.h>
 #include <proto/bsdsocket.h>
 #include <sys/socket.h>
 #include <sys/time.h>

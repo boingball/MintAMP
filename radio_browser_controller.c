@@ -15,6 +15,30 @@
 #include <stdio.h>
 #include <string.h>
 
+#if defined(AMIGA_M68K)
+#include <stdarg.h>
+#include <exec/semaphores.h>
+#include <proto/exec.h>
+/* Same cross-task shared-stdout race as radio_stream.c (see radio_debug.h's
+ * RADIO_DBG comment for the field evidence): this controller runs on the
+ * GUI task, concurrently with radio_stream.c/amiga_mp3dec.c's own output
+ * during station probing/playback. Redirect every printf() in this file
+ * through the same shared radio_console_lock. */
+extern struct SignalSemaphore radio_console_lock;
+static int RadioBrowserControllerLockedPrintf(const char *fmt, ...)
+{
+    int r;
+    va_list ap;
+    ObtainSemaphore(&radio_console_lock);
+    va_start(ap, fmt);
+    r = vprintf(fmt, ap);
+    va_end(ap);
+    ReleaseSemaphore(&radio_console_lock);
+    return r;
+}
+#define printf RadioBrowserControllerLockedPrintf
+#endif
+
 /* Radio Browser is a mirror network and clients are expected to fail over:
  * a single hardcoded mirror meant one slow/dead mirror turned every search
  * into "Search failed" for the rest of the app's life.  Each search tries

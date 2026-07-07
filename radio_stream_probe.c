@@ -17,6 +17,30 @@
 #include "miniamp_memguard.h"
 
 #if defined(AMIGA_M68K)
+#include <stdarg.h>
+#include <exec/semaphores.h>
+#include <proto/exec.h>
+/* Same cross-task shared-stdout race as radio_stream.c (see radio_debug.h's
+ * RADIO_DBG comment for the field evidence): this file's probe/favicon
+ * fetches run on the net worker task (or the GUI task's lazy fallback) and
+ * have many always-on printf() calls that were unlocked. Redirect every
+ * printf() in this file through the same shared radio_console_lock. */
+extern struct SignalSemaphore radio_console_lock;
+static int RadioStreamProbeLockedPrintf(const char *fmt, ...)
+{
+    int r;
+    va_list ap;
+    ObtainSemaphore(&radio_console_lock);
+    va_start(ap, fmt);
+    r = vprintf(fmt, ap);
+    va_end(ap);
+    ReleaseSemaphore(&radio_console_lock);
+    return r;
+}
+#define printf RadioStreamProbeLockedPrintf
+#endif
+
+#if defined(AMIGA_M68K)
 #include <exec/types.h>
 #include <exec/libraries.h>
 #include <proto/exec.h>
