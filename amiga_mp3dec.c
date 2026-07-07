@@ -5182,6 +5182,29 @@ static int RadioUrlHasMp3Hint(const char *url)
 	return 0;
 }
 
+/* Radio Browser directories commonly tag Opus-in-Ogg mounts with codec
+ * "OPUS" and/or Content-Type "audio/opus", and Icecast otherwise reports the
+ * same generic "audio/ogg"/"application/ogg" Content-Type it uses for
+ * Vorbis-in-Ogg -- so this must be checked before RadioDecoderExtFromContentType
+ * folds both down to the same "ogg" extension string. This module only links
+ * Tremor (integer Vorbis); handing it an Opus identification header is not a
+ * format error Tremor is guaranteed to reject cleanly (see the matching
+ * OggS+OpusHead guard in radio_stream_probe.c's rb_probe_detect_codec()),
+ * so callers must refuse the stream here rather than let it reach the OGG
+ * decoder module. */
+static int RadioStreamLooksLikeOpus(const char *url, const char *contentType, const char *codecHint)
+{
+	const char *ext = GetFileExtension(url);
+	if (codecHint && StrCaseCmp(codecHint, "OPUS") == 0)
+		return 1;
+	if (contentType && (StrCaseStarts(contentType, "audio/opus") ||
+		StrCaseStarts(contentType, "audio/x-opus")))
+		return 1;
+	if (ext && StrCaseCmp(ext, "opus") == 0)
+		return 1;
+	return 0;
+}
+
 static const char *RadioDecoderExtFromUrlOrTypeHint(const char *url, const char *contentType, const char *codecHint)
 {
 	const char *ext = GetFileExtension(url);
@@ -10656,6 +10679,14 @@ int main(int argc, char **argv)
 			fprintf(stderr, "radio-codec: Radio Browser codec=%s URL codec hint=%s HTTP content-type=%s\n",
 				opt.radioCodecHint ? opt.radioCodecHint : "(none)",
 				RadioUrlHasMp3Hint(opt.inName) ? "MP3" : "none", Radio_GetContentType(radio));
+			if (RadioStreamLooksLikeOpus(opt.inName, Radio_GetContentType(radio), opt.radioCodecHint)) {
+				fprintf(stderr, "cannot open radio stream: Opus-in-Ogg is not supported by this decoder\n");
+				GuiMarkRadioErrorText("Unsupported stream codec: OPUS");
+				Radio_Close(radio);
+				free(resolvedOutName);
+				AmigaFreeNormalizedArgs(&normalized);
+				return 1;
+			}
 			radioExt = RadioDecoderExtFromUrlOrTypeHint(opt.inName, Radio_GetContentType(radio), opt.radioCodecHint);
 			fprintf(stderr, "radio-codec: final selected decoder=%s\n", radioExt ? radioExt : "mp3");
 			if (radioExt && StrCaseCmp(radioExt, "mp3") != 0) {

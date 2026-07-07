@@ -1358,25 +1358,32 @@ static RbStreamCodec rb_probe_detect_codec(const RbProbeUrl *url, const RbStream
         RADIO_DBG(printf("rb-probe codec: initial byte sniff=ADTS final=AAC\n");)
         return RB_STREAM_CODEC_AAC;
     }
-    if (peek && peek_len >= 4 && peek[0] == 'O' && peek[1] == 'g' && peek[2] == 'g' && peek[3] == 'S') {
-        /* "OggS" is just the container magic -- Vorbis, Opus, Speex and
-         * FLAC-in-Ogg all start a page with it. The only codec this app can
-         * actually decode inside an Ogg container is Vorbis (via Tremor);
-         * an Opus (or other) payload handed to ogg.decoder isn't a format
-         * error Tremor is guaranteed to reject cleanly, so catch it here
-         * instead of letting ov_open_callbacks() ever see it. Every Opus
-         * stream's very first page carries an "OpusHead" identification
-         * packet, which -- unlike Vorbis's packet-type-prefixed "vorbis"
-         * string -- is safe to substring-search for regardless of the exact
-         * page header length (segment table size varies). */
+    /* "OggS" is just the container magic -- Vorbis, Opus, Speex and
+     * FLAC-in-Ogg all start a page with it. The only codec this app can
+     * actually decode inside an Ogg container is Vorbis (via Tremor);
+     * an Opus (or other) payload handed to ogg.decoder isn't a format
+     * error Tremor is guaranteed to reject cleanly, so this must be
+     * checked before EVERY path below that can return RB_STREAM_CODEC_OGG
+     * -- including the Content-Type and URL-extension fallbacks, since a
+     * real Icecast Opus-in-Ogg mount reports the exact same generic
+     * "audio/ogg"/"application/ogg" Content-Type a Vorbis mount does, and
+     * some servers' first response chunk is too short for the byte-sniff
+     * below to see the "OggS" magic at all. Every Opus stream's very first
+     * page carries an "OpusHead" identification packet, which -- unlike
+     * Vorbis's packet-type-prefixed "vorbis" string -- is safe to
+     * substring-search for regardless of the exact page header length
+     * (segment table size varies). */
+    if (peek) {
         int i;
         for (i = 0; i + 8 <= peek_len; i++) {
             if (peek[i] == 'O' && peek[i + 1] == 'p' && peek[i + 2] == 'u' && peek[i + 3] == 's' &&
                 peek[i + 4] == 'H' && peek[i + 5] == 'e' && peek[i + 6] == 'a' && peek[i + 7] == 'd') {
-                RADIO_DBG(printf("rb-probe codec: initial byte sniff=OggS+OpusHead final=unsupported (Opus-in-Ogg)\n");)
+                RADIO_DBG(printf("rb-probe codec: peek buffer contains OpusHead final=unsupported (Opus-in-Ogg)\n");)
                 return RB_STREAM_CODEC_UNKNOWN;
             }
         }
+    }
+    if (peek && peek_len >= 4 && peek[0] == 'O' && peek[1] == 'g' && peek[2] == 'g' && peek[3] == 'S') {
         RADIO_DBG(printf("rb-probe codec: initial byte sniff=OggS final=OGG\n");)
         return RB_STREAM_CODEC_OGG;
     }
@@ -1384,6 +1391,8 @@ static RbStreamCodec rb_probe_detect_codec(const RbProbeUrl *url, const RbStream
         if (rb_probe_contains_nocase(info->content_type, "audio/mpeg") ||
             rb_probe_contains_nocase(info->content_type, "audio/mp3")) return RB_STREAM_CODEC_MP3;
         if (rb_probe_content_type_is_aac(info->content_type)) return RB_STREAM_CODEC_AAC;
+        if (rb_probe_contains_nocase(info->content_type, "audio/opus") ||
+            rb_probe_contains_nocase(info->content_type, "audio/x-opus")) return RB_STREAM_CODEC_UNKNOWN;
         if (rb_probe_contains_nocase(info->content_type, "audio/ogg") ||
             rb_probe_contains_nocase(info->content_type, "application/ogg") ||
             rb_probe_contains_nocase(info->content_type, "audio/vorbis") ||
@@ -1391,6 +1400,8 @@ static RbStreamCodec rb_probe_detect_codec(const RbProbeUrl *url, const RbStream
     }
     if (rb_probe_url_has_aac_hint(url))
         return RB_STREAM_CODEC_AAC;
+    if (url && rb_probe_contains_nocase(url->path, ".opus"))
+        return RB_STREAM_CODEC_UNKNOWN;
     if (url && (rb_probe_contains_nocase(url->path, ".ogg") || rb_probe_contains_nocase(url->path, ".oga")))
         return RB_STREAM_CODEC_OGG;
     if (rb_probe_url_has_mp3_hint(url))

@@ -2587,7 +2587,7 @@ static void radio_worker_maybe_log_stats(RadioStream *rs)
 	freeBytes = rs->size > rs->used ? rs->size - rs->used : 0;
 	status = rs->status;
 	radio_stream_unlock(rs);
-	printf("radio-worker: session=%lu pump reads=%lu bytes=%lu wantRead=%lu zero=%lu backpressure=%lu partial=%lu preventedDrop=%lu ringFill=%lu ringFree=%lu status=%d stage=\"%s\" lastOp=\"%s\" heartbeat=%lu\n",
+	RADIO_DBG(printf("radio-worker: session=%lu pump reads=%lu bytes=%lu wantRead=%lu zero=%lu backpressure=%lu partial=%lu preventedDrop=%lu ringFill=%lu ringFree=%lu status=%d stage=\"%s\" lastOp=\"%s\" heartbeat=%lu\n",
 		rs->session_id,
 		rs->workerReadCalls,
 		rs->workerReadBytes,
@@ -2601,7 +2601,7 @@ static void radio_worker_maybe_log_stats(RadioStream *rs)
 		(int)status,
 		radio_net_worker_stage ? (const char *)radio_net_worker_stage : "<unset>",
 		radio_net_worker_last_op ? (const char *)radio_net_worker_last_op : "<unset>",
-		radio_net_worker_heartbeat);
+		radio_net_worker_heartbeat);)
 	rs->workerLastStatsClock = (unsigned long)now;
 }
 
@@ -3167,7 +3167,7 @@ static int radio_pump_body(RadioStream *rs)
     if (rs->fatalStop) { set_error(rs, "TLS read failed"); return -1; }
     if (radio_is_stopping(rs)) {
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-        printf("radio-pump: stop/detach observed before SSL_read session=%lu -- no further read\n", rs->session_id);
+        RADIO_DBG(printf("radio-pump: stop/detach observed before SSL_read session=%lu -- no further read\n", rs->session_id);)
         return 0;
 #else
         close_current_socket(rs); rs->status = RADIO_STATUS_CLOSED; return 0;
@@ -3192,9 +3192,9 @@ static int radio_pump_body(RadioStream *rs)
         if (ringFreeSnapshot == 0) {
             rs->workerBackpressureCount++;
             if (rs->workerBackpressureCount == 1 || (rs->workerBackpressureCount % 25UL) == 0) {
-                printf("radio-worker: backpressure session=%lu ringFill=%lu ringFree=%lu parseState=%d audioUntilMeta=%d metaLeft=%d -- not reading socket\n",
+                RADIO_DBG(printf("radio-worker: backpressure session=%lu ringFill=%lu ringFree=%lu parseState=%d audioUntilMeta=%d metaLeft=%d -- not reading socket\n",
                     rs->session_id, usedSnapshot, ringFreeSnapshot, parseStateSnapshot,
-                    audioUntilMetaSnapshot, metaLeftSnapshot);
+                    audioUntilMetaSnapshot, metaLeftSnapshot);)
             }
             radio_backoff_sleep();
             radio_worker_maybe_log_stats(rs);
@@ -3216,8 +3216,8 @@ static int radio_pump_body(RadioStream *rs)
         int detached = rs->workerDetached;
         int registered = rs->workerRegistered;
         radio_stream_unlock(rs);
-        printf("radio-pump: stop/detach observed before SSL_read session=%lu status=%d stopReq=%d closing=%d closeReq=%d registered=%d detached=%d -- no further read\n",
-            rs->session_id, (int)stopStatus, stopReq, closing, closeReq, registered, detached);
+        RADIO_DBG(printf("radio-pump: stop/detach observed before SSL_read session=%lu status=%d stopReq=%d closing=%d closeReq=%d registered=%d detached=%d -- no further read\n",
+            rs->session_id, (int)stopStatus, stopReq, closing, closeReq, registered, detached);)
         return 0;
     }
     radio_stream_unlock(rs);
@@ -3281,7 +3281,7 @@ static int radio_pump_body(RadioStream *rs)
 	    radio_worker_maybe_log_stats(rs);
 	    if (radio_is_stopping(rs)) {
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-            printf("radio-pump: stop/detach observed after SSL_read session=%lu -- close deferred to worker close job\n", rs->session_id);
+            RADIO_DBG(printf("radio-pump: stop/detach observed after SSL_read session=%lu -- close deferred to worker close job\n", rs->session_id);)
             return 0;
 #else
             close_current_socket(rs); rs->status = RADIO_STATUS_CLOSED; return 0;
@@ -3445,8 +3445,8 @@ int Radio_ReadAudio(RadioStream *rs,unsigned char *buf,int maxBytes)
 		return 0;
 	if(!headerDone || !decoderStarted || used==0) {
 		if(status==RADIO_STATUS_PLAYING || status==RADIO_STATUS_BUFFERING || status==RADIO_STATUS_CONNECTING || status==RADIO_STATUS_RECONNECTING)
-			printf("radio-read: transient zero session=%lu status=%d used=%lu headerDone=%d decoderStarted=%d everPlayed=%d stopping=%d\n",
-				rs->session_id, (int)status, used, headerDone, decoderStarted, everPlayed, stopping);
+			RADIO_DBG(printf("radio-read: transient zero session=%lu status=%d used=%lu headerDone=%d decoderStarted=%d everPlayed=%d stopping=%d\n",
+				rs->session_id, (int)status, used, headerDone, decoderStarted, everPlayed, stopping);)
 		return 0;
 	}
 #else
