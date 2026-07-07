@@ -70,10 +70,10 @@ PNG_CPPFLAGS := -DENABLE_PNG_ARTWORK -DLODEPNG_NO_COMPILE_ENCODER \
 # EXTRA_CFLAGS and drop svgdec.c from GUIR_SOURCES below to also shrink
 # the binary; the C-level guard alone only skips the decode calls.
 
-SOURCES := amiga_mp3dec.c miniamp_memguard.c $(RADIO_SOURCES) $(DECODER_SOURCES)
+SOURCES := amiga_mp3dec.c miniamp_memguard.c radio_runtime_flags.c $(RADIO_SOURCES) $(DECODER_SOURCES)
 # miniamp_memguard.c compiles to nothing unless HEAPGUARD=1 (see
 # MINIAMP_DEBUG_ALLOC above), so it's harmless to always list it.
-GUI_SOURCES := amiga_mp3gui.c picojpeg.c miniamp_memguard.c $(RADIO_SOURCES) \
+GUI_SOURCES := amiga_mp3gui.c picojpeg.c miniamp_memguard.c radio_runtime_flags.c $(RADIO_SOURCES) \
 	radio_browser_controller.c radio_browser.c radio_browser_url.c \
 	radio_browser_http.c radio_browser_json.c radio_stream_probe.c
 # miniamp3 uses gadtools.library via proto/gadtools.h; no linker flag is needed.
@@ -83,7 +83,7 @@ GUI_SOURCES := amiga_mp3gui.c picojpeg.c miniamp_memguard.c $(RADIO_SOURCES) \
 # lodepng.c/svgdec.c are only needed here -- the radio favicon artwork
 # feature (and its PNG/SVG support) is minimp3r-only, not wired into the
 # GadTools frontend above.
-GUIR_SOURCES := minimp3r.c picojpeg.c lodepng.c svgdec.c miniamp_memguard.c $(RADIO_SOURCES) \
+GUIR_SOURCES := minimp3r.c picojpeg.c lodepng.c svgdec.c miniamp_memguard.c radio_runtime_flags.c $(RADIO_SOURCES) \
 	radio_browser_controller.c radio_browser.c radio_browser_url.c \
 	radio_browser_http.c radio_browser_json.c radio_stream_probe.c
 
@@ -174,8 +174,8 @@ amissl_child_worker_repro: amissl_child_worker_repro.c
 	$(CC) $(CFLAGS_COMMON) $(CPPFLAGS_COMMON) -DHAVE_AMISSL $(SSL_CPPFLAGS) $(DEBUG_CPPFLAGS) $(EXTRA_CFLAGS) -o $@ amissl_child_worker_repro.c
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
 
-rb_stream_probe_test: radio_stream_probe.c radio_stream_probe.h
-	$(CC) $(CFLAGS_COMMON) $(CPPFLAGS_COMMON) $(SSL_CPPFLAGS) $(DEBUG_CPPFLAGS) $(EXTRA_CFLAGS) -DRB_STREAM_PROBE_TEST -o $@ radio_stream_probe.c
+rb_stream_probe_test: radio_stream_probe.c radio_stream_probe.h radio_runtime_flags.c radio_runtime_flags.h
+	$(CC) $(CFLAGS_COMMON) $(CPPFLAGS_COMMON) $(SSL_CPPFLAGS) $(DEBUG_CPPFLAGS) $(EXTRA_CFLAGS) -DRB_STREAM_PROBE_TEST -o $@ radio_stream_probe.c radio_runtime_flags.c
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
 
 sslgui:

@@ -14,6 +14,7 @@
 #include <stdarg.h>
 #ifndef AMIGA_M68K
 #include <signal.h>
+#include <unistd.h>
 #endif
 
 #if defined(AMIGA_M68K) && (defined(__amigaos__) || defined(__AMIGA__) || defined(__MORPHOS__))
@@ -138,6 +139,11 @@ static void RadioDebugUnsuppressedPrintf(const char *fmt, ...)
 #define putchar MiniAmp3Putchar
 #define fflush MiniAmp3Fflush
 #define fwrite MiniAmp3Fwrite
+#ifdef RADIO_DEBUG
+#define RADIO_INPUT_DIAG_PRINTF RadioDebugUnsuppressedPrintf
+#else
+#define RADIO_INPUT_DIAG_PRINTF MiniAmp3Printf
+#endif
 
 #if defined(AMIGA_M68K)
 /* Tell AmigaOS to provide at least 256 KB of stack for this executable. */
@@ -1653,6 +1659,17 @@ static void InputSourceClose(InputSource *input)
 #endif
 	if (input->radio) {
 		RadioStream *radio = input->radio;
+		RadioStatus status = Radio_GetStatus(radio);
+		int buffered = Radio_GetBufferedBytes(radio);
+		const char *error = Radio_GetError(radio);
+		if (!gPlaybackInterrupted &&
+			status != RADIO_STATUS_ERROR &&
+			status != RADIO_STATUS_STOPPING &&
+			status != RADIO_STATUS_CLOSED &&
+			(buffered > 0 || (error && !error[0]))) {
+			RADIO_INPUT_DIAG_PRINTF("radio-input: WARNING decoder exiting normal while radio buffered=%d status=%d error=\"%s\" session=%lu\n",
+				buffered, (int)status, error ? error : "", Radio_GetSessionId(radio));
+		}
 		RADIO_DBG(printf("radio-teardown: before first Radio_RequestStop (InputSourceClose) session=%lu\n",
 			Radio_GetSessionId(radio)));
 		Radio_RequestStop(radio);
@@ -1682,6 +1699,30 @@ static void CloseInputFile(FILE **file, int debugCleanup)
 		printf("debug-cleanup: input file closed: yes\n");
 }
 
+#if ENABLE_RADIO
+static unsigned long radio_input_clock_ms(void)
+{
+#if defined(AMIGA_M68K) && defined(HAVE_AMIGA_AUDIO_DEVICE)
+	struct DateStamp ds;
+	DateStamp(&ds);
+	return (unsigned long)ds.ds_Days * 86400000UL +
+		(unsigned long)ds.ds_Minute * 60000UL +
+		(unsigned long)ds.ds_Tick * 20UL;
+#else
+	return (unsigned long)(clock() * 1000UL / CLOCKS_PER_SEC);
+#endif
+}
+
+static void radio_input_wait_tick(void)
+{
+#if defined(AMIGA_M68K) && defined(HAVE_AMIGA_AUDIO_DEVICE)
+	Delay(1);
+#else
+	usleep(20000);
+#endif
+}
+#endif
+
 static size_t InputSourceRead(InputSource *input, void *dest, size_t bytes)
 {
 	if (input && input->prefixPos < input->prefixSize) {
@@ -1694,21 +1735,69 @@ static size_t InputSourceRead(InputSource *input, void *dest, size_t bytes)
 		return take + InputSourceRead(input, (unsigned char *)dest + take, bytes - take);
 	}
 	if (input && input->radio) {
-		RadioStatus status;
-		if (gPlaybackInterrupted) {
-			Radio_RequestStop(input->radio);
-			GuiMarkRadioStopped();
-			return 0;
-		}
-		status = Radio_GetStatus(input->radio);
-		if (status == RADIO_STATUS_STOPPING || status == RADIO_STATUS_CLOSED)
-			return 0;
-		{
-			size_t got = (size_t)Radio_ReadAudio(input->radio, (unsigned char *)dest, (int)bytes);
+		unsigned long startMs = radio_input_clock_ms();
+		unsigned long lastLogMs = 0;
+		const unsigned long maxWaitMs = 15000UL;
+
+		for (;;) {
+			RadioStatus status;
+			int buffered;
+			size_t got;
+
+			if (gPlaybackInterrupted) {
+				Radio_RequestStop(input->radio);
+				GuiMarkRadioStopped();
+				return 0;
+			}
+
 			status = Radio_GetStatus(input->radio);
-			if (status != RADIO_STATUS_STOPPING && status != RADIO_STATUS_CLOSED)
+			if (status == RADIO_STATUS_ERROR ||
+				status == RADIO_STATUS_STOPPING ||
+				status == RADIO_STATUS_CLOSED) {
 				GuiPublishRadioMetadata(input->radio);
-			return got;
+				return 0;
+			}
+
+			got = (size_t)Radio_ReadAudio(input->radio, (unsigned char *)dest, (int)bytes);
+			if (got > 0) {
+				status = Radio_GetStatus(input->radio);
+				if (status != RADIO_STATUS_STOPPING && status != RADIO_STATUS_CLOSED)
+					GuiPublishRadioMetadata(input->radio);
+				return got;
+			}
+
+			status = Radio_GetStatus(input->radio);
+			buffered = Radio_GetBufferedBytes(input->radio);
+			if (status == RADIO_STATUS_ERROR ||
+				status == RADIO_STATUS_STOPPING ||
+				status == RADIO_STATUS_CLOSED) {
+				GuiPublishRadioMetadata(input->radio);
+				return 0;
+			}
+
+			if (radio_input_clock_ms() - lastLogMs >= 1000UL) {
+				RADIO_INPUT_DIAG_PRINTF("radio-input: zero read requested=%lu got=0 status=%d buffered=%d error=\"%s\" session=%lu -- waiting, not EOF\n",
+					(unsigned long)bytes,
+					(int)status,
+					buffered,
+					Radio_GetError(input->radio),
+					Radio_GetSessionId(input->radio));
+				lastLogMs = radio_input_clock_ms();
+			}
+
+			if (radio_input_clock_ms() - startMs >= maxWaitMs) {
+				RADIO_INPUT_DIAG_PRINTF("radio-input: live stream read timeout requested=%lu status=%d buffered=%d error=\"%s\" session=%lu\n",
+					(unsigned long)bytes,
+					(int)status,
+					buffered,
+					Radio_GetError(input->radio),
+					Radio_GetSessionId(input->radio));
+				Radio_FailStartup(input->radio, "radio stream stalled - no audio delivered");
+				GuiPublishRadioMetadata(input->radio);
+				return 0;
+			}
+
+			radio_input_wait_tick();
 		}
 	}
 	if (input->memory) {

@@ -1,5 +1,24 @@
 # AmiSSL Lifecycle Audit
 
+> **Superseded by the single-worker architecture.** `radio_stream.c` no longer
+> uses the "GUI/opener task opens the shared instance, each playback child
+> opens its own bsdsocket base and runs InitAmiSSL()/CleanupAmiSSL() against
+> it" model this audit describes. Instead a single long-lived net worker task
+> (`radio_net_worker_entry()`, started by `radio_net_worker_ensure_started()`)
+> owns its own private `SocketBase`/`AmiSSLMasterBase`/`AmiSSLBase`/
+> `AmiSSLExtBase`/`AmiSSL_ErrNoPtr` storage, opens AmiSSL exactly once
+> (`OpenAmiSSLTags(..., AmiSSL_InitAmiSSL, TRUE, ...)`, matching
+> `amissl_child_worker_repro.c`) for the app's whole run, and is the only
+> task that ever calls `socket()`/`connect()`/`SSL_*()`/`InitAmiSSL()` --
+> every other task (GUI, playback child, `radio_stream_probe.c`) reaches it
+> only through `Radio_RunOnNetWorker()`. This resolves F1 (the opener task is
+> now always initialised, being the only task that runs `OpenAmiSSLTags()`),
+> F2 (no per-child `InitAmiSSL()`/`CleanupAmiSSL()` to skip), F4 (the worker's
+> `SocketBase` is never shared with another task), and F5 (there is only ever
+> one instance, opened once). F3's MiniMem-into-TLS-quarantine propagation
+> still applies and is unchanged. The rest of this document describes the
+> superseded design and is kept for history.
+
 Audit of every AmiSSL open/init/cleanup/close path in this codebase against the
 official AmiSSL v5 autodocs (`amissl.library/InitAmiSSLA`,
 `amissl.library/CleanupAmiSSLA`, `amissl.library/--background--`) and the
@@ -211,13 +230,12 @@ drop the probe fallback in GUI builds).
   (`radio_stream.c:823-825`, `radio_stream_probe.c:684-686`,
   `amissl_https_get.c:193-195`) and at both `OpenAmiSSLTags` sites. Correct
   (subject to the shared-errno caveat in F4).
-- **Rule 10 (TLS-error path):** on `SSL_ERROR_SSL`/fatal error-queue faults
-  from `SSL_connect`/`SSL_read` the code stops the stream, blocks the host
-  until restart (`Radio_NoteTlsFaultHost` / `Radio_IsTlsFaultHost`,
-  `radio_stream.c:953,974`), quarantines the session's objects, and keeps
-  HTTPS enabled for fresh sessions. The optional "parent-side AmiSSL soft
-  reset" is not implemented (allowed — it is optional). Hard-disable on heap
-  corruption works for playback but not probes (see F3).
+- **Rule 10 (TLS-error path):** on normal TLS failures from
+  `SSL_connect`/`SSL_read`/`SSL_write`, playback records diagnostics and then
+  runs the normal per-attempt cleanup (`SSL_free`, `SSL_CTX_free`, socket close,
+  child AmiSSL/library close, and parent-global restore). The host-blocking path
+  remains removed, so another HTTPS station can be tried. Hard-disable remains
+  reserved for detected heap/memory corruption (see F3).
 - **`amissl_https_get.c`** is fully compliant and is the correct reference
   pattern for the manual (no `AmiSSL_InitAmiSSL`) lifecycle:
   `OpenAmiSSLTags` → explicit `InitAmiSSL` → SSL use → `CleanupAmiSSL` →

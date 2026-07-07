@@ -10,6 +10,7 @@
 #include <string.h>
 #include "miniamp_memguard.h"
 #include "amiga_display_text.h"
+#include "radio_runtime_flags.h"
 
 #if defined(AMIGA_M68K)
 #define main HelixAmp3CliMain
@@ -3070,9 +3071,23 @@ static int LoadRadioFaviconImage(HelixAmp3Gui *gui)
 	static unsigned char response[HELIXAMP3_FAVICON_MAX_BYTES];
 	int bytes = 0;
 	int rc;
+	int artworkDisabled;
 
 	if (!gui || !gui->currentRadioFavicon[0]) {
 		RADIO_DBG(printf("radio-art: no favicon URL for current station\n");)
+		return 0;
+	}
+	artworkDisabled = rb_probe_artwork_disabled();
+	printf("radio-art: flag check MP3_NO_ARTWORK enabled=%d testEnable=%d before favicon/artwork fetch\n", artworkDisabled, rb_probe_artwork_test_enabled());
+	if (artworkDisabled) {
+		if (radio_runtime_flag_enabled("MP3_NO_ARTWORK"))
+			printf("radio-art: skipped by MP3_NO_ARTWORK\n");
+		else
+			printf("radio-art: disabled for run after fatal TLS/artwork transport fault\n");
+		return 0;
+	}
+	if (Radio_PlaybackOwnsNetwork()) {
+		RADIO_DBG(printf("radio-art: skipped favicon fetch while radio playback child owns networking\n");)
 		return 0;
 	}
 	RADIO_DBG(printf("radio-art: fetching favicon url=%s\n", gui->currentRadioFavicon);)
@@ -5534,6 +5549,11 @@ static void RadioDoSearch(HelixAmp3Gui *app)
 	int rc;
 	char filterMsg[192];
 
+	if (Radio_PlaybackOwnsNetwork()) {
+		RADIO_DBG(printf("radio-browser: search skipped while radio playback child owns networking\n");)
+		RadioSetStatus(app, "Radio playback owns networking; search after stopping.");
+		return;
+	}
 	RadioSetStatus(app, "Searching Radio Browser...");
 	text = NULL;
 	GT_GetGadgetAttrs(nameGad, app->rbWin, NULL, GTST_String, (ULONG)(void *)&text, TAG_DONE);
@@ -5745,6 +5765,11 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 			StopPlayback(app);
 		return;
 	}
+	if (Radio_PlaybackOwnsNetwork()) {
+		RADIO_DBG(printf("radio-probe: play/probe skipped while radio playback child owns networking\n");)
+		RadioSetStatus(app, "Radio playback owns networking; stop before probing another stream.");
+		return;
+	}
 	if (app->rbShowingFavourites) {
 		if (app->rbSelectedFavourite < 0 || app->rbSelectedFavourite >= app->rbFavouriteCount) {
 			RadioSetStatus(app, "Select a favourite first.");
@@ -5789,6 +5814,14 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 	}
 	memset(&info, 0, sizeof(info));
 	RadioSetStatus(app, "Checking stream...");
+	Radio_LogTestModeSummary();
+	{
+		int probeDisabled = rb_probe_stream_probe_disabled();
+		printf("radio-probe: flag check MP3_NO_STREAM_PROBE enabled=%d testEnable=%d before selected probe\n", probeDisabled, rb_probe_stream_probe_test_enabled());
+		if (!probeDisabled) {
+			RADIO_DBG(printf("radio-ui: new stream probe start url=\"%s\"\n", rb_station_play_url(st));)
+		}
+	}
 	rc = rb_controller_probe_selected(&app->rbController, &info, peek, (int)sizeof(peek), &peekLen);
 	if (rc < 0) {
 		radio_reset_playback_state_after_stop(app, "probe-failed");
@@ -5816,8 +5849,20 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 		RadioSetStatus(app, "Stopping current stream before playing selection...");
 		return;
 	}
-	SafeCopy(app->currentRadioFavicon, sizeof(app->currentRadioFavicon), st->favicon);
-	RADIO_DBG(printf("radio-art: station favicon=\"%s\"\n", app->currentRadioFavicon);)
+	{
+		int artworkDisabled = rb_probe_artwork_disabled();
+		printf("radio-art: flag check MP3_NO_ARTWORK enabled=%d testEnable=%d before favicon/artwork fetch\n", artworkDisabled, rb_probe_artwork_test_enabled());
+		if (artworkDisabled) {
+			app->currentRadioFavicon[0] = '\0';
+			if (radio_runtime_flag_enabled("MP3_NO_ARTWORK"))
+				printf("radio-art: skipped by MP3_NO_ARTWORK\n");
+			else
+				printf("radio-art: disabled for run after fatal TLS/artwork transport fault\n");
+		} else {
+			SafeCopy(app->currentRadioFavicon, sizeof(app->currentRadioFavicon), st->favicon);
+			RADIO_DBG(printf("radio-art: station favicon=\"%s\"\n", app->currentRadioFavicon);)
+		}
+	}
 	SelectInternetStream(app, info.final_url);
 	rb_station_display_name(st, msg, (int)sizeof(msg));
 	SafeCopy(app->currentRadioStationName, sizeof(app->currentRadioStationName), msg);

@@ -401,6 +401,10 @@ static int rb_http_get_binary_impl(const char *host, const char *path,
     if (out_content_type && out_content_type_size > 0) out_content_type[0] = '\0';
     if (!host || !path || !out_body || out_body_size <= 0) return RB_HTTP_ERR_BAD_ARG;
     out_body[0] = '\0';
+    if (Radio_PlaybackOwnsNetwork()) {
+        RADIO_DBG(printf("radio-browser-http: skipped HTTP request while radio playback child owns networking host=%s path=%s\n", host, path);)
+        return RB_HTTP_ERR_CONNECT;
+    }
 
     rc = rb_http_build_request(request, (int)sizeof(request), host, path);
     if (rc < 0) return rc;

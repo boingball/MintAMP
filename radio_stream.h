@@ -72,16 +72,23 @@ unsigned long Radio_GetSessionId(RadioStream *rs);
  * same reasoning. Returns 0 for a NULL stream. */
 int Radio_IsSessionFatal(RadioStream *rs);
 const char *Radio_StatusText(RadioStatus status);
-/* Open the process-wide network libraries (bsdsocket.library + AmiSSL)
- * exactly once, at application startup.  Safe to call more than once (a
- * no-op if already open) and safe even if the caller never uses HTTPS.
- * Every probe/browser/stream connection still opens and closes its own
- * socket and, for HTTPS, its own SSL/SSL_CTX -- only the shared libraries
- * stay open for the app's lifetime instead of being reopened per request. */
+/* Start the single long-lived radio net worker task (HAVE_AMISSL builds) --
+ * it owns its own bsdsocket.library base, its own amisslmaster.library base,
+ * its own AmiSSLBase/AmiSSLExtBase and its own AmiSSL_ErrNoPtr storage
+ * privately, opens AmiSSL (OpenAmiSSLTags()/InitAmiSSL) exactly once for the
+ * app's whole run, and then owns the pump loop for active stations. Open/close
+ * requests still use Radio_RunOnNetWorker(), but Radio_Pump() itself is only
+ * a cheap status/buffer check -- never reopening any of those bases
+ * per station switch. Plain-HTTP-only m68k builds without HAVE_AMISSL just
+ * open bsdsocket.library directly here instead (no per-task AmiSSL lifecycle
+ * to manage). Safe to call more than once (a no-op if already up) and safe
+ * even if the caller never uses HTTPS/radio at all. */
 void Radio_NetworkInit(void);
-/* Release the process-wide network libraries (AmiSSL master + bsdsocket.library)
- * exactly once, at application exit.  Call only after every playback child has
- * been stopped and reaped.  Safe to call when nothing was ever opened. */
+/* Ask the net worker task to close its libraries (CleanupAmiSSL-adjacent
+ * teardown: CloseAmiSSL()/CloseLibrary(amisslmaster)/CloseLibrary(bsdsocket),
+ * exactly once, matching amissl_child_worker_repro.c) and exit, then wait,
+ * bounded, for it to do so. Call only after every playback child has been
+ * stopped and reaped. Safe to call when nothing was ever opened. */
 void Radio_NetworkShutdown(void);
 void Radio_GetNetworkStats(long *active_stream_sessions, long *active_stream_tasks,
     long *open_socket_count, long *active_ssl_count, long *active_ssl_ctx_count);
@@ -92,46 +99,57 @@ void Radio_GetTeardownStats(long *active_stream_sessions, long *active_stream_ta
     long *open_socket_count, long *playback_open_socket_count,
     long *active_decoder_count, long *active_audio_buffer_count,
     long *active_stream_buffer_count);
+/* The net worker task's SocketBase/AmiSSLBase/AmiSSLMasterBase are private
+ * to that one task: this only ever returns non-NULL pointers when called BY
+ * the worker task itself (radio_stream_probe.c's code, which now only runs
+ * via Radio_RunOnNetWorker()) -- every other (GUI/opener) task always gets
+ * all-NULL and must open its own independent bsdsocket.library base instead
+ * (radio_browser_http.c already does this as a fallback). */
 void Radio_GetNetworkBases(void **socket_base, void **amissl_base, void **amissl_master_base);
-/* True once Radio_NetworkInit() has successfully opened bsdsocket.library --
- * lets the GUI grey out internet-radio features up front on a machine with
- * no network stack installed, instead of failing later on first connect. */
+/* True once bsdsocket.library is open (the net worker task's own base in
+ * HAVE_AMISSL builds, Radio_NetworkInit()'s own base otherwise) -- lets the
+ * GUI grey out internet-radio features up front on a machine with no
+ * network stack installed, instead of failing later on first connect. A
+ * plain status flag: never exposes the SocketBase pointer itself. */
 int Radio_HasNetwork(void);
-/* True once Radio_NetworkInit() has successfully opened the shared AmiSSL
- * instance -- lets the GUI grey out the HTTPS scheme option up front on a
- * machine without AmiSSL installed (always false in builds without
- * HAVE_AMISSL). */
+/* True once the net worker task has successfully opened its AmiSSL instance
+ * -- lets the GUI grey out the HTTPS scheme option up front on a machine
+ * without AmiSSL installed (always false in builds without HAVE_AMISSL). */
 int Radio_HasHttps(void);
-/* Shared AmiSSL instance opened by Radio_NetworkInit()/radio_stream.c, for
- * radio_stream_probe.c to adopt instead of opening a second instance (its
- * weak-symbol copies of the bases do not reliably merge with the strong
- * definitions under the m68k hunk linker).  All NULL when not open. */
+int Radio_PlaybackOwnsNetwork(void);
+int Radio_WorkerIsIdle(void);
+const char *Radio_WorkerStateName(void);
+/* Same private-to-the-worker-task rule as Radio_GetNetworkBases(): only
+ * returns non-NULL to the worker task itself, letting radio_stream_probe.c
+ * use the one AmiSSL instance the worker already opened instead of opening
+ * a second one of its own (its weak-symbol copies of the bases do not
+ * reliably merge with the strong definitions under the m68k hunk linker). */
 void Radio_GetAmiSslShared(void **amissl_base, void **amissl_ext_base, void **amissl_master_base);
-/* True when the calling task is the one that ran OpenAmiSSLTags(): per the
- * AmiSSL v5/v6 SDK that task is already initialized and must NOT run the
- * per-subprocess InitAmiSSL()/CleanupAmiSSL() pair. */
+/* True when the calling task is the net worker task -- the only task that
+ * ever runs OpenAmiSSLTags()/InitAmiSSL() in this process, so per the AmiSSL
+ * v5/v6 SDK it is already initialized and must NOT run a manual
+ * InitAmiSSL()/CleanupAmiSSL() pair on top of that. */
 int Radio_AmiSslTaskIsOpener(void);
-/* Serializes the shared AmiSSLBase/AmiSSLExtBase/AmiSSLMasterBase/SocketBase
- * globals and their per-task "have I initialized" bookkeeping against
- * concurrent use by another task (a playback child tearing down its own
- * AmiSSL state while the GUI/opener task starts a station probe or favicon
- * fetch, or vice versa). Nestable by the same task (AmigaOS SignalSemaphore
- * semantics), so callers that already hold the lock and call back into
- * another locked helper are safe.
- *
- * Radio_AmiSslLock() is a BOUNDED, non-blocking-retry attempt (AttemptSemaphore()
- * polled with a timeout), not a plain wait: a task wedged inside AmiSSL while
- * holding this lock (this codebase has already seen CleanupAmiSSL() loop
- * forever on corrupted internals) must never turn into every other task --
- * including the one handling the user's Stop click -- blocking uninterruptibly
- * on an exec semaphore Wait() with no way to react to a signal. Returns 1 if
- * the lock was acquired, 0 if it gave up (caller proceeds unlocked, same as
- * if this lock did not exist). Only call Radio_AmiSslUnlock() when Lock()
- * returned 1 -- releasing a semaphore this task never acquired is undefined.
- * No-op (returns 0) before Radio_NetworkInit() has run and in non-Amiga
- * builds. */
+/* Historically serialized the shared AmiSSLBase/AmiSSLExtBase/AmiSSLMasterBase/
+ * SocketBase globals against concurrent use by more than one task. With the
+ * single-net-worker-task architecture only that one task ever touches those
+ * globals, so there is no more concurrent access to guard: both functions
+ * are now trivial (Lock always "succeeds", Unlock is a no-op), kept only so
+ * radio_stream_probe.c does not need its own call-site changes. */
 int Radio_AmiSslLock(void);
 void Radio_AmiSslUnlock(void);
+/* Run fn(arg) synchronously on the net worker task: either immediately (the
+ * calling task already IS the worker -- e.g. a job calling back into
+ * another helper) or by shipping the closure to the worker task over its
+ * message port and blocking (bounded) for the reply. This is the only
+ * sanctioned way for radio_stream_probe.c (or any other subsystem) to touch
+ * bsdsocket.library/AmiSSL: no task other than the worker itself may call
+ * socket()/connect()/SSL_*()/InitAmiSSL() directly. Returns 1 if fn ran
+ * (on whichever task), 0 if the worker could not be started or the wait
+ * timed out (the worker may be wedged inside a blocking call -- see the
+ * lifecycle audit doc). No-op (returns 0) in non-Amiga/non-HAVE_AMISSL
+ * builds. */
+int Radio_RunOnNetWorker(void (*fn)(void *arg), void *arg);
 int Radio_IsMemoryPoisoned(void);
 void Radio_MarkMemoryPoisoned(const char *where);
 int Radio_IsTlsPoisoned(void);
@@ -140,12 +158,8 @@ void Radio_MarkTlsPoisoned(const char *where);
  * the failing session's SSL objects are quarantined (leaked, never freed)
  * and HTTPS stays enabled -- always. Only detected memory corruption
  * hard-poisons HTTPS (Radio_MarkTlsPoisoned()). */
+void Radio_SetTlsFaultContext(unsigned long session_id, const char *url);
 void Radio_ReportTlsFault(const char *where);
-/* Per-run blocklist of hosts that triggered a fatal AmiSSL fault: the fault
- * can corrupt memory inside the failing AmiSSL call itself, so a known
- * offender must not be contacted over TLS again until restart. */
-void Radio_NoteTlsFaultHost(const char *host);
-int Radio_IsTlsFaultHost(const char *host);
 const char *Radio_TlsPoisonedMessage(void);
 /* First (root-cause) reason AmiSSL was marked poisoned this run, or
  * "not-poisoned". */
@@ -208,6 +222,9 @@ static void Radio_GetNetworkBases(void **socket_base, void **amissl_base, void *
 }
 static int Radio_HasNetwork(void) { return 0; }
 static int Radio_HasHttps(void) { return 0; }
+static int Radio_PlaybackOwnsNetwork(void) { return 0; }
+static int Radio_WorkerIsIdle(void) { return 1; }
+static const char *Radio_WorkerStateName(void) { return "idle"; }
 static void Radio_GetAmiSslShared(void **amissl_base, void **amissl_ext_base, void **amissl_master_base)
 {
     if (amissl_base) *amissl_base = 0;
@@ -217,13 +234,13 @@ static void Radio_GetAmiSslShared(void **amissl_base, void **amissl_ext_base, vo
 static int Radio_AmiSslTaskIsOpener(void) { return 0; }
 static int Radio_AmiSslLock(void) { return 0; }
 static void Radio_AmiSslUnlock(void) { }
+static int Radio_RunOnNetWorker(void (*fn)(void *arg), void *arg) { (void)fn; (void)arg; return 0; }
 static int Radio_IsMemoryPoisoned(void) { return 0; }
 static void Radio_MarkMemoryPoisoned(const char *where) { (void)where; }
 static int Radio_IsTlsPoisoned(void) { return 0; }
 static void Radio_MarkTlsPoisoned(const char *where) { (void)where; }
+static void Radio_SetTlsFaultContext(unsigned long session_id, const char *url) { (void)session_id; (void)url; }
 static void Radio_ReportTlsFault(const char *where) { (void)where; }
-static void Radio_NoteTlsFaultHost(const char *host) { (void)host; }
-static int Radio_IsTlsFaultHost(const char *host) { (void)host; return 0; }
 static const char *Radio_TlsPoisonedMessage(void) { return "HTTPS disabled after memory corruption; reboot before using HTTPS."; }
 static const char *Radio_TlsPoisonReason(void) { return "not-poisoned"; }
 static int Radio_CheckMiniMem(const char *where) { (void)where; return 0; }
@@ -243,4 +260,62 @@ static const char *Radio_StatusText(RadioStatus status)
 }
 #endif
 
+#endif /* RADIO_STREAM_H */
+
+#if !defined(RADIO_DEBUG) && !defined(main) && !defined(RADIO_RELEASE_PRINTF_FILTER_DISABLED) && !defined(RADIO_RELEASE_PRINTF_FILTER_INSTALLED)
+#include <stdio.h>
+#include <stdarg.h>
+#include <string.h>
+static int radio_release_printf(const char *fmt, ...)
+{
+    int r;
+    va_list ap;
+
+    if (fmt &&
+        (!strncmp(fmt, "radio-runtime:", 14) ||
+         !strncmp(fmt, "radio-probe: flag check", 23) ||
+         !strncmp(fmt, "radio-art: flag check", 21) ||
+         !strncmp(fmt, "radio-resource:", 15) ||
+         !strncmp(fmt, "radio-read: transient zero", 26) ||
+         !strncmp(fmt, "radio-input: zero read", 22) ||
+         !strncmp(fmt, "radio-worker: session=", 22) ||
+         !strncmp(fmt, "radio-worker: backpressure", 26) ||
+         !strncmp(fmt, "radio-cleanup: abort SSL_free policy", 36) ||
+         !strncmp(fmt, "radio-cleanup: abort SSL_free/SSL_CTX_free skipped", 51) ||
+         !strncmp(fmt, "radio-pump: stop/detach observed", 33)))
+        return 0;
+
+    va_start(ap, fmt);
+    r = vprintf(fmt, ap);
+    va_end(ap);
+    return r;
+}
+#define printf radio_release_printf
+#define RADIO_RELEASE_PRINTF_FILTER_INSTALLED 1
+#endif
+
+#if defined(AMIGA_M68K) && defined(RB_GID_RADIO_RESULTS) && !defined(RADIO_GADTOOLS_CLOSE_GUARD_INSTALLED)
+static int Radio_GadToolsIsRadioWindow(struct Window *win)
+{
+    return win && win->Title && strcmp((const char *)win->Title, "Internet Radio") == 0;
+}
+
+static int Radio_GadToolsGuardModifyIDCMP(struct Window *win, ULONG flags)
+{
+    return ModifyIDCMP(win, flags);
+}
+
+static UWORD Radio_GadToolsGuardRemoveGList(struct Window *win, struct Gadget *gadgets, WORD num)
+{
+    if (Radio_GadToolsIsRadioWindow(win)) {
+        (void)gadgets;
+        (void)num;
+        return 0;
+    }
+    return RemoveGList(win, gadgets, num);
+}
+
+#define ModifyIDCMP(win, flags) Radio_GadToolsGuardModifyIDCMP((win), (flags))
+#define RemoveGList(win, gadgets, num) Radio_GadToolsGuardRemoveGList((win), (gadgets), (num))
+#define RADIO_GADTOOLS_CLOSE_GUARD_INSTALLED 1
 #endif
