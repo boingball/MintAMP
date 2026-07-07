@@ -6242,14 +6242,11 @@ static int PlaybackBufferCanaryOk(const void *base, unsigned long bytes)
 	return 1;
 }
 
-/* Diagnostic only (temporary): proactively check a just-filled work-buffer
- * slot's guard bytes right after the decode fill that wrote it, instead of
- * only at final AmigaAudioClose() cleanup -- by cleanup time the session may
- * already have died from the corruption elsewhere, or the buffer may have
- * been freed/reused, losing the evidence of which decode call did it. Reports
- * the exact slot/channel/pointer/decoded-length/call-site the moment the
- * overflow is detectable, to localize the writer instead of inferring it from
- * where memory happens to be corrupted later. */
+#if defined(MINIAMP_AUDIO_WORKBUF_CANARY_DEBUG)
+/* Diagnostic only: proactively check a just-filled work-buffer slot's guard
+ * bytes right after the decode fill that wrote it. This scans guard bytes and
+ * must stay out of normal RC/release playback hot paths unless explicitly
+ * enabled with MINIAMP_AUDIO_WORKBUF_CANARY_DEBUG. */
 static void AmigaAudioCheckWorkBufferCanary(AmigaAudioPlayer *player, int slot,
 	unsigned long lastFillLen, const char *where)
 {
@@ -6268,6 +6265,7 @@ static void AmigaAudioCheckWorkBufferCanary(AmigaAudioPlayer *player, int slot,
 		}
 	}
 }
+#endif
 
 static signed char *AmigaAllocGuarded(unsigned long bytes, int chip, void **baseOut)
 {
@@ -9410,7 +9408,9 @@ static int AmigaPlayStreamingGeneric(InputSource *input,
 
 		len[active] = GenericDecodeStreamFillPlaybackBuffer(&stream, opt,
 			&player, active, buf[active], bufBytes);
+		#if defined(MINIAMP_AUDIO_WORKBUF_CANARY_DEBUG)
 		AmigaAudioCheckWorkBufferCanary(&player, active, len[active], "generic startup fill");
+		#endif
 		if (active == 0)
 			if (opt->debugDecoder) printf("generic-debug: startup buffer 0 filled len=%lu\n", len[active]);
 		startupFillAttempts++;
@@ -9541,7 +9541,9 @@ static int AmigaPlayStreamingGeneric(InputSource *input,
 				err = -1;
 				break;
 			}
+			#if defined(MINIAMP_AUDIO_WORKBUF_CANARY_DEBUG)
 			AmigaAudioCheckWorkBufferCanary(&player, justFreed, len[decodeAhead], "generic decode-ahead copy");
+			#endif
 			len[justFreed] = len[decodeAhead];
 		} else {
 			activeMilliseconds = PlaybackBufferDurationMilliseconds(opt,
@@ -9550,7 +9552,9 @@ static int AmigaPlayStreamingGeneric(InputSource *input,
 				break;
 			len[justFreed] = GenericDecodeStreamFillPlaybackBuffer(&stream, opt,
 				&player, justFreed, buf[justFreed], bufBytes);
+			#if defined(MINIAMP_AUDIO_WORKBUF_CANARY_DEBUG)
 			AmigaAudioCheckWorkBufferCanary(&player, justFreed, len[justFreed], "generic refill justFreed");
+			#endif
 			if (stream.decodeError) {
 				if (ops && ops->info && ops->info->extensions && StrCaseCmp(ops->info->extensions, "aac") == 0 && input->radio)
 					Radio_FailStartup(input->radio, "AAC output overflow prevented");
@@ -9576,7 +9580,9 @@ static int AmigaPlayStreamingGeneric(InputSource *input,
 				break;
 			len[decodeAhead] = GenericDecodeStreamFillPlaybackBuffer(&stream, opt,
 				&player, decodeAhead, buf[decodeAhead], bufBytes);
+			#if defined(MINIAMP_AUDIO_WORKBUF_CANARY_DEBUG)
 			AmigaAudioCheckWorkBufferCanary(&player, decodeAhead, len[decodeAhead], "generic refill decodeAhead");
+			#endif
 			if (stream.decodeError) {
 				if (ops && ops->info && ops->info->extensions && StrCaseCmp(ops->info->extensions, "aac") == 0 && input->radio)
 					Radio_FailStartup(input->radio, "AAC output overflow prevented");
@@ -9995,7 +10001,9 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 		} else {
 			len[active] = DecodeStreamFillPlaybackBuffer(&stream, opt, &player,
 				active, buf[active], bufBytes);
+			#if defined(MINIAMP_AUDIO_WORKBUF_CANARY_DEBUG)
 			AmigaAudioCheckWorkBufferCanary(&player, active, len[active], "mp3 startup fill");
+			#endif
 		}
 		if (gPlaybackInterrupted)
 			goto cleanup;
@@ -10112,7 +10120,9 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 				err = -1;
 				break;
 			}
+			#if defined(MINIAMP_AUDIO_WORKBUF_CANARY_DEBUG)
 			AmigaAudioCheckWorkBufferCanary(&player, justFreed, len[decodeAhead], "mp3 decode-ahead copy");
+			#endif
 			len[justFreed] = len[decodeAhead];
 		} else {
 			activeMilliseconds = PlaybackBufferDurationMilliseconds(opt,
@@ -10121,7 +10131,9 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 				break;
 			len[justFreed] = DecodeStreamFillPlaybackBuffer(&stream, opt, &player,
 				justFreed, buf[justFreed], bufBytes);
+			#if defined(MINIAMP_AUDIO_WORKBUF_CANARY_DEBUG)
 			AmigaAudioCheckWorkBufferCanary(&player, justFreed, len[justFreed], "mp3 refill justFreed");
+			#endif
 			PrintPlaybackFillDebug(opt, justFreed, len[justFreed]);
 			if (stream.decodeError) {
 				err = -1;
@@ -10148,7 +10160,9 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 				break;
 			len[decodeAhead] = DecodeStreamFillPlaybackBuffer(&stream, opt, &player,
 				decodeAhead, buf[decodeAhead], bufBytes);
+			#if defined(MINIAMP_AUDIO_WORKBUF_CANARY_DEBUG)
 			AmigaAudioCheckWorkBufferCanary(&player, decodeAhead, len[decodeAhead], "mp3 refill decodeAhead");
+			#endif
 			PrintPlaybackFillDebug(opt, decodeAhead, len[decodeAhead]);
 			if (stream.decodeError) {
 				err = -1;
