@@ -17,6 +17,19 @@
 #include <unistd.h>
 #endif
 
+#if defined(AMIGA_M68K)
+#include <exec/semaphores.h>
+#include <proto/exec.h>
+/* Storage for the cross-task stdout lock declared extern by radio_debug.h/
+ * radio_stream.h (RADIO_DBG/RADIO_STOP_DEBUG_PRINTF) and by this file's own
+ * MiniAmp3Printf-family wrappers below. minimp3r.c's real main() -- not
+ * amiga_mp3dec.c's own main(), which becomes HelixAmp3CliMain, the
+ * per-playback-child entry point, when included into minimp3r.c -- calls
+ * InitSemaphore() on this exactly once, before any worker task or playback
+ * child that could race on it is ever spawned. */
+struct SignalSemaphore radio_console_lock;
+#endif
+
 #if defined(AMIGA_M68K) && (defined(__amigaos__) || defined(__AMIGA__) || defined(__MORPHOS__))
 #define HAVE_AMIGA_AUDIO_DEVICE 1
 #include <exec/types.h>
@@ -54,15 +67,38 @@ static int MiniAmp3ConsoleSuppressed(void)
 	return gMiniAmp3EmbeddedPlayback != 0;
 }
 
+#if defined(AMIGA_M68K)
+/* Every printf/fprintf/fputs/puts/putchar/fwrite call in this file (and,
+ * since minimp3r.c #includes it as one translation unit, in minimp3r.c's own
+ * GUI code too) funnels through these Mini* wrappers via the #define printf
+ * MiniAmp3Printf-style redirect below. The net worker task, every playback
+ * child, and the GUI task each call these concurrently against the same
+ * shared stdout -- confirmed directly in a captured field log, where two
+ * tasks' printf() output was physically spliced together mid-line. Lock
+ * around the actual I/O call in each wrapper (radio_console_lock, shared
+ * with radio_stream.c's RADIO_DBG macros via radio_debug.h/radio_stream.h,
+ * initialized once at true program startup in minimp3r.c's real main()) so
+ * concurrent debug/status output can no longer corrupt the C library's
+ * shared stdio buffer state. radio_console_lock itself is defined near the
+ * top of this file. */
+#define MINIAMP3_IO_LOCK() ObtainSemaphore(&radio_console_lock)
+#define MINIAMP3_IO_UNLOCK() ReleaseSemaphore(&radio_console_lock)
+#else
+#define MINIAMP3_IO_LOCK() ((void)0)
+#define MINIAMP3_IO_UNLOCK() ((void)0)
+#endif
+
 static int MiniAmp3Printf(const char *fmt, ...)
 {
 	int r;
 	va_list ap;
 	if (MiniAmp3ConsoleSuppressed())
 		return 0;
+	MINIAMP3_IO_LOCK();
 	va_start(ap, fmt);
 	r = vprintf(fmt, ap);
 	va_end(ap);
+	MINIAMP3_IO_UNLOCK();
 	return r;
 }
 
@@ -72,45 +108,67 @@ static int MiniAmp3Fprintf(FILE *stream, const char *fmt, ...)
 	va_list ap;
 	if (MiniAmp3ConsoleSuppressed() && (stream == stdout || stream == stderr))
 		return 0;
+	MINIAMP3_IO_LOCK();
 	va_start(ap, fmt);
 	r = vfprintf(stream, fmt, ap);
 	va_end(ap);
+	MINIAMP3_IO_UNLOCK();
 	return r;
 }
 
 static int MiniAmp3Fputs(const char *s, FILE *stream)
 {
+	int r;
 	if (MiniAmp3ConsoleSuppressed() && (stream == stdout || stream == stderr))
 		return 0;
-	return fputs(s, stream);
+	MINIAMP3_IO_LOCK();
+	r = fputs(s, stream);
+	MINIAMP3_IO_UNLOCK();
+	return r;
 }
 
 static int MiniAmp3Puts(const char *s)
 {
+	int r;
 	if (MiniAmp3ConsoleSuppressed())
 		return 0;
-	return puts(s);
+	MINIAMP3_IO_LOCK();
+	r = puts(s);
+	MINIAMP3_IO_UNLOCK();
+	return r;
 }
 
 static int MiniAmp3Putchar(int c)
 {
+	int r;
 	if (MiniAmp3ConsoleSuppressed())
 		return c;
-	return putchar(c);
+	MINIAMP3_IO_LOCK();
+	r = putchar(c);
+	MINIAMP3_IO_UNLOCK();
+	return r;
 }
 
 static int MiniAmp3Fflush(FILE *stream)
 {
+	int r;
 	if (MiniAmp3ConsoleSuppressed() && (!stream || stream == stdout || stream == stderr))
 		return 0;
-	return fflush(stream);
+	MINIAMP3_IO_LOCK();
+	r = fflush(stream);
+	MINIAMP3_IO_UNLOCK();
+	return r;
 }
 
 static size_t MiniAmp3Fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream)
 {
+	size_t r;
 	if (MiniAmp3ConsoleSuppressed() && (stream == stdout || stream == stderr))
 		return nmemb;
-	return fwrite(ptr, size, nmemb, stream);
+	MINIAMP3_IO_LOCK();
+	r = fwrite(ptr, size, nmemb, stream);
+	MINIAMP3_IO_UNLOCK();
+	return r;
 }
 
 #ifdef RADIO_DEBUG
@@ -125,13 +183,33 @@ static size_t MiniAmp3Fwrite(const void *ptr, size_t size, size_t nmemb, FILE *s
 static void RadioDebugUnsuppressedPrintf(const char *fmt, ...)
 {
 	va_list ap;
+	MINIAMP3_IO_LOCK();
 	va_start(ap, fmt);
 	vprintf(fmt, ap);
 	va_end(ap);
 	fflush(stdout);
+	MINIAMP3_IO_UNLOCK();
 }
 #endif
 
+#ifdef printf
+#undef printf
+#endif
+#ifdef fprintf
+#undef fprintf
+#endif
+#ifdef fputs
+#undef fputs
+#endif
+#ifdef puts
+#undef puts
+#endif
+#ifdef putchar
+#undef putchar
+#endif
+#ifdef fflush
+#undef fflush
+#endif
 #define printf MiniAmp3Printf
 #define fprintf MiniAmp3Fprintf
 #define fputs MiniAmp3Fputs
@@ -5104,6 +5182,29 @@ static int RadioUrlHasMp3Hint(const char *url)
 	return 0;
 }
 
+/* Radio Browser directories commonly tag Opus-in-Ogg mounts with codec
+ * "OPUS" and/or Content-Type "audio/opus", and Icecast otherwise reports the
+ * same generic "audio/ogg"/"application/ogg" Content-Type it uses for
+ * Vorbis-in-Ogg -- so this must be checked before RadioDecoderExtFromContentType
+ * folds both down to the same "ogg" extension string. This module only links
+ * Tremor (integer Vorbis); handing it an Opus identification header is not a
+ * format error Tremor is guaranteed to reject cleanly (see the matching
+ * OggS+OpusHead guard in radio_stream_probe.c's rb_probe_detect_codec()),
+ * so callers must refuse the stream here rather than let it reach the OGG
+ * decoder module. */
+static int RadioStreamLooksLikeOpus(const char *url, const char *contentType, const char *codecHint)
+{
+	const char *ext = GetFileExtension(url);
+	if (codecHint && StrCaseCmp(codecHint, "OPUS") == 0)
+		return 1;
+	if (contentType && (StrCaseStarts(contentType, "audio/opus") ||
+		StrCaseStarts(contentType, "audio/x-opus")))
+		return 1;
+	if (ext && StrCaseCmp(ext, "opus") == 0)
+		return 1;
+	return 0;
+}
+
 static const char *RadioDecoderExtFromUrlOrTypeHint(const char *url, const char *contentType, const char *codecHint)
 {
 	const char *ext = GetFileExtension(url);
@@ -6182,6 +6283,31 @@ static int PlaybackBufferCanaryOk(const void *base, unsigned long bytes)
 	return 1;
 }
 
+#if defined(MINIAMP_AUDIO_WORKBUF_CANARY_DEBUG)
+/* Diagnostic only: proactively check a just-filled work-buffer slot's guard
+ * bytes right after the decode fill that wrote it. This scans guard bytes and
+ * must stay out of normal RC/release playback hot paths unless explicitly
+ * enabled with MINIAMP_AUDIO_WORKBUF_CANARY_DEBUG. */
+static void AmigaAudioCheckWorkBufferCanary(AmigaAudioPlayer *player, int slot,
+	unsigned long lastFillLen, const char *where)
+{
+	int ch;
+	if (!player || !player->stereo)
+		return;
+	for (ch = 0; ch < 2; ch++) {
+		if (player->splitWorkBase[slot][ch] &&
+			!PlaybackBufferCanaryOk(player->splitWorkBase[slot][ch], player->splitWorkBytes)) {
+			fprintf(stderr,
+				"radio-buffer-guard: CORRUPT work buffer slot=%d ch=%d ptr=%p base=%p bytes=%lu lastFillLen=%lu where=%s\n",
+				slot, ch, (void *)player->splitWorkBuf[slot][ch],
+				player->splitWorkBase[slot][ch], player->splitWorkBytes,
+				lastFillLen, where ? where : "");
+			fflush(stderr);
+		}
+	}
+}
+#endif
+
 static signed char *AmigaAllocGuarded(unsigned long bytes, int chip, void **baseOut)
 {
 	unsigned long total;
@@ -6249,12 +6375,22 @@ static void AmigaAudioCleanupTrace4(const AmigaAudioPlayer *player,
 		(void)d;
 		return;
 	}
+	/* Two separate printf() calls build one logical line -- each one taken
+	 * on its own is atomic (MiniAmp3Printf locks internally), but the gap
+	 * between the two calls is not, so another task's complete message can
+	 * land in between them. AmigaOS semaphores are safely re-entrant for
+	 * the owning task, so an outer lock spanning both calls nests cleanly
+	 * with each call's own inner lock instead of deadlocking. */
+	MINIAMP3_IO_LOCK();
 	printf("debug-cleanup: ");
 	printf(fmt, a, b, c, d);
+	MINIAMP3_IO_UNLOCK();
 #else
 	if (!player) { (void)fmt; (void)a; (void)b; (void)c; (void)d; return; }
+	MINIAMP3_IO_LOCK();
 	RadioDebugUnsuppressedPrintf("debug-cleanup: ");
 	RadioDebugUnsuppressedPrintf(fmt, a, b, c, d);
+	MINIAMP3_IO_UNLOCK();
 #endif
 }
 
@@ -9313,6 +9449,9 @@ static int AmigaPlayStreamingGeneric(InputSource *input,
 
 		len[active] = GenericDecodeStreamFillPlaybackBuffer(&stream, opt,
 			&player, active, buf[active], bufBytes);
+		#if defined(MINIAMP_AUDIO_WORKBUF_CANARY_DEBUG)
+		AmigaAudioCheckWorkBufferCanary(&player, active, len[active], "generic startup fill");
+		#endif
 		if (active == 0)
 			if (opt->debugDecoder) printf("generic-debug: startup buffer 0 filled len=%lu\n", len[active]);
 		startupFillAttempts++;
@@ -9443,6 +9582,9 @@ static int AmigaPlayStreamingGeneric(InputSource *input,
 				err = -1;
 				break;
 			}
+			#if defined(MINIAMP_AUDIO_WORKBUF_CANARY_DEBUG)
+			AmigaAudioCheckWorkBufferCanary(&player, justFreed, len[decodeAhead], "generic decode-ahead copy");
+			#endif
 			len[justFreed] = len[decodeAhead];
 		} else {
 			activeMilliseconds = PlaybackBufferDurationMilliseconds(opt,
@@ -9451,6 +9593,9 @@ static int AmigaPlayStreamingGeneric(InputSource *input,
 				break;
 			len[justFreed] = GenericDecodeStreamFillPlaybackBuffer(&stream, opt,
 				&player, justFreed, buf[justFreed], bufBytes);
+			#if defined(MINIAMP_AUDIO_WORKBUF_CANARY_DEBUG)
+			AmigaAudioCheckWorkBufferCanary(&player, justFreed, len[justFreed], "generic refill justFreed");
+			#endif
 			if (stream.decodeError) {
 				if (ops && ops->info && ops->info->extensions && StrCaseCmp(ops->info->extensions, "aac") == 0 && input->radio)
 					Radio_FailStartup(input->radio, "AAC output overflow prevented");
@@ -9476,6 +9621,9 @@ static int AmigaPlayStreamingGeneric(InputSource *input,
 				break;
 			len[decodeAhead] = GenericDecodeStreamFillPlaybackBuffer(&stream, opt,
 				&player, decodeAhead, buf[decodeAhead], bufBytes);
+			#if defined(MINIAMP_AUDIO_WORKBUF_CANARY_DEBUG)
+			AmigaAudioCheckWorkBufferCanary(&player, decodeAhead, len[decodeAhead], "generic refill decodeAhead");
+			#endif
 			if (stream.decodeError) {
 				if (ops && ops->info && ops->info->extensions && StrCaseCmp(ops->info->extensions, "aac") == 0 && input->radio)
 					Radio_FailStartup(input->radio, "AAC output overflow prevented");
@@ -9894,6 +10042,9 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 		} else {
 			len[active] = DecodeStreamFillPlaybackBuffer(&stream, opt, &player,
 				active, buf[active], bufBytes);
+			#if defined(MINIAMP_AUDIO_WORKBUF_CANARY_DEBUG)
+			AmigaAudioCheckWorkBufferCanary(&player, active, len[active], "mp3 startup fill");
+			#endif
 		}
 		if (gPlaybackInterrupted)
 			goto cleanup;
@@ -10010,6 +10161,9 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 				err = -1;
 				break;
 			}
+			#if defined(MINIAMP_AUDIO_WORKBUF_CANARY_DEBUG)
+			AmigaAudioCheckWorkBufferCanary(&player, justFreed, len[decodeAhead], "mp3 decode-ahead copy");
+			#endif
 			len[justFreed] = len[decodeAhead];
 		} else {
 			activeMilliseconds = PlaybackBufferDurationMilliseconds(opt,
@@ -10018,6 +10172,9 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 				break;
 			len[justFreed] = DecodeStreamFillPlaybackBuffer(&stream, opt, &player,
 				justFreed, buf[justFreed], bufBytes);
+			#if defined(MINIAMP_AUDIO_WORKBUF_CANARY_DEBUG)
+			AmigaAudioCheckWorkBufferCanary(&player, justFreed, len[justFreed], "mp3 refill justFreed");
+			#endif
 			PrintPlaybackFillDebug(opt, justFreed, len[justFreed]);
 			if (stream.decodeError) {
 				err = -1;
@@ -10044,6 +10201,9 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 				break;
 			len[decodeAhead] = DecodeStreamFillPlaybackBuffer(&stream, opt, &player,
 				decodeAhead, buf[decodeAhead], bufBytes);
+			#if defined(MINIAMP_AUDIO_WORKBUF_CANARY_DEBUG)
+			AmigaAudioCheckWorkBufferCanary(&player, decodeAhead, len[decodeAhead], "mp3 refill decodeAhead");
+			#endif
 			PrintPlaybackFillDebug(opt, decodeAhead, len[decodeAhead]);
 			if (stream.decodeError) {
 				err = -1;
@@ -10225,6 +10385,18 @@ int main(int argc, char **argv)
 	int effectiveRate;
 	char *resolvedOutName;
 
+#if defined(AMIGA_M68K) && !defined(RADIO_CONSOLE_LOCK_INIT_ELSEWHERE)
+	/* Standalone build only (fast030/amiga_mp3dec targets): this main() is
+	 * the true program entry point, so it is safe to InitSemaphore() here,
+	 * once, before anything else runs. When this file is #included into
+	 * minimp3r.c instead, main() is renamed to HelixAmp3CliMain and becomes
+	 * the per-playback-child entry point -- RADIO_CONSOLE_LOCK_INIT_ELSEWHERE
+	 * is defined there so this block is skipped; minimp3r.c's own real
+	 * main() does the one-time init instead, since re-running InitSemaphore()
+	 * on every child spawn would race any other task already using the
+	 * semaphore. */
+	InitSemaphore(&radio_console_lock);
+#endif
 	resolvedOutName = NULL;
 	infile = NULL;
 	outfile = NULL;
@@ -10507,6 +10679,14 @@ int main(int argc, char **argv)
 			fprintf(stderr, "radio-codec: Radio Browser codec=%s URL codec hint=%s HTTP content-type=%s\n",
 				opt.radioCodecHint ? opt.radioCodecHint : "(none)",
 				RadioUrlHasMp3Hint(opt.inName) ? "MP3" : "none", Radio_GetContentType(radio));
+			if (RadioStreamLooksLikeOpus(opt.inName, Radio_GetContentType(radio), opt.radioCodecHint)) {
+				fprintf(stderr, "cannot open radio stream: Opus-in-Ogg is not supported by this decoder\n");
+				GuiMarkRadioErrorText("Unsupported stream codec: OPUS");
+				Radio_Close(radio);
+				free(resolvedOutName);
+				AmigaFreeNormalizedArgs(&normalized);
+				return 1;
+			}
 			radioExt = RadioDecoderExtFromUrlOrTypeHint(opt.inName, Radio_GetContentType(radio), opt.radioCodecHint);
 			fprintf(stderr, "radio-codec: final selected decoder=%s\n", radioExt ? radioExt : "mp3");
 			if (radioExt && StrCaseCmp(radioExt, "mp3") != 0) {

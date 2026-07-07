@@ -3078,12 +3078,12 @@ static int LoadRadioFaviconImage(HelixAmp3Gui *gui)
 		return 0;
 	}
 	artworkDisabled = rb_probe_artwork_disabled();
-	printf("radio-art: flag check MP3_NO_ARTWORK enabled=%d testEnable=%d before favicon/artwork fetch\n", artworkDisabled, rb_probe_artwork_test_enabled());
+	RADIO_DBG(printf("radio-art: flag check MP3_NO_ARTWORK enabled=%d testEnable=%d before favicon/artwork fetch\n", artworkDisabled, rb_probe_artwork_test_enabled());)
 	if (artworkDisabled) {
 		if (radio_runtime_flag_enabled("MP3_NO_ARTWORK"))
-			printf("radio-art: skipped by MP3_NO_ARTWORK\n");
+			RADIO_DBG(printf("radio-art: skipped by MP3_NO_ARTWORK\n");)
 		else
-			printf("radio-art: disabled for run after fatal TLS/artwork transport fault\n");
+			RADIO_DBG(printf("radio-art: disabled for run after fatal TLS/artwork transport fault\n");)
 		return 0;
 	}
 	if (Radio_PlaybackOwnsNetwork()) {
@@ -5817,7 +5817,7 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 	Radio_LogTestModeSummary();
 	{
 		int probeDisabled = rb_probe_stream_probe_disabled();
-		printf("radio-probe: flag check MP3_NO_STREAM_PROBE enabled=%d testEnable=%d before selected probe\n", probeDisabled, rb_probe_stream_probe_test_enabled());
+		RADIO_DBG(printf("radio-probe: flag check MP3_NO_STREAM_PROBE enabled=%d testEnable=%d before selected probe\n", probeDisabled, rb_probe_stream_probe_test_enabled());)
 		if (!probeDisabled) {
 			RADIO_DBG(printf("radio-ui: new stream probe start url=\"%s\"\n", rb_station_play_url(st));)
 		}
@@ -5851,13 +5851,13 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 	}
 	{
 		int artworkDisabled = rb_probe_artwork_disabled();
-		printf("radio-art: flag check MP3_NO_ARTWORK enabled=%d testEnable=%d before favicon/artwork fetch\n", artworkDisabled, rb_probe_artwork_test_enabled());
+		RADIO_DBG(printf("radio-art: flag check MP3_NO_ARTWORK enabled=%d testEnable=%d before favicon/artwork fetch\n", artworkDisabled, rb_probe_artwork_test_enabled());)
 		if (artworkDisabled) {
 			app->currentRadioFavicon[0] = '\0';
 			if (radio_runtime_flag_enabled("MP3_NO_ARTWORK"))
-				printf("radio-art: skipped by MP3_NO_ARTWORK\n");
+				RADIO_DBG(printf("radio-art: skipped by MP3_NO_ARTWORK\n");)
 			else
-				printf("radio-art: disabled for run after fatal TLS/artwork transport fault\n");
+				RADIO_DBG(printf("radio-art: disabled for run after fatal TLS/artwork transport fault\n");)
 		} else {
 			SafeCopy(app->currentRadioFavicon, sizeof(app->currentRadioFavicon), st->favicon);
 			RADIO_DBG(printf("radio-art: station favicon=\"%s\"\n", app->currentRadioFavicon);)
@@ -6795,8 +6795,11 @@ static void EnterInternetStream(HelixAmp3Gui *gui)
 		if (enteredUrl)
 			SafeCopy(url, sizeof(url), enteredUrl);
 	}
-	FreeGadgets(gadgets);
+	ModifyIDCMP(win, 0);
+	while ((msg = GT_GetIMsg(win->UserPort)) != NULL)
+		GT_ReplyIMsg(msg);
 	CloseWindow(win);
+	FreeGadgets(gadgets);
 	if (accepted) {
 		/* Manually typed URLs never have a known station favicon; clear any
 		 * favicon left over from a previously played station so the art

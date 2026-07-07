@@ -11,7 +11,17 @@
 #include "radio_debug.h"
 #if defined(RADIO_DEBUG) || RADIO_DEBUG_STOP
 #include <stdio.h>
+#if defined(AMIGA_M68K)
+/* Same cross-task stdout race as radio_debug.h's RADIO_DBG_PRINTF -- this
+ * macro predates that fix and had its own unlocked printf, so it needs the
+ * same lock (radio_console_lock, defined/init'd alongside RADIO_DBG). */
+#include <exec/semaphores.h>
+#include <proto/exec.h>
+extern struct SignalSemaphore radio_console_lock;
+#define RADIO_STOP_DEBUG_PRINTF(x) do { ObtainSemaphore(&radio_console_lock); printf x; fflush(stdout); ReleaseSemaphore(&radio_console_lock); } while (0)
+#else
 #define RADIO_STOP_DEBUG_PRINTF(x) do { printf x; } while (0)
+#endif
 #else
 #define RADIO_STOP_DEBUG_PRINTF(x) do { } while (0)
 #endif

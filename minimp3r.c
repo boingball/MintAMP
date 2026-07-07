@@ -32,6 +32,11 @@
  * line entry point renamed.  Mirrors the trick used by amiga_mp3gui.c so we
  * share gGuiPlaybackStatus, gMiniAmp3EmbeddedPlayback and gPlaybackInterrupted
  * with the playback child without any extra glue. */
+/* Tell amiga_mp3dec.c's main() (renamed to HelixAmp3CliMain just below, and
+ * used as the per-playback-child entry point in this build) not to
+ * InitSemaphore() radio_console_lock itself -- this file's own real main()
+ * does that exactly once, before any child/worker task exists to race it. */
+#define RADIO_CONSOLE_LOCK_INIT_ELSEWHERE 1
 #define main HelixAmp3CliMain
 #include "amiga_mp3dec.c"
 #undef main
@@ -3999,12 +4004,12 @@ static int LoadRadioFaviconImage(MrApp *app)
 		return 0;
 	}
 	artworkDisabled = rb_probe_artwork_disabled();
-	printf("radio-art: flag check MP3_NO_ARTWORK enabled=%d testEnable=%d before favicon/artwork fetch\n", artworkDisabled, rb_probe_artwork_test_enabled());
+	RADIO_DBG(printf("radio-art: flag check MP3_NO_ARTWORK enabled=%d testEnable=%d before favicon/artwork fetch\n", artworkDisabled, rb_probe_artwork_test_enabled());)
 	if (artworkDisabled) {
 		if (radio_runtime_flag_enabled("MP3_NO_ARTWORK"))
-			printf("radio-art: skipped by MP3_NO_ARTWORK\n");
+			RADIO_DBG(printf("radio-art: skipped by MP3_NO_ARTWORK\n");)
 		else
-			printf("radio-art: disabled for run after fatal TLS/artwork transport fault\n");
+			RADIO_DBG(printf("radio-art: disabled for run after fatal TLS/artwork transport fault\n");)
 		return 0;
 	}
 	if (Radio_PlaybackOwnsNetwork()) {
@@ -4950,7 +4955,7 @@ static void RadioDoProbeAndPlay(MrApp *app)
 	Radio_LogTestModeSummary();
 	{
 		int probeDisabled = rb_probe_stream_probe_disabled();
-		printf("radio-probe: flag check MP3_NO_STREAM_PROBE enabled=%d testEnable=%d before selected probe\n", probeDisabled, rb_probe_stream_probe_test_enabled());
+		RADIO_DBG(printf("radio-probe: flag check MP3_NO_STREAM_PROBE enabled=%d testEnable=%d before selected probe\n", probeDisabled, rb_probe_stream_probe_test_enabled());)
 		if (!probeDisabled) {
 			RADIO_DBG(printf("radio-ui: new stream probe start url=\"%s\"\n", rb_station_play_url(st));)
 		}
@@ -4983,13 +4988,13 @@ static void RadioDoProbeAndPlay(MrApp *app)
 	SafeCopy(app->inputName, sizeof(app->inputName), info.final_url);
 	{
 		int artworkDisabled = rb_probe_artwork_disabled();
-		printf("radio-art: flag check MP3_NO_ARTWORK enabled=%d testEnable=%d before favicon/artwork fetch\n", artworkDisabled, rb_probe_artwork_test_enabled());
+		RADIO_DBG(printf("radio-art: flag check MP3_NO_ARTWORK enabled=%d testEnable=%d before favicon/artwork fetch\n", artworkDisabled, rb_probe_artwork_test_enabled());)
 		if (artworkDisabled) {
 			app->currentRadioFavicon[0] = '\0';
 			if (radio_runtime_flag_enabled("MP3_NO_ARTWORK"))
-				printf("radio-art: skipped by MP3_NO_ARTWORK\n");
+				RADIO_DBG(printf("radio-art: skipped by MP3_NO_ARTWORK\n");)
 			else
-				printf("radio-art: disabled for run after fatal TLS/artwork transport fault\n");
+				RADIO_DBG(printf("radio-art: disabled for run after fatal TLS/artwork transport fault\n");)
 		} else {
 			SafeCopy(app->currentRadioFavicon, sizeof(app->currentRadioFavicon), st->favicon);
 			RADIO_DBG(printf("radio-art: station favicon=\"%s\"\n", app->currentRadioFavicon);)
@@ -5977,6 +5982,12 @@ int main(int argc, char **argv)
 {
 	struct Task *task = FindTask(NULL);
 	int rc;
+
+	/* True program entry point: init the cross-task stdout lock exactly
+	 * once here, before any playback child or the net worker task can be
+	 * spawned. See amiga_mp3dec.c's radio_console_lock definition and
+	 * RADIO_CONSOLE_LOCK_INIT_ELSEWHERE above. */
+	InitSemaphore(&radio_console_lock);
 
 	gMrDetectedStackLower = (ULONG)task->tc_SPLower;
 	gMrDetectedStackUpper = (ULONG)task->tc_SPUpper;
