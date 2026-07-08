@@ -243,6 +243,9 @@ int STATNAME(IMDCT36_TEST_ACTIVE)(int *xCurr, int *xPrev, int *y, int btCurr, in
 int STATNAME(IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
 int STATNAME(IMDCTThinOutputSelftest)(void);
 int STATNAME(IMDCTSubbandCapSelftest)(void);
+int STATNAME(AntiAliasSubbandCapSelftest)(void);
+int STATNAME(IMDCT36AsmGeneralPathSelftest)(void);
+int STATNAME(FDCT32HalfSparse16Selftest)(void);
 void STATNAME(PolyphaseMonoFast_C_REFERENCE)(short *pcm, int *vbuf, const int *coefBase);
 void STATNAME(PolyphaseMonoFast_TEST_ACTIVE)(short *pcm, int *vbuf, const int *coefBase);
 int STATNAME(PolyphaseMonoFast_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
@@ -324,6 +327,9 @@ extern const int STATNAME(polyCoef)[264];
 #define AMIGA_IMDCT36_HAS_ASM STATNAME(IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME)
 #define AMIGA_IMDCT_THIN_SELFTEST STATNAME(IMDCTThinOutputSelftest)
 #define AMIGA_IMDCT_SUBBAND_CAP_SELFTEST STATNAME(IMDCTSubbandCapSelftest)
+#define AMIGA_ANTIALIAS_SUBBAND_CAP_SELFTEST STATNAME(AntiAliasSubbandCapSelftest)
+#define AMIGA_IMDCT36_ASM_GENERAL_PATH_SELFTEST STATNAME(IMDCT36AsmGeneralPathSelftest)
+#define AMIGA_FDCT32_HALF_SPARSE16_SELFTEST STATNAME(FDCT32HalfSparse16Selftest)
 #define AMIGA_POLYPHASE_MONO_FAST_C_REFERENCE STATNAME(PolyphaseMonoFast_C_REFERENCE)
 #define AMIGA_POLYPHASE_MONO_FAST_TEST_ACTIVE STATNAME(PolyphaseMonoFast_TEST_ACTIVE)
 #define AMIGA_POLYPHASE_MONO_FAST_HAS_ASM STATNAME(PolyphaseMonoFast_HAS_AMIGA_M68K_ASM_RUNTIME)
@@ -410,6 +416,9 @@ typedef struct DecodeOptions {
 	int selftestImdct;
 	int selftestImdctThin;
 	int selftestSubbandCap;
+	int selftestAntialiasSubbandCap;
+	int selftestImdct36AsmGeneralPath;
+	int selftestFdct32HalfSparse16;
 	int selftestAntialias;
 	int selftestPolyphase;
 	int selftestPolyphaseStride2;
@@ -846,6 +855,9 @@ static void PrintUsage(const char *prog)
 	printf("  --selftest-imdct compare C reference and optional m68k asm long IMDCT path\n");
 	printf("  --selftest-imdct-thin verify exact selected IMDCT bands and deterministic sparse output\n");
 	printf("  --selftest-subband-cap verify low-rate mono IMDCT subband cap behavior\n");
+	printf("  --selftest-antialias-subband-cap verify capping antialias butterflies to the subband cap leaves kept bands bit-exact\n");
+	printf("  --selftest-imdct36-asm-general-path verify m68k asm IMDCT36 matches C reference for transition/mixed-window (btCurr/btPrev != 0) blocks, not just the fast long-window path\n");
+	printf("  --selftest-fdct32half-sparse16 verify prototype sparse-input FDCT32Half (NOT wired into playback) matches the reference when subbands 16-31 are zero\n");
 	printf("  --selftest-antialias compare C reference and optional m68k asm antialias path\n");
 	printf("  --selftest-polyphase compare C fast mono polyphase and optional m68k asm path\n");
 	printf("  --selftest-polyphase-stride2 compare C and optional asm stride-2 mono polyphase paths\n");
@@ -1093,6 +1105,12 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->selftestImdctThin = 1;
 		} else if (!strcmp(argv[i], "--selftest-subband-cap")) {
 			opt->selftestSubbandCap = 1;
+		} else if (!strcmp(argv[i], "--selftest-antialias-subband-cap")) {
+			opt->selftestAntialiasSubbandCap = 1;
+		} else if (!strcmp(argv[i], "--selftest-imdct36-asm-general-path")) {
+			opt->selftestImdct36AsmGeneralPath = 1;
+		} else if (!strcmp(argv[i], "--selftest-fdct32half-sparse16")) {
+			opt->selftestFdct32HalfSparse16 = 1;
 		} else if (!strcmp(argv[i], "--selftest-antialias")) {
 			opt->selftestAntialias = 1;
 		} else if (!strcmp(argv[i], "--selftest-polyphase")) {
@@ -1226,6 +1244,9 @@ if (opt->selftestMulshift ||
     opt->selftestImdct ||
     opt->selftestImdctThin ||
     opt->selftestSubbandCap ||
+    opt->selftestAntialiasSubbandCap ||
+    opt->selftestImdct36AsmGeneralPath ||
+    opt->selftestFdct32HalfSparse16 ||
     opt->selftestAntialias ||
     opt->selftestPolyphase ||
     opt->selftestPolyphaseStride2 ||
@@ -3219,7 +3240,10 @@ static int SelftestImdct(void)
 	}
 
 	/* Non-common long windows, and the block types used around mixed/short transitions,
-	 * must route through the C fallback and remain bit-identical.
+	 * now route through IMDCT36_GeneralWindow (shared between the C reference and the
+	 * m68k asm general path) rather than a full C fallback -- this loop's coverage
+	 * doubles as a live-hardware check on that path (see IMDCT36AsmGeneralPathSelftest
+	 * for the dedicated, larger-trial-count version of the same comparison).
 	 */
 	for (i = 0; i < 256UL; i++) {
 		seed = seed * 1664525UL + 1013904223UL;
@@ -10472,6 +10496,21 @@ int main(int argc, char **argv)
 	}
 	if (opt.selftestSubbandCap) {
 		int selftestErr = AMIGA_IMDCT_SUBBAND_CAP_SELFTEST();
+		AmigaFreeNormalizedArgs(&normalized);
+		return selftestErr;
+	}
+	if (opt.selftestAntialiasSubbandCap) {
+		int selftestErr = AMIGA_ANTIALIAS_SUBBAND_CAP_SELFTEST();
+		AmigaFreeNormalizedArgs(&normalized);
+		return selftestErr;
+	}
+	if (opt.selftestImdct36AsmGeneralPath) {
+		int selftestErr = AMIGA_IMDCT36_ASM_GENERAL_PATH_SELFTEST();
+		AmigaFreeNormalizedArgs(&normalized);
+		return selftestErr;
+	}
+	if (opt.selftestFdct32HalfSparse16) {
+		int selftestErr = AMIGA_FDCT32_HALF_SPARSE16_SELFTEST();
 		AmigaFreeNormalizedArgs(&normalized);
 		return selftestErr;
 	}

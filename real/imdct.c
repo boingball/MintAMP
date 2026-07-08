@@ -297,6 +297,40 @@ static __inline void FreqInvertOdd(int *y)
 }
 
 
+/*
+ * Single source of truth for "how many of the 32 subbands does this decode
+ * actually keep," shared by IMDCTApplySubbandCap() below (which acts on it)
+ * and IMDCT()'s AntiAlias() call site (which needs to know it *before*
+ * IMDCTApplySubbandCap() normally runs, to size how much antialias work is
+ * worth doing -- see the comment at that call site). Returns NBANDS (32)
+ * as a "no cap active" sentinel, matching IMDCTApplySubbandCap()'s original
+ * return-0 behavior.
+ */
+static int MP3FastLowrateEffectiveActiveSubbands(const MP3DecInfo *mp3DecInfo)
+{
+	int activeSubbands;
+
+	if (!mp3DecInfo)
+		return NBANDS;
+
+	activeSubbands = mp3DecInfo->fastLowrateActiveSubbands;
+	if (activeSubbands <= 0) activeSubbands = NBANDS;
+	if (activeSubbands > NBANDS) activeSubbands = NBANDS;
+
+	if (mp3DecInfo->superfastLowrate && mp3DecInfo->fastLowrateStride > 1)
+		return activeSubbands;
+
+#if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_FAST_SUBBAND_CAP)
+	if (mp3DecInfo->fastLowrateStride >= 2) {
+		/* stride 2 (22050 Hz output from 44100 Hz) and above: subbands 16-31 are
+		 * above the output Nyquist (11025 Hz) and are zeroed by the polyphase
+		 * filter anyway, so skip computing them in the IMDCT. */
+		return 16;
+	}
+#endif
+	return NBANDS;
+}
+
 static int IMDCTApplySubbandCap(const MP3DecInfo *mp3DecInfo, BlockCount *bc)
 {
 	int activeSubbands;
@@ -308,32 +342,16 @@ static int IMDCTApplySubbandCap(const MP3DecInfo *mp3DecInfo, BlockCount *bc)
 	if (!mp3DecInfo || !bc)
 		return 0;
 
-	activeSubbands = mp3DecInfo->fastLowrateActiveSubbands;
-	if (activeSubbands <= 0) activeSubbands = NBANDS;
-	if (activeSubbands > NBANDS) activeSubbands = NBANDS;
+	activeSubbands = MP3FastLowrateEffectiveActiveSubbands(mp3DecInfo);
+	if (activeSubbands >= NBANDS)
+		return 0;
 
-	if (mp3DecInfo->superfastLowrate && mp3DecInfo->fastLowrateStride > 1) {
-		if (bc->nBlocksTotal > activeSubbands) bc->nBlocksTotal = activeSubbands;
-		if (bc->nBlocksLong  > activeSubbands) bc->nBlocksLong  = activeSubbands;
-		if (bc->nBlocksPrev  > activeSubbands) bc->nBlocksPrev  = activeSubbands;
-		bc->activeSubbands = activeSubbands;
-		bc->subbandCapActive = 1;
-		return 1;
-	}
-#if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_FAST_SUBBAND_CAP)
-	if (mp3DecInfo->fastLowrateStride >= 2) {
-		/* stride 2 (22050 Hz output from 44100 Hz) and above: subbands 16-31 are
-		 * above the output Nyquist (11025 Hz) and are zeroed by the polyphase
-		 * filter anyway, so skip computing them in the IMDCT. */
-		if (bc->nBlocksTotal > 16) bc->nBlocksTotal = 16;
-		if (bc->nBlocksLong  > 16) bc->nBlocksLong  = 16;
-		if (bc->nBlocksPrev  > 16) bc->nBlocksPrev  = 16;
-		bc->activeSubbands = 16;
-		bc->subbandCapActive = 1;
-		return 1;
-	}
-#endif
-	return 0;
+	if (bc->nBlocksTotal > activeSubbands) bc->nBlocksTotal = activeSubbands;
+	if (bc->nBlocksLong  > activeSubbands) bc->nBlocksLong  = activeSubbands;
+	if (bc->nBlocksPrev  > activeSubbands) bc->nBlocksPrev  = activeSubbands;
+	bc->activeSubbands = activeSubbands;
+	bc->subbandCapActive = 1;
+	return 1;
 }
 
 
@@ -547,12 +565,53 @@ static __inline int IMDCT36_AMIGA_M68K_MULSHIFT32(int x, int y)
  *                inline asm may or may not be helpful)
  **************************************************************************************/
 // barely faster in RAM
+/*
+ * Windowing/overlap-add loop for the btCurr != 0 || btPrev != 0 case
+ * (factored out of IMDCT36_C_REFERENCE's else branch below, unchanged, so
+ * IMDCT36_AMIGA_M68K_ASM can share it after doing the xBuf accumulation +
+ * idct9 stage in asm instead of falling back to the full C reference --
+ * see that function's header comment for why this matters).
+ */
+static int IMDCT36_GeneralWindow(int *xp, const int *cp, int *xPrev,
+	int btCurr, int btPrev, int *ypLo, int *ypHi)
+{
+	int i, xo, xe, c, d, mOut, yLo, yHi;
+	int xPrevWin[18];
+	int *xpwLo, *xpwHi;
+	const int *wpLo, *wpHi;
+
+	WinPrevious(xPrev, xPrevWin, btPrev);
+
+	wpLo = imdctWin[btCurr];
+	wpHi = wpLo + 17;
+	xpwLo = xPrevWin;
+	xpwHi = xPrevWin + 17;
+	mOut = 0;
+	for (i = 9; i > 0; i--) {
+		c = *cp--;	xo = *(xp + 9);		xe = *xp--;
+		/* gain 2 int bits here */
+		xo = MULSHIFT32(c, xo);			/* 2*c18*xOdd (mul by 2 implicit in scaling)  */
+		xe >>= 2;
+
+		d = xe - xo;
+		(*xPrev++) = xe + xo;	/* symmetry - xPrev[i] = xPrev[17-i] for long blocks */
+
+		yLo = (*xpwLo++ + MULSHIFT32(d, *wpLo++)) << 2;
+		yHi = (*xpwHi-- + MULSHIFT32(d, *wpHi--)) << 2;
+		*ypLo = yLo;		ypLo += NBANDS;
+		*ypHi = yHi;		ypHi -= NBANDS;
+		mOut |= FASTABS(yLo);
+		mOut |= FASTABS(yHi);
+	}
+	return mOut;
+}
+
 int IMDCT36_C_REFERENCE(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb)
 {
-	int i, es, xBuf[18], xPrevWin[18];
+	int i, es, xBuf[18];
 	int acc1, acc2, s, d, t, mOut;
-	int xo, xe, c, *xp, *xpwLo, *xpwHi, *ypLo, *ypHi, yLo, yHi;
-	const int *cp, *wp, *wpLo, *wpHi;
+	int xo, xe, c, *xp, *ypLo, *ypHi, yLo, yHi;
+	const int *cp, *wp;
 
 	acc1 = acc2 = 0;
 	xCurr += 17;
@@ -614,37 +673,22 @@ int IMDCT36_C_REFERENCE(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, 
 			mOut |= FASTABS(yLo);
 			mOut |= FASTABS(yHi);
 		}
+		xPrev -= 9;	/* rewind the local advance from the loop above */
 	} else {
-		/* slower method - either prev or curr is using window type != 0 so do full 36-point window 
+		/* slower method - either prev or curr is using window type != 0 so do full 36-point window
 		 * output xPrevWin has at least 3 guard bits (xPrev has 2, gain 1 in WinPrevious)
+		 *
+		 * NOTE: IMDCT36_GeneralWindow takes xPrev by value, so its internal
+		 * (*xPrev++) advance during the write loop does not propagate back to
+		 * this xPrev -- it is left pointing at the original (start) position,
+		 * which is exactly what FreqInvertRescale/FreqInvertOdd below need, so
+		 * unlike the fast path above, no rewind is needed here.
 		 */
-		WinPrevious(xPrev, xPrevWin, btPrev);
-
-		wpLo = imdctWin[btCurr];
-		wpHi = wpLo + 17;
-		xpwLo = xPrevWin;
-		xpwHi = xPrevWin + 17;
 		ypLo = y;
 		ypHi = y + 17*NBANDS;
-		for (i = 9; i > 0; i--) {
-			c = *cp--;	xo = *(xp + 9);		xe = *xp--;
-			/* gain 2 int bits here */
-			xo = MULSHIFT32(c, xo);			/* 2*c18*xOdd (mul by 2 implicit in scaling)  */
-			xe >>= 2;
-
-			d = xe - xo;
-			(*xPrev++) = xe + xo;	/* symmetry - xPrev[i] = xPrev[17-i] for long blocks */
-			
-			yLo = (*xpwLo++ + MULSHIFT32(d, *wpLo++)) << 2;
-			yHi = (*xpwHi-- + MULSHIFT32(d, *wpHi--)) << 2;
-			*ypLo = yLo;		ypLo += NBANDS;
-			*ypHi = yHi;		ypHi -= NBANDS;
-			mOut |= FASTABS(yLo);
-			mOut |= FASTABS(yHi);
-		}
+		mOut = IMDCT36_GeneralWindow(xp, cp, xPrev, btCurr, btPrev, ypLo, ypHi);
 	}
 
-	xPrev -= 9;
 	if (es)
 		mOut |= FreqInvertRescale(y, xPrev, blockIdx, es);
 	else if (blockIdx & 0x01)
@@ -816,15 +860,32 @@ static __inline int IMDCT36_AMIGA_M68K_LONG_WINDOW(int *xp, const int *cp,
 	return mOut;
 }
 
+/*
+ * Previously bailed out to the full IMDCT36_C_REFERENCE (redoing the
+ * accumulation loop and BOTH idct9 calls in plain C) whenever btCurr != 0
+ * || btPrev != 0 -- i.e. every block adjacent to a window-type transition
+ * (start/stop/short), not just genuinely short blocks. That meant the
+ * already-verified idct9_amiga_m68k_asm below got skipped for those
+ * blocks too, not just the windowing step that actually differs.
+ *
+ * The accumulation loop and the two idct9 calls are IDENTICAL between the
+ * btCurr==0&&btPrev==0 case and every other case -- only the final
+ * windowing/overlap-add step differs (see IMDCT36_C_REFERENCE). So this
+ * now always does the shared asm prep, then branches only the windowing:
+ * IMDCT36_AMIGA_M68K_LONG_WINDOW (existing asm, symmetric-window fast
+ * path) or IMDCT36_GeneralWindow (the C windowing loop factored out of
+ * IMDCT36_C_REFERENCE's else branch, unchanged -- see that function's
+ * comment). Verified via IMDCT36AsmGeneralPathSelftest() below to match
+ * IMDCT36_C_REFERENCE bit-for-bit across randomized btCurr/btPrev/gb
+ * combinations, including the btCurr==0&&btPrev==0 fast path (unchanged
+ * from before this restructure).
+ */
 static int IMDCT36_AMIGA_M68K_ASM(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb)
 {
 	int i, es, xBuf[18];
 	int acc1, acc2, mOut;
 	int *xp, *ypLo, *ypHi;
 	const int *cp, *wp;
-
-	if (btCurr != 0 || btPrev != 0)
-		return IMDCT36_C_REFERENCE(xCurr, xPrev, y, btCurr, btPrev, blockIdx, gb);
 
 	acc1 = acc2 = 0;
 	xCurr += 17;
@@ -856,10 +917,14 @@ static int IMDCT36_AMIGA_M68K_ASM(int *xCurr, int *xPrev, int *y, int btCurr, in
 
 	xp = xBuf + 8;
 	cp = c18 + 8;
-	wp = fastWin36;
 	ypLo = y;
 	ypHi = y + 17*NBANDS;
-	mOut = IMDCT36_AMIGA_M68K_LONG_WINDOW(xp, cp, wp, xPrev, ypLo, ypHi);
+	if (btCurr == 0 && btPrev == 0) {
+		wp = fastWin36;
+		mOut = IMDCT36_AMIGA_M68K_LONG_WINDOW(xp, cp, wp, xPrev, ypLo, ypHi);
+	} else {
+		mOut = IMDCT36_GeneralWindow(xp, cp, xPrev, btCurr, btPrev, ypLo, ypHi);
+	}
 
 	if (es)
 		mOut |= FreqInvertRescale(y, xPrev, blockIdx, es);
@@ -878,8 +943,7 @@ int IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME(void)
 int IMDCT36_TEST_ACTIVE(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb)
 {
 #if IMDCT36_HAS_AMIGA_M68K_ASM
-	if (btCurr == 0 && btPrev == 0)
-		return IMDCT36_AMIGA_M68K_ASM(xCurr, xPrev, y, btCurr, btPrev, blockIdx, gb);
+	return IMDCT36_AMIGA_M68K_ASM(xCurr, xPrev, y, btCurr, btPrev, blockIdx, gb);
 #endif
 	return IMDCT36_C_REFERENCE(xCurr, xPrev, y, btCurr, btPrev, blockIdx, gb);
 }
@@ -1169,11 +1233,15 @@ static int HybridTransform(int *xCurr, int *xPrev, int y[BLOCK_SIZE][NBANDS], Si
 				 prevWinIdx = 0;
 
 			/* do 36-point IMDCT, including windowing and overlap-add.
-			 * Mixed/transition-window long blocks deliberately stay on the C reference path.
+			 * Mixed/transition-window long blocks now go through the same
+			 * IMDCT36() dispatcher as the non-transition case above --
+			 * IMDCT36_AMIGA_M68K_ASM shares the asm accumulation/idct9 stage
+			 * for these blocks too and only branches C for the windowing step
+			 * (see IMDCT36_AMIGA_M68K_ASM's header comment).
 			 */
 #if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_M68K_IMDCT_THIN_OUTPUT)
 			if (IMDCTThinBlockSelected(bc, i))
-				mOut |= IMDCT36_C_REFERENCE(xCurr, xPrev, &(y[0][i]), currWinIdx, prevWinIdx, i, bc->gbIn);
+				mOut |= IMDCT36(xCurr, xPrev, &(y[0][i]), currWinIdx, prevWinIdx, i, bc->gbIn);
 			else {
 				int row;
 				mOut |= IMDCT36_ThinSkip(xCurr, xPrev, bc->gbIn);
@@ -1181,7 +1249,7 @@ static int HybridTransform(int *xCurr, int *xPrev, int y[BLOCK_SIZE][NBANDS], Si
 					y[row][i] = 0;
 			}
 #else
-			mOut |= IMDCT36_C_REFERENCE(xCurr, xPrev, &(y[0][i]), currWinIdx, prevWinIdx, i, bc->gbIn);
+			mOut |= IMDCT36(xCurr, xPrev, &(y[0][i]), currWinIdx, prevWinIdx, i, bc->gbIn);
 #endif
 			xCurr += 18;
 			xPrev += 9;
@@ -1472,6 +1540,140 @@ int IMDCTSubbandCapSelftest(void)
 	return failures ? -1 : 0;
 }
 
+/*
+ * Proves the IMDCT()'s antialiasNBfly capping is an exact simplification:
+ * for a variety of (uncapped nBfly, activeSubbands) pairs, running
+ * AntiAlias() with the full nBfly vs. with it capped to activeSubbands
+ * must produce bit-identical output for every sample belonging to a KEPT
+ * block (indices 0 .. activeSubbands*18 - 1). Anything at or beyond that
+ * is either the discarded region (allowed to differ -- it gets zeroed by
+ * the subband cap right after) or out of the buffer entirely.
+ */
+int AntiAliasSubbandCapSelftest(void)
+{
+	static const int kActiveSubbandsCases[] = { 16, 12, 8, 6, 3, 1 };
+	int uncapped[MAX_NSAMP];
+	int capped[MAX_NSAMP];
+	int nBfly;
+	int caseIdx;
+	int i;
+	int failures;
+
+	failures = 0;
+	for (nBfly = 1; nBfly <= 31; nBfly++) {
+		int bufLen = (nBfly + 1) * 18;
+		if (bufLen > MAX_NSAMP)
+			bufLen = MAX_NSAMP;
+
+		for (i = 0; i < bufLen; i++) {
+			/* Deterministic pseudo-random fill, well within AntiAlias's
+			 * documented "assume at least 1 guard bit" precondition. */
+			int v = (int)(((unsigned int)(i * 2654435761U + (unsigned int)nBfly * 40503U)) & 0x000fffffU) - 0x00080000;
+			uncapped[i] = v;
+			capped[i] = v;
+		}
+
+		for (caseIdx = 0; caseIdx < (int)(sizeof(kActiveSubbandsCases) / sizeof(kActiveSubbandsCases[0])); caseIdx++) {
+			int activeSubbands = kActiveSubbandsCases[caseIdx];
+			int cappedNBfly = nBfly;
+			int keptSamples;
+			int j;
+
+			if (cappedNBfly > activeSubbands)
+				cappedNBfly = activeSubbands;
+			keptSamples = activeSubbands * 18;
+			if (keptSamples > bufLen)
+				continue;	/* this nBfly doesn't even reach the cap; nothing to prove here */
+
+			for (i = 0; i < bufLen; i++) {
+				uncapped[i] = capped[i];	/* reset from the case above */
+			}
+			AntiAlias_C_REFERENCE(uncapped, nBfly);
+			AntiAlias_C_REFERENCE(capped, cappedNBfly);
+
+			for (j = 0; j < keptSamples; j++) {
+				if (uncapped[j] != capped[j]) {
+					printf("antialias subband cap selftest MISMATCH nBfly=%d cappedNBfly=%d activeSubbands=%d sample=%d uncapped=%d capped=%d\n",
+						nBfly, cappedNBfly, activeSubbands, j, uncapped[j], capped[j]);
+					failures++;
+					break;
+				}
+			}
+		}
+	}
+
+	printf("antialias subband cap selftest: %s\n", failures ? "FAIL" : "PASS");
+	return failures ? -1 : 0;
+}
+
+/*
+ * Verifies the IMDCT36_AMIGA_M68K_ASM restructure described at that
+ * function's definition: it now always runs the shared xBuf accumulation +
+ * idct9_amiga_m68k_asm stage and branches only at the windowing step
+ * (IMDCT36_AMIGA_M68K_LONG_WINDOW vs IMDCT36_GeneralWindow), instead of
+ * bailing out to the full C reference whenever btCurr != 0 || btPrev != 0.
+ * Compares against IMDCT36_C_REFERENCE bit-for-bit (output y[], updated
+ * xPrev[], and mOut) across randomized btCurr/btPrev/blockIdx/gb and input
+ * combinations, including the btCurr==0&&btPrev==0 fast path (unchanged by
+ * this restructure) so a regression there would also be caught here.
+ */
+int IMDCT36AsmGeneralPathSelftest(void)
+{
+#if IMDCT36_HAS_AMIGA_M68K_ASM
+	int xCurrRef[18], xCurrAsm[18];
+	int xPrevRef[9], xPrevAsm[9];
+	int yRef[18][NBANDS], yAsm[18][NBANDS];
+	unsigned int rngState = 0x9e3779b9U;
+	int trial, btCurr, btPrev, gb, blockIdx, i;
+	int mOutRef, mOutAsm;
+	int failures = 0;
+	int total = 0;
+
+	for (trial = 0; trial < 20000; trial++) {
+		rngState ^= rngState << 13; rngState ^= rngState >> 17; rngState ^= rngState << 5;
+		btCurr = rngState % 4;
+		rngState ^= rngState << 13; rngState ^= rngState >> 17; rngState ^= rngState << 5;
+		btPrev = rngState % 4;
+		rngState ^= rngState << 13; rngState ^= rngState >> 17; rngState ^= rngState << 5;
+		blockIdx = rngState % 2;
+		rngState ^= rngState << 13; rngState ^= rngState >> 17; rngState ^= rngState << 5;
+		gb = rngState % 10;
+
+		for (i = 0; i < 18; i++) {
+			int v;
+			rngState ^= rngState << 13; rngState ^= rngState >> 17; rngState ^= rngState << 5;
+			v = (int)(rngState % 0x08000000U) - 0x04000000;
+			xCurrRef[i] = v; xCurrAsm[i] = v;
+		}
+		for (i = 0; i < 9; i++) {
+			int v;
+			rngState ^= rngState << 13; rngState ^= rngState >> 17; rngState ^= rngState << 5;
+			v = (int)(rngState % 0x08000000U) - 0x04000000;
+			xPrevRef[i] = v; xPrevAsm[i] = v;
+		}
+		memset(yRef, 0, sizeof(yRef));
+		memset(yAsm, 0, sizeof(yAsm));
+
+		mOutRef = IMDCT36_C_REFERENCE(xCurrRef, xPrevRef, &yRef[0][0], btCurr, btPrev, blockIdx, gb);
+		mOutAsm = IMDCT36_AMIGA_M68K_ASM(xCurrAsm, xPrevAsm, &yAsm[0][0], btCurr, btPrev, blockIdx, gb);
+		total++;
+
+		if (mOutRef != mOutAsm || memcmp(yRef, yAsm, sizeof(yRef)) != 0 ||
+			memcmp(xPrevRef, xPrevAsm, sizeof(xPrevRef)) != 0) {
+			printf("imdct36 asm general-path selftest MISMATCH trial=%d btCurr=%d btPrev=%d blockIdx=%d gb=%d mOutRef=%d mOutAsm=%d\n",
+				trial, btCurr, btPrev, blockIdx, gb, mOutRef, mOutAsm);
+			failures++;
+		}
+	}
+
+	printf("imdct36 asm general-path selftest: %d trials, %s\n", total, failures ? "FAIL" : "PASS");
+	return failures ? -1 : 0;
+#else
+	printf("imdct36 asm general-path selftest: SKIPPED (no m68k asm on this target)\n");
+	return 0;
+#endif
+}
+
 int IMDCTThinOutputSelftest(void)
 {
 	int xFull[MAX_NSAMP];
@@ -1603,6 +1805,8 @@ int IMDCTThinOutputSelftest(void)
 int IMDCT(MP3DecInfo *mp3DecInfo, int gr, int ch)
 {
 	int nBfly, blockCutoff;
+	int antialiasNBfly;
+	int activeSubbandsForAntiAlias;
 	FrameHeader *fh;
 	SideInfo *si;
 	HuffmanInfo *hi;
@@ -1640,7 +1844,29 @@ int IMDCT(MP3DecInfo *mp3DecInfo, int gr, int ch)
 		nBfly = 0;
 	}
  
-	AntiAlias(hi->huffDecBuf[ch], nBfly);
+	/*
+	 * AntiAlias()'s inter-block butterflies are each strictly local to one
+	 * block boundary (see AntiAlias_C_REFERENCE: butterfly k only reads/
+	 * writes the 8 samples on either side of that one boundary, with no
+	 * carry between iterations), so this is an *exact* simplification, not
+	 * a new approximation on top of the existing subband cap: bands below
+	 * the cap come out bit-identical whether or not the butterflies for the
+	 * fully-discarded region run. The one butterfly that must still run is
+	 * the boundary between the last KEPT block and the first discarded one
+	 * -- it also touches the kept block's high edge -- which is why this
+	 * caps at activeSubbands (the boundary count for activeSubbands kept
+	 * blocks), not activeSubbands - 1. See AntiAliasSubbandCapSelftest()
+	 * for a randomized proof that kept-band output is unaffected.
+	 * This only ever fires for fast-lowrate stride>=2 decodes -- full-rate
+	 * decode always gets activeSubbandsForAntiAlias == NBANDS here, so
+	 * antialiasNBfly == nBfly and this is a no-op for the primary path.
+	 */
+	activeSubbandsForAntiAlias = MP3FastLowrateEffectiveActiveSubbands(mp3DecInfo);
+	antialiasNBfly = nBfly;
+	if (activeSubbandsForAntiAlias < NBANDS && antialiasNBfly > activeSubbandsForAntiAlias)
+		antialiasNBfly = activeSubbandsForAntiAlias;
+
+	AntiAlias(hi->huffDecBuf[ch], antialiasNBfly);
 	hi->nonZeroBound[ch] = MAX(hi->nonZeroBound[ch], (nBfly * 18) + 8);
 
 	ASSERT(hi->nonZeroBound[ch] <= MAX_NSAMP);

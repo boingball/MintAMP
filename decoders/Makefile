@@ -21,10 +21,36 @@
 
 CC     := m68k-amigaos-gcc
 NM     := m68k-amigaos-nm
-CPU    := -m68020
+
+# CPU selects the target processor: 00=68000, 20=68020, 30=68030 (default),
+# 40=68040, 60=68060 -- same numeric convention as Makefile.amiga, which is
+# the single source of truth when this is built via `make -f Makefile.amiga
+# decoder-modules` (it forwards its own CPU= here). Run standalone (`make -C
+# decoders`) it defaults to 30 to match this project's primary target.
+CPU ?= 30
+CPU_MFLAG_00 := -m68000
+CPU_MFLAG_20 := -m68020
+CPU_MFLAG_30 := -m68030
+CPU_MFLAG_40 := -m68040
+CPU_MFLAG_60 := -m68060
+CPU_MFLAG := $(CPU_MFLAG_$(CPU))
+ifeq ($(CPU_MFLAG),)
+$(error Unknown CPU=$(CPU) -- expected one of: 00 20 30 40 60)
+endif
+
 AACASM ?= 1
 OGGASM ?= 1
-CFLAGS := $(CPU) -O2 -fomit-frame-pointer -std=gnu89 -Wall -I. \
+# override: these decoders link with -nostartfiles against a hand-written
+# Exec-backed allocator shim (see ogg_alloc.c/aac_alloc.c/flac_alloc.c) that
+# only works if GCC never recognizes/inlines a call as "the real libc
+# malloc/free/memset" -- -fno-builtin-* is what prevents that. Previously
+# Makefile.amiga's decoder-modules target passed its own CFLAGS="..." on
+# the command line, which (per normal GNU Make precedence) silently
+# replaced this entire line -- including those flags and -ffunction-
+# sections/-fdata-sections needed for the --gc-sections link step -- every
+# time this was built via `make -f Makefile.amiga gui/guir/fast030` rather
+# than standalone `make -C decoders`. override makes this immune to that.
+override CFLAGS := $(CPU_MFLAG) -O2 -fomit-frame-pointer -std=gnu89 -Wall -I. \
           -DHAVE_AMIGA_AUDIO_DEVICE -DAMIGA_M68K \
           -fno-builtin \
           -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc \

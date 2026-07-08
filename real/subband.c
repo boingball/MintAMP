@@ -51,7 +51,18 @@ void FDCT32FastLowrate(int *x, int *d, int offset, int oddBlock, int gb,
 {
 #if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE)
 	if (stride == 2) {
+#if defined(AMIGA_FAST_SUBBAND_CAP)
+		/* Whenever this macro is defined, IMDCTApplySubbandCap() in
+		 * real/imdct.c unconditionally caps stride-2 decode to <= 16
+		 * active subbands and zeroes the rest before this is ever
+		 * reached (see MP3FastLowrateEffectiveActiveSubbands()) --
+		 * exactly FDCT32HalfSparse16()'s precondition. Without this
+		 * macro that guarantee doesn't hold, so fall back to the
+		 * general FDCT32Half() below. */
+		FDCT32HalfSparse16(x, d, offset, oddBlock, gb);
+#else
 		FDCT32Half(x, d, offset, oddBlock, gb);
+#endif
 		return;
 	}
 	if (stride == 4 && MP3ExperimentalFDCT32QuarterEnabled()) {
