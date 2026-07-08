@@ -156,6 +156,8 @@
 #define IMDCTSubbandCapSelftest STATNAME(IMDCTSubbandCapSelftest)
 #define AntiAliasSubbandCapSelftest STATNAME(AntiAliasSubbandCapSelftest)
 #define IMDCT36AsmGeneralPathSelftest STATNAME(IMDCT36AsmGeneralPathSelftest)
+#define MP3FastLowrateEffectiveActiveSubbands STATNAME(MP3FastLowrateEffectiveActiveSubbands)
+#define DequantSubbandCapSelftest STATNAME(DequantSubbandCapSelftest)
 #define DecodeHuffmanPairs_C_REFERENCE STATNAME(DecodeHuffmanPairs_C_REFERENCE)
 #define DecodeHuffmanPairs_TEST_ACTIVE STATNAME(DecodeHuffmanPairs_TEST_ACTIVE)
 #define DecodeHuffmanPairs_HAS_AMIGA_M68K_ASM_RUNTIME STATNAME(DecodeHuffmanPairs_HAS_AMIGA_M68K_ASM_RUNTIME)
@@ -411,8 +413,8 @@ int BitstreamRefillSelftest(void);
 int CalcBitsUsed(BitStreamInfo *bsi, unsigned char *startBuf, int startOffset);
 
 /* dequant.c, dqchan.c, stproc.c */
-int DequantChannel(int *sampleBuf, int *workBuf, int *nonZeroBound, FrameHeader *fh, SideInfoSub *sis, 
-					ScaleFactorInfoSub *sfis, CriticalBandInfo *cbi);
+int DequantChannel(int *sampleBuf, int *workBuf, int *nonZeroBound, FrameHeader *fh, SideInfoSub *sis,
+					ScaleFactorInfoSub *sfis, CriticalBandInfo *cbi, int subbandCapSampleLimit);
 int DequantBlock_C_REFERENCE(int *inbuf, int *outbuf, int num, int scale);
 int DequantBlock_TEST_ACTIVE(int *inbuf, int *outbuf, int num, int scale);
 int DequantBlock_HAS_AMIGA_M68K_ASM_RUNTIME(void);
@@ -451,6 +453,8 @@ int IMDCTThinOutputSelftest(void);
 int IMDCTSubbandCapSelftest(void);
 int AntiAliasSubbandCapSelftest(void);
 int IMDCT36AsmGeneralPathSelftest(void);
+int MP3FastLowrateEffectiveActiveSubbands(const MP3DecInfo *mp3DecInfo);
+int DequantSubbandCapSelftest(void);
 
 /* huffman.c selftest hooks */
 int DecodeHuffmanPairs_C_REFERENCE(int *xy, int nVals, int tabIdx, int bitsLeft, unsigned char *buf, int bitOffset);

@@ -131,6 +131,8 @@ typedef struct _MP3DecodeCoreProfile {
 	clock_t polyphase;
 	unsigned long imdctSubbandsExecuted;
 	unsigned long imdctSubbandsSkipped;
+	unsigned long imdct36BlockCount;
+	unsigned long imdct12x3BlockCount;
 	unsigned long monoMSSideSkipEligible;
 	unsigned long monoMSSideHuffmanSkipped;
 	unsigned long monoMSSideDequantSkipped;
@@ -208,6 +210,7 @@ void MP3GetDecodeCoreProfile(MP3DecodeCoreProfile *profile);
 int MP3DecodeCoreProfileIsEnabled(void);
 void MP3AddDecodeCoreProfile(int bucket, clock_t elapsed);
 void MP3AddDecodeCoreIMDCTSubbands(unsigned long executed, unsigned long skipped);
+void MP3AddDecodeCoreImdctBlockCounts(unsigned long longBlocks, unsigned long shortBlocks);
 void MP3AddDecodeCoreMonoMSSideSkip(int bucket);
 
 #ifdef __cplusplus

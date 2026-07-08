@@ -93,6 +93,7 @@ static void CollapseStereoToMono(int x[MAX_NCHAN][MAX_NSAMP], int nSamps,
 int Dequantize(MP3DecInfo *mp3DecInfo, int gr)
 {
 	int i, ch, nSamps, mOut[2];
+	int dequantSubbandCapSampleLimit;
 	FrameHeader *fh;
 	SideInfo *si;
 	ScaleFactorInfo *sfi;
@@ -116,6 +117,18 @@ int Dequantize(MP3DecInfo *mp3DecInfo, int gr)
 	cbi = di->cbi;
 	mOut[0] = mOut[1] = 0;
 
+	/* Same activeSubbands*18 sample-index convention already used by
+	 * AntiAlias's and IMDCT's subband caps (real/imdct.c) -- content beyond
+	 * this index is guaranteed never read once fast-lowrate's subband cap is
+	 * active (IMDCTApplySubbandCap() caps bc->nBlocksLong before
+	 * HybridTransform's loop even starts), so DequantChannel() can skip the
+	 * expensive per-coefficient work there too. 0 means "no cap active",
+	 * matching DequantChannel()'s subbandCapSampleLimit contract. */
+	{
+		int activeSubbands = MP3FastLowrateEffectiveActiveSubbands(mp3DecInfo);
+		dequantSubbandCapSampleLimit = (activeSubbands < NBANDS) ? activeSubbands * 18 : 0;
+	}
+
 	/* Pure mid/side joint stereo is special for mono output: after MPEG
 	 * reconstruction, (L + R) / 2 is exactly the coded mid channel with the
 	 * same 1/sqrt(2) scale already applied by DequantChannel().  The decoder can
@@ -128,7 +141,7 @@ int Dequantize(MP3DecInfo *mp3DecInfo, int gr)
 	AMIGA_PROFILE_START(amigaProfileStart);
 	while (ch-- > 0) {
 		hi->gb[ch] = DequantChannel(hi->huffDecBuf[ch], di->workBuf, &hi->nonZeroBound[ch], fh,
-			&si->sis[gr][ch], &sfi->sfis[gr][ch], &cbi[ch]);
+			&si->sis[gr][ch], &sfi->sfis[gr][ch], &cbi[ch], dequantSubbandCapSampleLimit);
 	}
 	if (gr >= 0 && gr < mp3DecInfo->nGrans &&
 		mp3DecInfo->monoMSSideSkipGranule[gr]) {

@@ -132,6 +132,17 @@ void MP3AddDecodeCoreIMDCTSubbands(unsigned long executed, unsigned long skipped
 #endif
 }
 
+void MP3AddDecodeCoreImdctBlockCounts(unsigned long longBlocks, unsigned long shortBlocks)
+{
+#ifdef AMIGA_PROFILE_DECODE
+	gDecodeCoreProfile.imdct36BlockCount += longBlocks;
+	gDecodeCoreProfile.imdct12x3BlockCount += shortBlocks;
+#else
+	(void)longBlocks;
+	(void)shortBlocks;
+#endif
+}
+
 void MP3AddDecodeCoreMonoMSSideSkip(int bucket)
 {
 #ifdef AMIGA_PROFILE_DECODE

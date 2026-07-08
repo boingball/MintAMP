@@ -197,6 +197,8 @@ enum {
 	GID_BUFFER,
 	GID_FASTMEM,
 	GID_FASTLOW,
+	GID_EXPPOLY,
+	GID_EXPREDUCEDTAPS,
 	GID_SPEED,
 	GID_WIDTH,
 	GID_DELAY,
@@ -472,6 +474,8 @@ typedef struct MrApp {
 	Object         *bufferGad;
 	Object         *fastMemGad;
 	Object         *fastLowGad;
+	Object         *expPolyGad;
+	Object         *expReducedTapsGad;
 	Object         *speedGad;
 	Object         *widthGad;
 	Object         *delayGad;
@@ -560,6 +564,8 @@ typedef struct MrApp {
 	int   qualityIndex;
 	int   mono;
 	int   fastMem;
+	int   expPoly;
+	int   expReducedTaps;
 	int   fastLowrate;
 	int   superfastLowrate;
 	int   ultrafast;
@@ -942,6 +948,8 @@ static void LoadSettings(MrApp *app)
 		app->superfastLowrate = 0;
 	}
 	app->fastMem = LoadEnvInt("FastMem", app->fastMem, 0, 1);
+	app->expPoly = LoadEnvInt("ExpPoly", app->expPoly, 0, 1);
+	app->expReducedTaps = LoadEnvInt("ExpReducedTaps", app->expReducedTaps, 0, 1);
 	app->mono = LoadEnvInt("Mono", app->mono, 0, 1);
 	app->fakeStereo = LoadEnvInt("FakeStereo", app->fakeStereo, 0, 1);
 	app->fakeStereoWidthIndex = LoadEnvInt("FakeStereoWidthIndex", app->fakeStereoWidthIndex, 0, 4);
@@ -982,6 +990,8 @@ static void SaveSettings(MrApp *app)
 	SaveEnvInt("Ultrafast", app->ultrafast);
 	SaveEnvInt("CD32Ultrafast", app->cd32Ultrafast);
 	SaveEnvInt("FastMem", app->fastMem);
+	SaveEnvInt("ExpPoly", app->expPoly);
+	SaveEnvInt("ExpReducedTaps", app->expReducedTaps);
 	SaveEnvInt("Mono", app->mono);
 	SaveEnvInt("FakeStereo", app->fakeStereo);
 	SaveEnvInt("FakeStereoWidthIndex", app->fakeStereoWidthIndex);
@@ -1410,6 +1420,13 @@ static void BuildPlaybackArgs(MrApp *app, MrPlayArgs *args)
 	}
 	if (useUltrafast && strcmp(kRates[rateIndex], "28600") == 0)
 		AddArg(args, "--ultrafast");
+	if (app->expPoly)
+		AddArg(args, "--exp-poly");
+	/* useCd32Ultrafast already adds --exp-reduced-taps unconditionally above
+	 * (its own tested default); avoid adding it twice when the independent
+	 * checkbox is also on. */
+	if (app->expReducedTaps && !useCd32Ultrafast)
+		AddArg(args, "--exp-reduced-taps");
 	if (useFakeStereo) {
 		AddArg(args, "--fake-stereo");
 		AddArg(args, "--fake-stereo-delay");
@@ -1629,7 +1646,7 @@ static void StartPlayback(MrApp *app)
 	gPlayer.process = CreateNewProcTags(
 		NP_Entry,      (ULONG)PlaybackEntry,
 		NP_Name,       (ULONG)"minimp3r playback",
-		NP_Priority,   0,
+		NP_Priority,   AMIGA_PLAYBACK_TASK_PRIORITY,
 		NP_StackSize,  262144,
 		NP_CurrentDir, dirLock,
 		NP_Output,     nilOut,
@@ -2501,6 +2518,27 @@ static int MrOpenWindow(MrApp *app)
 	                GA_Selected, (ULONG)(app->fastLowrate ? TRUE : FALSE),
 	                TAG_DONE);
 
+	/* Both opt-in and off by default -- see MP3SetExperimentalPolyphase()/
+	 * MP3SetExperimentalReducedTaps() in amiga_mp3dec.c. Exp-poly is an
+	 * alternate asm implementation of the same math (correctness-preserving
+	 * in principle, just less soak-tested than the default path); reduced-
+	 * taps is explicitly lossy (see its --exp-reduced-taps help text) --
+	 * kept as two separate checkboxes, independent of Speed Mode, so either
+	 * can be soak-tested on its own. */
+	app->expPolyGad = (Object *)NewObject(CHECKBOX_GetClass(), NULL,
+	                GA_ID, GID_EXPPOLY,
+	                GA_RelVerify, TRUE,
+	                GA_Text, (ULONG)"Experimental polyphase asm",
+	                GA_Selected, (ULONG)(app->expPoly ? TRUE : FALSE),
+	                TAG_DONE);
+
+	app->expReducedTapsGad = (Object *)NewObject(CHECKBOX_GetClass(), NULL,
+	                GA_ID, GID_EXPREDUCEDTAPS,
+	                GA_RelVerify, TRUE,
+	                GA_Text, (ULONG)"Reduced-tap dewindowing (lossy)",
+	                GA_Selected, (ULONG)(app->expReducedTaps ? TRUE : FALSE),
+	                TAG_DONE);
+
 	app->speedGad = (Object *)NewObject(CHOOSER_GetClass(), NULL,
 	                GA_ID, GID_SPEED,
 	                GA_RelVerify, TRUE,
@@ -2581,6 +2619,7 @@ static int MrOpenWindow(MrApp *app)
 		!CheckGadget(app->qualityGad, "quality") || !CheckGadget(app->channelGad, "channel") ||
 		!CheckGadget(app->volumeGad, "volume") || !CheckGadget(app->bufferGad, "buffer") ||
 		!CheckGadget(app->fastMemGad, "fast memory") || !CheckGadget(app->fastLowGad, "fast low-rate") ||
+		!CheckGadget(app->expPolyGad, "experimental polyphase") || !CheckGadget(app->expReducedTapsGad, "reduced taps") ||
 		!CheckGadget(app->speedGad, "speed") || !CheckGadget(app->widthGad, "width") ||
 		!CheckGadget(app->delayGad, "delay") || !CheckGadget(app->playGad, "play") ||
 		!CheckGadget(app->nextGad, "next") || !CheckGadget(app->stopGad, "stop") ||
@@ -2690,6 +2729,13 @@ static int MrOpenWindow(MrApp *app)
 				LAYOUT_AddChild, (ULONG)app->fastLowGad,
 				TAG_DONE),
 			CHILD_WeightedHeight, 0,
+
+			LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
+				LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
+				LAYOUT_AddChild, (ULONG)app->expPolyGad,
+				LAYOUT_AddChild, (ULONG)app->expReducedTapsGad,
+				TAG_DONE),
+			CHILD_WeightedHeight, 0,
 			TAG_DONE),
 		CHILD_WeightedHeight, 0,
 
@@ -2794,6 +2840,7 @@ static void MrCloseWindow(MrApp *app)
 		app->win = NULL;
 		app->fileGad = app->rateGad = app->qualityGad = app->channelGad = NULL;
 		app->volumeGad = app->bufferGad = app->fastMemGad = app->fastLowGad = NULL;
+		app->expPolyGad = app->expReducedTapsGad = NULL;
 		app->speedGad = app->widthGad = app->delayGad = app->playGad = NULL;
 		app->nextGad = app->stopGad = app->filterGad = app->playlistGad = NULL;
 		app->radioGad = app->timeGad = app->fileInfoGad = app->titleGad = NULL;
@@ -5705,6 +5752,10 @@ static void SyncFromGadgets(MrApp *app)
 		app->fastMem = (v != 0);
 	if (app->fastLowGad && GetAttr(GA_Selected, app->fastLowGad, &v))
 		app->fastLowrate = (v != 0);
+	if (app->expPolyGad && GetAttr(GA_Selected, app->expPolyGad, &v))
+		app->expPoly = (v != 0);
+	if (app->expReducedTapsGad && GetAttr(GA_Selected, app->expReducedTapsGad, &v))
+		app->expReducedTaps = (v != 0);
 	if (app->speedGad && GetAttr(CHOOSER_Selected, app->speedGad, &v)) {
 		app->cd32Ultrafast = (app->rateIndex == MR_RATE_22050_INDEX && (int)v == 3);
 		app->ultrafast = ((int)v == 2);

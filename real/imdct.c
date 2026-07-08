@@ -299,14 +299,17 @@ static __inline void FreqInvertOdd(int *y)
 
 /*
  * Single source of truth for "how many of the 32 subbands does this decode
- * actually keep," shared by IMDCTApplySubbandCap() below (which acts on it)
- * and IMDCT()'s AntiAlias() call site (which needs to know it *before*
+ * actually keep," shared by IMDCTApplySubbandCap() below (which acts on it),
+ * IMDCT()'s AntiAlias() call site (which needs to know it *before*
  * IMDCTApplySubbandCap() normally runs, to size how much antialias work is
- * worth doing -- see the comment at that call site). Returns NBANDS (32)
- * as a "no cap active" sentinel, matching IMDCTApplySubbandCap()'s original
- * return-0 behavior.
+ * worth doing -- see the comment at that call site), and DequantChannel()
+ * (real/dqchan.c, via Dequantize() in real/dequant.c), which uses the same
+ * activeSubbands*18 sample-index convention to skip dequantizing critical
+ * bands the IMDCT subband cap will never read. Returns NBANDS (32) as a
+ * "no cap active" sentinel, matching IMDCTApplySubbandCap()'s original
+ * return-0 behavior. Not static so real/dequant.c can call it too.
  */
-static int MP3FastLowrateEffectiveActiveSubbands(const MP3DecInfo *mp3DecInfo)
+int MP3FastLowrateEffectiveActiveSubbands(const MP3DecInfo *mp3DecInfo)
 {
 	int activeSubbands;
 
@@ -1269,7 +1272,9 @@ static int HybridTransform(int *xCurr, int *xPrev, int y[BLOCK_SIZE][NBANDS], Si
 		xPrev += 9;
 	}
 	nBlocksOut = i;
-	
+	MP3AddDecodeCoreImdctBlockCounts((unsigned long)bc->nBlocksLong,
+		(unsigned long)(nBlocksOut - bc->nBlocksLong));
+
 	/* window and overlap prev if prev longer that current */
 	for (   ; i < bc->nBlocksPrev; i++) {
 		prevWinIdx = prevType;

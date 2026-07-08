@@ -2117,7 +2117,21 @@ static int connect_http(RadioStream *rs){
          * plumbing changed. Getting an unexpected EINTR-style abort deep
          * inside a library that was never written to expect one is a
          * plausible way to corrupt its state rather than cleanly cancel it,
-         * so the mask must not outlive this single call. */
+         * so the mask must not outlive this single call.
+         *
+         * The mask alone only says *which* signal would abort this call --
+         * nothing actually sends SIGBREAKF_CTRL_C to this (worker) task
+         * otherwise, so a wedged resolver previously had nothing to react
+         * to (see Radio_RequestStop() below, which now signals this task).
+         * Clear any stale pending CTRL_C first: a signal left over from an
+         * earlier stop request that arrived after that request's own
+         * gethostbyname() call had already returned would otherwise sit
+         * pending and immediately abort *this*, unrelated, later call
+         * (e.g. the next station the user opens) the moment the mask goes
+         * live below. Safe to clear here because this code always runs on
+         * the worker task itself (radio_net_worker_is_self() is enforced
+         * by every caller of connect_http()). */
+        SetSignal(0, SIGBREAKF_CTRL_C);
         SocketBaseTags(SBTM_SETVAL(SBTC_BREAKMASK), (ULONG)SIGBREAKF_CTRL_C, TAG_DONE);
         he=gethostbyname(rs->host);
         SocketBaseTags(SBTM_SETVAL(SBTC_BREAKMASK), 0UL, TAG_DONE);
@@ -2791,6 +2805,23 @@ void Radio_RequestStop(RadioStream *rs)
     rs->reconnectDelay = 0;
     rs->status = RADIO_STATUS_STOPPING;
     radio_stream_unlock(rs);
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+    /* Wake a worker task that might be wedged inside connect_http()'s
+     * gethostbyname() call (the one masked blocking call in this file --
+     * see the SBTC_BREAKMASK comment there) resolving THIS session's host.
+     * Without this, the stop flags set above only take effect once that
+     * call eventually returns on its own, which for a slow/unresponsive
+     * resolver could be a long time or never (the original wedged-forever
+     * report this fixed). Signal() is safe to call regardless of what the
+     * worker is actually doing right now: its own poll loop
+     * (radio_net_worker_entry()) never Wait()s on this signal, so this
+     * either aborts an in-flight masked gethostbyname() immediately, or
+     * just leaves the bit pending harmlessly until that call's own
+     * SetSignal(0, SIGBREAKF_CTRL_C) clears it before its next attempt
+     * (for this or a later session). */
+    if (radio_net_worker_task && !radio_net_worker_is_self())
+        Signal(radio_net_worker_task, SIGBREAKF_CTRL_C);
+#endif
     /* Run the full unregister+shutdown+close+free sequence as one
      * uninterrupted worker-owned step (radio_worker_stop_unregister_abort_
      * job() above, which just calls radio_worker_close_detach_stream_job())

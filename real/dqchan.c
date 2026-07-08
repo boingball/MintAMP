@@ -43,6 +43,8 @@
 
 #include "coder.h"
 #include "assembly.h"
+#include <stdio.h>
+#include <string.h>
 
 typedef int ARRAY3[3];	/* for short-block reordering */
 
@@ -231,7 +233,22 @@ int DequantBlock_C_REFERENCE(int *inbuf, int *outbuf, int num, int scale)
 		} else if (x < 16) {
 
 			y = tab16[x];
-			y = (scalei < 0) ? y << -scalei : y >> scalei;
+			/* scalei can legitimately reach -12 (see comment above: "smallest
+			 * input scale = -47, so smallest scalei = -12"), and tab16[]
+			 * entries are large enough that left-shifting by that much can
+			 * overflow into the sign bit. The x>=64 branch below already
+			 * clips its analogous shift<0 case; this branch didn't, so it
+			 * could silently emit a negative "dequantized" magnitude for an
+			 * ordinary small Huffman coefficient. */
+			if (scalei < 0) {
+				shift = -scalei;
+				if (y > (0x7fffffff >> shift))
+					y = 0x7fffffff;
+				else
+					y <<= shift;
+			} else {
+				y >>= scalei;
+			}
 
 		} else {
 
@@ -384,7 +401,18 @@ static int DequantBlock_AmigaM68KAsm(int *inbuf, int *outbuf, int num, int scale
 		} else if (x < 16) {
 
 			y = tab16[x];
-			y = (scaleiReg < 0) ? y << -scaleiReg : y >> scaleiReg;
+			/* See the matching comment in DequantBlock_C_REFERENCE: scaleiReg
+			 * can legitimately reach -12, and this left-shift was missing the
+			 * clip its x>=64-branch sibling already has. */
+			if (scaleiReg < 0) {
+				shift = -scaleiReg;
+				if (y > (0x7fffffff >> shift))
+					y = 0x7fffffff;
+				else
+					y <<= shift;
+			} else {
+				y >>= scaleiReg;
+			}
 
 		} else {
 
@@ -506,10 +534,23 @@ static int DequantBlock(int *inbuf, int *outbuf, int num, int scale)
  *
  * Return:      minimum number of guard bits in dequantized sampleBuf
  *
- * Notes:       dequantized samples in Q(DQ_FRACBITS_OUT) format 
+ * Notes:       dequantized samples in Q(DQ_FRACBITS_OUT) format
+ *
+ *              subbandCapSampleLimit: sample-index cutoff (activeSubbands*18,
+ *              matching MP3FastLowrateEffectiveActiveSubbands()'s convention;
+ *              <= 0 means "no cap active") beyond which the fast-lowrate
+ *              IMDCT subband cap guarantees this content is never read
+ *              downstream (bc->nBlocksLong is capped before HybridTransform's
+ *              loop even starts -- see IMDCTApplySubbandCap()). Long-block
+ *              critical bands entirely beyond this cutoff skip the expensive
+ *              per-coefficient DequantBlock() call; see the loop below for
+ *              how cbMax[0] (-> cbi->cbEndL, which IntensityProcMPEG1/2 use
+ *              as the intensity-stereo start boundary) and gbMask (->
+ *              guard-bit count, this function's return value) still get
+ *              tracked exactly.
  **************************************************************************************/
-int DequantChannel(int *sampleBuf, int *workBuf, int *nonZeroBound, FrameHeader *fh, SideInfoSub *sis, 
-					ScaleFactorInfoSub *sfis, CriticalBandInfo *cbi)
+int DequantChannel(int *sampleBuf, int *workBuf, int *nonZeroBound, FrameHeader *fh, SideInfoSub *sis,
+					ScaleFactorInfoSub *sfis, CriticalBandInfo *cbi, int subbandCapSampleLimit)
 {
 	int i, w, cb;
 	int cbStartL, cbEndL, cbStartS, cbEndS;
@@ -558,19 +599,55 @@ int DequantChannel(int *sampleBuf, int *workBuf, int *nonZeroBound, FrameHeader 
 	/* long blocks */
 	for (cb = 0; cb < cbEndL; cb++) {
 
-		nonZero = 0;
 		nSamps = fh->sfBand->l[cb + 1] - fh->sfBand->l[cb];
 		gainI = 210 - globalGain + sfactMultiplier * (sfis->l[cb] + (sis->preFlag ? (int)preTab[cb] : 0));
 
-		nonZero |= DequantBlock(sampleBuf + i, sampleBuf + i, nSamps, gainI);
+		if (subbandCapSampleLimit > 0 && i >= subbandCapSampleLimit) {
+			/* Entirely beyond the fast-lowrate subband cap: skip the
+			 * expensive per-coefficient dequant, but still scan the raw
+			 * (undequantized) magnitudes so cbMax[0] tracking stays exact --
+			 * nonzero-ness is identical whether checked before or after
+			 * dequantization (DequantBlock never turns a nonzero magnitude
+			 * into a zero output or vice versa). gbMask safety is preserved
+			 * via a single DequantBlock() call on the band's peak raw
+			 * magnitude: y = pow(x,4/3)*scale is monotonic in x for a fixed
+			 * scale, so dequantizing the peak is a guaranteed upper bound on
+			 * every coefficient's true y in this band, which can only ever
+			 * *reduce* (never increase) the reported guard-bit count
+			 * relative to full computation -- the safety direction that
+			 * matters for IMDCT's downstream guard-bit-dependent scaling.
+			 * sampleBuf[i..i+nSamps) is intentionally left un-dequantized;
+			 * it's never read once the subband cap is active. */
+			int k, xAbs, xPeak, yPeakDiscard;
+
+			nonZero = 0;
+			xPeak = 0;
+			for (k = 0; k < nSamps; k++) {
+				xAbs = sampleBuf[i + k] & 0x7fffffff;
+				if (xAbs) {
+					nonZero = 1;
+					if (xAbs > xPeak)
+						xPeak = xAbs;
+				}
+			}
+			if (xPeak) {
+				/* Return value (mask) is what we actually need; outbuf must
+				 * still point somewhere valid, so it writes the same value
+				 * into a local we don't otherwise use. */
+				gbMask |= DequantBlock(&xPeak, &yPeakDiscard, 1, gainI);
+			}
+		} else {
+			nonZero = DequantBlock(sampleBuf + i, sampleBuf + i, nSamps, gainI);
+			gbMask |= nonZero;
+		}
+
 		i += nSamps;
 
 		/* update highest non-zero critical band */
-		if (nonZero) 
+		if (nonZero)
 			cbMax[0] = cb;
-		gbMask |= nonZero;
 
-		if (i >= *nonZeroBound) 
+		if (i >= *nonZeroBound)
 			break;
 	}
 
@@ -634,4 +711,128 @@ int DequantChannel(int *sampleBuf, int *workBuf, int *nonZeroBound, FrameHeader 
 	cbi->cbEndSMax = MAX(cbi->cbEndSMax, cbMax[2]);
 
 	return CLZ(gbMask) - 1;
+}
+
+/*
+ * Verifies the DequantChannel() subbandCapSampleLimit long-block skip
+ * against the uncapped computation, calling the real production function
+ * (not a host stand-in) with both subbandCapSampleLimit=0 (uncapped) and
+ * the two real fast-lowrate active-subbands values (16 -> stride 2, 8 ->
+ * stride 4). Checks, per the same reasoning in DequantChannel()'s comment:
+ *   1. kept-region samples (index < cutoff) bit-identical
+ *   2. cbi->cbEndL bit-identical regardless of whether it falls above or
+ *      below the cutoff (intensity stereo's cbStartL = cbi[1].cbEndL + 1
+ *      boundary depends on this staying exact)
+ *   3. return value (guard-bit count) identical -- proven exact (not just
+ *      safe-but-conservative) once DequantBlock's x<16 branch overflow was
+ *      fixed (see that fix's commit message); this selftest would catch a
+ *      regression of either fix.
+ * Long blocks only (mirrors the optimization's scope); short/mixed blocks
+ * are untouched by subbandCapSampleLimit and not exercised here.
+ */
+int DequantSubbandCapSelftest(void)
+{
+	static const int kActiveSubbandsCases[] = { 16, 8 };
+	unsigned int rngState = 0x5EED1234U;
+	int trial, caseIdx, failures, total;
+
+	failures = 0;
+	total = 0;
+
+	for (trial = 0; trial < 20000; trial++) {
+		int sampleBufRef[MAX_NSAMP], sampleBufCap[MAX_NSAMP];
+		int workBufRef[MAX_REORDER_SAMPS], workBufCap[MAX_REORDER_SAMPS];
+		FrameHeader fh;
+		SideInfoSub sis;
+		ScaleFactorInfoSub sfis;
+		CriticalBandInfo cbiRef, cbiCap;
+		int nonZeroBoundRef, nonZeroBoundCap, nonZeroBoundIn;
+		int gbRef, gbCap;
+		int i, cb, mismatch;
+
+		for (i = 0; i < MAX_NSAMP; i++) {
+			unsigned int r;
+			int mag, roll;
+
+			rngState ^= rngState << 13; rngState ^= rngState >> 17; rngState ^= rngState << 5;
+			r = rngState;
+			roll = (int)(r % 10);
+			if (roll < 4) mag = 0;
+			else if (roll < 7) mag = (int)(r % 4);
+			else if (roll < 9) mag = (int)(r % 60) + 4;
+			else mag = (int)(r % 8000) + 64;
+
+			rngState ^= rngState << 13; rngState ^= rngState >> 17; rngState ^= rngState << 5;
+			sampleBufRef[i] = (int)(((rngState & 1U) << 31) | (unsigned int)mag);
+			sampleBufCap[i] = sampleBufRef[i];
+		}
+		memset(workBufRef, 0, sizeof(workBufRef));
+		memset(workBufCap, 0, sizeof(workBufCap));
+
+		memset(&fh, 0, sizeof(fh));
+		fh.ver = MPEG1;
+		fh.sfBand = &sfBandTable[MPEG1][0];
+
+		memset(&sis, 0, sizeof(sis));
+		sis.blockType = 0;		/* long block only -- matches this optimization's scope */
+		sis.mixedBlock = 0;
+
+		rngState ^= rngState << 13; rngState ^= rngState >> 17; rngState ^= rngState << 5;
+		sis.globalGain = (int)(rngState % 256);
+		rngState ^= rngState << 13; rngState ^= rngState >> 17; rngState ^= rngState << 5;
+		sis.sfactScale = (int)(rngState & 1);
+		rngState ^= rngState << 13; rngState ^= rngState >> 17; rngState ^= rngState << 5;
+		sis.preFlag = (int)(rngState & 1);
+
+		memset(&sfis, 0, sizeof(sfis));
+		for (cb = 0; cb < 22; cb++) {
+			rngState ^= rngState << 13; rngState ^= rngState >> 17; rngState ^= rngState << 5;
+			sfis.l[cb] = (char)(rngState % 32);
+		}
+
+		rngState ^= rngState << 13; rngState ^= rngState >> 17; rngState ^= rngState << 5;
+		nonZeroBoundIn = (rngState % 3 == 0) ? (int)(rngState % 576) : 576;
+		if (nonZeroBoundIn <= 0) nonZeroBoundIn = 576;
+
+		memset(&cbiRef, 0, sizeof(cbiRef));
+		memset(&cbiCap, 0, sizeof(cbiCap));
+		nonZeroBoundRef = nonZeroBoundIn;
+		nonZeroBoundCap = nonZeroBoundIn;
+
+		gbRef = DequantChannel(sampleBufRef, workBufRef, &nonZeroBoundRef, &fh, &sis, &sfis, &cbiRef, 0);
+
+		caseIdx = trial % (int)(sizeof(kActiveSubbandsCases) / sizeof(kActiveSubbandsCases[0]));
+		gbCap = DequantChannel(sampleBufCap, workBufCap, &nonZeroBoundCap, &fh, &sis, &sfis, &cbiCap,
+			kActiveSubbandsCases[caseIdx] * 18);
+		total++;
+
+		mismatch = 0;
+		{
+			int keptLimit = kActiveSubbandsCases[caseIdx] * 18;
+			if (keptLimit > nonZeroBoundRef) keptLimit = nonZeroBoundRef;
+			for (i = 0; i < keptLimit; i++) {
+				if (sampleBufRef[i] != sampleBufCap[i]) {
+					printf("dequant subband cap selftest MISMATCH trial=%d kept sample=%d ref=%d cap=%d activeSubbands=%d\n",
+						trial, i, sampleBufRef[i], sampleBufCap[i], kActiveSubbandsCases[caseIdx]);
+					mismatch = 1;
+					break;
+				}
+			}
+		}
+		if (cbiRef.cbEndL != cbiCap.cbEndL) {
+			printf("dequant subband cap selftest MISMATCH trial=%d cbEndL ref=%d cap=%d activeSubbands=%d\n",
+				trial, cbiRef.cbEndL, cbiCap.cbEndL, kActiveSubbandsCases[caseIdx]);
+			mismatch = 1;
+		}
+		if (gbRef != gbCap) {
+			printf("dequant subband cap selftest MISMATCH trial=%d gb ref=%d cap=%d activeSubbands=%d\n",
+				trial, gbRef, gbCap, kActiveSubbandsCases[caseIdx]);
+			mismatch = 1;
+		}
+		if (mismatch)
+			failures++;
+	}
+
+	printf("dequant subband cap selftest: %d trials, %s\n", total, failures ? "FAIL" : "PASS");
+	return failures ? -1 : 0;
 }

@@ -52,6 +52,25 @@ extern struct Library *AmiSSLMasterBase;
 #include "assembly.h"
 #include "statname.h"
 
+/*
+ * AmigaOS priority for the playback child process (minimp3r.c's radio
+ * player and amiga_mp3gui.c's file player both create theirs with this).
+ * 0 (default/Workbench priority) keeps CPU-bound decoding from starving
+ * the GUI's own event loop -- otherwise Stop becomes hard to press during
+ * heavy decode, the same tradeoff that makes Songplayer feel like it
+ * nearly locks up the GUI while it plays.
+ *
+ * Tried bumping this to 1 to let playback preempt the GUI process on
+ * contention; real-hardware testing showed the app doing "weird things"
+ * with the bump active, so this is back to 0 (the original, tested
+ * behavior) rather than trading a hiccup-reduction guess for a worse,
+ * less predictable failure mode. Revisit only with a specific, reproduced
+ * symptom in hand, not as a blind A/B.
+ */
+#ifndef AMIGA_PLAYBACK_TASK_PRIORITY
+#define AMIGA_PLAYBACK_TASK_PRIORITY 0
+#endif
+
 volatile int gMiniAmp3EmbeddedPlayback;
 static int gMiniAmp3DebugPlayRequested;
 
@@ -245,6 +264,7 @@ int STATNAME(IMDCTThinOutputSelftest)(void);
 int STATNAME(IMDCTSubbandCapSelftest)(void);
 int STATNAME(AntiAliasSubbandCapSelftest)(void);
 int STATNAME(IMDCT36AsmGeneralPathSelftest)(void);
+int STATNAME(DequantSubbandCapSelftest)(void);
 int STATNAME(FDCT32HalfSparse16Selftest)(void);
 void STATNAME(PolyphaseMonoFast_C_REFERENCE)(short *pcm, int *vbuf, const int *coefBase);
 void STATNAME(PolyphaseMonoFast_TEST_ACTIVE)(short *pcm, int *vbuf, const int *coefBase);
@@ -329,6 +349,7 @@ extern const int STATNAME(polyCoef)[264];
 #define AMIGA_IMDCT_SUBBAND_CAP_SELFTEST STATNAME(IMDCTSubbandCapSelftest)
 #define AMIGA_ANTIALIAS_SUBBAND_CAP_SELFTEST STATNAME(AntiAliasSubbandCapSelftest)
 #define AMIGA_IMDCT36_ASM_GENERAL_PATH_SELFTEST STATNAME(IMDCT36AsmGeneralPathSelftest)
+#define AMIGA_DEQUANT_SUBBAND_CAP_SELFTEST STATNAME(DequantSubbandCapSelftest)
 #define AMIGA_FDCT32_HALF_SPARSE16_SELFTEST STATNAME(FDCT32HalfSparse16Selftest)
 #define AMIGA_POLYPHASE_MONO_FAST_C_REFERENCE STATNAME(PolyphaseMonoFast_C_REFERENCE)
 #define AMIGA_POLYPHASE_MONO_FAST_TEST_ACTIVE STATNAME(PolyphaseMonoFast_TEST_ACTIVE)
@@ -418,6 +439,7 @@ typedef struct DecodeOptions {
 	int selftestSubbandCap;
 	int selftestAntialiasSubbandCap;
 	int selftestImdct36AsmGeneralPath;
+	int selftestDequantSubbandCap;
 	int selftestFdct32HalfSparse16;
 	int selftestAntialias;
 	int selftestPolyphase;
@@ -857,6 +879,7 @@ static void PrintUsage(const char *prog)
 	printf("  --selftest-subband-cap verify low-rate mono IMDCT subband cap behavior\n");
 	printf("  --selftest-antialias-subband-cap verify capping antialias butterflies to the subband cap leaves kept bands bit-exact\n");
 	printf("  --selftest-imdct36-asm-general-path verify m68k asm IMDCT36 matches C reference for transition/mixed-window (btCurr/btPrev != 0) blocks, not just the fast long-window path\n");
+	printf("  --selftest-dequant-subband-cap verify capping dequant long-block work to the subband cap leaves kept samples, cbEndL, and guard-bit count bit-exact\n");
 	printf("  --selftest-fdct32half-sparse16 verify prototype sparse-input FDCT32Half (NOT wired into playback) matches the reference when subbands 16-31 are zero\n");
 	printf("  --selftest-antialias compare C reference and optional m68k asm antialias path\n");
 	printf("  --selftest-polyphase compare C fast mono polyphase and optional m68k asm path\n");
@@ -1109,6 +1132,8 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->selftestAntialiasSubbandCap = 1;
 		} else if (!strcmp(argv[i], "--selftest-imdct36-asm-general-path")) {
 			opt->selftestImdct36AsmGeneralPath = 1;
+		} else if (!strcmp(argv[i], "--selftest-dequant-subband-cap")) {
+			opt->selftestDequantSubbandCap = 1;
 		} else if (!strcmp(argv[i], "--selftest-fdct32half-sparse16")) {
 			opt->selftestFdct32HalfSparse16 = 1;
 		} else if (!strcmp(argv[i], "--selftest-antialias")) {
@@ -1246,6 +1271,7 @@ if (opt->selftestMulshift ||
     opt->selftestSubbandCap ||
     opt->selftestAntialiasSubbandCap ||
     opt->selftestImdct36AsmGeneralPath ||
+    opt->selftestDequantSubbandCap ||
     opt->selftestFdct32HalfSparse16 ||
     opt->selftestAntialias ||
     opt->selftestPolyphase ||
@@ -10509,6 +10535,11 @@ int main(int argc, char **argv)
 		AmigaFreeNormalizedArgs(&normalized);
 		return selftestErr;
 	}
+	if (opt.selftestDequantSubbandCap) {
+		int selftestErr = AMIGA_DEQUANT_SUBBAND_CAP_SELFTEST();
+		AmigaFreeNormalizedArgs(&normalized);
+		return selftestErr;
+	}
 	if (opt.selftestFdct32HalfSparse16) {
 		int selftestErr = AMIGA_FDCT32_HALF_SPARSE16_SELFTEST();
 		AmigaFreeNormalizedArgs(&normalized);
@@ -11439,6 +11470,12 @@ int main(int argc, char **argv)
 				}
 				printf("core IMDCT subbands: executed=%lu skipped=%lu\n",
 					coreProfile.imdctSubbandsExecuted, coreProfile.imdctSubbandsSkipped);
+				{
+					unsigned long imdctTotalBlocks = coreProfile.imdct36BlockCount + coreProfile.imdct12x3BlockCount;
+					double shortPct = imdctTotalBlocks ? (100.0 * (double)coreProfile.imdct12x3BlockCount / (double)imdctTotalBlocks) : 0.0;
+					printf("imdct block kind: IMDCT36(long)=%lu IMDCT12x3(short)=%lu short-block%%=%.1f\n",
+						coreProfile.imdct36BlockCount, coreProfile.imdct12x3BlockCount, shortPct);
+				}
 				printf("mono M/S side-channel skip: eligible=%lu huffman=%lu dequant=%lu imdct=%lu synthesis=%lu\n",
 					coreProfile.monoMSSideSkipEligible,
 					coreProfile.monoMSSideHuffmanSkipped,
