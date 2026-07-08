@@ -14,8 +14,7 @@
 # -----
 #   make -C decoders          # build FLAC, AAC and OGG modules
 #   make -C decoders flac     # build only the FLAC module
-#   make -C decoders aac      # build only the AAC module (AAC asm on by default)
-#   make -C decoders aac AACASM=0  # build AAC without m68k asm helpers
+#   make -C decoders aac      # build only the AAC module
 #   make -C decoders ogg      # build only the OGG/Vorbis (Tremor) module
 #   make -C decoders ogg OGGASM=0  # build OGG/Tremor without m68k asm helpers
 
@@ -38,7 +37,6 @@ ifeq ($(CPU_MFLAG),)
 $(error Unknown CPU=$(CPU) -- expected one of: 00 20 30 40 60)
 endif
 
-AACASM ?= 1
 OGGASM ?= 1
 # override: these decoders link with -nostartfiles against a hand-written
 # Exec-backed allocator shim (see ogg_alloc.c/aac_alloc.c/flac_alloc.c) that
@@ -152,14 +150,6 @@ aac: aac.decoder
 AAC_SHIM_DIR := aac-arduino-shim
 
 AAC_CFLAGS := $(CFLAGS) -I. -I$(AAC_SHIM_DIR) -Iaac -DARDUINO
-
-ifeq ($(AACASM),1)
-AAC_CFLAGS += \
-  -DAMIGA_M68K_ASM_AAC_HUFFMAN \
-  -DAMIGA_M68K_ASM_AAC_DEQUANT \
-  -DAMIGA_M68K_ASM_AAC_STEREO \
-  -DAMIGA_M68K_ASM_AAC_IMDCT
-endif
 
 aac_entry.o aac_alloc.o aac_module.o: decoder_module.h
 aac_alloc.o aac_module.o: aac_alloc.h

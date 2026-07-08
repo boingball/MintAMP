@@ -62,7 +62,6 @@ OPTFLAGS ?= -O2 -fomit-frame-pointer
 TARGET ?= amiga_mp3dec
 GUI_TARGET ?= miniamp3
 GUIR_TARGET ?= minimp3r
-AACASM ?= 1
 
 CPPFLAGS_COMMON := -Ipub -Ireal -DAMIGA_M68K
 CFLAGS_COMMON := $(CPU_MFLAG) $(STD) $(OPTFLAGS)
@@ -296,8 +295,7 @@ print-fast030-command:
 decoder-modules:
 	$(MAKE) -C decoders \
 		CC="$(CC)" \
-		CPU="$(CPU)" \
-		AACASM="$(AACASM)"
+		CPU="$(CPU)"
 
 clean:
 	rm -f $(TARGET) $(FAST030_TARGET) $(PROF030_TARGET) $(FAST030_HALFASM_TEST_TARGET) $(GUI_TARGET) $(GUIR_TARGET) $(GUI_HALFASM_TEST_TARGET) \

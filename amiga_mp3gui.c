@@ -196,7 +196,15 @@ static char gSupportedExtPattern[512];
 #define HELIXAMP3_QUALITY_MIN 0
 #define HELIXAMP3_QUALITY_MAX 3
 #define HELIXAMP3_SIGMASK(gui) (1UL << (gui)->win->UserPort->mp_SigBit)
-#define GUI_ENV_PREFIX  "ENVARC:MiniAMP3"
+/* Bare name, no explicit "ENV:"/"ENVARC:" device prefix -- SaveEnvString()
+ * below passes this through SetVar() with GVF_GLOBAL_ONLY (writes ENV:) and
+ * separately with GVF_SAVE_VAR (which internally constructs the persistent
+ * disk path as "ENVARC:" + name). An explicit "ENVARC:" baked into the name
+ * itself made that second call target "ENVARC:ENVARC:MiniAMP3/..." -- a
+ * malformed, double-prefixed path that silently failed to persist, while
+ * the plain ENV: (RAM, cleared on reboot) write still succeeded -- exactly
+ * the "settings don't survive a restart" symptom this fixes. */
+#define GUI_ENV_PREFIX  "MiniAMP3"
 #define GUI_STARTUP_STACK_SIZE 262144UL
 
 #define GUI_WIN_W       560    /* inner width; wide enough for all controls */

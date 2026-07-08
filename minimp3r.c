@@ -65,7 +65,12 @@
 #include "radio_browser_controller.h"
 #include "radio_browser_http.h"
 
-#define MR_ENV_PREFIX "ENVARC:MiniAMP3"
+/* See the matching comment in amiga_mp3gui.c's GUI_ENV_PREFIX: bare name,
+ * no explicit device prefix -- GVF_SAVE_VAR already constructs the
+ * persistent "ENVARC:" + name path itself, and an explicit "ENVARC:" baked
+ * in here doubled up into a malformed path that silently failed to persist
+ * across reboots while the plain ENV: (RAM) write kept working. */
+#define MR_ENV_PREFIX "MiniAMP3"
 #define MR_SETTINGS_VERSION 1
 #define MR_RADIO_FAV_MAX 20
 #if !defined(__AROS__) && !defined(MR_DISABLE_CIA_FILTER)
