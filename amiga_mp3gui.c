@@ -335,6 +335,7 @@ enum {
 	GID_BUFFER,
 	GID_VOLUME,
 	GID_QUALITY,
+	GID_SUBBAND_CAP,
 	GID_PLAY,
 	GID_NEXT,
 	GID_STOP,
@@ -558,6 +559,7 @@ typedef struct HelixAmp3Gui {
 	int   bufferSeconds;
 	int   volumePercent;
 	int   qualityIndex;
+	int   subbandCapIndex;
 	int   decodeThenPlay;
 	int   bench;
 	int   closeRequested;
@@ -714,6 +716,25 @@ static const STRPTR kQualityLabels[] = {
 	(STRPTR)"Best",
 	NULL
 };
+
+/* Manual override for --subband-cap N (see amiga_mp3dec.c's --subband-cap
+ * help text). "Auto" (index 0) means don't pass --subband-cap at all and
+ * let whatever fast-lowrate/ultrafast preset is active pick its own default
+ * (or run uncapped at the full 32 subbands otherwise). The explicit values
+ * below let a track that's still hiccuping at the fastest preset be capped
+ * further by hand -- lower values drop more high-frequency detail but cost
+ * less CPU in IMDCT/antialias/dequant. */
+static const STRPTR kSubbandCapLabels[] = {
+	(STRPTR)"Auto",
+	(STRPTR)"26",
+	(STRPTR)"20",
+	(STRPTR)"16",
+	(STRPTR)"12",
+	(STRPTR)"8",
+	NULL
+};
+static const int kSubbandCapValues[] = { 0, 26, 20, 16, 12, 8 };
+#define SUBBAND_CAP_COUNT (sizeof(kSubbandCapValues) / sizeof(kSubbandCapValues[0]))
 
 static const STRPTR kFakeStereoWidthLabels[] = {
 	(STRPTR)"Very wide",
@@ -939,6 +960,7 @@ static void SaveGuiSettings(HelixAmp3Gui *gui)
 	SaveEnvInt("BufferSeconds", gui->bufferSeconds);
 	SaveEnvInt("Volume", gui->volumePercent);
 	SaveEnvInt("QualityIndex", gui->qualityIndex);
+	SaveEnvInt("SubbandCapIndex", gui->subbandCapIndex);
 	SaveEnvInt("SettingsVersion", HELIXAMP3_SETTINGS_VERSION);
 	SaveEnvInt("DecodeThenPlay", gui->decodeThenPlay);
 	SaveEnvInt("Bench", gui->bench);
@@ -4742,6 +4764,15 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 	if (!gad)
 		return -1;
 
+	gad = MakeGadget(gui, gad, CYCLE_KIND, GID_SUBBAND_CAP,
+		GUI_MARGIN_L + 350, ROW_CYCLES, 130, 16, "Subbands:",
+		GTCY_Labels, (ULONG)kSubbandCapLabels,
+		GTCY_Active, gui->subbandCapIndex,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
 	gui->gadBuffer = gad = MakeSliderGadget(gui, gad, GID_BUFFER,
 		SLIDER_X, ROW_BUFFER, BUFFER_SLIDER_W, "Buffer:",
 		1, 10, gui->bufferSeconds, "%ld sec", 6, 2);
@@ -5049,6 +5080,7 @@ static int GuiOpen(HelixAmp3Gui *gui)
 			gui->qualityIndex = hasQualityIndex ? loadedQuality : 1;
 		}
 	}
+	gui->subbandCapIndex = LoadEnvInt("SubbandCapIndex", 0, 0, SUBBAND_CAP_COUNT - 1);
 	gui->decodeThenPlay = LoadEnvInt("DecodeThenPlay", 0, 0, 1);
 	gui->bench = LoadEnvInt("Bench", 0, 0, 1);
 	gui->artEnabled = LoadEnvInt("Artwork", 1, 0, 1);
@@ -6921,6 +6953,15 @@ static void BuildPlaybackArgs(HelixAmp3Gui *gui, HelixAmp3Args *args)
 	 * checkbox is also on. */
 	if (gui->expReducedTaps && !gui->cd32Ultrafast)
 		AddArg(args, "--exp-reduced-taps");
+	/* Manual subband cap always comes last so it overrides whatever default
+	 * a fast-lowrate/ultrafast preset above already picked (e.g. CD32
+	 * Ultrafast's hardcoded --subband-cap 12) -- --subband-cap N just does
+	 * a plain last-flag-wins atoi() assignment in amiga_mp3dec.c. */
+	if (gui->subbandCapIndex > 0) {
+		AddArg(args, "--subband-cap");
+		sprintf(num, "%d", kSubbandCapValues[gui->subbandCapIndex]);
+		AddArg(args, num);
+	}
 	if (gui->fakeStereo) {
 		AddArg(args, "--fake-stereo");
 		AddArg(args, "--fake-stereo-delay");
@@ -7688,6 +7729,19 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 			gui->qualityIndex > HELIXAMP3_QUALITY_MAX)
 			gui->qualityIndex = 1;
 		SetStatus(gui, "Quality profile updated.");
+		SaveGuiSettings(gui);
+		break;
+	case GID_SUBBAND_CAP:
+		if (gui->playbackActive || gui->playbackDonePending) {
+			GT_SetGadgetAttrs(gad, gui->win, NULL,
+				GTCY_Active, gui->subbandCapIndex, TAG_DONE);
+			SetStatus(gui, "Stop playback before changing subbands.");
+			break;
+		}
+		gui->subbandCapIndex = code;
+		if (gui->subbandCapIndex < 0 || gui->subbandCapIndex >= (int)SUBBAND_CAP_COUNT)
+			gui->subbandCapIndex = 0;
+		SetStatus(gui, "Manual subband cap updated.");
 		SaveGuiSettings(gui);
 		break;
 	case GID_PLAY:

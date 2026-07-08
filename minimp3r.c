@@ -197,6 +197,7 @@ enum {
 	GID_FILE = 1,
 	GID_RATE,
 	GID_QUALITY,
+	GID_SUBBAND_CAP,
 	GID_CHANNEL,
 	GID_VOLUME,
 	GID_BUFFER,
@@ -258,6 +259,21 @@ static const STRPTR kQualityLabels[] = {
 	(STRPTR)"Best",
 	NULL
 };
+
+/* Manual override for --subband-cap N -- see the matching comment in
+ * amiga_mp3gui.c's kSubbandCapLabels. "Auto" (index 0) leaves whatever the
+ * active fast-lowrate/ultrafast preset already picked untouched. */
+static const STRPTR kSubbandCapLabels[] = {
+	(STRPTR)"Auto",
+	(STRPTR)"26",
+	(STRPTR)"20",
+	(STRPTR)"16",
+	(STRPTR)"12",
+	(STRPTR)"8",
+	NULL
+};
+static const int kSubbandCapValues[] = { 0, 26, 20, 16, 12, 8 };
+#define SUBBAND_CAP_COUNT (sizeof(kSubbandCapValues) / sizeof(kSubbandCapValues[0]))
 
 static const STRPTR kChannelLabels[] = {
 	(STRPTR)"Stereo",
@@ -474,6 +490,7 @@ typedef struct MrApp {
 	Object         *fileGad;
 	Object         *rateGad;
 	Object         *qualityGad;
+	Object         *subbandCapGad;
 	Object         *channelGad;
 	Object         *volumeGad;
 	Object         *bufferGad;
@@ -567,6 +584,7 @@ typedef struct MrApp {
 	char  playlist[MR_PLAYLIST_MAX][MR_MAX_PATH];
 	int   rateIndex;
 	int   qualityIndex;
+	int   subbandCapIndex;
 	int   mono;
 	int   fastMem;
 	int   expPoly;
@@ -968,6 +986,7 @@ static void LoadSettings(MrApp *app)
 	app->bufferSeconds = LoadEnvInt("BufferSeconds", app->bufferSeconds, 1, 10);
 	app->volumePercent = LoadEnvInt("Volume", app->volumePercent, 0, 100);
 	app->qualityIndex = LoadEnvInt("QualityIndex", app->qualityIndex, 0, 3);
+	app->subbandCapIndex = LoadEnvInt("SubbandCapIndex", app->subbandCapIndex, 0, SUBBAND_CAP_COUNT - 1);
 	app->decodeThenPlay = LoadEnvInt("DecodeThenPlay", app->decodeThenPlay, 0, 1);
 	app->bench = LoadEnvInt("Bench", app->bench, 0, 1);
 	app->artEnabled = LoadEnvInt("Artwork", app->artEnabled, 0, 1);
@@ -1006,6 +1025,7 @@ static void SaveSettings(MrApp *app)
 	SaveEnvInt("BufferSeconds", ClampInt(app->bufferSeconds, 1, 10));
 	SaveEnvInt("Volume", ClampInt(app->volumePercent, 0, 100));
 	SaveEnvInt("QualityIndex", app->qualityIndex);
+	SaveEnvInt("SubbandCapIndex", app->subbandCapIndex);
 	SaveEnvInt("SettingsVersion", MR_SETTINGS_VERSION);
 	SaveEnvInt("DecodeThenPlay", app->decodeThenPlay);
 	SaveEnvInt("Bench", app->bench);
@@ -1432,6 +1452,15 @@ static void BuildPlaybackArgs(MrApp *app, MrPlayArgs *args)
 	 * checkbox is also on. */
 	if (app->expReducedTaps && !useCd32Ultrafast)
 		AddArg(args, "--exp-reduced-taps");
+	/* Manual subband cap always comes last so it overrides whatever default
+	 * a fast-lowrate/ultrafast preset above already picked (e.g. CD32
+	 * Ultrafast's hardcoded --subband-cap 12) -- --subband-cap N just does
+	 * a plain last-flag-wins atoi() assignment in amiga_mp3dec.c. */
+	if (app->subbandCapIndex > 0) {
+		AddArg(args, "--subband-cap");
+		sprintf(num, "%d", kSubbandCapValues[app->subbandCapIndex]);
+		AddArg(args, num);
+	}
 	if (useFakeStereo) {
 		AddArg(args, "--fake-stereo");
 		AddArg(args, "--fake-stereo-delay");
@@ -2251,6 +2280,7 @@ static void PreCloseLibsAudit(MrApp *app)
 		(app->rbCodecGad ? 1 : 0) + (app->rbCountryCodeGad ? 1 : 0) +
 		(app->rbSchemeGad ? 1 : 0) + (app->rbLimitGad ? 1 : 0) +
 		(app->rbBitrateGad ? 1 : 0) + (app->qualityGad ? 1 : 0) +
+		(app->subbandCapGad ? 1 : 0) +
 		(app->channelGad ? 1 : 0) + (app->rateGad ? 1 : 0);
 	imageObjects = app->artGad ? 1 : 0;
 	hooks = 0;
@@ -2481,6 +2511,13 @@ static int MrOpenWindow(MrApp *app)
 	                CHOOSER_Selected, (ULONG)app->qualityIndex,
 	                TAG_DONE);
 
+	app->subbandCapGad = (Object *)NewObject(CHOOSER_GetClass(), NULL,
+	                GA_ID, GID_SUBBAND_CAP,
+	                GA_RelVerify, TRUE,
+	                CHOOSER_LabelArray, (ULONG)kSubbandCapLabels,
+	                CHOOSER_Selected, (ULONG)app->subbandCapIndex,
+	                TAG_DONE);
+
 	app->channelGad = (Object *)NewObject(CHOOSER_GetClass(), NULL,
 	                GA_ID, GID_CHANNEL,
 	                GA_RelVerify, TRUE,
@@ -2621,7 +2658,8 @@ static int MrOpenWindow(MrApp *app)
 	{ int i; for (i = 0; i < 5; i++) app->starGad[i] = (Object *)NewObject(BUTTON_GetClass(), NULL, GA_ID, GID_STAR1 + i, GA_RelVerify, TRUE, GA_Text, (ULONG)"-", TAG_DONE); }
 
 	if (!CheckGadget(app->fileGad, "file") || !CheckGadget(app->rateGad, "rate") ||
-		!CheckGadget(app->qualityGad, "quality") || !CheckGadget(app->channelGad, "channel") ||
+		!CheckGadget(app->qualityGad, "quality") || !CheckGadget(app->subbandCapGad, "subband cap") ||
+		!CheckGadget(app->channelGad, "channel") ||
 		!CheckGadget(app->volumeGad, "volume") || !CheckGadget(app->bufferGad, "buffer") ||
 		!CheckGadget(app->fastMemGad, "fast memory") || !CheckGadget(app->fastLowGad, "fast low-rate") ||
 		!CheckGadget(app->expPolyGad, "experimental polyphase") || !CheckGadget(app->expReducedTapsGad, "reduced taps") ||
@@ -2709,6 +2747,7 @@ static int MrOpenWindow(MrApp *app)
 				LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
 				ADD_LABELLED(app->rateGad, "Rate"),
 				ADD_LABELLED(app->qualityGad, "Quality"),
+				ADD_LABELLED(app->subbandCapGad, "Subbands"),
 				ADD_LABELLED(app->channelGad, "Mono/Stereo"),
 				TAG_DONE),
 			CHILD_WeightedHeight, 0,
@@ -2843,7 +2882,7 @@ static void MrCloseWindow(MrApp *app)
 		DisposeObject(app->winObj);	/* disposes the whole gadget tree too */
 		app->winObj = NULL;
 		app->win = NULL;
-		app->fileGad = app->rateGad = app->qualityGad = app->channelGad = NULL;
+		app->fileGad = app->rateGad = app->qualityGad = app->subbandCapGad = app->channelGad = NULL;
 		app->volumeGad = app->bufferGad = app->fastMemGad = app->fastLowGad = NULL;
 		app->expPolyGad = app->expReducedTapsGad = NULL;
 		app->speedGad = app->widthGad = app->delayGad = app->playGad = NULL;
@@ -5741,6 +5780,10 @@ static void SyncFromGadgets(MrApp *app)
 	}
 	if (app->qualityGad && GetAttr(CHOOSER_Selected, app->qualityGad, &v))
 		app->qualityIndex = (int)v;
+	if (app->subbandCapGad && GetAttr(CHOOSER_Selected, app->subbandCapGad, &v)) {
+		if ((int)v >= 0 && (int)v < (int)SUBBAND_CAP_COUNT)
+			app->subbandCapIndex = (int)v;
+	}
 	if (app->channelGad && GetAttr(CHOOSER_Selected, app->channelGad, &v))
 		app->mono = ((int)v == 1);
 	if (app->volumeGad && GetAttr(SLIDER_Level, app->volumeGad, &v)) {
