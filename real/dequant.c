@@ -117,16 +117,25 @@ int Dequantize(MP3DecInfo *mp3DecInfo, int gr)
 	cbi = di->cbi;
 	mOut[0] = mOut[1] = 0;
 
-	/* Same activeSubbands*18 sample-index convention already used by
-	 * AntiAlias's and IMDCT's subband caps (real/imdct.c) -- content beyond
-	 * this index is guaranteed never read once fast-lowrate's subband cap is
-	 * active (IMDCTApplySubbandCap() caps bc->nBlocksLong before
-	 * HybridTransform's loop even starts), so DequantChannel() can skip the
-	 * expensive per-coefficient work there too. 0 means "no cap active",
-	 * matching DequantChannel()'s subbandCapSampleLimit contract. */
+	/* The IMDCT subband cap later discards activeSubbands and above, but
+	 * AntiAlias() must still run the boundary between the final kept subband
+	 * and the first discarded one.  That boundary reads the first eight samples
+	 * of the first discarded subband, so DequantChannel() must keep one guard
+	 * subband beyond the final IMDCT/subband cap.  Without that guard band the
+	 * kept edge subband is antialiased against stale/zero data, which is exactly
+	 * the kind of hard scratchy artefact heard at 22050 with caps around 16+.
+	 * 0 means "no cap active", matching DequantChannel()'s contract.
+	 */
 	{
 		int activeSubbands = MP3FastLowrateEffectiveActiveSubbands(mp3DecInfo);
-		dequantSubbandCapSampleLimit = (activeSubbands < NBANDS) ? activeSubbands * 18 : 0;
+		if (activeSubbands < NBANDS) {
+			int dequantSubbands = activeSubbands + 1;
+			if (dequantSubbands > NBANDS)
+				dequantSubbands = NBANDS;
+			dequantSubbandCapSampleLimit = dequantSubbands * 18;
+		} else {
+			dequantSubbandCapSampleLimit = 0;
+		}
 	}
 
 	/* Pure mid/side joint stereo is special for mono output: after MPEG
