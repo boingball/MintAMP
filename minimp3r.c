@@ -686,6 +686,7 @@ static void RadioSetStatus(MrApp *app, const char *text);
 static int SetStatusIfChanged(MrApp *app, const char *text);
 static void SetStatus(MrApp *app, const char *text);
 static void RadioDoProbeAndPlay(MrApp *app);
+static void RadioProbeUrlAndStart(MrApp *app, const char *url, const char *stationName);
 static void RadioSelectResult(MrApp *app, ULONG eventSelected);
 
 static void SyncMenuChecks(MrApp *app);
@@ -4668,6 +4669,102 @@ static void RadioSetStatus(MrApp *app, const char *text)
 			STRINGA_TextVal, (ULONG)app->lastRadioError, TAG_DONE);
 }
 
+static void RadioProbeUrlAndStart(MrApp *app, const char *url, const char *stationName)
+{
+	static unsigned char peek[512];
+	RbStreamInfo info;
+	int peekLen = 0;
+	int rc;
+	char msg[256];
+	const char *name;
+	const char *err;
+
+	if (!app) return;
+	if (!url || !url[0]) {
+		RadioSetStatus(app, "No stream URL to play.");
+		SetStatus(app, "No stream URL to play.");
+		return;
+	}
+	if (!MrIsRadioInput(url)) {
+		RadioSetStatus(app, "Stream URL must start with HTTP or HTTPS.");
+		SetStatus(app, "Stream URL must start with HTTP or HTTPS.");
+		return;
+	}
+	if (!app->hasHttps && !strncmp(url, "https://", 8)) {
+		RadioSetStatus(app, "HTTPS not supported in this build");
+		SetStatus(app, "HTTPS not supported in this build");
+		return;
+	}
+	if (rb_probe_url_looks_hls(url)) {
+		RadioSetStatus(app, "HLS stream not supported");
+		SetStatus(app, "HLS stream not supported");
+		return;
+	}
+	if (Radio_PlaybackOwnsNetwork()) {
+		RADIO_DBG(printf("radio-ui: direct/favourite probe skipped while radio playback child owns networking url=\"%s\"\n", url);)
+		RadioSetStatus(app, "Radio playback owns networking; stop before probing another stream.");
+		SetStatus(app, "Radio playback owns networking; stop before probing another stream.");
+		return;
+	}
+	if (Radio_IsMemoryPoisoned()) {
+		RadioSetStatus(app, "Memory corruption detected. Save log and reboot before using MiniAMP3 again.");
+		SetStatus(app, "Memory corruption detected. Save log and reboot before using MiniAMP3 again.");
+		RADIO_DBG(printf("radio-memory: refusing direct/favourite probe after MiniMem/ring corruption url=\"%s\"\n", url);)
+		return;
+	}
+
+	app->haveRadioHostAddr = 0;
+	app->radioHostAddrBe = 0;
+	memset(&info, 0, sizeof(info));
+	RadioSetStatus(app, "Connecting...");
+	SetStatus(app, "Connecting...");
+	Radio_LogTestModeSummary();
+	RADIO_DBG(printf("radio-ui: direct/favourite probe start url=\"%s\" name=\"%s\"\n", url, stationName ? stationName : "");)
+	rc = rb_probe_stream_url(url, &info, peek, (int)sizeof(peek), &peekLen);
+	RADIO_DBG(printf("radio-ui: direct/favourite probe result rc=%d final=\"%s\" content=\"%s\" codec=%d redirects=%d\n",
+		rc, info.final_url, info.content_type, (int)info.codec, info.redirect_count);)
+	if (rc < 0) {
+		err = rb_probe_error_text(rc);
+		RadioSetStatus(app, err);
+		SetStatus(app, err);
+		return;
+	}
+	if (info.codec != RB_STREAM_CODEC_MP3 && info.codec != RB_STREAM_CODEC_AAC &&
+		info.codec != RB_STREAM_CODEC_OGG) {
+		sprintf(msg, "Unsupported stream codec: %s (%.48s)", ProbeCodecName(info.codec), info.content_type);
+		RadioSetStatus(app, msg);
+		SetStatus(app, msg);
+		return;
+	}
+	if (!info.final_url[0]) {
+		RadioSetStatus(app, "Stream probe did not return a playable URL.");
+		SetStatus(app, "Stream probe did not return a playable URL.");
+		return;
+	}
+#if defined(AMIGA_M68K)
+	if (app->lastCompletedWasHttps && !strncmp(info.final_url, "https://", 8) &&
+		!app->playbackActive && !app->playbackDonePending && !PlaybackProcessStillExists()) {
+		RADIO_DBG(printf("radio-done: Delay(4) between fully completed HTTPS sessions before starting next HTTPS URL\n");)
+		RadioSetStatus(app, "Waiting briefly before next HTTPS stream...");
+		Delay(4);
+	}
+#endif
+	SafeCopy(app->inputName, sizeof(app->inputName), info.final_url);
+	app->haveRadioHostAddr = info.have_host_addr;
+	app->radioHostAddrBe = info.host_addr_be;
+	app->currentRadioFavicon[0] = '\0';
+	name = (stationName && stationName[0]) ? stationName : "Internet Radio";
+	SafeCopy(app->currentRadioStationName, sizeof(app->currentRadioStationName), name);
+	UpdateFileGadget(app);
+	RefreshFileInfoAndTags(app);
+	sprintf(msg, "Buffering - %.140s", name);
+	RadioSetStatus(app, msg);
+	SetStatus(app, msg);
+	RADIO_DBG(printf("radio-ui: direct/favourite stream start url=\"%s\" hostCached=%d\n", info.final_url, info.have_host_addr);)
+	StartPlayback(app);
+	Radio_CheckMiniMem("after direct/favourite station switch");
+}
+
 
 static int RadioStationMatchesScheme(MrApp *app, const RadioBrowserStation *st)
 {
@@ -5015,17 +5112,10 @@ static void RadioDoProbeAndPlay(MrApp *app)
 			RadioSetStatus(app, "Select a favourite first.");
 			return;
 		}
-		SafeCopy(app->inputName, sizeof(app->inputName), app->rbFavouriteUrls[app->rbSelectedFavourite]);
-		app->currentRadioFavicon[0] = '\0';
-		app->haveRadioHostAddr = 0;
-		app->radioHostAddrBe = 0;
-		UpdateFileGadget(app);
-		RefreshFileInfoAndTags(app);
-		SafeCopy(app->currentRadioStationName, sizeof(app->currentRadioStationName), app->rbFavouriteNames[app->rbSelectedFavourite]);
-		sprintf(msg, "Buffering - %.120s", app->rbFavouriteNames[app->rbSelectedFavourite]);
-		RadioSetStatus(app, msg);
-		StartPlayback(app);
-		Radio_CheckMiniMem("after station switch");
+		RADIO_DBG(printf("radio-ui: favourite probe requested url=\"%s\" name=\"%s\"\n",
+			app->rbFavouriteUrls[app->rbSelectedFavourite], app->rbFavouriteNames[app->rbSelectedFavourite]);)
+		RadioProbeUrlAndStart(app, app->rbFavouriteUrls[app->rbSelectedFavourite],
+			app->rbFavouriteNames[app->rbSelectedFavourite]);
 		return;
 	}
 	if (app->rbController.selected_index < 0) {
@@ -5979,7 +6069,10 @@ static int MrMainReal(int argc, char **argv)
 						break;
 					case GID_PLAY:
 						SyncFromGadgets(&app);
-						StartPlayback(&app);
+						if (MrIsRadioInput(app.inputName))
+							RadioProbeUrlAndStart(&app, app.inputName, NULL);
+						else
+							StartPlayback(&app);
 						break;
 					case GID_NEXT:
 						SyncFromGadgets(&app);
