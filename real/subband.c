@@ -47,15 +47,13 @@
 #include "assembly.h"
 
 /*
- * Diagnostic-only precondition check for FDCT32HalfSparse16()'s
- * documented contract (buf[16..31] == 0). Disabled unless
+ * Diagnostic-only counter for FDCT32HalfSparse16()'s documented contract
+ * (buf[16..31] == 0). Disabled unless
  * MP3EnableFdct32HalfSparse16PreconditionCheck(1) is called (wired to
- * --debug-subband-precondition); the check itself is a handful of int
- * compares gated behind a runtime flag, so it costs nothing when off and
- * is safe to leave compiled in. Exists to distinguish "this real decode
- * never actually satisfies the precondition FDCT32HalfSparse16 assumes"
- * from "the precondition holds and something else is wrong" without
- * needing new hardware access to investigate a live bug report.
+ * --debug-subband-precondition). The stride-2 sparse fast path still performs
+ * the high-half scan when compiled with AMIGA_FAST_SUBBAND_CAP so it can fall
+ * back safely when a manual subband cap keeps bands 16+ alive; the debug flag
+ * only controls whether those scans/violations are counted for diagnostics.
  */
 static int gFdct32HalfSparse16CheckEnabled;
 volatile unsigned long gFdct32HalfSparse16PreconditionViolations;
@@ -74,24 +72,26 @@ void FDCT32FastLowrate(int *x, int *d, int offset, int oddBlock, int gb,
 #if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE)
 	if (stride == 2) {
 #if defined(AMIGA_FAST_SUBBAND_CAP)
-		/* Whenever this macro is defined, IMDCTApplySubbandCap() in
-		 * real/imdct.c unconditionally caps stride-2 decode to <= 16
-		 * active subbands and zeroes the rest before this is ever
-		 * reached (see MP3FastLowrateEffectiveActiveSubbands()) --
-		 * exactly FDCT32HalfSparse16()'s precondition. Without this
-		 * macro that guarantee doesn't hold, so fall back to the
-		 * general FDCT32Half() below. */
-		if (gFdct32HalfSparse16CheckEnabled) {
+		{
 			int k;
-			gFdct32HalfSparse16PreconditionChecks++;
+			int sparse16Ok;
+
+			sparse16Ok = 1;
+			if (gFdct32HalfSparse16CheckEnabled)
+				gFdct32HalfSparse16PreconditionChecks++;
 			for (k = 16; k < 32; k++) {
 				if (x[k] != 0) {
-					gFdct32HalfSparse16PreconditionViolations++;
+					sparse16Ok = 0;
+					if (gFdct32HalfSparse16CheckEnabled)
+						gFdct32HalfSparse16PreconditionViolations++;
 					break;
 				}
 			}
+			if (sparse16Ok)
+				FDCT32HalfSparse16(x, d, offset, oddBlock, gb);
+			else
+				FDCT32Half(x, d, offset, oddBlock, gb);
 		}
-		FDCT32HalfSparse16(x, d, offset, oddBlock, gb);
 #else
 		FDCT32Half(x, d, offset, oddBlock, gb);
 #endif
