@@ -50,10 +50,10 @@
  * Diagnostic-only counter for FDCT32HalfSparse16()'s documented contract
  * (buf[16..31] == 0). Disabled unless
  * MP3EnableFdct32HalfSparse16PreconditionCheck(1) is called (wired to
- * --debug-subband-precondition). The stride-2 decode path is currently forced
- * back through full FDCT32() for safety while the half-DCT/ASM regression is
- * isolated; the counters remain available for debug builds that re-enable the
- * sparse stride-2 path later.
+ * --debug-subband-precondition). The stride-2 sparse fast path still performs
+ * the high-half scan when compiled with AMIGA_FAST_SUBBAND_CAP so it can fall
+ * back safely when a manual subband cap keeps bands 16+ alive; the debug flag
+ * only controls whether those scans/violations are counted for diagnostics.
  */
 static int gFdct32HalfSparse16CheckEnabled;
 volatile unsigned long gFdct32HalfSparse16PreconditionViolations;
@@ -71,12 +71,30 @@ void FDCT32FastLowrate(int *x, int *d, int offset, int oddBlock, int gb,
 {
 #if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE)
 	if (stride == 2) {
-		/* Rescue path: 22050/stride-2 was producing hard alias/noise in both
-		 * mono and stereo.  Bypass both FDCT32Half() and FDCT32HalfSparse16()
-		 * so this rate uses the same proven full DCT scatter as master while we
-		 * keep the low-rate polyphase decimator separately testable.
-		 */
-		FDCT32(x, d, offset, oddBlock, gb);
+#if defined(AMIGA_FAST_SUBBAND_CAP)
+		{
+			int k;
+			int sparse16Ok;
+
+			sparse16Ok = 1;
+			if (gFdct32HalfSparse16CheckEnabled)
+				gFdct32HalfSparse16PreconditionChecks++;
+			for (k = 16; k < 32; k++) {
+				if (x[k] != 0) {
+					sparse16Ok = 0;
+					if (gFdct32HalfSparse16CheckEnabled)
+						gFdct32HalfSparse16PreconditionViolations++;
+					break;
+				}
+			}
+			if (sparse16Ok)
+				FDCT32HalfSparse16(x, d, offset, oddBlock, gb);
+			else
+				FDCT32Half(x, d, offset, oddBlock, gb);
+		}
+#else
+		FDCT32Half(x, d, offset, oddBlock, gb);
+#endif
 		return;
 	}
 	if (stride == 4 && MP3ExperimentalFDCT32QuarterEnabled()) {
@@ -87,53 +105,6 @@ void FDCT32FastLowrate(int *x, int *d, int offset, int oddBlock, int gb,
 	(void)stride;
 #endif
 	FDCT32(x, d, offset, oddBlock, gb);
-}
-
-static int PolyphaseMonoStride2Safe(short *pcm, int *vbuf, const int *coefBase,
-	int *phase)
-{
-	short full[NBANDS];
-	int sample;
-	int produced;
-	int localPhase;
-
-	localPhase = *phase;
-	PolyphaseMono(full, vbuf, coefBase);
-	produced = 0;
-	for (sample = 0; sample < NBANDS; sample++) {
-		if (localPhase == 0)
-			pcm[produced++] = full[sample];
-		localPhase++;
-		if (localPhase >= 2)
-			localPhase = 0;
-	}
-	*phase = localPhase;
-	return produced;
-}
-
-static int PolyphaseStereoStride2Safe(short *pcm, int *vbuf, const int *coefBase,
-	int *phase)
-{
-	short full[NBANDS * 2];
-	int sample;
-	int produced;
-	int localPhase;
-
-	localPhase = *phase;
-	PolyphaseStereo(full, vbuf, coefBase);
-	produced = 0;
-	for (sample = 0; sample < NBANDS; sample++) {
-		if (localPhase == 0) {
-			pcm[produced * 2] = full[sample * 2];
-			pcm[produced * 2 + 1] = full[sample * 2 + 1];
-			produced++;
-		}
-		localPhase++;
-		if (localPhase >= 2)
-			localPhase = 0;
-	}
-	*phase = localPhase;
-	return produced * 2;
 }
 
 /**************************************************************************************
@@ -193,12 +164,8 @@ int Subband(MP3DecInfo *mp3DecInfo, short *pcmBuf)
 				AMIGA_PROFILE_STOP(MP3_DECODE_CORE_PROFILE_SUBBAND_DCT32, amigaProfileStart);
 				AMIGA_PROFILE_START(amigaProfileStart);
 				vbase = vbuf + vindex;
-				if (stride == 2)
-					produced = PolyphaseStereoStride2Safe(pcmBuf, vbase, polyCoef,
-						&phase);
-				else
-					produced = PolyphaseStereoFastLowrate(pcmBuf, vbase, polyCoef,
-						stride, &phase);
+				produced = PolyphaseStereoFastLowrate(pcmBuf, vbase, polyCoef,
+					stride, &phase);
 				lowrateOutputSamps += produced;
 				pcmBuf += produced;
 				AMIGA_PROFILE_STOP(MP3_DECODE_CORE_PROFILE_POLYPHASE, amigaProfileStart);
@@ -211,12 +178,8 @@ int Subband(MP3DecInfo *mp3DecInfo, short *pcmBuf)
 				AMIGA_PROFILE_STOP(MP3_DECODE_CORE_PROFILE_SUBBAND_DCT32, amigaProfileStart);
 				AMIGA_PROFILE_START(amigaProfileStart);
 				vbase = vbuf + vindex + VBUF_LENGTH;
-				if (stride == 2)
-					produced = PolyphaseStereoStride2Safe(pcmBuf, vbase, polyCoef,
-						&phase);
-				else
-					produced = PolyphaseStereoFastLowrate(pcmBuf, vbase, polyCoef,
-						stride, &phase);
+				produced = PolyphaseStereoFastLowrate(pcmBuf, vbase, polyCoef,
+					stride, &phase);
 				lowrateOutputSamps += produced;
 				pcmBuf += produced;
 				AMIGA_PROFILE_STOP(MP3_DECODE_CORE_PROFILE_POLYPHASE, amigaProfileStart);
@@ -268,12 +231,8 @@ int Subband(MP3DecInfo *mp3DecInfo, short *pcmBuf)
 				AMIGA_PROFILE_STOP(MP3_DECODE_CORE_PROFILE_SUBBAND_DCT32, amigaProfileStart);
 				AMIGA_PROFILE_START(amigaProfileStart);
 				vbase = vbuf + vindex;
-				if (stride == 2)
-					produced = PolyphaseMonoStride2Safe(pcmBuf, vbase, polyCoef,
-						&phase);
-				else
-					produced = PolyphaseMonoFastLowrate(pcmBuf, vbase, polyCoef,
-						stride, &phase);
+				produced = PolyphaseMonoFastLowrate(pcmBuf, vbase, polyCoef,
+					stride, &phase);
 				lowrateOutputSamps += produced;
 				pcmBuf += produced;
 				AMIGA_PROFILE_STOP(MP3_DECODE_CORE_PROFILE_POLYPHASE, amigaProfileStart);
@@ -284,12 +243,8 @@ int Subband(MP3DecInfo *mp3DecInfo, short *pcmBuf)
 				AMIGA_PROFILE_STOP(MP3_DECODE_CORE_PROFILE_SUBBAND_DCT32, amigaProfileStart);
 				AMIGA_PROFILE_START(amigaProfileStart);
 				vbase = vbuf + vindex + VBUF_LENGTH;
-				if (stride == 2)
-					produced = PolyphaseMonoStride2Safe(pcmBuf, vbase, polyCoef,
-						&phase);
-				else
-					produced = PolyphaseMonoFastLowrate(pcmBuf, vbase, polyCoef,
-						stride, &phase);
+				produced = PolyphaseMonoFastLowrate(pcmBuf, vbase, polyCoef,
+					stride, &phase);
 				lowrateOutputSamps += produced;
 				pcmBuf += produced;
 				AMIGA_PROFILE_STOP(MP3_DECODE_CORE_PROFILE_POLYPHASE, amigaProfileStart);
