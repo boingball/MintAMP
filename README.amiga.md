@@ -754,6 +754,21 @@ decoded frame count and output sample count.
    amiga_mp3dec.midsideasm --bench --decode-only --checksum stereo-joint.mp3
    ```
 
+   `real/dequant.c`'s `CollapseStereoToMono()` (plain LR-encoded stereo
+   source decoding to mono output -- e.g. 22050 Mono Ultrafast on a
+   non-joint-stereo 128 kbps file) shares this same `AMIGA_M68K_ASM_MIDSIDE`
+   flag for its own near-identical asm loop, since pure mid/side joint-stereo
+   sources skip this function entirely via the `monoMSSideSkipGranule` fast
+   path in `mp3dec.c` (mid = (L+R)/2 is already the coded mid channel, so
+   there's nothing to collapse) -- only non-MS-eligible stereo sources
+   (plain "Stereo" mode, or joint-stereo with intensity) reach
+   `CollapseStereoToMono()` at all. Verify with
+   `--selftest-collapse-stereo-mono`, which cross-checks the asm against a
+   C reference across edge-case magnitude patterns (including `INT_MIN`,
+   which the branchless `FASTABS` trick wraps back to `INT_MIN` -- verified
+   the asm reproduces that exact quirk rather than diverging on it) before
+   trusting it on a real file.
+
 
 8. `AMIGA_M68K_ASM_HUFFMAN` is an opt-in experimental Huffman-pair refill
    shortcut for 68020+ GNU m68k builds, tuned for 68030.  It deliberately does

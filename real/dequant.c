@@ -42,12 +42,25 @@
  *               coefficient reordering
  **************************************************************************************/
 
+#include <stdio.h>
 #include "coder.h"
 #include "assembly.h"
 #include "amiga_profile_decode.h"
 
 
-static void CollapseStereoToMono(int x[MAX_NCHAN][MAX_NSAMP], int nSamps,
+#if defined(AMIGA_M68K_ASM_MIDSIDE) && defined(__GNUC__) && \
+	(defined(__mc68020__) || defined(__mc68030__) || defined(__mc68040__) || \
+	 defined(__mc68060__) || defined(mc68020))
+#define COLLAPSE_STEREO_TO_MONO_HAS_AMIGA_M68K_ASM 1
+#else
+#define COLLAPSE_STEREO_TO_MONO_HAS_AMIGA_M68K_ASM 0
+#endif
+
+/* Always-available reference implementation: also the only implementation
+ * on non-m68k/non-GCC builds. Not called directly on the hot path when the
+ * asm below is active -- see CollapseStereoToMono() -- but kept callable so
+ * CollapseStereoToMonoSelftest() can cross-check the asm output against it. */
+static void CollapseStereoToMono_C_REFERENCE(int x[MAX_NCHAN][MAX_NSAMP], int nSamps,
 	int *nonZeroBound, int *gb)
 {
 	int i;
@@ -62,6 +75,133 @@ static void CollapseStereoToMono(int x[MAX_NCHAN][MAX_NSAMP], int nSamps,
 	}
 	nonZeroBound[0] = nSamps;
 	gb[0] = CLZ(mOut) - 1;
+}
+
+static void CollapseStereoToMono(int x[MAX_NCHAN][MAX_NSAMP], int nSamps,
+	int *nonZeroBound, int *gb)
+{
+#if COLLAPSE_STEREO_TO_MONO_HAS_AMIGA_M68K_ASM
+	int *left;
+	int *right;
+	int *outp;
+	int mOut;
+
+	mOut = 0;
+	if (nSamps > 0) {
+		left = x[0];
+		right = x[1];
+		outp = &mOut;
+		/* Same shape as MidSideProc's hot loop below (this file's other
+		 * per-sample stereo reconstruction pass): d6 holds the
+		 * register-form shift count (m68k immediate shifts can't encode
+		 * 31), and the copy/asr/eor/sub sequence implements FASTABS
+		 * without a data-dependent branch. mixed = (left+right)>>1 uses
+		 * an immediate #1 shift, which m68k *can* encode directly.
+		 * nSamps is at most 576, so dbf's 16-bit counter is sufficient. */
+		__asm__ volatile (
+			"move.l %3,%%d7\n\t"
+			"subq.l #1,%%d7\n\t"
+			"moveq #31,%%d6\n\t"
+			"moveq #0,%%d4\n"
+			"1:\n\t"
+			"move.l (%1)+,%%d0\n\t"
+			"add.l (%0),%%d0\n\t"
+			"asr.l #1,%%d0\n\t"
+			"move.l %%d0,(%0)+\n\t"
+			"move.l %%d0,%%d1\n\t"
+			"asr.l %%d6,%%d1\n\t"
+			"eor.l %%d1,%%d0\n\t"
+			"sub.l %%d1,%%d0\n\t"
+			"or.l %%d0,%%d4\n\t"
+			"dbf %%d7,1b\n\t"
+			"move.l %%d4,(%2)"
+			: "+&a" (left), "+&a" (right), "+&a" (outp)
+			: "a" (nSamps)
+			: "d0", "d1", "d4", "d6", "d7", "cc", "memory");
+	}
+	nonZeroBound[0] = nSamps;
+	gb[0] = CLZ(mOut) - 1;
+#else
+	CollapseStereoToMono_C_REFERENCE(x, nSamps, nonZeroBound, gb);
+#endif
+}
+
+/*
+ * Cross-checks CollapseStereoToMono() (the production dispatch, which runs
+ * the m68k asm above when compiled in) against CollapseStereoToMono_C_REFERENCE()
+ * across randomized nSamps/magnitude combinations, including edge cases
+ * (nSamps == 0, nSamps == MAX_NSAMP, all-zero input, alternating sign/magnitude
+ * patterns designed to exercise FASTABS's branchless sign handling for both
+ * positive and negative mixed values). Checks the collapsed x[0] samples,
+ * nonZeroBound[0], and gb[0] (the guard-bit count that FDCT32FastLowrate()
+ * later uses to decide how much to scale down before the transform --
+ * reporting this wrong in either direction risks the exact class of
+ * corruption the antialias guard-band fix elsewhere in this file addressed,
+ * so it's checked bit-exactly here, not just "close enough").
+ */
+int CollapseStereoToMonoSelftest(void)
+{
+	static int xRef[MAX_NCHAN][MAX_NSAMP];
+	static int xAsm[MAX_NCHAN][MAX_NSAMP];
+	unsigned int rngState = 0xC0117A5EU;
+	int trial, failures, total;
+
+	failures = 0;
+	total = 0;
+
+	for (trial = 0; trial < 5000; trial++) {
+		int nSamps, i, nonZeroBoundRef, nonZeroBoundAsm, gbRef, gbAsm;
+		int pattern = trial % 6;
+
+		nSamps = (int)(rngState % (MAX_NSAMP + 1));
+		rngState ^= rngState << 13; rngState ^= rngState >> 17; rngState ^= rngState << 5;
+		if (trial == 0) nSamps = 0;
+		if (trial == 1) nSamps = 1;
+		if (trial == 2) nSamps = MAX_NSAMP;
+
+		for (i = 0; i < MAX_NSAMP; i++) {
+			int l, r;
+
+			rngState ^= rngState << 13; rngState ^= rngState >> 17; rngState ^= rngState << 5;
+			switch (pattern) {
+			case 0: l = 0; r = 0; break;
+			case 1: l = 0x3fffffff; r = 0x3fffffff; break;
+			case 2: l = (int)0xc0000000U; r = (int)0xc0000000U; break;
+			case 3: l = 0x3fffffff; r = (int)0xc0000000U; break;
+			case 4: l = (int)(rngState & 0x7fffffffU); r = -(int)(rngState & 0x7fffffffU); break;
+			default: l = (int)rngState >> 4; r = (int)(rngState ^ 0x9e3779b9U) >> 4; break;
+			}
+			xRef[0][i] = l; xRef[1][i] = r;
+			xAsm[0][i] = l; xAsm[1][i] = r;
+		}
+
+		nonZeroBoundRef = nonZeroBoundAsm = -1;
+		gbRef = gbAsm = -1;
+		CollapseStereoToMono_C_REFERENCE(xRef, nSamps, &nonZeroBoundRef, &gbRef);
+		CollapseStereoToMono(xAsm, nSamps, &nonZeroBoundAsm, &gbAsm);
+		total++;
+
+		if (nonZeroBoundRef != nonZeroBoundAsm || gbRef != gbAsm) {
+			printf("CollapseStereoToMono mismatch trial=%d nSamps=%d pattern=%d: "
+				"nonZeroBound ref=%d asm=%d gb ref=%d asm=%d\n",
+				trial, nSamps, pattern, nonZeroBoundRef, nonZeroBoundAsm, gbRef, gbAsm);
+			failures++;
+			continue;
+		}
+		for (i = 0; i < nSamps; i++) {
+			if (xRef[0][i] != xAsm[0][i]) {
+				printf("CollapseStereoToMono mismatch trial=%d nSamps=%d pattern=%d i=%d: "
+					"ref=%d asm=%d\n", trial, nSamps, pattern, i, xRef[0][i], xAsm[0][i]);
+				failures++;
+				break;
+			}
+		}
+	}
+
+	printf("CollapseStereoToMono selftest: %d trials, %s (asm compiled in: %s)\n",
+		total, failures ? "FAIL" : "PASS",
+		COLLAPSE_STEREO_TO_MONO_HAS_AMIGA_M68K_ASM ? "yes" : "no");
+	return failures ? -1 : 0;
 }
 
 

@@ -265,6 +265,7 @@ int STATNAME(IMDCTSubbandCapSelftest)(void);
 int STATNAME(AntiAliasSubbandCapSelftest)(void);
 int STATNAME(IMDCT36AsmGeneralPathSelftest)(void);
 int STATNAME(DequantSubbandCapSelftest)(void);
+int STATNAME(CollapseStereoToMonoSelftest)(void);
 int STATNAME(FDCT32HalfSparse16Selftest)(void);
 void STATNAME(PolyphaseMonoFast_C_REFERENCE)(short *pcm, int *vbuf, const int *coefBase);
 void STATNAME(PolyphaseMonoFast_TEST_ACTIVE)(short *pcm, int *vbuf, const int *coefBase);
@@ -365,6 +366,7 @@ extern const int STATNAME(polyCoef)[264];
 #define AMIGA_ANTIALIAS_SUBBAND_CAP_SELFTEST STATNAME(AntiAliasSubbandCapSelftest)
 #define AMIGA_IMDCT36_ASM_GENERAL_PATH_SELFTEST STATNAME(IMDCT36AsmGeneralPathSelftest)
 #define AMIGA_DEQUANT_SUBBAND_CAP_SELFTEST STATNAME(DequantSubbandCapSelftest)
+#define AMIGA_COLLAPSE_STEREO_TO_MONO_SELFTEST STATNAME(CollapseStereoToMonoSelftest)
 #define AMIGA_FDCT32_HALF_SPARSE16_SELFTEST STATNAME(FDCT32HalfSparse16Selftest)
 #define AMIGA_POLYPHASE_MONO_FAST_C_REFERENCE STATNAME(PolyphaseMonoFast_C_REFERENCE)
 #define AMIGA_POLYPHASE_MONO_FAST_TEST_ACTIVE STATNAME(PolyphaseMonoFast_TEST_ACTIVE)
@@ -455,6 +457,7 @@ typedef struct DecodeOptions {
 	int selftestAntialiasSubbandCap;
 	int selftestImdct36AsmGeneralPath;
 	int selftestDequantSubbandCap;
+	int selftestCollapseStereoToMono;
 	int selftestFdct32HalfSparse16;
 	int selftestAntialias;
 	int selftestPolyphase;
@@ -900,6 +903,7 @@ static void PrintUsage(const char *prog)
 	printf("  --selftest-antialias-subband-cap verify capping antialias butterflies to the subband cap leaves kept bands bit-exact\n");
 	printf("  --selftest-imdct36-asm-general-path verify m68k asm IMDCT36 matches C reference for transition/mixed-window (btCurr/btPrev != 0) blocks, not just the fast long-window path\n");
 	printf("  --selftest-dequant-subband-cap verify capping dequant long-block work to the subband cap leaves kept samples, cbEndL, and guard-bit count bit-exact\n");
+	printf("  --selftest-collapse-stereo-mono verify the stereo-to-mono collapse (plain LR stereo source, mono output) asm matches the C reference bit-exact\n");
 	printf("  --selftest-fdct32half-sparse16 verify prototype sparse-input FDCT32Half (NOT wired into playback) matches the reference when subbands 16-31 are zero\n");
 	printf("  --selftest-antialias compare C reference and optional m68k asm antialias path\n");
 	printf("  --selftest-polyphase compare C fast mono polyphase and optional m68k asm path\n");
@@ -1160,6 +1164,8 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->selftestImdct36AsmGeneralPath = 1;
 		} else if (!strcmp(argv[i], "--selftest-dequant-subband-cap")) {
 			opt->selftestDequantSubbandCap = 1;
+		} else if (!strcmp(argv[i], "--selftest-collapse-stereo-mono")) {
+			opt->selftestCollapseStereoToMono = 1;
 		} else if (!strcmp(argv[i], "--selftest-fdct32half-sparse16")) {
 			opt->selftestFdct32HalfSparse16 = 1;
 		} else if (!strcmp(argv[i], "--selftest-antialias")) {
@@ -1308,6 +1314,7 @@ if (opt->selftestMulshift ||
     opt->selftestAntialiasSubbandCap ||
     opt->selftestImdct36AsmGeneralPath ||
     opt->selftestDequantSubbandCap ||
+    opt->selftestCollapseStereoToMono ||
     opt->selftestFdct32HalfSparse16 ||
     opt->selftestAntialias ||
     opt->selftestPolyphase ||
@@ -11002,6 +11009,11 @@ int main(int argc, char **argv)
 	}
 	if (opt.selftestDequantSubbandCap) {
 		int selftestErr = AMIGA_DEQUANT_SUBBAND_CAP_SELFTEST();
+		AmigaFreeNormalizedArgs(&normalized);
+		return selftestErr;
+	}
+	if (opt.selftestCollapseStereoToMono) {
+		int selftestErr = AMIGA_COLLAPSE_STEREO_TO_MONO_SELFTEST();
 		AmigaFreeNormalizedArgs(&normalized);
 		return selftestErr;
 	}

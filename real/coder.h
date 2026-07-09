@@ -162,6 +162,7 @@
 #define IMDCT36AsmGeneralPathSelftest STATNAME(IMDCT36AsmGeneralPathSelftest)
 #define MP3FastLowrateEffectiveActiveSubbands STATNAME(MP3FastLowrateEffectiveActiveSubbands)
 #define DequantSubbandCapSelftest STATNAME(DequantSubbandCapSelftest)
+#define CollapseStereoToMonoSelftest STATNAME(CollapseStereoToMonoSelftest)
 #define DecodeHuffmanPairs_C_REFERENCE STATNAME(DecodeHuffmanPairs_C_REFERENCE)
 #define DecodeHuffmanPairs_TEST_ACTIVE STATNAME(DecodeHuffmanPairs_TEST_ACTIVE)
 #define DecodeHuffmanPairs_HAS_AMIGA_M68K_ASM_RUNTIME STATNAME(DecodeHuffmanPairs_HAS_AMIGA_M68K_ASM_RUNTIME)
@@ -459,6 +460,7 @@ int AntiAliasSubbandCapSelftest(void);
 int IMDCT36AsmGeneralPathSelftest(void);
 int MP3FastLowrateEffectiveActiveSubbands(const MP3DecInfo *mp3DecInfo);
 int DequantSubbandCapSelftest(void);
+int CollapseStereoToMonoSelftest(void);
 
 /* huffman.c selftest hooks */
 int DecodeHuffmanPairs_C_REFERENCE(int *xy, int nVals, int tabIdx, int bitsLeft, unsigned char *buf, int bitOffset);
