@@ -325,10 +325,15 @@ int MP3FastLowrateEffectiveActiveSubbands(const MP3DecInfo *mp3DecInfo)
 
 #if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_FAST_SUBBAND_CAP)
 	if (mp3DecInfo->fastLowrateStride >= 2) {
-		/* stride 2 (22050 Hz output from 44100 Hz) and above: subbands 16-31 are
-		 * above the output Nyquist (11025 Hz) and are zeroed by the polyphase
-		 * filter anyway, so skip computing them in the IMDCT. */
-		return 16;
+		/* MP3SetFastLowrate() already set fastLowrateActiveSubbands to the
+		 * stride's own output-Nyquist-derived default (16/10/8/6 for
+		 * stride 2/3/4/5), and MP3SetSubbandCap() can only ever lower it
+		 * further. Previously this returned a hardcoded 16 for every
+		 * stride >= 2 here (a leftover from when stride 2 was the only
+		 * fast-lowrate rate), which silently widened stride 3/4/5's cap
+		 * back out to 16 and made --subband-cap a no-op outside superfast
+		 * mode. Just use the value already computed above. */
+		return activeSubbands;
 	}
 #endif
 	return NBANDS;

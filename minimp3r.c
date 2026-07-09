@@ -236,17 +236,20 @@ enum {
 
 /* 8287 Hz removed: it failed often enough in practice to not be worth
  * offering, and 8820 Hz already covers the same "lowest available rate"
- * role.  kRates[MR_RATE_22050_INDEX] must stay "22050" -- several speed/
+ * role.  14700 Hz (stride 3) sits between 11025 and 22050 as a middle-ground
+ * rate -- see the matching entry in amiga_mp3gui.c's kRates.
+ * kRates[MR_RATE_22050_INDEX] must stay "22050" -- several speed/
  * ultrafast/CD32 code paths below key off that specific rate. */
 static const char * const kRates[] = {
-	"8820", "11025", "22050", "28600"
+	"8820", "11025", "14700", "22050", "28600"
 };
 #define MR_RATE_COUNT  ((int)(sizeof(kRates) / sizeof(kRates[0])))
-#define MR_RATE_22050_INDEX 2
+#define MR_RATE_22050_INDEX 3
 
 static const STRPTR kRateLabels[] = {
 	(STRPTR)"8820 Hz",
 	(STRPTR)"11025 Hz",
+	(STRPTR)"14700 Hz",
 	(STRPTR)"22050 Hz",
 	(STRPTR)"28600 Hz",
 	NULL
@@ -4429,6 +4432,7 @@ return;
 
 if (AslRequestTags(fr,
 ASLFR_Window, (ULONG)app->win,
+ASLFR_SleepWindow, TRUE,
 TAG_DONE)) {
 path[0] = '\0';
 
@@ -5265,7 +5269,7 @@ static void OpenRadioWindow(MrApp *app)
 		LAYOUT_AddChild, (ULONG)app->rbStatusGad, CHILD_WeightedHeight, 0, TAG_DONE);
 	if (!root) goto fail;
 	app->rbWinObj = (Object *)NewObject(WINDOW_GetClass(), NULL, WA_Title, (ULONG)"Internet Radio", WA_Activate, TRUE, WA_DepthGadget, TRUE, WA_DragBar, TRUE, WA_CloseGadget, TRUE, WA_SizeGadget, TRUE, WA_IDCMP, IDCMP_GADGETUP | IDCMP_CLOSEWINDOW | IDCMP_IDCMPUPDATE | IDCMP_REFRESHWINDOW, WA_Width, 540, WA_Height, 340, WINDOW_Position, WPOS_CENTERSCREEN, WINDOW_ParentGroup, (ULONG)root, TAG_DONE);
-	if (!app->rbWinObj) goto fail; app->rbWin = (struct Window *)RA_OpenWindow(app->rbWinObj); if (!app->rbWin) goto fail; RadioRefreshResults(app); return;
+	if (!app->rbWinObj) goto fail; app->rbWin = (struct Window *)RA_OpenWindow(app->rbWinObj); if (!app->rbWin) goto fail; WindowToFront(app->rbWin); ActivateWindow(app->rbWin); RadioRefreshResults(app); return;
 fail:
 	if (!app->rbWinObj && root) DisposeObject(root); CloseRadioWindow(app);
 }
@@ -5632,6 +5636,8 @@ static void OpenPlaylistWindow(MrApp *app)
 	app->plWin = (struct Window *)RA_OpenWindow(app->plWinObj);
 	if (!app->plWin)
 		goto fail;
+	WindowToFront(app->plWin);
+	ActivateWindow(app->plWin);
 	RefreshPlaylistView(app);
 	return;
 
@@ -5655,7 +5661,8 @@ static void BrowseForPlaylist(MrApp *app)
 		SetStatus(app, "Could not allocate playlist requester.");
 		return;
 	}
-	if (AslRequestTags(fr, ASLFR_Window, (ULONG)app->win, TAG_DONE)) {
+	if (AslRequestTags(fr, ASLFR_Window, (ULONG)app->win,
+		ASLFR_SleepWindow, TRUE, TAG_DONE)) {
 		path[0] = '\0';
 		if (fr->fr_Drawer && fr->fr_Drawer[0])
 			SafeCopy(path, sizeof(path), (const char *)fr->fr_Drawer);

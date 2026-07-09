@@ -318,6 +318,15 @@ extern void AmigaM68KPolyphaseMonoFastStride2Reduced(short *pcm, int *vbuf,
 extern void MonoFastPolyphaseStride4_Amiga_m68k(short *pcm, int *vbuf,
 	const int *coefBase) __asm__("MonoFastPolyphaseStride4_Amiga_m68k")
 	__attribute__((weak));
+extern void MonoFastPolyphaseStride4Phase1_Amiga_m68k(short *pcm, int *vbuf,
+	const int *coefBase) __asm__("MonoFastPolyphaseStride4Phase1_Amiga_m68k")
+	__attribute__((weak));
+extern void MonoFastPolyphaseStride4Phase2_Amiga_m68k(short *pcm, int *vbuf,
+	const int *coefBase) __asm__("MonoFastPolyphaseStride4Phase2_Amiga_m68k")
+	__attribute__((weak));
+extern void MonoFastPolyphaseStride4Phase3_Amiga_m68k(short *pcm, int *vbuf,
+	const int *coefBase) __asm__("MonoFastPolyphaseStride4Phase3_Amiga_m68k")
+	__attribute__((weak));
 extern void MonoFastPolyphaseStride3Phase0_Amiga_m68k(short *pcm, int *vbuf,
 	const int *coefBase) __asm__("MonoFastPolyphaseStride3Phase0_Amiga_m68k")
 	__attribute__((weak));
@@ -326,6 +335,21 @@ extern void MonoFastPolyphaseStride3Phase1_Amiga_m68k(short *pcm, int *vbuf,
 	__attribute__((weak));
 extern void MonoFastPolyphaseStride3Phase2_Amiga_m68k(short *pcm, int *vbuf,
 	const int *coefBase) __asm__("MonoFastPolyphaseStride3Phase2_Amiga_m68k")
+	__attribute__((weak));
+extern void MonoFastPolyphaseStride5Phase0_Amiga_m68k(short *pcm, int *vbuf,
+	const int *coefBase) __asm__("MonoFastPolyphaseStride5Phase0_Amiga_m68k")
+	__attribute__((weak));
+extern void MonoFastPolyphaseStride5Phase1_Amiga_m68k(short *pcm, int *vbuf,
+	const int *coefBase) __asm__("MonoFastPolyphaseStride5Phase1_Amiga_m68k")
+	__attribute__((weak));
+extern void MonoFastPolyphaseStride5Phase2_Amiga_m68k(short *pcm, int *vbuf,
+	const int *coefBase) __asm__("MonoFastPolyphaseStride5Phase2_Amiga_m68k")
+	__attribute__((weak));
+extern void MonoFastPolyphaseStride5Phase3_Amiga_m68k(short *pcm, int *vbuf,
+	const int *coefBase) __asm__("MonoFastPolyphaseStride5Phase3_Amiga_m68k")
+	__attribute__((weak));
+extern void MonoFastPolyphaseStride5Phase4_Amiga_m68k(short *pcm, int *vbuf,
+	const int *coefBase) __asm__("MonoFastPolyphaseStride5Phase4_Amiga_m68k")
 	__attribute__((weak));
 extern void StereoFastPolyphaseStride3Phase0_Amiga_m68k(short *pcm, int *vbuf,
 	const int *coefBase) __asm__("StereoFastPolyphaseStride3Phase0_Amiga_m68k")
@@ -1657,12 +1681,45 @@ int MonoFastPolyphaseStride4_Amiga_m68k_IsActive(void)
 #endif
 }
 
+/*
+ * Phase 0 keeps its own MonoFastPolyphaseStride4_Amiga_m68k_IsActive()
+ * above (used by the original --selftest-polyphase-stride4, which only
+ * ever exercises phase 0). This one additionally requires phases 1-3 --
+ * added later, closing the gap where 3 of every 4 mono stride-4 frames
+ * fell back to C -- and is what the runtime dispatch below actually
+ * checks before using any of the asm phase kernels.
+ */
+int MonoFastPolyphaseStride4AllPhases_Amiga_m68k_IsActive(void)
+{
+#if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_M68K_ASM_POLYPHASE)
+	return (MonoFastPolyphaseStride4_Amiga_m68k &&
+		MonoFastPolyphaseStride4Phase1_Amiga_m68k &&
+		MonoFastPolyphaseStride4Phase2_Amiga_m68k &&
+		MonoFastPolyphaseStride4Phase3_Amiga_m68k) ? 1 : 0;
+#else
+	return 0;
+#endif
+}
+
 int MonoFastPolyphaseStride3_Amiga_m68k_IsActive(void)
 {
 #if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_M68K_ASM_POLYPHASE)
 	return (MonoFastPolyphaseStride3Phase0_Amiga_m68k &&
 		MonoFastPolyphaseStride3Phase1_Amiga_m68k &&
 		MonoFastPolyphaseStride3Phase2_Amiga_m68k) ? 1 : 0;
+#else
+	return 0;
+#endif
+}
+
+int MonoFastPolyphaseStride5_Amiga_m68k_IsActive(void)
+{
+#if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_M68K_ASM_POLYPHASE)
+	return (MonoFastPolyphaseStride5Phase0_Amiga_m68k &&
+		MonoFastPolyphaseStride5Phase1_Amiga_m68k &&
+		MonoFastPolyphaseStride5Phase2_Amiga_m68k &&
+		MonoFastPolyphaseStride5Phase3_Amiga_m68k &&
+		MonoFastPolyphaseStride5Phase4_Amiga_m68k) ? 1 : 0;
 #else
 	return 0;
 #endif
@@ -2071,6 +2128,22 @@ int PolyphaseMonoFastLowrate(short *pcm, int *vbuf, const int *coefBase, int str
 				localPhase);
 #endif
 #if defined(AMIGA_M68K_ASM_POLYPHASE)
+		if (MonoFastPolyphaseStride4AllPhases_Amiga_m68k_IsActive()) {
+			switch (localPhase) {
+			case 0:
+				MonoFastPolyphaseStride4_Amiga_m68k(pcm, vbuf, PolyAsmCoef(coefBase));
+				return 8;
+			case 1:
+				MonoFastPolyphaseStride4Phase1_Amiga_m68k(pcm, vbuf, PolyAsmCoef(coefBase));
+				return 8;
+			case 2:
+				MonoFastPolyphaseStride4Phase2_Amiga_m68k(pcm, vbuf, PolyAsmCoef(coefBase));
+				return 8;
+			default:
+				MonoFastPolyphaseStride4Phase3_Amiga_m68k(pcm, vbuf, PolyAsmCoef(coefBase));
+				return 8;
+			}
+		}
 		if (localPhase == 0 && MonoFastPolyphaseStride4_Amiga_m68k_IsActive()) {
 			MonoFastPolyphaseStride4_Amiga_m68k(pcm, vbuf, PolyAsmCoef(coefBase));
 			return 8;
@@ -2079,11 +2152,33 @@ int PolyphaseMonoFastLowrate(short *pcm, int *vbuf, const int *coefBase, int str
 		return PolyphaseMonoFastLowrateStride4(pcm, vbuf, coefBase, localPhase);
 	}
 	if (stride == 5) {
+		int endPhase = localPhase + 2;
+		if (endPhase >= 5)
+			endPhase -= 5;
+#if defined(AMIGA_M68K_ASM_POLYPHASE)
+		if (MonoFastPolyphaseStride5_Amiga_m68k_IsActive()) {
+			*phase = endPhase;
+			switch (localPhase) {
+			case 0:
+				MonoFastPolyphaseStride5Phase0_Amiga_m68k(pcm, vbuf, PolyAsmCoef(coefBase));
+				return 7;
+			case 1:
+				MonoFastPolyphaseStride5Phase1_Amiga_m68k(pcm, vbuf, PolyAsmCoef(coefBase));
+				return 6;
+			case 2:
+				MonoFastPolyphaseStride5Phase2_Amiga_m68k(pcm, vbuf, PolyAsmCoef(coefBase));
+				return 6;
+			case 3:
+				MonoFastPolyphaseStride5Phase3_Amiga_m68k(pcm, vbuf, PolyAsmCoef(coefBase));
+				return 6;
+			default:
+				MonoFastPolyphaseStride5Phase4_Amiga_m68k(pcm, vbuf, PolyAsmCoef(coefBase));
+				return 7;
+			}
+		}
+#endif
 		produced = PolyphaseMonoFastLowrateStride5(pcm, vbuf, coefBase, localPhase);
-		localPhase += 2;
-		if (localPhase >= 5)
-			localPhase -= 5;
-		*phase = localPhase;
+		*phase = endPhase;
 		return produced;
 	}
 	if (stride == 3) {

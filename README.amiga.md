@@ -444,9 +444,10 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   16 output samples. The emitted PCM remains bit-identical to selecting every
   second sample from the full synthesis path. Huffman/dequant and IMDCT still
   run at full MP3 rate; stride-3/4/5 output still uses full FDCT32 (stride 3
-  has both a hand-unrolled C kernel and, unlike stride 4/5, a full three-phase
-  m68k asm kernel covering mono and stereo -- see
-  `--selftest-polyphase-stride3`). Stereo input
+  has a hand-unrolled C kernel and a full three-phase m68k asm kernel
+  covering mono and stereo; stride 5 mono now also has a full five-phase
+  asm kernel matching its already-complete stereo coverage -- see
+  `--selftest-polyphase-stride3`/`--selftest-polyphase-stride5`). Stereo input
   with `--mono` is collapsed in the decoder after required MPEG stereo
   reconstruction, so the
   right-channel IMDCT/FDCT32/polyphase work and full stereo PCM copy are skipped.
@@ -476,8 +477,65 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   `StereoFastPolyphaseStride3_Amiga_m68k_IsActive()` report whether the asm
   is linked in and active; `--selftest-polyphase-stride3[-stereo]` print
   both the "asm requested" (compile-time) and "asm active" (runtime) status
-  alongside the correctness check. Superfast defaults its active-subbands
-  cap to 10 (output Nyquist ~7.35 kHz) at this rate.
+  alongside the correctness check. Both plain `--fast-lowrate` and
+  `--superfast-lowrate` default the active-subbands cap to 10 (output
+  Nyquist ~7.35 kHz) at this rate -- `MP3FastLowrateEffectiveActiveSubbands()`
+  used to hardcode 16 for every stride >= 2 outside superfast mode (a
+  leftover from when stride 2 was the only fast-lowrate rate), which silently
+  widened stride 3/4/5's cap back out to 16 in plain fast mode and made a
+  manual `--subband-cap N` a no-op unless Superfast was also ticked; it now
+  reuses the same stride-derived default (and manual override) either way.
+  Unlike stride 2 (`FDCT32Half`/`FDCT32HalfSparse16`) and stride 4
+  (`FDCT32Quarter`), stride 3 has no equivalent `FDCT32FastLowrate()` fast
+  path and still runs the full 32-row FDCT32 every call -- see the note in
+  `real/subband.c`'s `FDCT32FastLowrate()` dispatch. This is a real
+  algorithmic gap, not just a missing kernel: `FDCT32Half`/`FDCT32Quarter`
+  prune the DCT's shared radix-2 butterfly network by skipping entire
+  recursive sub-blocks whose outputs are never read, which only works
+  because stride 2 and stride 4 are powers of 2 that align with that
+  network's even/odd and quarter splits. Stride 3's kept-row residue class
+  (every 3rd of 32 rows) is coprime to 2, so it is spread evenly across
+  every sub-block at every recursion depth -- no sub-block can be skipped,
+  and computing the ~11 needed rows directly (bypassing the shared
+  butterfly reuse) costs more multiplies than the existing full FDCT32
+  (which does all 32 outputs in ~80 muls total). A stride-3 "FDCT32Third"
+  analogous to Quarter is therefore not available via this codebase's DCT
+  algorithm; the subband-cap fix above (dequant/IMDCT skip inactive bands)
+  and stride 3's existing full polyphase asm coverage are the safe wins at
+  this rate, not FDCT32 pruning.
+- `--rate 8820`/`--rate 8287` (stride 5) mono now also has a full
+  five-phase m68k asm kernel (`MonoFastPolyphaseStride5Phase0..4_Amiga_m68k`
+  in `real/amiga_m68k_polyphase.S`), matching the stereo coverage this
+  stride already had. `MonoFastPolyphaseStride5_Amiga_m68k_IsActive()`
+  reports whether it's linked in and active; `--selftest-polyphase-stride5`
+  checks its output against full-band synthesis the same way the stride 3
+  selftests do.
+- `--rate 11025` (stride 4) mono now has asm kernels for all 4 phases
+  (`MonoFastPolyphaseStride4_Amiga_m68k` for phase 0, plus
+  `MonoFastPolyphaseStride4Phase1/2/3_Amiga_m68k` in
+  `real/amiga_m68k_polyphase.S`) -- previously only phase 0 had an asm
+  kernel, so 3 of every 4 mono stride-4 frames fell back to C. Stereo
+  stride 4 already had full 4-phase asm coverage and is unaffected.
+  `MonoFastPolyphaseStride4AllPhases_Amiga_m68k_IsActive()` gates the
+  runtime dispatch (falling back to the original phase-0-only asm path,
+  then to C, if only some phases are linked); the original
+  `--selftest-polyphase-stride4` still only exercises phase 0 as before,
+  and the new `--selftest-polyphase-stride4-allphases` checks all 4
+  phases against full-band synthesis.
+- The shared stereo tap macros in `real/amiga_m68k_polyphase.S`
+  (`STEREO_SAMPLE0`/`STEREO_SAMPLE16`/`STEREO_PAIR_LO`/`STEREO_PAIR_HI`,
+  used by the stride 2/3/4/5 stereo asm kernels) seed their L/R
+  accumulators from the first tap's product instead of `clr.l`-ing
+  `%d3`/`%d5` and adding into them, via a new `STEREO_PROD_ADD_FIRST`
+  macro. This removes two instructions per sample with no change to
+  the arithmetic (0 + x == x) or output. `--selftest-polyphase-stride2-stereo`,
+  `-stride3-stereo`, `-stride4-stereo`, and `-stride5-stereo` all compare
+  the asm kernels against `PolyphaseStereoFastLowrateCompact`/full-band C
+  reference output and cover every macro touched by this change.
+  `MP3GetStereoStride2PolyphaseCounters()`/`MP3GetStereoStride4PolyphaseCounters()`
+  (printed at playback exit alongside the mono equivalents) report whether
+  asm or C actually ran, so a regression would show up as a call-count or
+  correctness change, not just a missing symbol.
 - `--ultrafast` is a full-rate/high-rate speed option that applies
   `--subband-cap 26`, capping IMDCT work to roughly the first 18 kHz of a
   44.1 kHz source.  The GUI's 22050 Mono Ultrafast preset goes further by

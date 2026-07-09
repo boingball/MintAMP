@@ -277,9 +277,13 @@ int PolyphaseMonoFastLowrate(short *pcm, int *vbuf, const int *coefBase, int str
 int PolyphaseStereoFastLowrate(short *pcm, int *vbuf, const int *coefBase, int stride, int *phase);
 int STATNAME(MonoFastPolyphaseStride3_Amiga_m68k_IsActive)(void);
 int STATNAME(StereoFastPolyphaseStride3_Amiga_m68k_IsActive)(void);
+int STATNAME(MonoFastPolyphaseStride5_Amiga_m68k_IsActive)(void);
+int STATNAME(MonoFastPolyphaseStride4AllPhases_Amiga_m68k_IsActive)(void);
 #define AMIGA_POLYPHASE_STEREO_FULL STATNAME(PolyphaseStereo)
 #define AMIGA_POLYPHASE_MONO_STRIDE3_HAS_ASM STATNAME(MonoFastPolyphaseStride3_Amiga_m68k_IsActive)
 #define AMIGA_POLYPHASE_STEREO_STRIDE3_HAS_ASM STATNAME(StereoFastPolyphaseStride3_Amiga_m68k_IsActive)
+#define AMIGA_POLYPHASE_MONO_STRIDE5_HAS_ASM STATNAME(MonoFastPolyphaseStride5_Amiga_m68k_IsActive)
+#define AMIGA_POLYPHASE_MONO_STRIDE4_ALLPHASES_HAS_ASM STATNAME(MonoFastPolyphaseStride4AllPhases_Amiga_m68k_IsActive)
 int STATNAME(PolyphaseMonoFastLowrateStride2_C_REFERENCE)(short *pcm, int *vbuf, const int *coefBase);
 int STATNAME(PolyphaseMonoFastLowrateStride2_TEST_ACTIVE)(short *pcm, int *vbuf, const int *coefBase);
 int STATNAME(PolyphaseMonoFastLowrateStride2_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
@@ -463,6 +467,8 @@ typedef struct DecodeOptions {
 	int selftestPolyphaseStride5Stereo;
 	int selftestPolyphaseStride3;
 	int selftestPolyphaseStride3Stereo;
+	int selftestPolyphaseStride5;
+	int selftestPolyphaseStride4AllPhases;
 	int forceCPolyphaseStride2Stereo;
 	int selftestFastLowrate;
 	int selftestReducedTaps;
@@ -906,6 +912,8 @@ static void PrintUsage(const char *prog)
 	printf("  --selftest-polyphase-stride5-stereo compare stereo stride-5 compact polyphase output\n");
 	printf("  --selftest-polyphase-stride3 verify stride-3 (14700 Hz) mono hand-unrolled polyphase output against full-band synthesis\n");
 	printf("  --selftest-polyphase-stride3-stereo verify stride-3 (14700 Hz) stereo hand-unrolled polyphase output against full-band synthesis\n");
+	printf("  --selftest-polyphase-stride5 verify stride-5 (8820/8287 Hz) mono polyphase output against full-band synthesis\n");
+	printf("  --selftest-polyphase-stride4-allphases verify stride-4 (11025 Hz) mono polyphase output at all 4 phases against full-band synthesis\n");
 	printf("  --force-c-polyphase-stride2-stereo benchmark stereo stride-2 C fallback in this binary\n");
 	printf("  --selftest-fastlowrate compare synthetic stride decimation paths\n");
 	printf("  --selftest-reduced-taps compare full and reduced stride-4 dewindow paths\n");
@@ -1172,6 +1180,10 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->selftestPolyphaseStride2StereoReduced = 1;
 		} else if (!strcmp(argv[i], "--selftest-polyphase-stride5-stereo")) {
 			opt->selftestPolyphaseStride5Stereo = 1;
+		} else if (!strcmp(argv[i], "--selftest-polyphase-stride5")) {
+			opt->selftestPolyphaseStride5 = 1;
+		} else if (!strcmp(argv[i], "--selftest-polyphase-stride4-allphases")) {
+			opt->selftestPolyphaseStride4AllPhases = 1;
 		} else if (!strcmp(argv[i], "--selftest-polyphase-stride3")) {
 			opt->selftestPolyphaseStride3 = 1;
 		} else if (!strcmp(argv[i], "--selftest-polyphase-stride3-stereo")) {
@@ -1308,6 +1320,8 @@ if (opt->selftestMulshift ||
     opt->selftestPolyphaseStride5Stereo ||
     opt->selftestPolyphaseStride3 ||
     opt->selftestPolyphaseStride3Stereo ||
+    opt->selftestPolyphaseStride5 ||
+    opt->selftestPolyphaseStride4AllPhases ||
     opt->selftestFastLowrate ||
     opt->selftestReducedTaps ||
     opt->selftestFdct32Quarter ||
@@ -4379,6 +4393,240 @@ static int SelftestPolyphaseStride3(void)
 static int SelftestPolyphaseStride3Stereo(void)
 {
 	return SelftestPolyphaseStride3Common(1);
+}
+
+/*
+ * Stride 5 (8820/8287 Hz) mono now has a full 5-phase m68k asm kernel
+ * (MonoFastPolyphaseStride5Phase0..4_Amiga_m68k in
+ * real/amiga_m68k_polyphase.S) alongside the existing hand-unrolled C
+ * path (PolyphaseMonoFastLowrateStride5) -- stereo already had full asm
+ * coverage for this stride; mono did not. Same independent-reference
+ * methodology as the stride3 selftest above: an un-decimated
+ * AMIGA_POLYPHASE_MONO_FAST_C_REFERENCE call is the ground truth, and
+ * this function separately (re-)derives which of those 32 samples a
+ * continuously running "keep every 5th sample, phase carried across
+ * frames" decimator starting at startPhase should keep, without calling
+ * into the code under test.
+ */
+static int TestPolyphaseStride5MonoCase(unsigned long index, unsigned long seed, int pattern,
+	int startPhase)
+{
+	static int cvbuf[AMIGA_POLYPHASE_VBUF_LENGTH];
+	static int avbuf[AMIGA_POLYPHASE_VBUF_LENGTH];
+	static short full[AMIGA_POLYPHASE_NBANDS];
+	static short pcm[AMIGA_POLYPHASE_NBANDS];
+	int expectedIndex[AMIGA_POLYPHASE_NBANDS];
+	int expectedCount;
+	int i;
+	int phase;
+	int count;
+	int running;
+
+	for (i = 0; i < AMIGA_POLYPHASE_VBUF_LENGTH; i++) {
+		seed = seed * 1664525UL + 1013904223UL;
+		if (pattern == 0)
+			cvbuf[i] = 0;
+		else if (pattern == 1)
+			cvbuf[i] = ((int)seed) >> 9;
+		else
+			cvbuf[i] = (i & 1) ? 0x03ffffff : (int)0xfc000000UL;
+		avbuf[i] = cvbuf[i];
+	}
+	for (i = 0; i < AMIGA_POLYPHASE_NBANDS; i++)
+		full[i] = pcm[i] = (short)(0x6c00 + i);
+
+	AMIGA_POLYPHASE_MONO_FAST_C_REFERENCE(full, cvbuf, AMIGA_POLY_COEF);
+
+	expectedCount = 0;
+	running = startPhase;
+	for (i = 0; i < AMIGA_POLYPHASE_NBANDS; i++) {
+		if (running == 0)
+			expectedIndex[expectedCount++] = i;
+		running++;
+		if (running >= 5)
+			running = 0;
+	}
+
+	phase = startPhase;
+	count = PolyphaseMonoFastLowrate(pcm, avbuf, AMIGA_POLY_COEF, 5, &phase);
+
+	if (count != expectedCount) {
+		printf("Polyphase stride5 mono count mismatch %lu startPhase=%d pattern=%d: got=%d expected=%d\n",
+			index, startPhase, pattern, count, expectedCount);
+		return -1;
+	}
+	for (i = 0; i < AMIGA_POLYPHASE_VBUF_LENGTH; i++) {
+		if (avbuf[i] != cvbuf[i]) {
+			printf("Polyphase stride5 mono vbuf mismatch %lu[%d] startPhase=%d pattern=%d\n",
+				index, i, startPhase, pattern);
+			return -1;
+		}
+	}
+	for (i = 0; i < expectedCount; i++) {
+		if (pcm[i] != full[expectedIndex[i]]) {
+			printf("Polyphase stride5 mono output mismatch %lu[%d] startPhase=%d pattern=%d fullIdx=%d: "
+				"got=%d want=%d\n",
+				index, i, startPhase, pattern, expectedIndex[i], pcm[i], full[expectedIndex[i]]);
+			return -1;
+		}
+	}
+	{
+		int expectedEndPhase = (startPhase + AMIGA_POLYPHASE_NBANDS) % 5;
+		if (phase != expectedEndPhase) {
+			printf("Polyphase stride5 mono phase mismatch %lu startPhase=%d: got=%d expected=%d\n",
+				index, startPhase, phase, expectedEndPhase);
+			return -1;
+		}
+	}
+	return 0;
+}
+
+static int SelftestPolyphaseStride5(void)
+{
+	unsigned long i;
+	unsigned long failures;
+	unsigned long seed;
+	int pattern;
+	int startPhase;
+
+	failures = 0;
+	seed = 0x5eed5eedUL;
+	for (i = 0; i < 2000UL; i++) {
+		seed = seed * 1664525UL + 1013904223UL;
+		pattern = (i < 30UL) ? 0 : ((i < 60UL) ? 2 : 1);
+		startPhase = (int)(i % 5UL);
+		if (TestPolyphaseStride5MonoCase(i, seed, pattern, startPhase) != 0)
+			failures++;
+	}
+
+	printf("Polyphase stride5 mono asm requested: %s\n",
+#ifdef AMIGA_M68K_ASM_POLYPHASE
+		"yes"
+#else
+		"no"
+#endif
+	);
+	printf("Polyphase stride5 mono asm active: %s\n",
+		AMIGA_POLYPHASE_MONO_STRIDE5_HAS_ASM() ? "yes" : "no");
+	printf("Polyphase stride5 mono selftest cases: %lu\n", i);
+	printf("Polyphase stride5 mono selftest failures: %lu\n", failures);
+	return failures ? 1 : 0;
+}
+
+/*
+ * Stride 4 (11025 Hz) mono now has asm kernels for all 4 phases
+ * (MonoFastPolyphaseStride4_Amiga_m68k for phase 0, plus
+ * MonoFastPolyphaseStride4Phase1/2/3_Amiga_m68k) -- previously only
+ * phase 0 had an asm kernel, so 3 of every 4 frames fell back to C.
+ * The original --selftest-polyphase-stride4 only ever exercises phase 0
+ * (via PolyphaseMonoFastLowrateStride4_C_REFERENCE/_TEST_ACTIVE, both
+ * hardcoded to phase 0), so this uses the same independent full-band
+ * reference methodology as the stride 3/5 selftests to cover all 4
+ * phases uniformly.
+ */
+static int TestPolyphaseStride4AllPhasesCase(unsigned long index, unsigned long seed, int pattern,
+	int startPhase)
+{
+	static int cvbuf[AMIGA_POLYPHASE_VBUF_LENGTH];
+	static int avbuf[AMIGA_POLYPHASE_VBUF_LENGTH];
+	static short full[AMIGA_POLYPHASE_NBANDS];
+	static short pcm[AMIGA_POLYPHASE_NBANDS];
+	int expectedIndex[AMIGA_POLYPHASE_NBANDS];
+	int expectedCount;
+	int i;
+	int phase;
+	int count;
+	int running;
+
+	for (i = 0; i < AMIGA_POLYPHASE_VBUF_LENGTH; i++) {
+		seed = seed * 1664525UL + 1013904223UL;
+		if (pattern == 0)
+			cvbuf[i] = 0;
+		else if (pattern == 1)
+			cvbuf[i] = ((int)seed) >> 9;
+		else
+			cvbuf[i] = (i & 1) ? 0x03ffffff : (int)0xfc000000UL;
+		avbuf[i] = cvbuf[i];
+	}
+	for (i = 0; i < AMIGA_POLYPHASE_NBANDS; i++)
+		full[i] = pcm[i] = (short)(0x6c00 + i);
+
+	AMIGA_POLYPHASE_MONO_FAST_C_REFERENCE(full, cvbuf, AMIGA_POLY_COEF);
+
+	expectedCount = 0;
+	running = startPhase;
+	for (i = 0; i < AMIGA_POLYPHASE_NBANDS; i++) {
+		if (running == 0)
+			expectedIndex[expectedCount++] = i;
+		running++;
+		if (running >= 4)
+			running = 0;
+	}
+
+	phase = startPhase;
+	count = PolyphaseMonoFastLowrate(pcm, avbuf, AMIGA_POLY_COEF, 4, &phase);
+
+	if (count != expectedCount) {
+		printf("Polyphase stride4 all-phases count mismatch %lu startPhase=%d pattern=%d: got=%d expected=%d\n",
+			index, startPhase, pattern, count, expectedCount);
+		return -1;
+	}
+	for (i = 0; i < AMIGA_POLYPHASE_VBUF_LENGTH; i++) {
+		if (avbuf[i] != cvbuf[i]) {
+			printf("Polyphase stride4 all-phases vbuf mismatch %lu[%d] startPhase=%d pattern=%d\n",
+				index, i, startPhase, pattern);
+			return -1;
+		}
+	}
+	for (i = 0; i < expectedCount; i++) {
+		if (pcm[i] != full[expectedIndex[i]]) {
+			printf("Polyphase stride4 all-phases output mismatch %lu[%d] startPhase=%d pattern=%d fullIdx=%d: "
+				"got=%d want=%d\n",
+				index, i, startPhase, pattern, expectedIndex[i], pcm[i], full[expectedIndex[i]]);
+			return -1;
+		}
+	}
+	{
+		int expectedEndPhase = (startPhase + AMIGA_POLYPHASE_NBANDS) % 4;
+		if (phase != expectedEndPhase) {
+			printf("Polyphase stride4 all-phases phase mismatch %lu startPhase=%d: got=%d expected=%d\n",
+				index, startPhase, phase, expectedEndPhase);
+			return -1;
+		}
+	}
+	return 0;
+}
+
+static int SelftestPolyphaseStride4AllPhases(void)
+{
+	unsigned long i;
+	unsigned long failures;
+	unsigned long seed;
+	int pattern;
+	int startPhase;
+
+	failures = 0;
+	seed = 0x40114014UL;
+	for (i = 0; i < 2000UL; i++) {
+		seed = seed * 1664525UL + 1013904223UL;
+		pattern = (i < 30UL) ? 0 : ((i < 60UL) ? 2 : 1);
+		startPhase = (int)(i % 4UL);
+		if (TestPolyphaseStride4AllPhasesCase(i, seed, pattern, startPhase) != 0)
+			failures++;
+	}
+
+	printf("Polyphase stride4 all-phases asm requested: %s\n",
+#ifdef AMIGA_M68K_ASM_POLYPHASE
+		"yes"
+#else
+		"no"
+#endif
+	);
+	printf("Polyphase stride4 all-phases asm active: %s\n",
+		AMIGA_POLYPHASE_MONO_STRIDE4_ALLPHASES_HAS_ASM() ? "yes" : "no");
+	printf("Polyphase stride4 all-phases selftest cases: %lu\n", i);
+	printf("Polyphase stride4 all-phases selftest failures: %lu\n", failures);
+	return failures ? 1 : 0;
 }
 
 
@@ -10814,6 +11062,16 @@ int main(int argc, char **argv)
 	}
 	if (opt.selftestPolyphaseStride3Stereo) {
 		int selftestErr = SelftestPolyphaseStride3Stereo();
+		AmigaFreeNormalizedArgs(&normalized);
+		return selftestErr;
+	}
+	if (opt.selftestPolyphaseStride5) {
+		int selftestErr = SelftestPolyphaseStride5();
+		AmigaFreeNormalizedArgs(&normalized);
+		return selftestErr;
+	}
+	if (opt.selftestPolyphaseStride4AllPhases) {
+		int selftestErr = SelftestPolyphaseStride4AllPhases();
 		AmigaFreeNormalizedArgs(&normalized);
 		return selftestErr;
 	}
