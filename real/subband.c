@@ -46,6 +46,28 @@
 #include "amiga_profile_decode.h"
 #include "assembly.h"
 
+/*
+ * Diagnostic-only precondition check for FDCT32HalfSparse16()'s
+ * documented contract (buf[16..31] == 0). Disabled unless
+ * MP3EnableFdct32HalfSparse16PreconditionCheck(1) is called (wired to
+ * --debug-subband-precondition); the check itself is a handful of int
+ * compares gated behind a runtime flag, so it costs nothing when off and
+ * is safe to leave compiled in. Exists to distinguish "this real decode
+ * never actually satisfies the precondition FDCT32HalfSparse16 assumes"
+ * from "the precondition holds and something else is wrong" without
+ * needing new hardware access to investigate a live bug report.
+ */
+static int gFdct32HalfSparse16CheckEnabled;
+volatile unsigned long gFdct32HalfSparse16PreconditionViolations;
+volatile unsigned long gFdct32HalfSparse16PreconditionChecks;
+
+void MP3EnableFdct32HalfSparse16PreconditionCheck(int enabled)
+{
+	gFdct32HalfSparse16CheckEnabled = enabled ? 1 : 0;
+	gFdct32HalfSparse16PreconditionViolations = 0;
+	gFdct32HalfSparse16PreconditionChecks = 0;
+}
+
 void FDCT32FastLowrate(int *x, int *d, int offset, int oddBlock, int gb,
 	int stride, int phase)
 {
@@ -59,6 +81,16 @@ void FDCT32FastLowrate(int *x, int *d, int offset, int oddBlock, int gb,
 		 * exactly FDCT32HalfSparse16()'s precondition. Without this
 		 * macro that guarantee doesn't hold, so fall back to the
 		 * general FDCT32Half() below. */
+		if (gFdct32HalfSparse16CheckEnabled) {
+			int k;
+			gFdct32HalfSparse16PreconditionChecks++;
+			for (k = 16; k < 32; k++) {
+				if (x[k] != 0) {
+					gFdct32HalfSparse16PreconditionViolations++;
+					break;
+				}
+			}
+		}
 		FDCT32HalfSparse16(x, d, offset, oddBlock, gb);
 #else
 		FDCT32Half(x, d, offset, oddBlock, gb);

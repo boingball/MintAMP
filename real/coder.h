@@ -136,6 +136,8 @@
 #define AmigaM68KPolyphaseMonoFastStride2_IsActive STATNAME(AmigaM68KPolyphaseMonoFastStride2_IsActive)
 #define AmigaM68KPolyphaseMonoFastStride2Reduced_IsActive STATNAME(AmigaM68KPolyphaseMonoFastStride2Reduced_IsActive)
 #define MonoFastPolyphaseStride4_Amiga_m68k_IsActive STATNAME(MonoFastPolyphaseStride4_Amiga_m68k_IsActive)
+#define MonoFastPolyphaseStride3_Amiga_m68k_IsActive STATNAME(MonoFastPolyphaseStride3_Amiga_m68k_IsActive)
+#define StereoFastPolyphaseStride3_Amiga_m68k_IsActive STATNAME(StereoFastPolyphaseStride3_Amiga_m68k_IsActive)
 #define StereoFastPolyphaseStride2Phase0Reduced_Amiga_m68k_IsActive STATNAME(StereoFastPolyphaseStride2Phase0Reduced_Amiga_m68k_IsActive)
 #define FDCT32				STATNAME(FDCT32)
 #define FDCT32Half			STATNAME(FDCT32Half)
@@ -504,6 +506,8 @@ int AmigaM68KPolyphaseMonoFast_IsActive(void);
 int AmigaM68KPolyphaseMonoFastStride2_IsActive(void);
 int AmigaM68KPolyphaseMonoFastStride2Reduced_IsActive(void);
 int MonoFastPolyphaseStride4_Amiga_m68k_IsActive(void);
+int MonoFastPolyphaseStride3_Amiga_m68k_IsActive(void);
+int StereoFastPolyphaseStride3_Amiga_m68k_IsActive(void);
 int StereoFastPolyphaseStride2Phase0Reduced_Amiga_m68k_IsActive(void);
 
 /* hufftabs.c */

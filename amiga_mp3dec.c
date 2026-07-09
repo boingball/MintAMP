@@ -269,6 +269,17 @@ int STATNAME(FDCT32HalfSparse16Selftest)(void);
 void STATNAME(PolyphaseMonoFast_C_REFERENCE)(short *pcm, int *vbuf, const int *coefBase);
 void STATNAME(PolyphaseMonoFast_TEST_ACTIVE)(short *pcm, int *vbuf, const int *coefBase);
 int STATNAME(PolyphaseMonoFast_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
+void STATNAME(PolyphaseStereo)(short *pcm, int *vbuf, const int *coefBase);
+void MP3EnableFdct32HalfSparse16PreconditionCheck(int enabled);
+extern volatile unsigned long gFdct32HalfSparse16PreconditionViolations;
+extern volatile unsigned long gFdct32HalfSparse16PreconditionChecks;
+int PolyphaseMonoFastLowrate(short *pcm, int *vbuf, const int *coefBase, int stride, int *phase);
+int PolyphaseStereoFastLowrate(short *pcm, int *vbuf, const int *coefBase, int stride, int *phase);
+int STATNAME(MonoFastPolyphaseStride3_Amiga_m68k_IsActive)(void);
+int STATNAME(StereoFastPolyphaseStride3_Amiga_m68k_IsActive)(void);
+#define AMIGA_POLYPHASE_STEREO_FULL STATNAME(PolyphaseStereo)
+#define AMIGA_POLYPHASE_MONO_STRIDE3_HAS_ASM STATNAME(MonoFastPolyphaseStride3_Amiga_m68k_IsActive)
+#define AMIGA_POLYPHASE_STEREO_STRIDE3_HAS_ASM STATNAME(StereoFastPolyphaseStride3_Amiga_m68k_IsActive)
 int STATNAME(PolyphaseMonoFastLowrateStride2_C_REFERENCE)(short *pcm, int *vbuf, const int *coefBase);
 int STATNAME(PolyphaseMonoFastLowrateStride2_TEST_ACTIVE)(short *pcm, int *vbuf, const int *coefBase);
 int STATNAME(PolyphaseMonoFastLowrateStride2_HAS_AMIGA_M68K_ASM_RUNTIME)(void);
@@ -450,6 +461,8 @@ typedef struct DecodeOptions {
 	int selftestPolyphaseStride2Stereo;
 	int selftestPolyphaseStride2StereoReduced;
 	int selftestPolyphaseStride5Stereo;
+	int selftestPolyphaseStride3;
+	int selftestPolyphaseStride3Stereo;
 	int forceCPolyphaseStride2Stereo;
 	int selftestFastLowrate;
 	int selftestReducedTaps;
@@ -477,6 +490,7 @@ typedef struct DecodeOptions {
 	int help;
 	int debugArgv;
 	int debugFastLowrate;
+	int debugSubbandPrecondition;
 	int debugPlay;
 	int debugTone;
 	int debugCleanup;
@@ -833,8 +847,8 @@ static void PrintUsage(const char *prog)
 	printf("  --info       print MP3/ID3 metadata; alone, inspect without decoding\n");
 	printf("  --play       AmigaOS experimental audio.device Paula playback (mono s8)\n");
 	printf("  --stereo     opt-in stereo output for --play or --decode-only benchmarking\n");
-	printf("               stereo rates: 8820, 11025, 22050, or PAL-top 28600 Hz\n");
-	printf("               mono rates: 8287 default, 8820, 11025, 22050, or PAL-top 28600 Hz\n");
+	printf("               stereo rates: 8820, 11025, 14700, 22050, or PAL-top 28600 Hz\n");
+	printf("               mono rates: 8287 default, 8820, 11025, 14700, 22050, or PAL-top 28600 Hz\n");
 	printf("  --fake-stereo  --play pseudo-stereo width from the mono decode (mono CPU cost)\n");
 	printf("               energy-symmetric cross-delay; mutually exclusive with --stereo\n");
 	printf("  --fake-stereo-delay N  fake-stereo delay in samples (1-%d, default %d)\n",
@@ -851,16 +865,16 @@ static void PrintUsage(const char *prog)
 	printf("  --fast-mem   preload the compressed MP3 into Fast RAM before decoding/playback\n");
 	printf("  --decode-only decode frames only; skip PCM conversion and output\n");
 	printf("  --no-output  run conversion/compression paths but discard output bytes\n");
-	printf("  --rate HZ    output/downsample rate: 28600, 22050, 11025, 8820, or 8287 Hz\n");
+	printf("  --rate HZ    output/downsample rate: 28600, 22050, 14700, 11025, 8820, or 8287 Hz\n");
 	printf("               28600/22050 playback is experimental/high CPU and may underrun\n");
 	printf("  --fast-lowrate lower-quality Amiga conversion; requires --rate\n");
-	printf("  --superfast-lowrate sparse low-rate mode; use --rate 8287, 8820, 11025, or 22050\n");
+	printf("  --superfast-lowrate sparse low-rate mode; use --rate 8287, 8820, 11025, 14700, or 22050\n");
 	printf("                 defaults to 11025 if no --rate is specified\n");
 	printf("  --ultrafast  cap IMDCT to 26 subbands (~18 kHz) at full 44.1 kHz rate;\n");
 	printf("                 saves ~18%% IMDCT work with negligible audible impact\n");
 	printf("  --subband-cap N limit IMDCT to N active subbands 1-32 (use after --rate/--fast-lowrate)\n");
 	printf("  --quality N set quality/speed level (0 fastest, 1 fast, 2 balanced, 3 accurate)\n");
-	printf("               default: 1 for --fast-lowrate --rate 11025 or 22050, otherwise 3\n");
+	printf("               default: 1 for --fast-lowrate --rate 11025, 14700, or 22050, otherwise 3\n");
 	printf("               0 enables Superfast FDCT32 quarter + Huffman asm; 1 adds reduced taps; 3 is original behavior\n");
 	printf("               individual --exp-* flags may still be enabled independently\n");
 	printf("  --exp-poly  use experimental 68030 asm mono polyphase when compiled in\n");
@@ -890,6 +904,8 @@ static void PrintUsage(const char *prog)
 	printf("  --selftest-polyphase-stride2-stereo compare stereo stride-2 compact polyphase output\n");
 	printf("  --selftest-polyphase-stride2-stereo-reduced compare stereo reduced stride-2 compact polyphase output\n");
 	printf("  --selftest-polyphase-stride5-stereo compare stereo stride-5 compact polyphase output\n");
+	printf("  --selftest-polyphase-stride3 verify stride-3 (14700 Hz) mono hand-unrolled polyphase output against full-band synthesis\n");
+	printf("  --selftest-polyphase-stride3-stereo verify stride-3 (14700 Hz) stereo hand-unrolled polyphase output against full-band synthesis\n");
 	printf("  --force-c-polyphase-stride2-stereo benchmark stereo stride-2 C fallback in this binary\n");
 	printf("  --selftest-fastlowrate compare synthetic stride decimation paths\n");
 	printf("  --selftest-reduced-taps compare full and reduced stride-4 dewindow paths\n");
@@ -905,6 +921,7 @@ static void PrintUsage(const char *prog)
 	printf("  --checksum  print a 32-bit checksum of decoded PCM samples\n");
 	printf("  --no-ms-mono-skip force full two-channel M/S decode before mono regression checks\n");
 	printf("  --debug-fastlowrate print per-frame/granule fast-lowrate placement\n");
+	printf("  --debug-subband-precondition check FDCT32HalfSparse16's buf[16..31]==0 precondition on every real 22050 Hz block and print violation counts at exit\n");
 	printf("  --debug-play print audio.device playback startup diagnostics\n");
 	printf("  --debug-tone submit a generated signed-8 Paula test tone through --play audio path\n");
 	printf("  --debug-cleanup print playback resource cleanup diagnostics\n");
@@ -970,7 +987,8 @@ static void ApplyQualityOptions(DecodeOptions *opt)
 	int quality;
 
 	quality = opt->qualitySpecified ? opt->quality :
-		(opt->fastLowrate && (opt->outputRate == 11025 || opt->outputRate == 22050) ? 1 : 3);
+		(opt->fastLowrate && (opt->outputRate == 11025 || opt->outputRate == 14700 ||
+			opt->outputRate == 22050) ? 1 : 3);
 	opt->quality = quality;
 
 	switch (quality) {
@@ -1154,6 +1172,10 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->selftestPolyphaseStride2StereoReduced = 1;
 		} else if (!strcmp(argv[i], "--selftest-polyphase-stride5-stereo")) {
 			opt->selftestPolyphaseStride5Stereo = 1;
+		} else if (!strcmp(argv[i], "--selftest-polyphase-stride3")) {
+			opt->selftestPolyphaseStride3 = 1;
+		} else if (!strcmp(argv[i], "--selftest-polyphase-stride3-stereo")) {
+			opt->selftestPolyphaseStride3Stereo = 1;
 		} else if (!strcmp(argv[i], "--force-c-polyphase-stride2-stereo")) {
 			opt->forceCPolyphaseStride2Stereo = 1;
 		} else if (!strcmp(argv[i], "--selftest-fastlowrate")) {
@@ -1222,11 +1244,13 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 				return -1;
 			opt->outputRate = atoi(argv[i]);
 			if (opt->outputRate != 28600 && opt->outputRate != 22050 &&
-				opt->outputRate != 11025 && opt->outputRate != 8820 &&
-				opt->outputRate != 8287)
+				opt->outputRate != 14700 && opt->outputRate != 11025 &&
+				opt->outputRate != 8820 && opt->outputRate != 8287)
 				return -1;
 		} else if (!strcmp(argv[i], "--debug-fastlowrate")) {
 			opt->debugFastLowrate = 1;
+		} else if (!strcmp(argv[i], "--debug-subband-precondition")) {
+			opt->debugSubbandPrecondition = 1;
 		} else if (!strcmp(argv[i], "--debug-play")) {
 			opt->debugPlay = 1;
 		} else if (!strcmp(argv[i], "--debug-tone")) {
@@ -1282,6 +1306,8 @@ if (opt->selftestMulshift ||
     opt->selftestPolyphaseStride2Stereo ||
     opt->selftestPolyphaseStride2StereoReduced ||
     opt->selftestPolyphaseStride5Stereo ||
+    opt->selftestPolyphaseStride3 ||
+    opt->selftestPolyphaseStride3Stereo ||
     opt->selftestFastLowrate ||
     opt->selftestReducedTaps ||
     opt->selftestFdct32Quarter ||
@@ -1325,13 +1351,13 @@ if (opt->selftestMulshift ||
 		opt->outputRate = opt->stereo ? 8820 : 8287;
 
 	if (opt->play && opt->outputRate != 8287 && opt->outputRate != 8820 &&
-		opt->outputRate != 11025 && opt->outputRate != 22050 &&
-		opt->outputRate != 28600) {
-		fprintf(stderr, "--play supports --rate 8287, 8820, 11025, 22050, or 28600 only\n");
+		opt->outputRate != 11025 && opt->outputRate != 14700 &&
+		opt->outputRate != 22050 && opt->outputRate != 28600) {
+		fprintf(stderr, "--play supports --rate 8287, 8820, 11025, 14700, 22050, or 28600 only\n");
 		return -1;
 	}
 	if (opt->play && opt->stereo && opt->outputRate == 8287) {
-		fprintf(stderr, "--stereo playback supports --rate 8820, 11025, 22050, or PAL-top 28600 only\n");
+		fprintf(stderr, "--stereo playback supports --rate 8820, 11025, 14700, 22050, or PAL-top 28600 only\n");
 		return -1;
 	}
 	if (opt->play) {
@@ -1342,15 +1368,15 @@ if (opt->selftestMulshift ||
 		opt->noOutput = 1;
 	}
 
-	if (opt->superfastLowrate && opt->outputRate != 11025 && opt->outputRate != 22050 &&
-		opt->outputRate != 8820 && opt->outputRate != 8287) {
-		fprintf(stderr, "--superfast-lowrate supports only --rate 8287, 8820, 11025, or 22050\n");
+	if (opt->superfastLowrate && opt->outputRate != 11025 && opt->outputRate != 14700 &&
+		opt->outputRate != 22050 && opt->outputRate != 8820 && opt->outputRate != 8287) {
+		fprintf(stderr, "--superfast-lowrate supports only --rate 8287, 8820, 11025, 14700, or 22050\n");
 		return -1;
 	}
-	if (opt->fastLowrate && (opt->outputRate != 22050 &&
+	if (opt->fastLowrate && (opt->outputRate != 22050 && opt->outputRate != 14700 &&
 		opt->outputRate != 11025 && opt->outputRate != 8820 &&
 		opt->outputRate != 8287)) {
-		fprintf(stderr, "--fast-lowrate requires --rate 22050, 11025, 8820, or 8287\n");
+		fprintf(stderr, "--fast-lowrate requires --rate 22050, 14700, 11025, 8820, or 8287\n");
 		return -1;
 	}
 
@@ -2515,6 +2541,8 @@ static int FastLowrateStrideForOutputRate(int outputRate)
 {
 	if (outputRate == 22050)
 		return 2;
+	if (outputRate == 14700)
+		return 3;
 	if (outputRate == 11025)
 		return 4;
 	return 5;
@@ -2777,13 +2805,18 @@ static int SelftestQuality(void)
 
 	memset(&opt, 0, sizeof(opt));
 	opt.fastLowrate = 1;
+	opt.outputRate = 14700;
+	failures += QualitySelftestExpect("auto-fast-lowrate-14700", opt, 1, 0, 0, 1, 0, 1) != 0;
+
+	memset(&opt, 0, sizeof(opt));
+	opt.fastLowrate = 1;
 	opt.outputRate = 8820;
 	failures += QualitySelftestExpect("auto-fast-lowrate-8820", opt, 0, 0, 0, 0, 0, 3) != 0;
 
 	memset(&opt, 0, sizeof(opt));
 	failures += QualitySelftestExpect("auto-default", opt, 0, 0, 0, 0, 0, 3) != 0;
 
-	printf("Quality selftest cases: %d\n", 8);
+	printf("Quality selftest cases: %d\n", 9);
 	printf("Quality selftest failures: %d\n", failures);
 	if (!failures)
 		printf("Quality selftest passed\n");
@@ -2882,6 +2915,44 @@ static int SelftestFastLowrate(void)
 		printf("note: --rate 8820/8287 uses fixed stride 5; 8287 intentionally differs "
 			"from rational 44100->8287 normal --rate positions.\n");
 	}
+
+	{
+		short normal3[TOTAL_FRAMES * CHANNELS];
+		short fast3[TOTAL_FRAMES * CHANNELS];
+		int normal3Count;
+		int fast3Count;
+		int fast3Phase;
+
+		memset(&rateState, 0, sizeof(rateState));
+		fast3Phase = 0;
+		normal3Count = 0;
+		fast3Count = 0;
+		for (offset = 0; offset < TOTAL_FRAMES; offset += CHUNK_FRAMES) {
+			inSamps = CHUNK_FRAMES * CHANNELS;
+			normal3Count += DownsampleFrame(&rateState, input + offset * CHANNELS,
+				normal3 + normal3Count, inSamps, 44100, 14700, CHANNELS);
+			fast3Count += FastLowrateSelectFrame(&fast3Phase, input + offset * CHANNELS,
+				fast3 + fast3Count, inSamps, 3, CHANNELS);
+		}
+		if (normal3Count != fast3Count) {
+			fprintf(stderr, "fast-lowrate selftest stride3 count mismatch: normal=%d fast=%d\n",
+				normal3Count, fast3Count);
+			failures++;
+		}
+		for (i = 0; i < normal3Count && i < fast3Count; i++) {
+			if (normal3[i] != fast3[i]) {
+				fprintf(stderr, "fast-lowrate selftest stride3 mismatch at %d: normal=%d fast=%d\n",
+					i, normal3[i], fast3[i]);
+				failures++;
+				break;
+			}
+		}
+		if (i == normal3Count && normal3Count == fast3Count)
+			printf("fast-lowrate selftest passed: stride 3 selects the same positions "
+				"as 44100->14700 normal decimation across chunk boundaries (%d samples)\n",
+				normal3Count);
+	}
+
 	return failures ? 1 : 0;
 }
 
@@ -4162,6 +4233,152 @@ static int SelftestPolyphaseStride5Stereo(void)
 	printf("Polyphase stride5 stereo selftest cases: %lu\n", i * 5UL);
 	printf("Polyphase stride5 stereo selftest failures: %lu\n", failures);
 	return failures ? 1 : 0;
+}
+
+/*
+ * Stride 3 (14700 Hz output from 44100 Hz) has a hand-unrolled C polyphase
+ * kernel (PolyphaseMonoFastLowrateStride3()/PolyphaseStereoFastLowrateStride3()
+ * in real/polyphase.c, dispatched from PolyphaseMonoFastLowrate()/
+ * PolyphaseStereoFastLowrate()), matching the stride 4/5 style -- no asm
+ * kernel yet. This proves that dispatch independently: an un-decimated
+ * PolyphaseMonoFast_C_REFERENCE()/PolyphaseStereo() call is the ground
+ * truth, and this function separately (re-)derives -- without calling
+ * into the code under test -- which of those 32 samples a continuously
+ * running "keep every 3rd sample, phase carried across frames" decimator
+ * starting at startPhase should keep, matching the same contract stride
+ * 2/4/5 already rely on via PolyphaseAdvanceLowratePhase().
+ */
+static int TestPolyphaseStride3Case(unsigned long index, unsigned long seed, int pattern,
+	int startPhase, int stereo)
+{
+	static int cvbuf[AMIGA_POLYPHASE_VBUF_LENGTH * 2];
+	static int avbuf[AMIGA_POLYPHASE_VBUF_LENGTH * 2];
+	static short full[AMIGA_POLYPHASE_NBANDS * 2];
+	static short pcm[AMIGA_POLYPHASE_NBANDS * 2];
+	int expectedIndex[AMIGA_POLYPHASE_NBANDS];
+	int expectedCount;
+	int vbufLen;
+	int i;
+	int phase;
+	int count;
+	int running;
+
+	vbufLen = stereo ? AMIGA_POLYPHASE_VBUF_LENGTH * 2 : AMIGA_POLYPHASE_VBUF_LENGTH;
+	for (i = 0; i < vbufLen; i++) {
+		seed = seed * 1664525UL + 1013904223UL;
+		if (pattern == 0)
+			cvbuf[i] = 0;
+		else if (pattern == 1)
+			cvbuf[i] = ((int)seed) >> 9;
+		else
+			cvbuf[i] = (i & 1) ? 0x03ffffff : (int)0xfc000000UL;
+		avbuf[i] = cvbuf[i];
+	}
+	for (i = 0; i < AMIGA_POLYPHASE_NBANDS * 2; i++)
+		full[i] = pcm[i] = (short)(0x6c00 + i);
+
+	if (stereo)
+		AMIGA_POLYPHASE_STEREO_FULL(full, cvbuf, AMIGA_POLY_COEF);
+	else
+		AMIGA_POLYPHASE_MONO_FAST_C_REFERENCE(full, cvbuf, AMIGA_POLY_COEF);
+
+	expectedCount = 0;
+	running = startPhase;
+	for (i = 0; i < AMIGA_POLYPHASE_NBANDS; i++) {
+		if (running == 0)
+			expectedIndex[expectedCount++] = i;
+		running++;
+		if (running >= 3)
+			running = 0;
+	}
+
+	phase = startPhase;
+	if (stereo)
+		count = PolyphaseStereoFastLowrate(pcm, avbuf, AMIGA_POLY_COEF, 3, &phase);
+	else
+		count = PolyphaseMonoFastLowrate(pcm, avbuf, AMIGA_POLY_COEF, 3, &phase);
+
+	if (count != expectedCount * (stereo ? 2 : 1)) {
+		printf("Polyphase stride3 count mismatch %lu startPhase=%d stereo=%d pattern=%d: got=%d expected=%d\n",
+			index, startPhase, stereo, pattern, count, expectedCount * (stereo ? 2 : 1));
+		return -1;
+	}
+	for (i = 0; i < vbufLen; i++) {
+		if (avbuf[i] != cvbuf[i]) {
+			printf("Polyphase stride3 vbuf mismatch %lu[%d] startPhase=%d stereo=%d pattern=%d: first=%ld second=%ld\n",
+				index, i, startPhase, stereo, pattern, (long)cvbuf[i], (long)avbuf[i]);
+			return -1;
+		}
+	}
+	for (i = 0; i < expectedCount; i++) {
+		if (stereo) {
+			if (pcm[i * 2] != full[expectedIndex[i] * 2] ||
+				pcm[i * 2 + 1] != full[expectedIndex[i] * 2 + 1]) {
+				printf("Polyphase stride3 stereo output mismatch %lu[%d] startPhase=%d pattern=%d "
+					"fullIdx=%d: got=(%d,%d) want=(%d,%d)\n",
+					index, i, startPhase, pattern, expectedIndex[i],
+					pcm[i * 2], pcm[i * 2 + 1], full[expectedIndex[i] * 2], full[expectedIndex[i] * 2 + 1]);
+				return -1;
+			}
+		} else if (pcm[i] != full[expectedIndex[i]]) {
+			printf("Polyphase stride3 mono output mismatch %lu[%d] startPhase=%d pattern=%d fullIdx=%d: "
+				"got=%d want=%d\n",
+				index, i, startPhase, pattern, expectedIndex[i], pcm[i], full[expectedIndex[i]]);
+			return -1;
+		}
+	}
+	{
+		int expectedEndPhase = (startPhase + AMIGA_POLYPHASE_NBANDS) % 3;
+		if (phase != expectedEndPhase) {
+			printf("Polyphase stride3 phase mismatch %lu startPhase=%d stereo=%d: got=%d expected=%d\n",
+				index, startPhase, stereo, phase, expectedEndPhase);
+			return -1;
+		}
+	}
+	return 0;
+}
+
+static int SelftestPolyphaseStride3Common(int stereo)
+{
+	unsigned long i;
+	unsigned long failures;
+	unsigned long seed;
+	int pattern;
+	int startPhase;
+
+	failures = 0;
+	seed = 0x2b7e1516UL;
+	for (i = 0; i < 1500UL; i++) {
+		seed = seed * 1664525UL + 1013904223UL;
+		pattern = (i < 24UL) ? 0 : ((i < 48UL) ? 2 : 1);
+		startPhase = (int)(i % 3UL);
+		if (TestPolyphaseStride3Case(i, seed, pattern, startPhase, stereo) != 0)
+			failures++;
+	}
+
+	printf("Polyphase stride3 %s asm requested: %s\n", stereo ? "stereo" : "mono",
+#ifdef AMIGA_M68K_ASM_POLYPHASE
+		"yes"
+#else
+		"no"
+#endif
+	);
+	printf("Polyphase stride3 %s asm active: %s\n", stereo ? "stereo" : "mono",
+		(stereo ? AMIGA_POLYPHASE_STEREO_STRIDE3_HAS_ASM() : AMIGA_POLYPHASE_MONO_STRIDE3_HAS_ASM())
+			? "yes" : "no");
+	printf("Polyphase stride3 %s selftest cases: %lu\n", stereo ? "stereo" : "mono", i);
+	printf("Polyphase stride3 %s selftest failures: %lu\n", stereo ? "stereo" : "mono", failures);
+	return failures ? 1 : 0;
+}
+
+static int SelftestPolyphaseStride3(void)
+{
+	return SelftestPolyphaseStride3Common(0);
+}
+
+static int SelftestPolyphaseStride3Stereo(void)
+{
+	return SelftestPolyphaseStride3Common(1);
 }
 
 
@@ -10590,6 +10807,16 @@ int main(int argc, char **argv)
 		AmigaFreeNormalizedArgs(&normalized);
 		return selftestErr;
 	}
+	if (opt.selftestPolyphaseStride3) {
+		int selftestErr = SelftestPolyphaseStride3();
+		AmigaFreeNormalizedArgs(&normalized);
+		return selftestErr;
+	}
+	if (opt.selftestPolyphaseStride3Stereo) {
+		int selftestErr = SelftestPolyphaseStride3Stereo();
+		AmigaFreeNormalizedArgs(&normalized);
+		return selftestErr;
+	}
 	if (opt.selftestFastLowrate) {
 		int selftestErr = SelftestFastLowrate();
 		AmigaFreeNormalizedArgs(&normalized);
@@ -11002,6 +11229,8 @@ int main(int argc, char **argv)
 	}
 	if (opt.subbandCap > 0)
 		MP3SetSubbandCap(decoder, opt.subbandCap);
+	if (opt.debugSubbandPrecondition)
+		MP3EnableFdct32HalfSparse16PreconditionCheck(1);
 	if (opt.play && opt.outputRate == 28600)
 		fprintf(stderr,
 			"28600 PAL-top playback uses normal post-decode decimation and may underrun on 030 systems.\n");
@@ -11063,6 +11292,10 @@ int main(int argc, char **argv)
 		printf("playback underruns buffer 1: %lu\n", stats.underrunBuffers[1]);
 		printf("playback underruns buffer 2: %lu\n", stats.underrunBuffers[2]);
 		printf("playback late buffers: %lu\n", stats.lateBuffers);
+		if (opt.debugSubbandPrecondition)
+			printf("FDCT32HalfSparse16 precondition checks: %lu, violations: %lu\n",
+				gFdct32HalfSparse16PreconditionChecks,
+				gFdct32HalfSparse16PreconditionViolations);
 		if (stats.spareTimeMeasured)
 			printf("playback minimum spare before buffer end: %ld ms\n",
 				stats.minimumSpareMilliseconds);

@@ -652,6 +652,7 @@ static const char * const kRates[] = {
 	"8287",
 	"8820",
 	"11025",
+	"14700",
 	"22050",
 	"28600"
 };
@@ -660,6 +661,7 @@ static const STRPTR kRateLabels[] = {
 	(STRPTR)"8287",
 	(STRPTR)"8820",
 	(STRPTR)"11025",
+	(STRPTR)"14700",
 	(STRPTR)"22050",
 	(STRPTR)"28600",
 	NULL
@@ -667,7 +669,7 @@ static const STRPTR kRateLabels[] = {
 
 static int RateIndexSupportsSuperfast(int rateIndex, int mono)
 {
-	return rateIndex >= (mono ? 0 : 1) && rateIndex <= 3;
+	return rateIndex >= (mono ? 0 : 1) && rateIndex <= 4;
 }
 
 static int DefaultSuperfastRateIndex(int mono)
@@ -5040,13 +5042,13 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	gui->fakeStereoWidthIndex = LoadEnvInt("FakeStereoWidthIndex", 1, 0, 4);
 	gui->fakeStereoDelayIndex = LoadEnvInt("FakeStereoDelayIndex", 2, 0, 4);
 	gui->hardwareFilter = LoadEnvInt("HardwareFilter", 0, 0, 1);
-	gui->rateIndex = LoadEnvInt("RateIndex", 2, 0, 4);
+	gui->rateIndex = LoadEnvInt("RateIndex", 2, 0, 5);
 	if (gui->cd32Ultrafast) {
 		gui->ultrafast = 0;
 		gui->fastLowrate = 1;
 		gui->superfastLowrate = 1;
 		gui->mono = 1;
-		gui->rateIndex = 3;
+		gui->rateIndex = 4;
 	} else if (gui->ultrafast) {
 		gui->fastLowrate = 0;
 		gui->superfastLowrate = 0;
@@ -7560,7 +7562,7 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 		gui->superfastLowrate = (code == 2 || code == 4) ? 1 : 0;
 		if (gui->cd32Ultrafast) {
 			gui->mono = 1;
-			gui->rateIndex = 3;
+			gui->rateIndex = 4;
 		}
 		if (gui->superfastLowrate &&
 			!RateIndexSupportsSuperfast(gui->rateIndex, ChannelUsesMonoCost(gui)))
@@ -7577,7 +7579,7 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 			"22050 mono ultrafast enabled (reduced taps, 12 subband cap)." :
 			code == 3 ?
 			"Ultrafast enabled (26 subband cap)." :
-			code == 2 ? "Superfast enabled for 8287/8820/11025/22050 Hz." :
+			code == 2 ? "Superfast enabled for 8287/8820/11025/14700/22050 Hz." :
 			code == 1 ? "Fast-lowrate enabled." : "Standard speed enabled.");
 		SaveGuiSettings(gui);
 		break;
@@ -7685,7 +7687,7 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 			break;
 		}
 		gui->rateIndex = code;
-		if (gui->rateIndex < 0 || gui->rateIndex > 4)
+		if (gui->rateIndex < 0 || gui->rateIndex > 5)
 			gui->rateIndex = 2;
 		if (gui->superfastLowrate &&
 			!RateIndexSupportsSuperfast(gui->rateIndex, ChannelUsesMonoCost(gui))) {

@@ -252,8 +252,10 @@ static int MP3FastLowrateActiveSubbandsForStride(int stride)
 {
 	if (stride >= 5)
 		return 6;	/* 8820/8287 Hz: output Nyquist ~4.4 kHz -> 6 subbands */
-	if (stride >= 4)
+	if (stride == 4)
 		return 8;
+	if (stride == 3)
+		return 10;	/* 14700 Hz: output Nyquist ~7.35 kHz -> 10 subbands */
 	if (stride == 2)
 		return 16;
 	return 32;

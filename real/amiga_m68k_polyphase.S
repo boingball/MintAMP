@@ -12,6 +12,12 @@
 	.globl	AmigaM68KPolyphaseMonoFastStride2
 	.globl	AmigaM68KPolyphaseMonoFastStride2Reduced
 	.globl	MonoFastPolyphaseStride4_Amiga_m68k
+	.globl	MonoFastPolyphaseStride3Phase0_Amiga_m68k
+	.globl	MonoFastPolyphaseStride3Phase1_Amiga_m68k
+	.globl	MonoFastPolyphaseStride3Phase2_Amiga_m68k
+	.globl	StereoFastPolyphaseStride3Phase0_Amiga_m68k
+	.globl	StereoFastPolyphaseStride3Phase1_Amiga_m68k
+	.globl	StereoFastPolyphaseStride3Phase2_Amiga_m68k
 	.globl	StereoFastPolyphaseStride2Phase0_Amiga_m68k
 	.globl	StereoFastPolyphaseStride2Phase0Reduced_Amiga_m68k
 	.globl	StereoFastPolyphaseStride4Half_Amiga_m68k
@@ -365,6 +371,83 @@ MonoFastPolyphaseStride4_Amiga_m68k:
 	PAIR_HI 12,10
 	PAIR_HI 8,12
 	PAIR_HI 4,14
+
+	movem.l	(%sp)+,%d2-%d3/%a2-%a6
+	rts
+
+
+/* void MonoFastPolyphaseStride3Phase0_Amiga_m68k(short *pcm, int *vbuf, const int *coefBase)
+ * Matches PolyphaseMonoFastLowrateStride3() case 0 in polyphase.c:
+ * synthesis indices 0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30 (11 samples).
+ */
+MonoFastPolyphaseStride3Phase0_Amiga_m68k:
+	movem.l	%d2-%d3/%a2-%a6,-(%sp)
+	move.l	32(%sp),%a0		| pcm
+	move.l	36(%sp),%a1		| vbuf
+	move.l	40(%sp),%a2		| coefBase
+
+	SAMPLE0
+	PAIR_LO 3,2
+	PAIR_LO 6,4
+	PAIR_LO 9,6
+	PAIR_LO 12,8
+	PAIR_LO 15,10
+	PAIR_HI 14,12
+	PAIR_HI 11,14
+	PAIR_HI 8,16
+	PAIR_HI 5,18
+	PAIR_HI 2,20
+
+	movem.l	(%sp)+,%d2-%d3/%a2-%a6
+	rts
+
+
+/* void MonoFastPolyphaseStride3Phase1_Amiga_m68k(short *pcm, int *vbuf, const int *coefBase)
+ * Matches PolyphaseMonoFastLowrateStride3() case 1 in polyphase.c:
+ * synthesis indices 2, 5, 8, 11, 14, 17, 20, 23, 26, 29 (10 samples).
+ */
+MonoFastPolyphaseStride3Phase1_Amiga_m68k:
+	movem.l	%d2-%d3/%a2-%a6,-(%sp)
+	move.l	32(%sp),%a0		| pcm
+	move.l	36(%sp),%a1		| vbuf
+	move.l	40(%sp),%a2		| coefBase
+
+	PAIR_LO 2,0
+	PAIR_LO 5,2
+	PAIR_LO 8,4
+	PAIR_LO 11,6
+	PAIR_LO 14,8
+	PAIR_HI 15,10
+	PAIR_HI 12,12
+	PAIR_HI 9,14
+	PAIR_HI 6,16
+	PAIR_HI 3,18
+
+	movem.l	(%sp)+,%d2-%d3/%a2-%a6
+	rts
+
+
+/* void MonoFastPolyphaseStride3Phase2_Amiga_m68k(short *pcm, int *vbuf, const int *coefBase)
+ * Matches PolyphaseMonoFastLowrateStride3() case 2 in polyphase.c:
+ * synthesis indices 1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 31 (11 samples).
+ */
+MonoFastPolyphaseStride3Phase2_Amiga_m68k:
+	movem.l	%d2-%d3/%a2-%a6,-(%sp)
+	move.l	32(%sp),%a0		| pcm
+	move.l	36(%sp),%a1		| vbuf
+	move.l	40(%sp),%a2		| coefBase
+
+	PAIR_LO 1,0
+	PAIR_LO 4,2
+	PAIR_LO 7,4
+	PAIR_LO 10,6
+	PAIR_LO 13,8
+	SAMPLE16_AT 10
+	PAIR_HI 13,12
+	PAIR_HI 10,14
+	PAIR_HI 7,16
+	PAIR_HI 4,18
+	PAIR_HI 1,20
 
 	movem.l	(%sp)+,%d2-%d3/%a2-%a6
 	rts
@@ -731,6 +814,83 @@ StereoFastPolyphaseStride4Phase3_Amiga_m68k:
 	STEREO_PAIR_HI 11,20
 	STEREO_PAIR_HI 7,24
 	STEREO_PAIR_HI 3,28
+
+	movem.l	(%sp)+,%d2-%d3/%d5/%a2-%a6
+	rts
+
+
+/* void StereoFastPolyphaseStride3Phase0_Amiga_m68k(short *pcm, int *vbuf, const int *coefBase)
+ * Matches PolyphaseStereoFastLowrateStride3() case 0 in polyphase.c:
+ * synthesis indices 0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30 (11 stereo pairs).
+ */
+StereoFastPolyphaseStride3Phase0_Amiga_m68k:
+	movem.l	%d2-%d3/%d5/%a2-%a6,-(%sp)
+	move.l	36(%sp),%a0		| pcm
+	move.l	40(%sp),%a1		| vbuf
+	move.l	44(%sp),%a2		| coefBase
+
+	STEREO_SAMPLE0 0
+	STEREO_PAIR_LO 3,4
+	STEREO_PAIR_LO 6,8
+	STEREO_PAIR_LO 9,12
+	STEREO_PAIR_LO 12,16
+	STEREO_PAIR_LO 15,20
+	STEREO_PAIR_HI 14,24
+	STEREO_PAIR_HI 11,28
+	STEREO_PAIR_HI 8,32
+	STEREO_PAIR_HI 5,36
+	STEREO_PAIR_HI 2,40
+
+	movem.l	(%sp)+,%d2-%d3/%d5/%a2-%a6
+	rts
+
+
+/* void StereoFastPolyphaseStride3Phase1_Amiga_m68k(short *pcm, int *vbuf, const int *coefBase)
+ * Matches PolyphaseStereoFastLowrateStride3() case 1 in polyphase.c:
+ * synthesis indices 2, 5, 8, 11, 14, 17, 20, 23, 26, 29 (10 stereo pairs).
+ */
+StereoFastPolyphaseStride3Phase1_Amiga_m68k:
+	movem.l	%d2-%d3/%d5/%a2-%a6,-(%sp)
+	move.l	36(%sp),%a0		| pcm
+	move.l	40(%sp),%a1		| vbuf
+	move.l	44(%sp),%a2		| coefBase
+
+	STEREO_PAIR_LO 2,0
+	STEREO_PAIR_LO 5,4
+	STEREO_PAIR_LO 8,8
+	STEREO_PAIR_LO 11,12
+	STEREO_PAIR_LO 14,16
+	STEREO_PAIR_HI 15,20
+	STEREO_PAIR_HI 12,24
+	STEREO_PAIR_HI 9,28
+	STEREO_PAIR_HI 6,32
+	STEREO_PAIR_HI 3,36
+
+	movem.l	(%sp)+,%d2-%d3/%d5/%a2-%a6
+	rts
+
+
+/* void StereoFastPolyphaseStride3Phase2_Amiga_m68k(short *pcm, int *vbuf, const int *coefBase)
+ * Matches PolyphaseStereoFastLowrateStride3() case 2 in polyphase.c:
+ * synthesis indices 1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 31 (11 stereo pairs).
+ */
+StereoFastPolyphaseStride3Phase2_Amiga_m68k:
+	movem.l	%d2-%d3/%d5/%a2-%a6,-(%sp)
+	move.l	36(%sp),%a0		| pcm
+	move.l	40(%sp),%a1		| vbuf
+	move.l	44(%sp),%a2		| coefBase
+
+	STEREO_PAIR_LO 1,0
+	STEREO_PAIR_LO 4,4
+	STEREO_PAIR_LO 7,8
+	STEREO_PAIR_LO 10,12
+	STEREO_PAIR_LO 13,16
+	STEREO_SAMPLE16 20
+	STEREO_PAIR_HI 13,24
+	STEREO_PAIR_HI 10,28
+	STEREO_PAIR_HI 7,32
+	STEREO_PAIR_HI 4,36
+	STEREO_PAIR_HI 1,40
 
 	movem.l	(%sp)+,%d2-%d3/%d5/%a2-%a6
 	rts

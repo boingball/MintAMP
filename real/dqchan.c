@@ -716,9 +716,14 @@ int DequantChannel(int *sampleBuf, int *workBuf, int *nonZeroBound, FrameHeader 
 /*
  * Verifies the DequantChannel() subbandCapSampleLimit long-block skip
  * against the uncapped computation, calling the real production function
- * (not a host stand-in) with both subbandCapSampleLimit=0 (uncapped) and
- * the two real fast-lowrate active-subbands values (16 -> stride 2, 8 ->
- * stride 4). Checks, per the same reasoning in DequantChannel()'s comment:
+ * (not a host stand-in) with subbandCapSampleLimit=0 (uncapped) and every
+ * active-subbands value that can actually reach this function: the two
+ * values fast-lowrate derives automatically from stride (16 -> stride 2,
+ * 8 -> stride 4), plus the manual overrides the GUI's "Subbands" cycle
+ * gadget exposes whenever Superfast is enabled (26, 20, 12 -- see
+ * amiga_mp3gui.c's kSubbandCapValues and MP3FastLowrateEffectiveActiveSubbands()'s
+ * superfastLowrate branch, which passes the raw manual value straight
+ * through). Checks, per the same reasoning in DequantChannel()'s comment:
  *   1. kept-region samples (index < cutoff) bit-identical
  *   2. cbi->cbEndL bit-identical regardless of whether it falls above or
  *      below the cutoff (intensity stereo's cbStartL = cbi[1].cbEndL + 1
@@ -732,7 +737,7 @@ int DequantChannel(int *sampleBuf, int *workBuf, int *nonZeroBound, FrameHeader 
  */
 int DequantSubbandCapSelftest(void)
 {
-	static const int kActiveSubbandsCases[] = { 16, 8 };
+	static const int kActiveSubbandsCases[] = { 26, 20, 16, 12, 8 };
 	unsigned int rngState = 0x5EED1234U;
 	int trial, caseIdx, failures, total;
 

@@ -209,7 +209,7 @@ Fast-mem is always obeyed.  When an internet stream is selected the GadTools
 frontend clears Fast-mem and omits `--fast-mem`, matching the ReAction frontend,
 because stream inputs are live sockets rather than finite seekable files.
 
-The buffer slider chooses the `--buffer-seconds` value from 1 to 30 seconds. The Volume slider stores `ENVARC:MiniAMP3/Volume` as 0-100% and maps it to `audio.device` `ioa_Volume` 0-64, so 0% is silent and 100% preserves the previous full-volume request value. Volume changes are shared with the embedded playback subprocess and applied to the next safe `CMD_WRITE` submission without changing PCM samples. The GUI rate selector cycles through 8287, 8820, 11025, 22050, and 28600 Hz.
+The buffer slider chooses the `--buffer-seconds` value from 1 to 30 seconds. The Volume slider stores `ENVARC:MiniAMP3/Volume` as 0-100% and maps it to `audio.device` `ioa_Volume` 0-64, so 0% is silent and 100% preserves the previous full-volume request value. Volume changes are shared with the embedded playback subprocess and applied to the next safe `CMD_WRITE` submission without changing PCM samples. The GUI rate selector cycles through 8287, 8820, 11025, 14700, 22050, and 28600 Hz.
 Superfast is a fast-lowrate variant rather than a separate exclusive mode; when
 Superfast is ticked the rate selector narrows to its supported 11025 and 22050 Hz
 choices. Playback still
@@ -237,7 +237,7 @@ Speed mode is now a single cycle gadget:
 - **Normal**: no fast-lowrate flags.
 - **Fast**: adds `--fast-lowrate` for supported non-28600 Hz playback rates.
 - **Superfast**: adds `--fast-lowrate --superfast-lowrate`, capping sparse
-  low-rate synthesis work for 8287, 8820, 11025, or 22050 Hz output.
+  low-rate synthesis work for 8287, 8820, 11025, 14700, or 22050 Hz output.
 - **Ultrafast**: uses Superfast for low-rate playback, or `--ultrafast` at
   28600 Hz to cap IMDCT work to 26 subbands.
 - **22050 Mono Ultrafast**: a CD32/030-oriented preset that forces 22050 Hz
@@ -261,7 +261,7 @@ source while reusing the public decoder and Paula playback implementation.
 ```sh
 amiga_mp3dec [options] infile.mp3 outfile
 amiga_mp3dec --info infile.mp3
-amiga_mp3dec --play [--stereo|--fake-stereo] [--rate 8287|8820|11025|22050|28600] [--quality 0|1|2|3] [--buffer-seconds N] [--volume N] [--fast-mem] infile.mp3
+amiga_mp3dec --play [--stereo|--fake-stereo] [--rate 8287|8820|11025|14700|22050|28600] [--quality 0|1|2|3] [--buffer-seconds N] [--volume N] [--fast-mem] infile.mp3
 amiga_mp3dec --play [playback options] infile.flac
 amiga_mp3dec --play [playback options] infile.aac
 amiga_mp3dec --selftest-play-cleanup [--debug-cleanup] [--buffer-seconds N]
@@ -302,16 +302,16 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   68030 testing. It opens `audio.device`, decodes to mono signed 8-bit PCM into
   Fast RAM work buffers, and bulk-copies each completed half-buffer into the
   chip-memory buffers submitted to `audio.device`. The default playback rate is
-  8287 Hz for 030 safety; `--rate 8820` and `--rate 11025` are accepted,
-  `--rate 22050` is accepted as an experimental/high-CPU mono-first mode that
-  may underrun on 030 systems, and `--rate 28600` selects the PAL-top Paula
-  mode. Playback rates up to 22050 Hz imply `--fast-lowrate`; 28600 Hz uses normal
+  8287 Hz for 030 safety; `--rate 8820`, `--rate 11025`, and `--rate 14700`
+  are accepted, `--rate 22050` is accepted as an experimental/high-CPU
+  mono-first mode that may underrun on 030 systems, and `--rate 28600` selects
+  the PAL-top Paula mode. Playback rates up to 22050 Hz imply `--fast-lowrate`; 28600 Hz uses normal
   post-decode decimation because it is not an integer fast-lowrate stride. 22050 Hz fast-lowrate
   playback prints `22050 requires significantly more CPU and may underrun on
   030 systems.`
   Playback prints the requested and actual output rates when fixed stride output
   differs, and calculates the PAL audio period from the actual output rate using
-  rounded `3546895 / actual_output_rate` ticks, so 22050 Hz uses period 161 and 28600 Hz uses period 124.
+  rounded `3546895 / actual_output_rate` ticks, so 22050 Hz uses period 161, 14700 Hz uses period 241, and 28600 Hz uses period 124.
   Playback automatically uses the reduced-
   overhead fast path: checksums run only with `--checksum`, timing buckets and
   decode-core profiling run only with `--bench`, and export/8SVX/Fibonacci state
@@ -324,9 +324,9 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   channel, converts decoded interleaved signed 16-bit PCM into planar signed
   8-bit Fast RAM work buffers, and uses one bulk copy per channel into the
   Paula chip-memory submission buffers when each half-buffer is submitted. Stereo
-  supports `--rate 8820` and `--rate 11025` first; `--rate 22050` is allowed
-  as an experimental/high-CPU stereo mode, and `--rate 28600` is available as
-  the PAL-top Paula mode. `--rate 8287` is mono-only.
+  supports `--rate 8820`, `--rate 11025`, and `--rate 14700` first; `--rate
+  22050` is allowed as an experimental/high-CPU stereo mode, and `--rate
+  28600` is available as the PAL-top Paula mode. `--rate 8287` is mono-only.
   Enabling stereo prints `Stereo playback needs significantly more CPU and may
   underrun on 030.`
 - `--fake-stereo` is an opt-in `--play` alternative to true `--stereo` for systems
@@ -422,16 +422,18 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
 - `--no-output` runs PCM conversion/downsampling and 8SVX/Fibonacci compression
   paths but discards bytes instead of touching an output file.  The output path
   argument is optional in this mode.
-- `--rate 28600`, `--rate 22050`, `--rate 11025`, `--rate 8820`, or `--rate 8287` post-decode downsamples the
-  output with a lightweight nearest-sample decimator when the MP3 sample rate is
-  higher than the requested output rate.
+- `--rate 28600`, `--rate 22050`, `--rate 14700`, `--rate 11025`, `--rate 8820`,
+  or `--rate 8287` post-decode downsamples the output with a lightweight
+  nearest-sample decimator when the MP3 sample rate is higher than the
+  requested output rate.
 - `--fast-lowrate` is a lower-quality Amiga conversion mode for speed-oriented
   playback and conversion. It requires one of the `--rate` values
   above. In `AMIGA_M68K` + `AMIGA_FAST_POLYPHASE` builds it writes only every
-  second polyphase output sample for 22050 Hz, every fourth for 11025 Hz, and
-  every fifth for 8820/8287 Hz. This skips discarded polyphase sample work,
-  appends emitted samples through one cumulative low-rate output counter, and
-  keeps the low-rate phase/stride state alive across granules and MP3 frames.
+  second polyphase output sample for 22050 Hz, every third for 14700 Hz,
+  every fourth for 11025 Hz, and every fifth for 8820/8287 Hz. This skips
+  discarded polyphase sample work, appends emitted samples through one
+  cumulative low-rate output counter, and keeps the low-rate phase/stride
+  state alive across granules and MP3 frames.
   For exact integer strides such as 44100 -> 11025, fast-lowrate selects the
   same source positions as normal `--rate` decimation. The 8287 Hz mode uses a
   fixed stride of 5 for Amiga-rate experiments, so 44100 Hz input emits at
@@ -441,7 +443,10 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   FDCT path skips the unused factored-DCT half and polyphase evaluates only those
   16 output samples. The emitted PCM remains bit-identical to selecting every
   second sample from the full synthesis path. Huffman/dequant and IMDCT still
-  run at full MP3 rate; stride-4/5 output still uses full FDCT32. Stereo input
+  run at full MP3 rate; stride-3/4/5 output still uses full FDCT32 (stride 3
+  has both a hand-unrolled C kernel and, unlike stride 4/5, a full three-phase
+  m68k asm kernel covering mono and stereo -- see
+  `--selftest-polyphase-stride3`). Stereo input
   with `--mono` is collapsed in the decoder after required MPEG stereo
   reconstruction, so the
   right-channel IMDCT/FDCT32/polyphase work and full stereo PCM copy are skipped.
@@ -452,9 +457,27 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   stride-4 polyphase ASM/C call counters when decode-core profiling is enabled.
 - `--superfast-lowrate` is the sparse low-rate mode used by the GUI Superfast
   speed setting.  It implies fast-lowrate, defaults to 11025 Hz if no rate is
-  supplied, and supports 8287, 8820, 11025, and 22050 Hz output.  It caps active
-  subbands to the output bandwidth so skipped high-frequency IMDCT/overlap work
-  is not generated merely to be discarded by the low-rate selector.
+  supplied, and supports 8287, 8820, 11025, 14700, and 22050 Hz output.  It
+  caps active subbands to the output bandwidth so skipped high-frequency
+  IMDCT/overlap work is not generated merely to be discarded by the low-rate
+  selector.
+- `--rate 14700` (stride 3) is a middle ground between 11025 Hz (stride 4)
+  and 22050 Hz (stride 2). It has its own hand-unrolled C polyphase kernel
+  (`PolyphaseMonoFastLowrateStride3`/`PolyphaseStereoFastLowrateStride3` in
+  `real/polyphase.c`), matching the stride 4/5 style: no per-sample dispatch
+  branch or loop overhead, just direct calls to the same
+  `PolyphaseMonoFastSampleLo/Hi/0/16` primitives the other strides use. In
+  `AMIGA_M68K_ASM_POLYPHASE` builds it also has a full asm kernel covering
+  all three phases for both mono and stereo
+  (`MonoFastPolyphaseStride3Phase0/1/2_Amiga_m68k` and
+  `StereoFastPolyphaseStride3Phase0/1/2_Amiga_m68k` in
+  `real/amiga_m68k_polyphase.S`) -- unlike stride 4, which only has an asm
+  kernel for mono phase 0. `MonoFastPolyphaseStride3_Amiga_m68k_IsActive()`/
+  `StereoFastPolyphaseStride3_Amiga_m68k_IsActive()` report whether the asm
+  is linked in and active; `--selftest-polyphase-stride3[-stereo]` print
+  both the "asm requested" (compile-time) and "asm active" (runtime) status
+  alongside the correctness check. Superfast defaults its active-subbands
+  cap to 10 (output Nyquist ~7.35 kHz) at this rate.
 - `--ultrafast` is a full-rate/high-rate speed option that applies
   `--subband-cap 26`, capping IMDCT work to roughly the first 18 kHz of a
   44.1 kHz source.  The GUI's 22050 Mono Ultrafast preset goes further by
@@ -468,8 +491,9 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
 
 `--quality N` selects one of the verified fast-path combinations while leaving
 the individual `--exp-*` flags available for fine-grained override. If
-`--quality` is omitted, `--fast-lowrate --rate 11025` and `--fast-lowrate
---rate 22050` default to quality 1; all other invocations default to quality 3.
+`--quality` is omitted, `--fast-lowrate --rate 11025`, `--fast-lowrate --rate
+14700`, and `--fast-lowrate --rate 22050` default to quality 1; all other
+invocations default to quality 3.
 
 - `--quality 0` (fastest) enables reduced taps, quarter-rate FDCT32, fast
   polyphase, and the optional Huffman ASM refill path. The
@@ -477,9 +501,12 @@ the individual `--exp-*` flags available for fine-grained override. If
   bit-accounting edge cases; in builds without the Huffman m68k ASM path it
   silently falls back to the normal C Huffman decoder.
 - `--quality 1` (fast) enables reduced taps and fast polyphase. This is the
-  automatic default for `--fast-lowrate --rate 11025` and `--fast-lowrate
-  --rate 22050`. The IMDCT subband cap (16 subbands) is applied at stride 2
-  and above, skipping subbands above the output Nyquist.
+  automatic default for `--fast-lowrate --rate 11025`, `--fast-lowrate --rate
+  14700`, and `--fast-lowrate --rate 22050`. Reduced taps only affects
+  stride 2/4 (22050/11025 Hz) output; stride 3 (14700 Hz) prints a warning
+  and otherwise ignores it. The IMDCT subband cap (16 subbands) is applied at
+  stride 2 and above, skipping subbands above the output Nyquist -- Superfast
+  mode narrows this further per-stride (10 subbands at 14700 Hz).
 - `--quality 2` (balanced) enables fast polyphase without reduced taps.
 - `--quality 3` (accurate) enables no approximations and is equivalent to the
   original decoder behavior.

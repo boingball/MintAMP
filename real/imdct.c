@@ -1497,6 +1497,36 @@ int IMDCTSubbandCapSelftest(void)
 		failures++;
 	}
 
+	/*
+	 * The GUI's manual "Subbands" cycle gadget lets users pick 26, 20, 16,
+	 * 12, or 8 directly (see amiga_mp3gui.c's kSubbandCapValues) whenever
+	 * Superfast is enabled, not just the two values (16, 8) that fast-lowrate
+	 * itself derives automatically from stride. Prove the plumbing holds for
+	 * every GUI-exposed value, not just the historically-tested ones.
+	 */
+	{
+		static const int kManualCapCases[] = { 26, 20, 12 };
+		int manualIdx;
+
+		for (manualIdx = 0; manualIdx < (int)(sizeof(kManualCapCases) / sizeof(kManualCapCases[0])); manualIdx++) {
+			int cap = kManualCapCases[manualIdx];
+
+			decInfo.superfastLowrate = 1;
+			decInfo.fastLowrateStride = 2;
+			decInfo.fastLowrateActiveSubbands = cap;
+			decInfo.outputMono = 1;
+			helperBc = baseBc;
+			helperApplied = IMDCTApplySubbandCap(&decInfo, &helperBc);
+			if (!helperApplied || helperBc.nBlocksTotal != cap || helperBc.nBlocksLong != cap ||
+				helperBc.nBlocksPrev != cap || helperBc.activeSubbands != cap || !helperBc.subbandCapActive) {
+				printf("subband cap selftest manual-cap helper failed: cap=%d applied=%d total=%d long=%d prev=%d activeBands=%d active=%d\n",
+					cap, helperApplied, helperBc.nBlocksTotal, helperBc.nBlocksLong, helperBc.nBlocksPrev,
+					helperBc.activeSubbands, helperBc.subbandCapActive);
+				failures++;
+			}
+		}
+	}
+
 	memset(&decInfo, 0, sizeof(decInfo));
 	decInfo.fastLowrateStride = 4;
 	decInfo.outputMono = 1;
@@ -1556,7 +1586,7 @@ int IMDCTSubbandCapSelftest(void)
  */
 int AntiAliasSubbandCapSelftest(void)
 {
-	static const int kActiveSubbandsCases[] = { 16, 12, 8, 6, 3, 1 };
+	static const int kActiveSubbandsCases[] = { 26, 20, 16, 12, 8, 6, 3, 1 };
 	int uncapped[MAX_NSAMP];
 	int capped[MAX_NSAMP];
 	int nBfly;
