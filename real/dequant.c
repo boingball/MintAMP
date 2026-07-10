@@ -316,6 +316,139 @@ int MidSideProcSubbandCapSelftest(void)
 	return failures ? -1 : 0;
 }
 
+/*
+ * Proves that Dequantize()'s dequantSubbandCapSampleLimit clamp on
+ * CollapseStereoToMono()'s nSamps is a safe simplification, using the same
+ * capped-vs-uncapped reasoning as MidSideProcSubbandCapSelftest() above
+ * (and DequantSubbandCapSelftest()/AntiAliasSubbandCapSelftest()) -- this
+ * codebase's established pattern for proving a subband-cap optimization
+ * doesn't change what downstream actually consumes. MidSideProc() has its
+ * own selftest above; this one covers CollapseStereoToMono()'s separate
+ * cap at the outputMono call site.
+ *
+ * Two runs on matched data, differing only in what happens at/after `cap`:
+ *   "capped"  : CollapseStereoToMono(buf, cap, ...)             -- the fix
+ *   "zeroed"  : CollapseStereoToMono(buf, fullLen, ...) with
+ *               buf[0..1][cap..fullLen) forced to 0 first        -- what an
+ *               uncapped call would need to see there to be equivalent
+ *
+ * This models "the discarded region zeroed" rather than the real production
+ * un-dequantized garbage DequantChannel() actually leaves beyond the cap
+ * (see that function's subbandCapSampleLimit comment): garbage has no
+ * well-defined arithmetic result to compare against, whereas zero is
+ * provably inert for both outputs this test checks --
+ *   - x[0][i] for i < cap never depends on data at or beyond i, so it is
+ *     identical in both runs regardless of what's beyond cap (garbage or
+ *     zero); not really exercised by this test, just documented here.
+ *   - gb[0] = CLZ(mOut)-1 where mOut is an OR-accumulation of FASTABS() over
+ *     every processed sample: OR-ing in extra zeros never changes the
+ *     result, so the "zeroed" run's gb[0] is exactly what the "capped" run's
+ *     gb[0] is, PROVIDED the discarded region really does contribute 0 --
+ *     which is exactly what capping nSamps guarantees (it never reads that
+ *     region at all, so whatever garbage is actually there cannot corrupt
+ *     gb[0] the way the pre-fix code could).
+ * nonZeroBound[0] is checked against each run's own contract (nSamps
+ * passed in) rather than against each other, since the two runs are called
+ * with deliberately different nSamps (cap vs fullLen) -- that difference is
+ * the entire point of the optimization, not something to hide.
+ */
+int CollapseStereoToMonoSubbandCapSelftest(void)
+{
+	/* dequantSubbandCapSampleLimit values Dequantize() actually computes:
+	 * MIN(activeSubbands+1, NBANDS)*18 for the fast-lowrate activeSubbands
+	 * cases in DequantSubbandCapSelftest's kActiveSubbandsCases (26, 20, 16,
+	 * 12, 10, 8, 6). */
+	static const int kCapCases[] = { 486, 378, 306, 234, 198, 162, 126 };
+	static int bufCapped[MAX_NCHAN][MAX_NSAMP];
+	static int bufZeroed[MAX_NCHAN][MAX_NSAMP];
+	unsigned int rngState = 0xDEC0DEADU;
+	int trial, caseIdx, failures, total;
+
+	failures = 0;
+	total = 0;
+
+	for (trial = 0; trial < 2000; trial++) {
+		int cap, fullLen, i, ch, pattern;
+		int nonZeroBoundCapped, nonZeroBoundZeroed;
+		int gbCapped[2], gbZeroed[2];
+		int mismatch;
+
+		caseIdx = trial % (int)(sizeof(kCapCases) / sizeof(kCapCases[0]));
+		cap = kCapCases[caseIdx];
+
+		rngState ^= rngState << 13; rngState ^= rngState >> 17; rngState ^= rngState << 5;
+		if (trial < (int)(sizeof(kCapCases) / sizeof(kCapCases[0])))
+			fullLen = MAX_NSAMP;			/* cap always binding at least once per case */
+		else
+			fullLen = cap + (int)(rngState % (unsigned int)(MAX_NSAMP - cap + 1));
+		if (fullLen > MAX_NSAMP) fullLen = MAX_NSAMP;
+		if (fullLen < cap) fullLen = cap;	/* cap can never exceed the true nSamps in production */
+
+		pattern = trial % 5;
+		for (i = 0; i < MAX_NSAMP; i++) {
+			int l, r;
+
+			rngState ^= rngState << 13; rngState ^= rngState >> 17; rngState ^= rngState << 5;
+			if (i >= fullLen) {
+				l = r = 0;
+			} else {
+				switch (pattern) {
+				case 0: l = 0x3fffffff; r = 0x3fffffff; break;
+				case 1: l = (int)0xc0000000U; r = (int)0xc0000000U; break;
+				case 2: l = 0x3fffffff; r = (int)0xc0000000U; break;
+				case 3: l = (int)(rngState & 0x7fffffffU); r = -(int)(rngState & 0x7fffffffU); break;
+				default: l = (int)rngState >> 4; r = (int)(rngState ^ 0x9e3779b9U) >> 4; break;
+				}
+			}
+			bufCapped[0][i] = l; bufCapped[1][i] = r;
+			bufZeroed[0][i] = l; bufZeroed[1][i] = r;
+		}
+		/* "discarded region zeroed": only the zeroed run's tail is forced to
+		 * 0; the capped run keeps its (irrelevant, never-read-beyond-cap)
+		 * data so this also proves capping truly never reads past cap. */
+		for (ch = 0; ch < MAX_NCHAN; ch++)
+			for (i = cap; i < fullLen; i++)
+				bufZeroed[ch][i] = 0;
+
+		nonZeroBoundCapped = nonZeroBoundZeroed = -1;
+		gbCapped[0] = gbCapped[1] = gbZeroed[0] = gbZeroed[1] = -1;
+		CollapseStereoToMono(bufCapped, cap, &nonZeroBoundCapped, gbCapped);
+		CollapseStereoToMono(bufZeroed, fullLen, &nonZeroBoundZeroed, gbZeroed);
+		total++;
+
+		mismatch = 0;
+		for (i = 0; i < cap; i++) {
+			if (bufCapped[0][i] != bufZeroed[0][i]) {
+				printf("collapse subband cap selftest MISMATCH trial=%d cap=%d fullLen=%d i=%d: "
+					"capped=%d zeroed=%d\n", trial, cap, fullLen, i, bufCapped[0][i], bufZeroed[0][i]);
+				mismatch = 1;
+				break;
+			}
+		}
+		if (gbCapped[0] != gbZeroed[0]) {
+			printf("collapse subband cap selftest MISMATCH trial=%d cap=%d fullLen=%d: "
+				"gb[0] capped=%d zeroed=%d\n", trial, cap, fullLen, gbCapped[0], gbZeroed[0]);
+			mismatch = 1;
+		}
+		if (nonZeroBoundCapped != cap) {
+			printf("collapse subband cap selftest MISMATCH trial=%d cap=%d fullLen=%d: "
+				"capped nonZeroBound[0]=%d expected=%d\n", trial, cap, fullLen, nonZeroBoundCapped, cap);
+			mismatch = 1;
+		}
+		if (nonZeroBoundZeroed != fullLen) {
+			printf("collapse subband cap selftest MISMATCH trial=%d cap=%d fullLen=%d: "
+				"zeroed nonZeroBound[0]=%d expected=%d\n", trial, cap, fullLen, nonZeroBoundZeroed, fullLen);
+			mismatch = 1;
+		}
+		if (mismatch)
+			failures++;
+	}
+
+	printf("CollapseStereoToMono subband cap selftest: %d trials, %s\n",
+		total, failures ? "FAIL" : "PASS");
+	return failures ? -1 : 0;
+}
+
 
 /**************************************************************************************
  * Function:    Dequantize
@@ -495,6 +628,21 @@ int Dequantize(MP3DecInfo *mp3DecInfo, int gr)
 
 		if (mp3DecInfo->outputMono && mp3DecInfo->nChans == 2) {
 			nSamps = MAX(hi->nonZeroBound[0], hi->nonZeroBound[1]);
+			/* Long-block DequantChannel() calls leave sampleBuf[i..nonZeroBound)
+			 * un-dequantized (raw Huffman magnitudes, not Q26 samples) beyond
+			 * dequantSubbandCapSampleLimit when the fast-lowrate subband cap is
+			 * active -- see that function's subbandCapSampleLimit comment.
+			 * nonZeroBound itself is only shrunk by short-block reordering, so
+			 * it can still exceed the cap here. Without this clamp,
+			 * CollapseStereoToMono() would mix that raw data into x[0] and fold
+			 * its magnitude into gb[0], exactly the class of guard-bit
+			 * corruption the antialias guard-band fix elsewhere in this file
+			 * addressed. dequantSubbandCapSampleLimit already includes the +1
+			 * guard subband AntiAlias() needs, so reusing it here (rather than
+			 * a tighter cap) preserves that fix -- same reasoning as
+			 * MidSideProc's cap above; see CollapseStereoToMonoSubbandCapSelftest. */
+			if (dequantSubbandCapSampleLimit > 0 && nSamps > dequantSubbandCapSampleLimit)
+				nSamps = dequantSubbandCapSampleLimit;
 			CollapseStereoToMono(hi->huffDecBuf, nSamps, hi->nonZeroBound, hi->gb);
 		}
 	}

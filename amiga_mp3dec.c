@@ -267,6 +267,7 @@ int STATNAME(IMDCT36AsmGeneralPathSelftest)(void);
 int STATNAME(DequantSubbandCapSelftest)(void);
 int STATNAME(CollapseStereoToMonoSelftest)(void);
 int STATNAME(MidSideProcSubbandCapSelftest)(void);
+int STATNAME(CollapseStereoToMonoSubbandCapSelftest)(void);
 int STATNAME(FDCT32HalfSparse16Selftest)(void);
 void STATNAME(PolyphaseMonoFast_C_REFERENCE)(short *pcm, int *vbuf, const int *coefBase);
 void STATNAME(PolyphaseMonoFast_TEST_ACTIVE)(short *pcm, int *vbuf, const int *coefBase);
@@ -374,6 +375,7 @@ extern const int STATNAME(polyCoef)[264];
 #define AMIGA_DEQUANT_SUBBAND_CAP_SELFTEST STATNAME(DequantSubbandCapSelftest)
 #define AMIGA_COLLAPSE_STEREO_TO_MONO_SELFTEST STATNAME(CollapseStereoToMonoSelftest)
 #define AMIGA_MIDSIDE_SUBBAND_CAP_SELFTEST STATNAME(MidSideProcSubbandCapSelftest)
+#define AMIGA_COLLAPSE_STEREO_TO_MONO_SUBBAND_CAP_SELFTEST STATNAME(CollapseStereoToMonoSubbandCapSelftest)
 #define AMIGA_FDCT32_HALF_SPARSE16_SELFTEST STATNAME(FDCT32HalfSparse16Selftest)
 #define AMIGA_POLYPHASE_MONO_FAST_C_REFERENCE STATNAME(PolyphaseMonoFast_C_REFERENCE)
 #define AMIGA_POLYPHASE_MONO_FAST_TEST_ACTIVE STATNAME(PolyphaseMonoFast_TEST_ACTIVE)
@@ -468,6 +470,7 @@ typedef struct DecodeOptions {
 	int selftestDequantSubbandCap;
 	int selftestCollapseStereoToMono;
 	int selftestMidSideSubbandCap;
+	int selftestCollapseStereoToMonoSubbandCap;
 	int selftestFdct32HalfSparse16;
 	int selftestAntialias;
 	int selftestPolyphase;
@@ -917,6 +920,7 @@ static void PrintUsage(const char *prog)
 	printf("  --selftest-dequant-subband-cap verify capping dequant long-block work to the subband cap leaves kept samples, cbEndL, and guard-bit count bit-exact\n");
 	printf("  --selftest-collapse-stereo-mono verify the stereo-to-mono collapse (plain LR stereo source, mono output) asm matches the C reference bit-exact\n");
 	printf("  --selftest-midside-subband-cap verify capping MidSideProc's scan to the fast-lowrate subband cap is safe and equivalent to a zeroed discarded region\n");
+	printf("  --selftest-collapse-stereo-mono-subband-cap verify capping stereo-to-mono collapse to the dequant subband cap matches an uncapped collapse with the discarded region zeroed, including gb[0] and nonZeroBound[0]\n");
 	printf("  --selftest-fdct32half-sparse16 verify prototype sparse-input FDCT32Half (NOT wired into playback) matches the reference when subbands 16-31 are zero\n");
 	printf("  --selftest-antialias compare C reference and optional m68k asm antialias path\n");
 	printf("  --selftest-polyphase compare C fast mono polyphase and optional m68k asm path\n");
@@ -1183,6 +1187,8 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->selftestCollapseStereoToMono = 1;
 		} else if (!strcmp(argv[i], "--selftest-midside-subband-cap")) {
 			opt->selftestMidSideSubbandCap = 1;
+		} else if (!strcmp(argv[i], "--selftest-collapse-stereo-mono-subband-cap")) {
+			opt->selftestCollapseStereoToMonoSubbandCap = 1;
 		} else if (!strcmp(argv[i], "--selftest-fdct32half-sparse16")) {
 			opt->selftestFdct32HalfSparse16 = 1;
 		} else if (!strcmp(argv[i], "--selftest-antialias")) {
@@ -1337,6 +1343,7 @@ if (opt->selftestMulshift ||
     opt->selftestDequantSubbandCap ||
     opt->selftestCollapseStereoToMono ||
     opt->selftestMidSideSubbandCap ||
+    opt->selftestCollapseStereoToMonoSubbandCap ||
     opt->selftestFdct32HalfSparse16 ||
     opt->selftestAntialias ||
     opt->selftestPolyphase ||
@@ -11268,6 +11275,11 @@ int main(int argc, char **argv)
 	}
 	if (opt.selftestMidSideSubbandCap) {
 		int selftestErr = AMIGA_MIDSIDE_SUBBAND_CAP_SELFTEST();
+		AmigaFreeNormalizedArgs(&normalized);
+		return selftestErr;
+	}
+	if (opt.selftestCollapseStereoToMonoSubbandCap) {
+		int selftestErr = AMIGA_COLLAPSE_STEREO_TO_MONO_SUBBAND_CAP_SELFTEST();
 		AmigaFreeNormalizedArgs(&normalized);
 		return selftestErr;
 	}
