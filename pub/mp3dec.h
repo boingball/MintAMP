@@ -145,6 +145,10 @@ typedef struct _MP3DecodeCoreProfile {
 	unsigned long monoMSSideFallbackIntensity;
 	unsigned long monoMSSideFallbackDisabled;
 	unsigned long monoMSSideFallbackMalformed;
+	unsigned long intensityMPEG1Count;
+	unsigned long intensityMPEG2Count;
+	unsigned long intensityWithMidSideCount;
+	unsigned long intensityOnlyCount;
 } MP3DecodeCoreProfile;
 
 typedef struct _MP3FastLowrateGranuleDebug {
@@ -212,6 +216,7 @@ void MP3AddDecodeCoreProfile(int bucket, clock_t elapsed);
 void MP3AddDecodeCoreIMDCTSubbands(unsigned long executed, unsigned long skipped);
 void MP3AddDecodeCoreImdctBlockCounts(unsigned long longBlocks, unsigned long shortBlocks);
 void MP3AddDecodeCoreMonoMSSideSkip(int bucket);
+void MP3AddDecodeCoreIntensityUsage(int bucket);
 
 #ifdef __cplusplus
 }

@@ -268,6 +268,7 @@ int STATNAME(DequantSubbandCapSelftest)(void);
 int STATNAME(CollapseStereoToMonoSelftest)(void);
 int STATNAME(MidSideProcSubbandCapSelftest)(void);
 int STATNAME(CollapseStereoToMonoSubbandCapSelftest)(void);
+int STATNAME(IntensityProcSubbandCapSelftest)(void);
 int STATNAME(FDCT32HalfSparse16Selftest)(void);
 void STATNAME(PolyphaseMonoFast_C_REFERENCE)(short *pcm, int *vbuf, const int *coefBase);
 void STATNAME(PolyphaseMonoFast_TEST_ACTIVE)(short *pcm, int *vbuf, const int *coefBase);
@@ -376,6 +377,7 @@ extern const int STATNAME(polyCoef)[264];
 #define AMIGA_COLLAPSE_STEREO_TO_MONO_SELFTEST STATNAME(CollapseStereoToMonoSelftest)
 #define AMIGA_MIDSIDE_SUBBAND_CAP_SELFTEST STATNAME(MidSideProcSubbandCapSelftest)
 #define AMIGA_COLLAPSE_STEREO_TO_MONO_SUBBAND_CAP_SELFTEST STATNAME(CollapseStereoToMonoSubbandCapSelftest)
+#define AMIGA_INTENSITY_SUBBAND_CAP_SELFTEST STATNAME(IntensityProcSubbandCapSelftest)
 #define AMIGA_FDCT32_HALF_SPARSE16_SELFTEST STATNAME(FDCT32HalfSparse16Selftest)
 #define AMIGA_POLYPHASE_MONO_FAST_C_REFERENCE STATNAME(PolyphaseMonoFast_C_REFERENCE)
 #define AMIGA_POLYPHASE_MONO_FAST_TEST_ACTIVE STATNAME(PolyphaseMonoFast_TEST_ACTIVE)
@@ -471,6 +473,7 @@ typedef struct DecodeOptions {
 	int selftestCollapseStereoToMono;
 	int selftestMidSideSubbandCap;
 	int selftestCollapseStereoToMonoSubbandCap;
+	int selftestIntensitySubbandCap;
 	int selftestFdct32HalfSparse16;
 	int selftestAntialias;
 	int selftestPolyphase;
@@ -921,6 +924,7 @@ static void PrintUsage(const char *prog)
 	printf("  --selftest-collapse-stereo-mono verify the stereo-to-mono collapse (plain LR stereo source, mono output) asm matches the C reference bit-exact\n");
 	printf("  --selftest-midside-subband-cap verify capping MidSideProc's scan to the fast-lowrate subband cap is safe and equivalent to a zeroed discarded region\n");
 	printf("  --selftest-collapse-stereo-mono-subband-cap verify capping stereo-to-mono collapse to the dequant subband cap matches an uncapped collapse with the discarded region zeroed, including gb[0] and nonZeroBound[0]\n");
+	printf("  --selftest-intensity-subband-cap verify capping IntensityProcMPEG1/2's scan to the fast-lowrate subband cap matches an uncapped call with the discarded region zeroed, for MPEG1/MPEG2 and long/short/mixed blocks\n");
 	printf("  --selftest-fdct32half-sparse16 verify prototype sparse-input FDCT32Half (NOT wired into playback) matches the reference when subbands 16-31 are zero\n");
 	printf("  --selftest-antialias compare C reference and optional m68k asm antialias path\n");
 	printf("  --selftest-polyphase compare C fast mono polyphase and optional m68k asm path\n");
@@ -1189,6 +1193,8 @@ static int ParseOptions(int argc, char **argv, DecodeOptions *opt)
 			opt->selftestMidSideSubbandCap = 1;
 		} else if (!strcmp(argv[i], "--selftest-collapse-stereo-mono-subband-cap")) {
 			opt->selftestCollapseStereoToMonoSubbandCap = 1;
+		} else if (!strcmp(argv[i], "--selftest-intensity-subband-cap")) {
+			opt->selftestIntensitySubbandCap = 1;
 		} else if (!strcmp(argv[i], "--selftest-fdct32half-sparse16")) {
 			opt->selftestFdct32HalfSparse16 = 1;
 		} else if (!strcmp(argv[i], "--selftest-antialias")) {
@@ -1344,6 +1350,7 @@ if (opt->selftestMulshift ||
     opt->selftestCollapseStereoToMono ||
     opt->selftestMidSideSubbandCap ||
     opt->selftestCollapseStereoToMonoSubbandCap ||
+    opt->selftestIntensitySubbandCap ||
     opt->selftestFdct32HalfSparse16 ||
     opt->selftestAntialias ||
     opt->selftestPolyphase ||
@@ -11283,6 +11290,11 @@ int main(int argc, char **argv)
 		AmigaFreeNormalizedArgs(&normalized);
 		return selftestErr;
 	}
+	if (opt.selftestIntensitySubbandCap) {
+		int selftestErr = AMIGA_INTENSITY_SUBBAND_CAP_SELFTEST();
+		AmigaFreeNormalizedArgs(&normalized);
+		return selftestErr;
+	}
 	if (opt.selftestFdct32HalfSparse16) {
 		int selftestErr = AMIGA_FDCT32_HALF_SPARSE16_SELFTEST();
 		AmigaFreeNormalizedArgs(&normalized);
@@ -12269,6 +12281,11 @@ int main(int argc, char **argv)
 					coreProfile.monoMSSideFallbackIntensity,
 					coreProfile.monoMSSideFallbackDisabled,
 					coreProfile.monoMSSideFallbackMalformed);
+				printf("intensity stereo usage: MPEG1=%lu MPEG2=%lu with-M/S=%lu intensity-only=%lu\n",
+					coreProfile.intensityMPEG1Count,
+					coreProfile.intensityMPEG2Count,
+					coreProfile.intensityWithMidSideCount,
+					coreProfile.intensityOnlyCount);
 				if (opt.fastLowrate)
 					printf("sparse low-rate: stride=%d active-subbands=%d fdct=%s\n",
 						FastLowrateStrideForOutputRate(opt.outputRate),

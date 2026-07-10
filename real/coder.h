@@ -168,6 +168,7 @@
 #define CollapseStereoToMonoSelftest STATNAME(CollapseStereoToMonoSelftest)
 #define MidSideProcSubbandCapSelftest STATNAME(MidSideProcSubbandCapSelftest)
 #define CollapseStereoToMonoSubbandCapSelftest STATNAME(CollapseStereoToMonoSubbandCapSelftest)
+#define IntensityProcSubbandCapSelftest STATNAME(IntensityProcSubbandCapSelftest)
 #define DecodeHuffmanPairs_C_REFERENCE STATNAME(DecodeHuffmanPairs_C_REFERENCE)
 #define DecodeHuffmanPairs_TEST_ACTIVE STATNAME(DecodeHuffmanPairs_TEST_ACTIVE)
 #define DecodeHuffmanPairs_HAS_AMIGA_M68K_ASM_RUNTIME STATNAME(DecodeHuffmanPairs_HAS_AMIGA_M68K_ASM_RUNTIME)
@@ -468,6 +469,7 @@ int DequantSubbandCapSelftest(void);
 int CollapseStereoToMonoSelftest(void);
 int MidSideProcSubbandCapSelftest(void);
 int CollapseStereoToMonoSubbandCapSelftest(void);
+int IntensityProcSubbandCapSelftest(void);
 
 /* huffman.c selftest hooks */
 int DecodeHuffmanPairs_C_REFERENCE(int *xy, int nVals, int tabIdx, int bitsLeft, unsigned char *buf, int bitOffset);

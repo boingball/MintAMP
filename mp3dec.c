@@ -170,6 +170,30 @@ void MP3AddDecodeCoreMonoMSSideSkip(int bucket)
 #endif
 }
 
+/* bucket: 0 = MPEG1 intensity, 1 = MPEG2 intensity, 2 = M/S + intensity
+ * (modeExt == 3), 3 = intensity-only (modeExt == 1). A single granule with
+ * intensity stereo enabled bumps exactly one of {0,1} (MPEG version) and
+ * exactly one of {2,3} (whether mid-side also ran), so both counted
+ * together they always sum to the same total. */
+void MP3AddDecodeCoreIntensityUsage(int bucket)
+{
+#ifdef AMIGA_PROFILE_DECODE
+	unsigned long *counter = 0;
+
+	switch (bucket) {
+	case 0: counter = &gDecodeCoreProfile.intensityMPEG1Count; break;
+	case 1: counter = &gDecodeCoreProfile.intensityMPEG2Count; break;
+	case 2: counter = &gDecodeCoreProfile.intensityWithMidSideCount; break;
+	case 3: counter = &gDecodeCoreProfile.intensityOnlyCount; break;
+	default: break;
+	}
+	if (counter)
+		(*counter)++;
+#else
+	(void)bucket;
+#endif
+}
+
 /**************************************************************************************
  * Function:    MP3InitDecoder
  *
