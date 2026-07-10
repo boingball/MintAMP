@@ -1,0 +1,92 @@
+diff --git a/minimp3r.c b/minimp3r.c
+--- a/minimp3r.c
++++ b/minimp3r.c
+@@ -2711,24 +2711,22 @@
+ 			LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
+ 				LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
+-				/* Left-packed, size-to-content row, matching the layout the
+-				 * Rating/stars/Track row below already uses successfully:
+-				 * every item except the LAST gets CHILD_WeightedWidth 0 (no
+-				 * stretch), and the last item is left as the row's one
+-				 * flex child but capped with a tight CHILD_MaxWidth so it
+-				 * can't visibly stretch either -- giving every item in the
+-				 * row weight 0 made the layout fall back to dividing the
+-				 * row into equal shares again instead of packing left. */
++				/* Pack every real control to its natural width, then give all
++				 * remaining horizontal space to an empty layout child.  Using
++				 * the final chooser as the flexible child still lets
++				 * layout.gadget redistribute the row and visually centre it. */
+ 				ADD_LABELLED(app->rateGad, "Rate"),
+ 				CHILD_WeightedWidth, 0,
+ 				ADD_LABELLED(app->qualityGad, "Quality"),
+ 				CHILD_WeightedWidth, 0,
+ 				ADD_LABELLED(app->subbandCapGad, "Subbands"),
+ 				CHILD_WeightedWidth, 0,
+-				/* Widest label is "Stereo" -- this is the row's one flex
+-				 * child (see comment above), capped tight so it still
+-				 * reads as left-packed. */
+ 				ADD_LABELLED(app->channelGad, "Mono/Stereo"),
+ 				CHILD_MaxWidth, 70,
++				CHILD_WeightedWidth, 0,
++				LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
++					TAG_DONE),
++				CHILD_WeightedWidth, 100,
+ 				TAG_DONE),
+ 			CHILD_WeightedHeight, 0,
+ 
+@@ -2736,26 +2734,19 @@
+ 			LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
+ 				LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
+-				/* Same left-packed treatment as the Rate row above: every
+-				 * item but the last is CHILD_WeightedWidth 0 with no
+-				 * explicit Min/Max, so it sizes to CHOOSER_GetClass's own
+-				 * natural width for its widest label -- exactly how Rate
+-				 * fits "28600 Hz" above. A forced CHILD_MinWidth was tried
+-				 * here to stop "22050 Mono Ultrafast" overflowing the
+-				 * gadget, but that only mattered while this row was still
+-				 * being stretched to an equal share of the row width
+-				 * (narrower than the chooser's own natural size); now that
+-				 * it isn't, the forced minimum was wider than the chooser
+-				 * actually needs and left dead space inside its own box --
+-				 * so drop it and let the gadget size itself, same as Rate. */
++				/* Same natural-width controls plus one dedicated flex spacer. */
+ 				ADD_LABELLED(app->speedGad, "Speed"),
+ 				CHILD_WeightedWidth, 0,
+ 				ADD_LABELLED(app->widthGad, "Mode/width"),
+ 				CHILD_WeightedWidth, 0,
+-				/* Widest label is "192" -- a few pixels is plenty, instead
+-				 * of an equal share of the row. This is the row's one flex
+-				 * child (see comment above). */
+ 				ADD_LABELLED(app->delayGad, "Delay"),
+ 				CHILD_MaxWidth, 50,
++				CHILD_WeightedWidth, 0,
++				LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
++					TAG_DONE),
++				CHILD_WeightedWidth, 100,
+ 				TAG_DONE),
+ 			CHILD_WeightedHeight, 0,
+@@ -2770,15 +2761,27 @@
+ 			LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
+ 				LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
+ 				LAYOUT_AddChild, (ULONG)app->fastMemGad,
++				CHILD_WeightedWidth, 0,
+ 				LAYOUT_AddChild, (ULONG)app->fastLowGad,
++				CHILD_WeightedWidth, 0,
++				LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
++					TAG_DONE),
++				CHILD_WeightedWidth, 100,
+ 				TAG_DONE),
+ 			CHILD_WeightedHeight, 0,
+ 
+ 			LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
+ 				LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
+ 				LAYOUT_AddChild, (ULONG)app->expPolyGad,
++				CHILD_WeightedWidth, 0,
+ 				LAYOUT_AddChild, (ULONG)app->expReducedTapsGad,
++				CHILD_WeightedWidth, 0,
++				LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
++					TAG_DONE),
++				CHILD_WeightedWidth, 100,
+ 				TAG_DONE),
+ 			CHILD_WeightedHeight, 0,
+ 			TAG_DONE),
