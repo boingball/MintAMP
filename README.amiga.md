@@ -769,6 +769,29 @@ decoded frame count and output sample count.
    the asm reproduces that exact quirk rather than diverging on it) before
    trusting it on a real file.
 
+   `MidSideProc()`'s caller in `Dequantize()` (`real/dequant.c`) also caps
+   its `nSamps` to the same `dequantSubbandCapSampleLimit` (activeSubbands+1
+   guard subband, matching the antialias guard-band fix above) whenever a
+   fast-lowrate subband cap is active, instead of always scanning the whole
+   spectrum. Samples at/beyond that boundary were already left un-dequantized
+   by `DequantChannel()`'s own cap, and neither IMDCT's subband cap nor
+   `AntiAlias()`'s guard-subband read ever reach that far into
+   `hi->huffDecBuf` -- so reconstructing sum/difference values there was
+   wasted work, more of it the wider a file's real bandwidth (i.e. more
+   noticeable on higher-bitrate joint-stereo files, which was the original
+   motivation: 22050 Hz Ultrafast Mono headroom on a 192 kbps joint-stereo
+   file). `--selftest-midside-subband-cap` proves this is exactly equivalent
+   to running the uncapped scan against the same input with the discarded
+   region zeroed (the same assumption IMDCT/AntiAlias already make about it),
+   both for the reconstructed samples and for `mOut`/the guard-bit count it
+   derives -- plus a direction check that capping never reports a *smaller*
+   (less safe) guard-bit count than today's uncapped-against-leftover-data
+   call would. Checksummed real 128/192 kbps joint-stereo decodes at 22050 Hz
+   (stereo and mono output, default and manual subband caps) bit-identical
+   before/after. `IntensityProc()` was deliberately left unchanged -- it's
+   the smaller-magnitude case in practice at these bitrates, and safely
+   capping it needs separate scrutiny of its `sfBand`/`cbi[]` boundary math.
+
 
 8. `AMIGA_M68K_ASM_HUFFMAN` is an opt-in experimental Huffman-pair refill
    shortcut for 68020+ GNU m68k builds, tuned for 68030.  It deliberately does

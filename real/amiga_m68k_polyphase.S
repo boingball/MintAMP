@@ -34,6 +34,11 @@
 	.globl	StereoFastPolyphaseStride4Phase2_Amiga_m68k
 	.globl	StereoFastPolyphaseStride4Phase3_Amiga_m68k
 	.globl	StereoFastPolyphaseStride4Half_Amiga_m68k_PhaseCounts
+	.globl	StereoFastPolyphaseStride4HalfReduced_Amiga_m68k
+	.globl	StereoFastPolyphaseStride4Phase0Reduced_Amiga_m68k
+	.globl	StereoFastPolyphaseStride4Phase1Reduced_Amiga_m68k
+	.globl	StereoFastPolyphaseStride4Phase2Reduced_Amiga_m68k
+	.globl	StereoFastPolyphaseStride4Phase3Reduced_Amiga_m68k
 	.globl	StereoFastPolyphaseStride5_Amiga_m68k
 	.globl	StereoFastPolyphaseStride5_Amiga_m68k_PhaseCounts
 	.globl	AmigaM68KPolyphaseFullRateStereo
@@ -1003,6 +1008,119 @@ StereoFastPolyphaseStride4Phase3_Amiga_m68k:
 	STEREO_PAIR_HI 11,20
 	STEREO_PAIR_HI 7,24
 	STEREO_PAIR_HI 3,28
+
+	movem.l	(%sp)+,%d2-%d3/%d5/%a2-%a6
+	rts
+
+
+/* void StereoFastPolyphaseStride4HalfReduced_Amiga_m68k(short *pcm, int *vbuf, const int *coefBase, int phase)
+ * Reduced-tap counterpart of StereoFastPolyphaseStride4Half_Amiga_m68k: same
+ * phase dispatch and the same emitted sample order as the full kernel, but
+ * each emitted sample keeps only the middle four paired taps (segments 4..11),
+ * matching PolyphaseStereoFastLowrateStride4Reduced()/
+ * PolyphaseStereoFastCompactSampleReduced() in polyphase.c exactly -- see the
+ * STEREO_*_R4 macros above, which already back the stride-2 reduced kernel.
+ */
+StereoFastPolyphaseStride4HalfReduced_Amiga_m68k:
+	move.l	16(%sp),%d0		| phase (before callee register save)
+	tst.l	%d0
+	beq	StereoFastPolyphaseStride4Phase0Reduced_Amiga_m68k
+	cmp.l	#1,%d0
+	beq	StereoFastPolyphaseStride4Phase1Reduced_Amiga_m68k
+	cmp.l	#2,%d0
+	beq	StereoFastPolyphaseStride4Phase2Reduced_Amiga_m68k
+	cmp.l	#3,%d0
+	beq	StereoFastPolyphaseStride4Phase3Reduced_Amiga_m68k
+	rts
+
+
+/* void StereoFastPolyphaseStride4Phase0Reduced_Amiga_m68k(short *pcm, int *vbuf, const int *coefBase)
+ * Reduced-tap version of StereoFastPolyphaseStride4Phase0_Amiga_m68k.
+ * Outputs stride-4 phase-0 samples: 0, 4, 8, 12, 16, 20, 24, 28
+ */
+StereoFastPolyphaseStride4Phase0Reduced_Amiga_m68k:
+	movem.l	%d2-%d3/%d5/%a2-%a6,-(%sp)
+	move.l	36(%sp),%a0		| pcm
+	move.l	40(%sp),%a1		| vbuf
+	move.l	44(%sp),%a2		| coefBase
+
+	STEREO_SAMPLE0_R4 0
+	STEREO_PAIR_LO_R4 4,4
+	STEREO_PAIR_LO_R4 8,8
+	STEREO_PAIR_LO_R4 12,12
+	STEREO_SAMPLE16_R4 16
+	STEREO_PAIR_HI_R4 12,20
+	STEREO_PAIR_HI_R4 8,24
+	STEREO_PAIR_HI_R4 4,28
+
+	movem.l	(%sp)+,%d2-%d3/%d5/%a2-%a6
+	rts
+
+
+/* void StereoFastPolyphaseStride4Phase1Reduced_Amiga_m68k(short *pcm, int *vbuf, const int *coefBase)
+ * Reduced-tap version of StereoFastPolyphaseStride4Phase1_Amiga_m68k.
+ * Outputs stride-4 phase-1 samples: 3, 7, 11, 15, 19, 23, 27, 31
+ */
+StereoFastPolyphaseStride4Phase1Reduced_Amiga_m68k:
+	movem.l	%d2-%d3/%d5/%a2-%a6,-(%sp)
+	move.l	36(%sp),%a0		| pcm
+	move.l	40(%sp),%a1		| vbuf
+	move.l	44(%sp),%a2		| coefBase
+
+	STEREO_PAIR_LO_R4 3,0
+	STEREO_PAIR_LO_R4 7,4
+	STEREO_PAIR_LO_R4 11,8
+	STEREO_PAIR_LO_R4 15,12
+	STEREO_PAIR_HI_R4 13,16
+	STEREO_PAIR_HI_R4 9,20
+	STEREO_PAIR_HI_R4 5,24
+	STEREO_PAIR_HI_R4 1,28
+
+	movem.l	(%sp)+,%d2-%d3/%d5/%a2-%a6
+	rts
+
+
+/* void StereoFastPolyphaseStride4Phase2Reduced_Amiga_m68k(short *pcm, int *vbuf, const int *coefBase)
+ * Reduced-tap version of StereoFastPolyphaseStride4Phase2_Amiga_m68k.
+ * Outputs stride-4 phase-2 samples: 2, 6, 10, 14, 18, 22, 26, 30
+ */
+StereoFastPolyphaseStride4Phase2Reduced_Amiga_m68k:
+	movem.l	%d2-%d3/%d5/%a2-%a6,-(%sp)
+	move.l	36(%sp),%a0		| pcm
+	move.l	40(%sp),%a1		| vbuf
+	move.l	44(%sp),%a2		| coefBase
+
+	STEREO_PAIR_LO_R4 2,0
+	STEREO_PAIR_LO_R4 6,4
+	STEREO_PAIR_LO_R4 10,8
+	STEREO_PAIR_LO_R4 14,12
+	STEREO_PAIR_HI_R4 14,16
+	STEREO_PAIR_HI_R4 10,20
+	STEREO_PAIR_HI_R4 6,24
+	STEREO_PAIR_HI_R4 2,28
+
+	movem.l	(%sp)+,%d2-%d3/%d5/%a2-%a6
+	rts
+
+
+/* void StereoFastPolyphaseStride4Phase3Reduced_Amiga_m68k(short *pcm, int *vbuf, const int *coefBase)
+ * Reduced-tap version of StereoFastPolyphaseStride4Phase3_Amiga_m68k.
+ * Outputs stride-4 phase-3 samples: 1, 5, 9, 13, 17, 21, 25, 29
+ */
+StereoFastPolyphaseStride4Phase3Reduced_Amiga_m68k:
+	movem.l	%d2-%d3/%d5/%a2-%a6,-(%sp)
+	move.l	36(%sp),%a0		| pcm
+	move.l	40(%sp),%a1		| vbuf
+	move.l	44(%sp),%a2		| coefBase
+
+	STEREO_PAIR_LO_R4 1,0
+	STEREO_PAIR_LO_R4 5,4
+	STEREO_PAIR_LO_R4 9,8
+	STEREO_PAIR_LO_R4 13,12
+	STEREO_PAIR_HI_R4 15,16
+	STEREO_PAIR_HI_R4 11,20
+	STEREO_PAIR_HI_R4 7,24
+	STEREO_PAIR_HI_R4 3,28
 
 	movem.l	(%sp)+,%d2-%d3/%d5/%a2-%a6
 	rts

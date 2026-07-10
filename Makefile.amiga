@@ -53,8 +53,17 @@ CPU_ASM_CPPFLAGS := \
 	-DAMIGA_M68K_ASM_INTENSITY \
 	-DAMIGA_M68K_ASM_DEQUANT \
 	-DAMIGA_M68K_ASM_HUFFMAN \
-	-DAMIGA_M68K_ASM_JPEG_GREY
-CPU_ASM_SOURCES := real/amiga_m68k_polyphase.S
+	-DAMIGA_M68K_ASM_JPEG_GREY \
+	-DAMIGA_M68K_ASM_PLANARS8
+# AMIGA_M68K_ASM_PLANARS8 was previously disabled here after real-hardware
+# testing found true-stereo playback corrupted at both 11025 and 22050 with
+# it on. Root cause was a wrong byte offset for the right channel in
+# PlanarS8FromInterleavedStereo_Amiga_m68k (amiga_m68k_planars8.S) -- it read
+# offset+1 (pcm[2i]'s own low byte) instead of offset+2 (pcm[2i+1]'s high
+# byte). Fixed and hardware-confirmed clean with the flag off (C-only path);
+# re-enabled here now that the asm kernel itself is ready for its own
+# hardware retest.
+CPU_ASM_SOURCES := real/amiga_m68k_polyphase.S amiga_m68k_planars8.S
 endif
 
 STD ?= -std=gnu89

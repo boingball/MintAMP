@@ -132,6 +132,9 @@
 #define StereoFastPolyphaseStride5_Amiga_m68k_IsActive STATNAME(StereoFastPolyphaseStride5_Amiga_m68k_IsActive)
 #define PolyphaseMonoFastLowrateStride4Reduced_TEST_ACTIVE STATNAME(PolyphaseMonoFastLowrateStride4Reduced_TEST_ACTIVE)
 #define PolyphaseStereoFastLowrateStride4Reduced_TEST_ACTIVE STATNAME(PolyphaseStereoFastLowrateStride4Reduced_TEST_ACTIVE)
+#define PolyphaseStereoFastLowrateStride4Reduced_C_REFERENCE STATNAME(PolyphaseStereoFastLowrateStride4Reduced_C_REFERENCE)
+#define PolyphaseStereoFastLowrateStride4Reduced_HAS_AMIGA_M68K_ASM_RUNTIME STATNAME(PolyphaseStereoFastLowrateStride4Reduced_HAS_AMIGA_M68K_ASM_RUNTIME)
+#define StereoFastPolyphaseStride4HalfReduced_Amiga_m68k_IsActive STATNAME(StereoFastPolyphaseStride4HalfReduced_Amiga_m68k_IsActive)
 #define AmigaM68KPolyphaseMonoFast_IsActive STATNAME(AmigaM68KPolyphaseMonoFast_IsActive)
 #define AmigaM68KPolyphaseMonoFastStride2_IsActive STATNAME(AmigaM68KPolyphaseMonoFastStride2_IsActive)
 #define AmigaM68KPolyphaseMonoFastStride2Reduced_IsActive STATNAME(AmigaM68KPolyphaseMonoFastStride2Reduced_IsActive)
@@ -163,6 +166,7 @@
 #define MP3FastLowrateEffectiveActiveSubbands STATNAME(MP3FastLowrateEffectiveActiveSubbands)
 #define DequantSubbandCapSelftest STATNAME(DequantSubbandCapSelftest)
 #define CollapseStereoToMonoSelftest STATNAME(CollapseStereoToMonoSelftest)
+#define MidSideProcSubbandCapSelftest STATNAME(MidSideProcSubbandCapSelftest)
 #define DecodeHuffmanPairs_C_REFERENCE STATNAME(DecodeHuffmanPairs_C_REFERENCE)
 #define DecodeHuffmanPairs_TEST_ACTIVE STATNAME(DecodeHuffmanPairs_TEST_ACTIVE)
 #define DecodeHuffmanPairs_HAS_AMIGA_M68K_ASM_RUNTIME STATNAME(DecodeHuffmanPairs_HAS_AMIGA_M68K_ASM_RUNTIME)
@@ -461,6 +465,7 @@ int IMDCT36AsmGeneralPathSelftest(void);
 int MP3FastLowrateEffectiveActiveSubbands(const MP3DecInfo *mp3DecInfo);
 int DequantSubbandCapSelftest(void);
 int CollapseStereoToMonoSelftest(void);
+int MidSideProcSubbandCapSelftest(void);
 
 /* huffman.c selftest hooks */
 int DecodeHuffmanPairs_C_REFERENCE(int *xy, int nVals, int tabIdx, int bitsLeft, unsigned char *buf, int bitOffset);
@@ -506,6 +511,9 @@ int PolyphaseStereoFastLowrateStride5_TEST_ACTIVE(short *pcm, int *vbuf, const i
 int StereoFastPolyphaseStride5_Amiga_m68k_IsActive(void);
 int PolyphaseMonoFastLowrateStride4Reduced_TEST_ACTIVE(short *pcm, int *vbuf, const int *coefBase, int phase);
 int PolyphaseStereoFastLowrateStride4Reduced_TEST_ACTIVE(short *pcm, int *vbuf, const int *coefBase, int phase);
+int PolyphaseStereoFastLowrateStride4Reduced_C_REFERENCE(short *pcm, int *vbuf, const int *coefBase, int phase);
+int PolyphaseStereoFastLowrateStride4Reduced_HAS_AMIGA_M68K_ASM_RUNTIME(void);
+int StereoFastPolyphaseStride4HalfReduced_Amiga_m68k_IsActive(void);
 int AmigaM68KPolyphaseMonoFast_IsActive(void);
 int AmigaM68KPolyphaseMonoFastStride2_IsActive(void);
 int AmigaM68KPolyphaseMonoFastStride2Reduced_IsActive(void);

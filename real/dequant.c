@@ -204,6 +204,118 @@ int CollapseStereoToMonoSelftest(void)
 	return failures ? -1 : 0;
 }
 
+/*
+ * Verifies that capping MidSideProc()'s nSamps to dequantSubbandCapSampleLimit
+ * (Dequantize()'s "whole spectrum" branch above) is equivalent to running the
+ * uncapped MidSideProc() against the same input with the discarded region
+ * already zeroed -- which is what every downstream consumer (IMDCT's own
+ * activeSubbands cap, AntiAlias()'s guard-subband read) already treats it
+ * as, since neither ever reads that far into hi->huffDecBuf when the cap is
+ * active. Checks:
+ *   1. kept-region (index < limit) reconstructed x[0]/x[1] bit-identical
+ *      between the capped call and the zeroed-discard-region uncapped call
+ *   2. mOut[0]/mOut[1] (and therefore the gb[] Dequantize() derives from
+ *      them) bit-identical between the two -- this is the safety-critical
+ *      part: FDCT32FastLowrate() uses gb to decide how much to scale down
+ *      before the transform, so an inflated/wrong guard-bit count here
+ *      risks the same class of corruption the antialias guard-band fix
+ *      elsewhere in this file addressed
+ *   3. as a sanity check on the "safe direction" reasoning in the comment
+ *      at the call site: capping never *increases* mOut relative to the
+ *      uncapped call against the real (non-zeroed, possibly-garbage)
+ *      discarded region, i.e. gb never comes out *smaller* (less safe)
+ *      than the uncapped call would have reported
+ */
+int MidSideProcSubbandCapSelftest(void)
+{
+	static const int kLimitCases[] = { 468, 288, 216, 144, 108 }; /* (26/16/12/8/6+1)*18 */
+	unsigned int rngState = 0x5A1D5EEDU;
+	int trial, failures, total;
+
+	failures = 0;
+	total = 0;
+
+	for (trial = 0; trial < 20000; trial++) {
+		static int xZeroed[MAX_NCHAN][MAX_NSAMP];
+		static int xCapped[MAX_NCHAN][MAX_NSAMP];
+		static int xGarbage[MAX_NCHAN][MAX_NSAMP];
+		int limit = kLimitCases[trial % (int)(sizeof(kLimitCases) / sizeof(kLimitCases[0]))];
+		int nSamps, i, mismatch;
+		int mOutZeroed[2], mOutCapped[2], mOutGarbage[2];
+
+		nSamps = limit + (int)(rngState % (MAX_NSAMP - limit + 1));
+		rngState ^= rngState << 13; rngState ^= rngState >> 17; rngState ^= rngState << 5;
+
+		for (i = 0; i < MAX_NSAMP; i++) {
+			int l, r, garbageL, garbageR;
+
+			rngState ^= rngState << 13; rngState ^= rngState >> 17; rngState ^= rngState << 5;
+			l = (int)(rngState & 0x3fffffffU) - 0x20000000;
+			rngState ^= rngState << 13; rngState ^= rngState >> 17; rngState ^= rngState << 5;
+			r = (int)(rngState & 0x3fffffffU) - 0x20000000;
+			rngState ^= rngState << 13; rngState ^= rngState >> 17; rngState ^= rngState << 5;
+			/* Simulates DequantChannel()'s cap-skip leftover: small raw
+			 * Huffman-magnitude-like values rather than proper Q26 ones. */
+			garbageL = (int)(rngState % 8000);
+			rngState ^= rngState << 13; rngState ^= rngState >> 17; rngState ^= rngState << 5;
+			garbageR = (int)(rngState % 8000);
+
+			if (i < limit) {
+				xZeroed[0][i] = xCapped[0][i] = xGarbage[0][i] = l;
+				xZeroed[1][i] = xCapped[1][i] = xGarbage[1][i] = r;
+			} else {
+				xZeroed[0][i] = xZeroed[1][i] = 0;
+				xCapped[0][i] = xCapped[1][i] = 0; /* untouched by the capped call; init matches */
+				xGarbage[0][i] = garbageL;
+				xGarbage[1][i] = garbageR;
+			}
+		}
+
+		mOutZeroed[0] = mOutZeroed[1] = 0;
+		mOutCapped[0] = mOutCapped[1] = 0;
+		mOutGarbage[0] = mOutGarbage[1] = 0;
+
+		MidSideProc(xZeroed, nSamps, mOutZeroed);      /* uncapped, discard region zeroed */
+		MidSideProc(xCapped, limit, mOutCapped);        /* capped, matching the real call site */
+		MidSideProc(xGarbage, nSamps, mOutGarbage);     /* uncapped, discard region "garbage" */
+		total++;
+
+		mismatch = 0;
+		for (i = 0; i < limit; i++) {
+			if (xZeroed[0][i] != xCapped[0][i] || xZeroed[1][i] != xCapped[1][i]) {
+				printf("MidSideProcSubbandCap mismatch trial=%d limit=%d nSamps=%d i=%d: "
+					"zeroed=(%d,%d) capped=(%d,%d)\n", trial, limit, nSamps, i,
+					xZeroed[0][i], xZeroed[1][i], xCapped[0][i], xCapped[1][i]);
+				mismatch = 1;
+				break;
+			}
+		}
+		if (mOutZeroed[0] != mOutCapped[0] || mOutZeroed[1] != mOutCapped[1]) {
+			printf("MidSideProcSubbandCap mOut mismatch trial=%d limit=%d nSamps=%d: "
+				"zeroed=(%d,%d) capped=(%d,%d)\n", trial, limit, nSamps,
+				mOutZeroed[0], mOutZeroed[1], mOutCapped[0], mOutCapped[1]);
+			mismatch = 1;
+		}
+		/* mOutGarbage can only ever be >= mOutCapped bitwise (OR over a
+		 * superset of nonzero-or-equal values), so CLZ(mOutGarbage) <=
+		 * CLZ(mOutCapped), i.e. the capped call's derived gb is never
+		 * smaller (less safe) than today's uncapped-against-garbage gb. */
+		if ((mOutGarbage[0] | mOutCapped[0]) != mOutGarbage[0] ||
+			(mOutGarbage[1] | mOutCapped[1]) != mOutGarbage[1]) {
+			printf("MidSideProcSubbandCap safety-direction violation trial=%d limit=%d nSamps=%d: "
+				"garbage=(%d,%d) capped=(%d,%d)\n", trial, limit, nSamps,
+				mOutGarbage[0], mOutGarbage[1], mOutCapped[0], mOutCapped[1]);
+			mismatch = 1;
+		}
+		if (mismatch)
+			failures++;
+	}
+
+	printf("MidSideProc subband cap selftest: %d trials, %s\n",
+		total, failures ? "FAIL" : "PASS");
+	return failures ? -1 : 0;
+}
+
 
 /**************************************************************************************
  * Function:    Dequantize
@@ -341,6 +453,22 @@ int Dequantize(MP3DecInfo *mp3DecInfo, int gr)
 				/* intensity stereo disabled - run mid-side on whole spectrum */
 				nSamps = MAX(hi->nonZeroBound[0], hi->nonZeroBound[1]);
 			}
+			/* Same reasoning as dequantSubbandCapSampleLimit above: samples
+			 * at/beyond that boundary were left un-dequantized by
+			 * DequantChannel() when a fast-lowrate subband cap is active,
+			 * and IMDCT's own cap (driven by the same
+			 * MP3FastLowrateEffectiveActiveSubbands() value, with this
+			 * same +1 guard subband covering AntiAlias()'s boundary read)
+			 * never reads that far into hi->huffDecBuf either way -- so
+			 * reconstructing sum/difference values there is wasted work
+			 * regardless of nonZeroBound/cbEndL/cbEndSMax being larger.
+			 * Excluding those samples from MidSideProc's guard-bit scan
+			 * can only *reduce* its mOut contribution (fewer values
+			 * OR-ed in), which is the same safe direction dequant's own
+			 * cap-skip already relies on -- see DequantSubbandCapSelftest
+			 * and this cap's dedicated MidSideProcSubbandCapSelftest. */
+			if (dequantSubbandCapSampleLimit > 0 && nSamps > dequantSubbandCapSampleLimit)
+				nSamps = dequantSubbandCapSampleLimit;
 			MidSideProc(hi->huffDecBuf, nSamps, mOut);
 		}
 
