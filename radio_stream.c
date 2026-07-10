@@ -467,6 +467,17 @@ int Radio_RunOnNetWorker(void (*fn)(void *arg), void *arg)
         Delay(2);
     }
     RADIO_DBG(printf("radio-net-worker: job dispatch timed out, worker may be wedged -- leaking job=%p replyPort=%p\n", (void *)job, (void *)replyPort););
+    /* The job itself may be sitting inside a masked blocking bsdsocket call
+     * (gethostbyname() in connect_http() or in the stream/favicon prober --
+     * both wrap their call in SBTC_BREAKMASK/SIGBREAKF_CTRL_C for exactly
+     * this reason). Without this kick a wedged resolver leaves the worker
+     * task permanently unable to run any later job -- every subsequent
+     * search/probe/play would also queue behind it and time out the same
+     * way, forever, instead of just this one attempt. Same "safe to signal
+     * regardless of what the worker is doing" reasoning as
+     * Radio_RequestStop()'s own call to this. */
+    if (radio_net_worker_task)
+        Signal(radio_net_worker_task, SIGBREAKF_CTRL_C);
     return 0;
 }
 

@@ -369,8 +369,12 @@ static void MrInitMenuStrip(void)
 	kMenus[1].MenuName = (STRPTR)"Playback";
 	kMenus[1].FirstItem = &kPlaybackItems[0];
 	for (i = 0; i < 3; i++) {
-		kProjectText[i].FrontPen = 0;
-		kProjectText[i].BackPen = 1;
+		/* Pen 0 is the screen's light/background pen, pen 1 is black on
+		 * the standard 4-colour Workbench palette -- these were swapped,
+		 * so JAM1 (which only uses FrontPen) drew the item text in the
+		 * pale pen instead of black. */
+		kProjectText[i].FrontPen = 1;
+		kProjectText[i].BackPen = 0;
 		kProjectText[i].DrawMode = JAM1;
 		kProjectText[i].LeftEdge = 2;
 		kProjectText[i].TopEdge = 1;
@@ -385,8 +389,9 @@ static void MrInitMenuStrip(void)
 		kProjectItems[i].NextSelect = MENUNULL;
 	}
 	for (i = 0; i < 9; i++) {
-		kPlaybackText[i].FrontPen = 0;
-		kPlaybackText[i].BackPen = 1;
+		/* Same FrontPen/BackPen swap as kProjectText above. */
+		kPlaybackText[i].FrontPen = 1;
+		kPlaybackText[i].BackPen = 0;
 		kPlaybackText[i].DrawMode = JAM1;
 		kPlaybackText[i].LeftEdge = 14;
 		kPlaybackText[i].TopEdge = 1;
@@ -1320,9 +1325,13 @@ static int SpeedChoiceFromApp(const MrApp *app)
 static void UpdateSpeedGadgetChoices(MrApp *app)
 {
 	if (app->rateIndex != MR_RATE_22050_INDEX && app->cd32Ultrafast) {
+		/* "22050 Mono Ultrafast" only exists at 22050 Hz; leaving that rate
+		 * must fall back to plain "Ultrafast" (index 2, same as picking it
+		 * by hand -- see the v==2 case in SyncFromGadgets()), not "Normal". */
 		app->cd32Ultrafast = 0;
-		app->ultrafast = 0;
+		app->ultrafast = 1;
 		app->superfastLowrate = 0;
+		app->fastLowrate = 0;
 	}
 	if (app->win && app->speedGad)
 		SetGadgetAttrs((struct Gadget *)app->speedGad, app->win, NULL,
@@ -2749,18 +2758,51 @@ static int MrOpenWindow(MrApp *app)
 
 			LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
 				LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
+				/* Left-packed, size-to-content row, matching the layout the
+				 * Rating/stars/Track row below already uses successfully:
+				 * every item except the LAST gets CHILD_WeightedWidth 0 (no
+				 * stretch), and the last item is left as the row's one
+				 * flex child but capped with a tight CHILD_MaxWidth so it
+				 * can't visibly stretch either -- giving every item in the
+				 * row weight 0 made the layout fall back to dividing the
+				 * row into equal shares again instead of packing left. */
 				ADD_LABELLED(app->rateGad, "Rate"),
+				CHILD_WeightedWidth, 0,
 				ADD_LABELLED(app->qualityGad, "Quality"),
+				CHILD_WeightedWidth, 0,
 				ADD_LABELLED(app->subbandCapGad, "Subbands"),
+				CHILD_WeightedWidth, 0,
+				/* Widest label is "Stereo" -- this is the row's one flex
+				 * child (see comment above), capped tight so it still
+				 * reads as left-packed. */
 				ADD_LABELLED(app->channelGad, "Mono/Stereo"),
+				CHILD_MaxWidth, 70,
 				TAG_DONE),
 			CHILD_WeightedHeight, 0,
 
 			LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
 				LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
+				/* Same left-packed treatment as the Rate row above: every
+				 * item but the last is CHILD_WeightedWidth 0 with no
+				 * explicit Min/Max, so it sizes to CHOOSER_GetClass's own
+				 * natural width for its widest label -- exactly how Rate
+				 * fits "28600 Hz" above. A forced CHILD_MinWidth was tried
+				 * here to stop "22050 Mono Ultrafast" overflowing the
+				 * gadget, but that only mattered while this row was still
+				 * being stretched to an equal share of the row width
+				 * (narrower than the chooser's own natural size); now that
+				 * it isn't, the forced minimum was wider than the chooser
+				 * actually needs and left dead space inside its own box --
+				 * so drop it and let the gadget size itself, same as Rate. */
 				ADD_LABELLED(app->speedGad, "Speed"),
+				CHILD_WeightedWidth, 0,
 				ADD_LABELLED(app->widthGad, "Mode/width"),
+				CHILD_WeightedWidth, 0,
+				/* Widest label is "192" -- a few pixels is plenty, instead
+				 * of an equal share of the row. This is the row's one flex
+				 * child (see comment above). */
 				ADD_LABELLED(app->delayGad, "Delay"),
+				CHILD_MaxWidth, 50,
 				TAG_DONE),
 			CHILD_WeightedHeight, 0,
 

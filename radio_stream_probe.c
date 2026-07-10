@@ -875,7 +875,30 @@ static int rb_probe_transport_open_ex(RbProbeTransport *transport, const char *u
     /* Amiga bsdsocket headers declare gethostbyname() with a mutable
      * name argument even though the call only reads it. Cast at the call
      * site so const-correct callers do not trigger -Wdiscarded-qualifiers. */
+#if defined(AMIGA_M68K)
+    /* gethostbyname() is a genuinely blocking bsdsocket.library call with no
+     * non-blocking mode of its own -- same hazard documented at length next
+     * to connect_http()'s own gethostbyname() call in radio_stream.c. This
+     * probe call runs on the net worker task (see rb_probe_stream_url()'s
+     * Radio_RunOnNetWorker() dispatch), so an unresponsive/blackholed
+     * nameserver for one station wedges that task inside this call forever:
+     * the GUI task's own bounded wait in Radio_RunOnNetWorker() times out
+     * and reports probe failure, but the worker itself never comes back,
+     * so it can never run another job again -- every later search/probe/
+     * play silently times out too ("stuck on Connecting", GUI sluggish
+     * from the GUI task polling GetMsg() for up to a minute per attempt
+     * with nothing ever answering). SBTC_BREAKMASK scoped tightly to just
+     * this call, matching connect_http(): Radio_RunOnNetWorker() sends
+     * SIGBREAKF_CTRL_C to the worker task if its wait times out, which
+     * aborts an in-flight masked gethostbyname() instead of leaving the
+     * worker wedged for the rest of the run. */
+    SetSignal(0, SIGBREAKF_CTRL_C);
+    SocketBaseTags(SBTM_SETVAL(SBTC_BREAKMASK), (ULONG)SIGBREAKF_CTRL_C, TAG_DONE);
     he = gethostbyname((char *)host);
+    SocketBaseTags(SBTM_SETVAL(SBTC_BREAKMASK), 0UL, TAG_DONE);
+#else
+    he = gethostbyname((char *)host);
+#endif
     if (!he || !he->h_addr_list || !he->h_addr_list[0]) return RB_STREAM_PROBE_ERR_DNS;
     if (host_addr_be) {
         char addr_text[16];
