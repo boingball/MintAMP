@@ -2758,6 +2758,7 @@ static int MrOpenWindow(MrApp *app)
 
 			LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
 				LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
+				LAYOUT_EvenSize, TRUE,
 				/* Left-packed, size-to-content row, matching the layout the
 				 * Rating/stars/Track row below already uses successfully:
 				 * every item except the LAST gets CHILD_WeightedWidth 0 (no
@@ -2776,7 +2777,8 @@ static int MrOpenWindow(MrApp *app)
 				 * child (see comment above), capped tight so it still
 				 * reads as left-packed. */
 				ADD_LABELLED(app->channelGad, "Mono/Stereo"),
-				CHILD_MaxWidth, 70,
+				CHILD_WeightedWidth, 0,
+				CHILD_MaxWidth, 100,
 				TAG_DONE),
 			CHILD_WeightedHeight, 0,
 
