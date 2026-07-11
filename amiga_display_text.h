@@ -13,6 +13,7 @@
 static size_t AmigaUtf8ToDisplay(char *dst, size_t dstSize, const char *src)
 {
     size_t si = 0, di = 0;
+    const char *structuredEnd = NULL;
     unsigned char c;
 
     if (!dst || dstSize == 0)
@@ -21,7 +22,28 @@ static size_t AmigaUtf8ToDisplay(char *dst, size_t dstSize, const char *src)
     if (!src)
         return 0;
 
-    while (src[si] && di + 1 < dstSize) {
+    /* Some iHeart/KISS ICY streams put a vendor attribute list inside
+     * StreamTitle, for example:
+     *
+     *   text="Say So" song_spot="M" MediaBaseId="2546146" ...
+     *
+     * The protocol parser has already bounded and terminated this string, so
+     * for display purposes extract only the quoted text value.  Require both
+     * the exact leading marker and its closing quote; malformed or ordinary
+     * titles continue through the normal conversion path unchanged. */
+    if (src[0] == 't' && src[1] == 'e' && src[2] == 'x' &&
+        src[3] == 't' && src[4] == '=' && src[5] == '"') {
+        const char *end = src + 6;
+        while (*end && *end != '"')
+            end++;
+        if (*end == '"') {
+            src += 6;
+            structuredEnd = end;
+        }
+    }
+
+    while (src[si] && (!structuredEnd || src + si < structuredEnd) &&
+           di + 1 < dstSize) {
         c = (unsigned char)src[si++];
         if (c == '\t' || c == '\n' || c == '\r') {
             dst[di++] = ' ';
