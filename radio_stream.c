@@ -557,6 +557,12 @@ static int radio_net_worker_stop(void)
     return 0;
 }
 #endif /* HAVE_AMISSL */
+static void radio_worker_breadcrumb(const char *stage, const char *op, unsigned long session)
+{
+    (void)stage;
+    (void)op;
+    (void)session;
+}
 static long radio_socket_library_open_count = 0;
 static long radio_socket_library_close_count = 0;
 #else
