@@ -557,6 +557,7 @@ static int radio_net_worker_stop(void)
     return 0;
 }
 #endif /* HAVE_AMISSL */
+#if !defined(HAVE_AMISSL)
 static void radio_worker_breadcrumb(const char *stage, const char *op, unsigned long session)
 {
     (void)stage;
@@ -574,6 +575,7 @@ static long radio_closeamissl_count = 0;
 static const char * volatile radio_net_worker_stage = "not-available";
 static const char * volatile radio_net_worker_last_op = "none";
 static volatile unsigned long radio_net_worker_heartbeat = 0;
+#endif
 #else
 #include <unistd.h>
 #include <errno.h>
