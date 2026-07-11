@@ -565,6 +565,15 @@ static void radio_worker_breadcrumb(const char *stage, const char *op, unsigned 
 }
 static long radio_socket_library_open_count = 0;
 static long radio_socket_library_close_count = 0;
+static long radio_amissl_init_count = 0;
+static long radio_amissl_cleanup_count = 0;
+static long radio_amisslmaster_open_count = 0;
+static long radio_amisslmaster_close_count = 0;
+static long radio_openamissltags_count = 0;
+static long radio_closeamissl_count = 0;
+static const char * volatile radio_net_worker_stage = "not-available";
+static const char * volatile radio_net_worker_last_op = "none";
+static volatile unsigned long radio_net_worker_heartbeat = 0;
 #else
 #include <unistd.h>
 #include <errno.h>
@@ -2249,7 +2258,11 @@ static int connect_http(RadioStream *rs){
         if (radio_is_stopping(rs)) { close_current_socket(rs); return -1; }
     }
 #endif
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     RADIO_DBG(printf("radio-http: session=%lu starting HTTP request phase isSSL=%d sslHandshakeDone=%d\n", rs->session_id, rs->isSSL, rs->sslHandshakeDone););
+#else
+    RADIO_DBG(printf("radio-http: session=%lu starting HTTP request phase isSSL=%d sslHandshakeDone=0\n", rs->session_id, rs->isSSL););
+#endif
     n=snprintf(req,sizeof(req),"GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: BoingPlayer/0.1 AmigaOS\r\nIcy-MetaData: 1\r\nConnection: close\r\n\r\n",rs->path,rs->host);
     if(n<0 || n>=(int)sizeof(req)){
         /* Never send a truncated request: a cut-off auth token is exactly
