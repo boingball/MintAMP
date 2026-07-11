@@ -196,11 +196,19 @@ static char gSupportedExtPattern[512];
 #define HELIXAMP3_QUALITY_MIN 0
 #define HELIXAMP3_QUALITY_MAX 3
 #define HELIXAMP3_SIGMASK(gui) (1UL << (gui)->win->UserPort->mp_SigBit)
-#define GUI_ENV_PREFIX  "ENVARC:MiniAMP3"
+/* Bare name, no explicit "ENV:"/"ENVARC:" device prefix -- SaveEnvString()
+ * below passes this through SetVar() with GVF_GLOBAL_ONLY (writes ENV:) and
+ * separately with GVF_SAVE_VAR (which internally constructs the persistent
+ * disk path as "ENVARC:" + name). An explicit "ENVARC:" baked into the name
+ * itself made that second call target "ENVARC:ENVARC:MiniAMP3/..." -- a
+ * malformed, double-prefixed path that silently failed to persist, while
+ * the plain ENV: (RAM, cleared on reboot) write still succeeded -- exactly
+ * the "settings don't survive a restart" symptom this fixes. */
+#define GUI_ENV_PREFIX  "MiniAMP3"
 #define GUI_STARTUP_STACK_SIZE 262144UL
 
 #define GUI_WIN_W       560    /* inner width; wide enough for all controls */
-#define GUI_WIN_H       340    /* inner height */
+#define GUI_WIN_H       358    /* inner height */
 
 #define GUI_MARGIN_L     8     /* left margin */
 #define GUI_MARGIN_R     8     /* right margin */
@@ -244,11 +252,12 @@ static char gSupportedExtPattern[512];
 #define ROW_GENRE       (GUI_TOP_Y + 6 * GUI_ROW_H)
 #define ROW_CHECKS      (GUI_TOP_Y + 7 * GUI_ROW_H + 4)
 #define ROW_CHANNELS    (GUI_TOP_Y + 8 * GUI_ROW_H + 4)
-#define ROW_CYCLES      (GUI_TOP_Y + 9 * GUI_ROW_H + 4)
-#define ROW_BUFFER      (GUI_TOP_Y + 10 * GUI_ROW_H + 4)
-#define ROW_VOLUME      (GUI_TOP_Y + 11 * GUI_ROW_H + 4)
-#define ROW_PROGRESS    (GUI_TOP_Y + 12 * GUI_ROW_H + 8)
-#define ROW_BUTTONS     (GUI_TOP_Y + 13 * GUI_ROW_H + 12)
+#define ROW_EXPERIMENTAL (GUI_TOP_Y + 9 * GUI_ROW_H + 4)
+#define ROW_CYCLES      (GUI_TOP_Y + 10 * GUI_ROW_H + 4)
+#define ROW_BUFFER      (GUI_TOP_Y + 11 * GUI_ROW_H + 4)
+#define ROW_VOLUME      (GUI_TOP_Y + 12 * GUI_ROW_H + 4)
+#define ROW_PROGRESS    (GUI_TOP_Y + 13 * GUI_ROW_H + 8)
+#define ROW_BUTTONS     (GUI_TOP_Y + 14 * GUI_ROW_H + 12)
 #define ROW_STATUS      (ROW_BUTTONS + TRANSPORT_H + 4)
 #define ROW_FILEINFO    (ROW_STATUS + GUI_ROW_H + 4)
 
@@ -316,6 +325,8 @@ enum {
 	GID_ALBUM,
 	GID_SPEED_MODE,
 	GID_FAST_MEM,
+	GID_EXP_POLY,
+	GID_EXP_REDUCED_TAPS,
 	GID_CHANNEL_MODE,
 	GID_FAKE_STEREO,
 	GID_FAKE_STEREO_WIDTH,
@@ -324,6 +335,7 @@ enum {
 	GID_BUFFER,
 	GID_VOLUME,
 	GID_QUALITY,
+	GID_SUBBAND_CAP,
 	GID_PLAY,
 	GID_NEXT,
 	GID_STOP,
@@ -455,6 +467,8 @@ typedef struct HelixAmp3Gui {
 	struct Gadget  *gadSpeedMode;
 	struct Gadget  *gadRate;
 	struct Gadget  *gadFastMem;
+	struct Gadget  *gadExpPoly;
+	struct Gadget  *gadExpReducedTaps;
 	struct Gadget  *gadChannelMode;
 	struct Gadget  *gadFakeStereo;
 	struct Gadget  *gadFakeStereoWidth;
@@ -534,6 +548,8 @@ typedef struct HelixAmp3Gui {
 	int   ultrafast;
 	int   cd32Ultrafast;
 	int   fastMem;
+	int   expPoly;
+	int   expReducedTaps;
 	int   mono;
 	int   fakeStereo;
 	int   fakeStereoWidthIndex;
@@ -543,6 +559,7 @@ typedef struct HelixAmp3Gui {
 	int   bufferSeconds;
 	int   volumePercent;
 	int   qualityIndex;
+	int   subbandCapIndex;
 	int   decodeThenPlay;
 	int   bench;
 	int   closeRequested;
@@ -635,6 +652,7 @@ static const char * const kRates[] = {
 	"8287",
 	"8820",
 	"11025",
+	"14700",
 	"22050",
 	"28600"
 };
@@ -643,6 +661,7 @@ static const STRPTR kRateLabels[] = {
 	(STRPTR)"8287",
 	(STRPTR)"8820",
 	(STRPTR)"11025",
+	(STRPTR)"14700",
 	(STRPTR)"22050",
 	(STRPTR)"28600",
 	NULL
@@ -650,7 +669,7 @@ static const STRPTR kRateLabels[] = {
 
 static int RateIndexSupportsSuperfast(int rateIndex, int mono)
 {
-	return rateIndex >= (mono ? 0 : 1) && rateIndex <= 3;
+	return rateIndex >= (mono ? 0 : 1) && rateIndex <= 4;
 }
 
 static int DefaultSuperfastRateIndex(int mono)
@@ -699,6 +718,25 @@ static const STRPTR kQualityLabels[] = {
 	(STRPTR)"Best",
 	NULL
 };
+
+/* Manual override for --subband-cap N (see amiga_mp3dec.c's --subband-cap
+ * help text). "Auto" (index 0) means don't pass --subband-cap at all and
+ * let whatever fast-lowrate/ultrafast preset is active pick its own default
+ * (or run uncapped at the full 32 subbands otherwise). The explicit values
+ * below let a track that's still hiccuping at the fastest preset be capped
+ * further by hand -- lower values drop more high-frequency detail but cost
+ * less CPU in IMDCT/antialias/dequant. */
+static const STRPTR kSubbandCapLabels[] = {
+	(STRPTR)"Auto",
+	(STRPTR)"26",
+	(STRPTR)"20",
+	(STRPTR)"16",
+	(STRPTR)"12",
+	(STRPTR)"8",
+	NULL
+};
+static const int kSubbandCapValues[] = { 0, 26, 20, 16, 12, 8 };
+#define SUBBAND_CAP_COUNT (sizeof(kSubbandCapValues) / sizeof(kSubbandCapValues[0]))
 
 static const STRPTR kFakeStereoWidthLabels[] = {
 	(STRPTR)"Very wide",
@@ -913,6 +951,8 @@ static void SaveGuiSettings(HelixAmp3Gui *gui)
 	SaveEnvInt("Ultrafast", gui->ultrafast);
 	SaveEnvInt("CD32Ultrafast", gui->cd32Ultrafast);
 	SaveEnvInt("FastMem", gui->fastMem);
+	SaveEnvInt("ExpPoly", gui->expPoly);
+	SaveEnvInt("ExpReducedTaps", gui->expReducedTaps);
 	SaveEnvInt("Mono", gui->mono);
 	SaveEnvInt("FakeStereo", gui->fakeStereo);
 	SaveEnvInt("FakeStereoWidthIndex", gui->fakeStereoWidthIndex);
@@ -922,6 +962,7 @@ static void SaveGuiSettings(HelixAmp3Gui *gui)
 	SaveEnvInt("BufferSeconds", gui->bufferSeconds);
 	SaveEnvInt("Volume", gui->volumePercent);
 	SaveEnvInt("QualityIndex", gui->qualityIndex);
+	SaveEnvInt("SubbandCapIndex", gui->subbandCapIndex);
 	SaveEnvInt("SettingsVersion", HELIXAMP3_SETTINGS_VERSION);
 	SaveEnvInt("DecodeThenPlay", gui->decodeThenPlay);
 	SaveEnvInt("Bench", gui->bench);
@@ -4634,6 +4675,40 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 	if (!gad)
 		return -1;
 
+	gad = MakeGadget(gui, gad, TEXT_KIND, GID_COUNT,
+		GUI_MARGIN_L + 14, ROW_EXPERIMENTAL - 1, 90, 16, "",
+		GTTX_Text, (ULONG)"Experimental:",
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	/* Both are opt-in and off by default -- see MP3SetExperimentalPolyphase()/
+	 * MP3SetExperimentalReducedTaps() in amiga_mp3dec.c. Exp-poly is an
+	 * alternate asm implementation of the same math (correctness-preserving
+	 * in principle, just less soak-tested than the default path); exp-reduced-
+	 * taps is explicitly lossy (see its --exp-reduced-taps help text) -- kept
+	 * as two separate checkboxes rather than folded into Speed Mode so either
+	 * can be soak-tested independently of which speed preset is active. */
+	gui->gadExpPoly = gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_EXP_POLY,
+		GUI_MARGIN_L + 108, ROW_EXPERIMENTAL, 20, 12, "Poly ASM",
+		GTCB_Checked, gui->expPoly,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gui->gadExpReducedTaps = gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_EXP_REDUCED_TAPS,
+		GUI_MARGIN_L + 220, ROW_EXPERIMENTAL, 20, 12, "Reduced taps (lossy)",
+		GTCB_Checked, gui->expReducedTaps,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
 	gui->gadChannelMode = gad = MakeGadget(gui, gad, CYCLE_KIND, GID_CHANNEL_MODE,
 		GUI_MARGIN_L + 14, ROW_CHANNELS - 2, 74, 16, "",
 		GTCY_Labels, (ULONG)kChannelModeLabels,
@@ -4686,6 +4761,15 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		GUI_MARGIN_L + 230, ROW_CYCLES, 100, 16, "Quality:",
 		GTCY_Labels, (ULONG)kQualityLabels,
 		GTCY_Active, gui->qualityIndex,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gad = MakeGadget(gui, gad, CYCLE_KIND, GID_SUBBAND_CAP,
+		GUI_MARGIN_L + 350, ROW_CYCLES, 130, 16, "Subbands:",
+		GTCY_Labels, (ULONG)kSubbandCapLabels,
+		GTCY_Active, gui->subbandCapIndex,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0);
 	if (!gad)
@@ -4951,18 +5035,20 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	gui->ultrafast = LoadEnvInt("Ultrafast", 0, 0, 1);
 	gui->cd32Ultrafast = LoadEnvInt("CD32Ultrafast", 0, 0, 1);
 	gui->fastMem = LoadEnvInt("FastMem", 1, 0, 1);
+	gui->expPoly = LoadEnvInt("ExpPoly", 0, 0, 1);
+	gui->expReducedTaps = LoadEnvInt("ExpReducedTaps", 0, 0, 1);
 	gui->mono = LoadEnvInt("Mono", 1, 0, 1);
 	gui->fakeStereo = LoadEnvInt("FakeStereo", 0, 0, 1);
 	gui->fakeStereoWidthIndex = LoadEnvInt("FakeStereoWidthIndex", 1, 0, 4);
 	gui->fakeStereoDelayIndex = LoadEnvInt("FakeStereoDelayIndex", 2, 0, 4);
 	gui->hardwareFilter = LoadEnvInt("HardwareFilter", 0, 0, 1);
-	gui->rateIndex = LoadEnvInt("RateIndex", 2, 0, 4);
+	gui->rateIndex = LoadEnvInt("RateIndex", 2, 0, 5);
 	if (gui->cd32Ultrafast) {
 		gui->ultrafast = 0;
 		gui->fastLowrate = 1;
 		gui->superfastLowrate = 1;
 		gui->mono = 1;
-		gui->rateIndex = 3;
+		gui->rateIndex = 4;
 	} else if (gui->ultrafast) {
 		gui->fastLowrate = 0;
 		gui->superfastLowrate = 0;
@@ -4996,6 +5082,7 @@ static int GuiOpen(HelixAmp3Gui *gui)
 			gui->qualityIndex = hasQualityIndex ? loadedQuality : 1;
 		}
 	}
+	gui->subbandCapIndex = LoadEnvInt("SubbandCapIndex", 0, 0, SUBBAND_CAP_COUNT - 1);
 	gui->decodeThenPlay = LoadEnvInt("DecodeThenPlay", 0, 0, 1);
 	gui->bench = LoadEnvInt("Bench", 0, 0, 1);
 	gui->artEnabled = LoadEnvInt("Artwork", 1, 0, 1);
@@ -6861,6 +6948,22 @@ static void BuildPlaybackArgs(HelixAmp3Gui *gui, HelixAmp3Args *args)
 	}
 	if (gui->ultrafast && strcmp(kRates[gui->rateIndex], "28600") == 0)
 		AddArg(args, "--ultrafast");
+	if (gui->expPoly)
+		AddArg(args, "--exp-poly");
+	/* cd32Ultrafast already adds --exp-reduced-taps unconditionally above
+	 * (its own tested default); avoid adding it twice when the independent
+	 * checkbox is also on. */
+	if (gui->expReducedTaps && !gui->cd32Ultrafast)
+		AddArg(args, "--exp-reduced-taps");
+	/* Manual subband cap always comes last so it overrides whatever default
+	 * a fast-lowrate/ultrafast preset above already picked (e.g. CD32
+	 * Ultrafast's hardcoded --subband-cap 12) -- --subband-cap N just does
+	 * a plain last-flag-wins atoi() assignment in amiga_mp3dec.c. */
+	if (gui->subbandCapIndex > 0) {
+		AddArg(args, "--subband-cap");
+		sprintf(num, "%d", kSubbandCapValues[gui->subbandCapIndex]);
+		AddArg(args, num);
+	}
 	if (gui->fakeStereo) {
 		AddArg(args, "--fake-stereo");
 		AddArg(args, "--fake-stereo-delay");
@@ -7205,9 +7308,10 @@ static void StartPlayback(HelixAmp3Gui *gui)
 	if (nilOut) {
 		gGuiPlayer.process = CreateNewProcTags(NP_Entry, (ULONG)PlaybackEntry,
 			NP_Name, (ULONG)"MiniAMP3 playback",
-			/* Keep playback at normal priority so CPU-bound decoding does not
-			 * starve the GadTools event loop and make Stop hard to press. */
-			NP_Priority, 0,
+			/* See AMIGA_PLAYBACK_TASK_PRIORITY's comment in amiga_mp3dec.c for
+			 * the tradeoff -- CPU-bound decoding vs. keeping the GadTools event
+			 * loop (and Stop) responsive. */
+			NP_Priority, AMIGA_PLAYBACK_TASK_PRIORITY,
 			NP_StackSize, 262144,
 			NP_CurrentDir, dirLock,
 			NP_Output, nilOut,
@@ -7217,9 +7321,10 @@ static void StartPlayback(HelixAmp3Gui *gui)
 	} else {
 		gGuiPlayer.process = CreateNewProcTags(NP_Entry, (ULONG)PlaybackEntry,
 			NP_Name, (ULONG)"MiniAMP3 playback",
-			/* Keep playback at normal priority so CPU-bound decoding does not
-			 * starve the GadTools event loop and make Stop hard to press. */
-			NP_Priority, 0,
+			/* See AMIGA_PLAYBACK_TASK_PRIORITY's comment in amiga_mp3dec.c for
+			 * the tradeoff -- CPU-bound decoding vs. keeping the GadTools event
+			 * loop (and Stop) responsive. */
+			NP_Priority, AMIGA_PLAYBACK_TASK_PRIORITY,
 			NP_StackSize, 262144,
 			NP_CurrentDir, dirLock,
 			NP_CopyVars, FALSE,
@@ -7457,7 +7562,7 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 		gui->superfastLowrate = (code == 2 || code == 4) ? 1 : 0;
 		if (gui->cd32Ultrafast) {
 			gui->mono = 1;
-			gui->rateIndex = 3;
+			gui->rateIndex = 4;
 		}
 		if (gui->superfastLowrate &&
 			!RateIndexSupportsSuperfast(gui->rateIndex, ChannelUsesMonoCost(gui)))
@@ -7474,7 +7579,7 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 			"22050 mono ultrafast enabled (reduced taps, 12 subband cap)." :
 			code == 3 ?
 			"Ultrafast enabled (26 subband cap)." :
-			code == 2 ? "Superfast enabled for 8287/8820/11025/22050 Hz." :
+			code == 2 ? "Superfast enabled for 8287/8820/11025/14700/22050 Hz." :
 			code == 1 ? "Fast-lowrate enabled." : "Standard speed enabled.");
 		SaveGuiSettings(gui);
 		break;
@@ -7489,6 +7594,30 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 		GT_SetGadgetAttrs(gad, gui->win, NULL, GTCB_Checked, gui->fastMem, TAG_DONE);
 		SetStatus(gui, gui->fastMem ? "Fast memory path enabled." : "Fast memory path disabled.");
 		GuiDisableFastMemIfTooSmall(gui);
+		SaveGuiSettings(gui);
+		break;
+	case GID_EXP_POLY:
+		if (gui->playbackActive || gui->playbackDonePending) {
+			GT_SetGadgetAttrs(gad, gui->win, NULL,
+				GTCB_Checked, gui->expPoly, TAG_DONE);
+			SetStatus(gui, "Stop playback before changing experimental options.");
+			break;
+		}
+		gui->expPoly = !gui->expPoly;
+		GT_SetGadgetAttrs(gad, gui->win, NULL, GTCB_Checked, gui->expPoly, TAG_DONE);
+		SetStatus(gui, gui->expPoly ? "Experimental polyphase asm enabled." : "Experimental polyphase asm disabled.");
+		SaveGuiSettings(gui);
+		break;
+	case GID_EXP_REDUCED_TAPS:
+		if (gui->playbackActive || gui->playbackDonePending) {
+			GT_SetGadgetAttrs(gad, gui->win, NULL,
+				GTCB_Checked, gui->expReducedTaps, TAG_DONE);
+			SetStatus(gui, "Stop playback before changing experimental options.");
+			break;
+		}
+		gui->expReducedTaps = !gui->expReducedTaps;
+		GT_SetGadgetAttrs(gad, gui->win, NULL, GTCB_Checked, gui->expReducedTaps, TAG_DONE);
+		SetStatus(gui, gui->expReducedTaps ? "Reduced-tap dewindowing enabled (lossy)." : "Reduced-tap dewindowing disabled.");
 		SaveGuiSettings(gui);
 		break;
 	case GID_CHANNEL_MODE:
@@ -7558,7 +7687,7 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 			break;
 		}
 		gui->rateIndex = code;
-		if (gui->rateIndex < 0 || gui->rateIndex > 4)
+		if (gui->rateIndex < 0 || gui->rateIndex > 5)
 			gui->rateIndex = 2;
 		if (gui->superfastLowrate &&
 			!RateIndexSupportsSuperfast(gui->rateIndex, ChannelUsesMonoCost(gui))) {
@@ -7602,6 +7731,19 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 			gui->qualityIndex > HELIXAMP3_QUALITY_MAX)
 			gui->qualityIndex = 1;
 		SetStatus(gui, "Quality profile updated.");
+		SaveGuiSettings(gui);
+		break;
+	case GID_SUBBAND_CAP:
+		if (gui->playbackActive || gui->playbackDonePending) {
+			GT_SetGadgetAttrs(gad, gui->win, NULL,
+				GTCY_Active, gui->subbandCapIndex, TAG_DONE);
+			SetStatus(gui, "Stop playback before changing subbands.");
+			break;
+		}
+		gui->subbandCapIndex = code;
+		if (gui->subbandCapIndex < 0 || gui->subbandCapIndex >= (int)SUBBAND_CAP_COUNT)
+			gui->subbandCapIndex = 0;
+		SetStatus(gui, "Manual subband cap updated.");
 		SaveGuiSettings(gui);
 		break;
 	case GID_PLAY:

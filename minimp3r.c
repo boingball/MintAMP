@@ -65,7 +65,12 @@
 #include "radio_browser_controller.h"
 #include "radio_browser_http.h"
 
-#define MR_ENV_PREFIX "ENVARC:MiniAMP3"
+/* See the matching comment in amiga_mp3gui.c's GUI_ENV_PREFIX: bare name,
+ * no explicit device prefix -- GVF_SAVE_VAR already constructs the
+ * persistent "ENVARC:" + name path itself, and an explicit "ENVARC:" baked
+ * in here doubled up into a malformed path that silently failed to persist
+ * across reboots while the plain ENV: (RAM) write kept working. */
+#define MR_ENV_PREFIX "MiniAMP3"
 #define MR_SETTINGS_VERSION 1
 #define MR_RADIO_FAV_MAX 20
 #if !defined(__AROS__) && !defined(MR_DISABLE_CIA_FILTER)
@@ -192,11 +197,14 @@ enum {
 	GID_FILE = 1,
 	GID_RATE,
 	GID_QUALITY,
+	GID_SUBBAND_CAP,
 	GID_CHANNEL,
 	GID_VOLUME,
 	GID_BUFFER,
 	GID_FASTMEM,
 	GID_FASTLOW,
+	GID_EXPPOLY,
+	GID_EXPREDUCEDTAPS,
 	GID_SPEED,
 	GID_WIDTH,
 	GID_DELAY,
@@ -228,17 +236,20 @@ enum {
 
 /* 8287 Hz removed: it failed often enough in practice to not be worth
  * offering, and 8820 Hz already covers the same "lowest available rate"
- * role.  kRates[MR_RATE_22050_INDEX] must stay "22050" -- several speed/
+ * role.  14700 Hz (stride 3) sits between 11025 and 22050 as a middle-ground
+ * rate -- see the matching entry in amiga_mp3gui.c's kRates.
+ * kRates[MR_RATE_22050_INDEX] must stay "22050" -- several speed/
  * ultrafast/CD32 code paths below key off that specific rate. */
 static const char * const kRates[] = {
-	"8820", "11025", "22050", "28600"
+	"8820", "11025", "14700", "22050", "28600"
 };
 #define MR_RATE_COUNT  ((int)(sizeof(kRates) / sizeof(kRates[0])))
-#define MR_RATE_22050_INDEX 2
+#define MR_RATE_22050_INDEX 3
 
 static const STRPTR kRateLabels[] = {
 	(STRPTR)"8820 Hz",
 	(STRPTR)"11025 Hz",
+	(STRPTR)"14700 Hz",
 	(STRPTR)"22050 Hz",
 	(STRPTR)"28600 Hz",
 	NULL
@@ -251,6 +262,21 @@ static const STRPTR kQualityLabels[] = {
 	(STRPTR)"Best",
 	NULL
 };
+
+/* Manual override for --subband-cap N -- see the matching comment in
+ * amiga_mp3gui.c's kSubbandCapLabels. "Auto" (index 0) leaves whatever the
+ * active fast-lowrate/ultrafast preset already picked untouched. */
+static const STRPTR kSubbandCapLabels[] = {
+	(STRPTR)"Auto",
+	(STRPTR)"26",
+	(STRPTR)"20",
+	(STRPTR)"16",
+	(STRPTR)"12",
+	(STRPTR)"8",
+	NULL
+};
+static const int kSubbandCapValues[] = { 0, 26, 20, 16, 12, 8 };
+#define SUBBAND_CAP_COUNT (sizeof(kSubbandCapValues) / sizeof(kSubbandCapValues[0]))
 
 static const STRPTR kChannelLabels[] = {
 	(STRPTR)"Stereo",
@@ -343,8 +369,12 @@ static void MrInitMenuStrip(void)
 	kMenus[1].MenuName = (STRPTR)"Playback";
 	kMenus[1].FirstItem = &kPlaybackItems[0];
 	for (i = 0; i < 3; i++) {
-		kProjectText[i].FrontPen = 0;
-		kProjectText[i].BackPen = 1;
+		/* Pen 0 is the screen's light/background pen, pen 1 is black on
+		 * the standard 4-colour Workbench palette -- these were swapped,
+		 * so JAM1 (which only uses FrontPen) drew the item text in the
+		 * pale pen instead of black. */
+		kProjectText[i].FrontPen = 1;
+		kProjectText[i].BackPen = 0;
 		kProjectText[i].DrawMode = JAM1;
 		kProjectText[i].LeftEdge = 2;
 		kProjectText[i].TopEdge = 1;
@@ -359,8 +389,9 @@ static void MrInitMenuStrip(void)
 		kProjectItems[i].NextSelect = MENUNULL;
 	}
 	for (i = 0; i < 9; i++) {
-		kPlaybackText[i].FrontPen = 0;
-		kPlaybackText[i].BackPen = 1;
+		/* Same FrontPen/BackPen swap as kProjectText above. */
+		kPlaybackText[i].FrontPen = 1;
+		kPlaybackText[i].BackPen = 0;
 		kPlaybackText[i].DrawMode = JAM1;
 		kPlaybackText[i].LeftEdge = 14;
 		kPlaybackText[i].TopEdge = 1;
@@ -467,11 +498,14 @@ typedef struct MrApp {
 	Object         *fileGad;
 	Object         *rateGad;
 	Object         *qualityGad;
+	Object         *subbandCapGad;
 	Object         *channelGad;
 	Object         *volumeGad;
 	Object         *bufferGad;
 	Object         *fastMemGad;
 	Object         *fastLowGad;
+	Object         *expPolyGad;
+	Object         *expReducedTapsGad;
 	Object         *speedGad;
 	Object         *widthGad;
 	Object         *delayGad;
@@ -558,8 +592,11 @@ typedef struct MrApp {
 	char  playlist[MR_PLAYLIST_MAX][MR_MAX_PATH];
 	int   rateIndex;
 	int   qualityIndex;
+	int   subbandCapIndex;
 	int   mono;
 	int   fastMem;
+	int   expPoly;
+	int   expReducedTaps;
 	int   fastLowrate;
 	int   superfastLowrate;
 	int   ultrafast;
@@ -657,6 +694,7 @@ static void RadioSetStatus(MrApp *app, const char *text);
 static int SetStatusIfChanged(MrApp *app, const char *text);
 static void SetStatus(MrApp *app, const char *text);
 static void RadioDoProbeAndPlay(MrApp *app);
+static void RadioProbeUrlAndStart(MrApp *app, const char *url, const char *stationName);
 static void RadioSelectResult(MrApp *app, ULONG eventSelected);
 
 static void SyncMenuChecks(MrApp *app);
@@ -942,6 +980,8 @@ static void LoadSettings(MrApp *app)
 		app->superfastLowrate = 0;
 	}
 	app->fastMem = LoadEnvInt("FastMem", app->fastMem, 0, 1);
+	app->expPoly = LoadEnvInt("ExpPoly", app->expPoly, 0, 1);
+	app->expReducedTaps = LoadEnvInt("ExpReducedTaps", app->expReducedTaps, 0, 1);
 	app->mono = LoadEnvInt("Mono", app->mono, 0, 1);
 	app->fakeStereo = LoadEnvInt("FakeStereo", app->fakeStereo, 0, 1);
 	app->fakeStereoWidthIndex = LoadEnvInt("FakeStereoWidthIndex", app->fakeStereoWidthIndex, 0, 4);
@@ -955,6 +995,7 @@ static void LoadSettings(MrApp *app)
 	app->bufferSeconds = LoadEnvInt("BufferSeconds", app->bufferSeconds, 1, 10);
 	app->volumePercent = LoadEnvInt("Volume", app->volumePercent, 0, 100);
 	app->qualityIndex = LoadEnvInt("QualityIndex", app->qualityIndex, 0, 3);
+	app->subbandCapIndex = LoadEnvInt("SubbandCapIndex", app->subbandCapIndex, 0, SUBBAND_CAP_COUNT - 1);
 	app->decodeThenPlay = LoadEnvInt("DecodeThenPlay", app->decodeThenPlay, 0, 1);
 	app->bench = LoadEnvInt("Bench", app->bench, 0, 1);
 	app->artEnabled = LoadEnvInt("Artwork", app->artEnabled, 0, 1);
@@ -982,6 +1023,8 @@ static void SaveSettings(MrApp *app)
 	SaveEnvInt("Ultrafast", app->ultrafast);
 	SaveEnvInt("CD32Ultrafast", app->cd32Ultrafast);
 	SaveEnvInt("FastMem", app->fastMem);
+	SaveEnvInt("ExpPoly", app->expPoly);
+	SaveEnvInt("ExpReducedTaps", app->expReducedTaps);
 	SaveEnvInt("Mono", app->mono);
 	SaveEnvInt("FakeStereo", app->fakeStereo);
 	SaveEnvInt("FakeStereoWidthIndex", app->fakeStereoWidthIndex);
@@ -991,6 +1034,7 @@ static void SaveSettings(MrApp *app)
 	SaveEnvInt("BufferSeconds", ClampInt(app->bufferSeconds, 1, 10));
 	SaveEnvInt("Volume", ClampInt(app->volumePercent, 0, 100));
 	SaveEnvInt("QualityIndex", app->qualityIndex);
+	SaveEnvInt("SubbandCapIndex", app->subbandCapIndex);
 	SaveEnvInt("SettingsVersion", MR_SETTINGS_VERSION);
 	SaveEnvInt("DecodeThenPlay", app->decodeThenPlay);
 	SaveEnvInt("Bench", app->bench);
@@ -1281,9 +1325,13 @@ static int SpeedChoiceFromApp(const MrApp *app)
 static void UpdateSpeedGadgetChoices(MrApp *app)
 {
 	if (app->rateIndex != MR_RATE_22050_INDEX && app->cd32Ultrafast) {
+		/* "22050 Mono Ultrafast" only exists at 22050 Hz; leaving that rate
+		 * must fall back to plain "Ultrafast" (index 2, same as picking it
+		 * by hand -- see the v==2 case in SyncFromGadgets()), not "Normal". */
 		app->cd32Ultrafast = 0;
-		app->ultrafast = 0;
+		app->ultrafast = 1;
 		app->superfastLowrate = 0;
+		app->fastLowrate = 0;
 	}
 	if (app->win && app->speedGad)
 		SetGadgetAttrs((struct Gadget *)app->speedGad, app->win, NULL,
@@ -1410,6 +1458,22 @@ static void BuildPlaybackArgs(MrApp *app, MrPlayArgs *args)
 	}
 	if (useUltrafast && strcmp(kRates[rateIndex], "28600") == 0)
 		AddArg(args, "--ultrafast");
+	if (app->expPoly)
+		AddArg(args, "--exp-poly");
+	/* useCd32Ultrafast already adds --exp-reduced-taps unconditionally above
+	 * (its own tested default); avoid adding it twice when the independent
+	 * checkbox is also on. */
+	if (app->expReducedTaps && !useCd32Ultrafast)
+		AddArg(args, "--exp-reduced-taps");
+	/* Manual subband cap always comes last so it overrides whatever default
+	 * a fast-lowrate/ultrafast preset above already picked (e.g. CD32
+	 * Ultrafast's hardcoded --subband-cap 12) -- --subband-cap N just does
+	 * a plain last-flag-wins atoi() assignment in amiga_mp3dec.c. */
+	if (app->subbandCapIndex > 0) {
+		AddArg(args, "--subband-cap");
+		sprintf(num, "%d", kSubbandCapValues[app->subbandCapIndex]);
+		AddArg(args, num);
+	}
 	if (useFakeStereo) {
 		AddArg(args, "--fake-stereo");
 		AddArg(args, "--fake-stereo-delay");
@@ -1629,7 +1693,7 @@ static void StartPlayback(MrApp *app)
 	gPlayer.process = CreateNewProcTags(
 		NP_Entry,      (ULONG)PlaybackEntry,
 		NP_Name,       (ULONG)"minimp3r playback",
-		NP_Priority,   0,
+		NP_Priority,   AMIGA_PLAYBACK_TASK_PRIORITY,
 		NP_StackSize,  262144,
 		NP_CurrentDir, dirLock,
 		NP_Output,     nilOut,
@@ -2229,6 +2293,7 @@ static void PreCloseLibsAudit(MrApp *app)
 		(app->rbCodecGad ? 1 : 0) + (app->rbCountryCodeGad ? 1 : 0) +
 		(app->rbSchemeGad ? 1 : 0) + (app->rbLimitGad ? 1 : 0) +
 		(app->rbBitrateGad ? 1 : 0) + (app->qualityGad ? 1 : 0) +
+		(app->subbandCapGad ? 1 : 0) +
 		(app->channelGad ? 1 : 0) + (app->rateGad ? 1 : 0);
 	imageObjects = app->artGad ? 1 : 0;
 	hooks = 0;
@@ -2440,7 +2505,7 @@ static int MrOpenWindow(MrApp *app)
 		GA_ID, GID_FILE,
 		GA_RelVerify, TRUE,
 		GETFILE_TitleText, (ULONG)"Choose an audio file",
-		GETFILE_Pattern, (ULONG)"#?.(mp3|flac|aac|ogg|oga|wav|aif|aiff)",
+		GETFILE_Pattern, (ULONG)"#?.(mp3|flac|aac|ogg|oga|wav|wma|8svx|iff|svx|aif|aiff)",
 		GETFILE_DoPatterns, TRUE,
 		GETFILE_FullFile, (ULONG)(app->inputName[0] ? app->inputName : ""),
 		TAG_DONE);
@@ -2457,6 +2522,13 @@ static int MrOpenWindow(MrApp *app)
 	                GA_RelVerify, TRUE,
 	                CHOOSER_LabelArray, (ULONG)kQualityLabels,
 	                CHOOSER_Selected, (ULONG)app->qualityIndex,
+	                TAG_DONE);
+
+	app->subbandCapGad = (Object *)NewObject(CHOOSER_GetClass(), NULL,
+	                GA_ID, GID_SUBBAND_CAP,
+	                GA_RelVerify, TRUE,
+	                CHOOSER_LabelArray, (ULONG)kSubbandCapLabels,
+	                CHOOSER_Selected, (ULONG)app->subbandCapIndex,
 	                TAG_DONE);
 
 	app->channelGad = (Object *)NewObject(CHOOSER_GetClass(), NULL,
@@ -2499,6 +2571,27 @@ static int MrOpenWindow(MrApp *app)
 	                GA_RelVerify, TRUE,
 	                GA_Text, (ULONG)"Fast low-rate decode",
 	                GA_Selected, (ULONG)(app->fastLowrate ? TRUE : FALSE),
+	                TAG_DONE);
+
+	/* Both opt-in and off by default -- see MP3SetExperimentalPolyphase()/
+	 * MP3SetExperimentalReducedTaps() in amiga_mp3dec.c. Exp-poly is an
+	 * alternate asm implementation of the same math (correctness-preserving
+	 * in principle, just less soak-tested than the default path); reduced-
+	 * taps is explicitly lossy (see its --exp-reduced-taps help text) --
+	 * kept as two separate checkboxes, independent of Speed Mode, so either
+	 * can be soak-tested on its own. */
+	app->expPolyGad = (Object *)NewObject(CHECKBOX_GetClass(), NULL,
+	                GA_ID, GID_EXPPOLY,
+	                GA_RelVerify, TRUE,
+	                GA_Text, (ULONG)"Experimental polyphase asm",
+	                GA_Selected, (ULONG)(app->expPoly ? TRUE : FALSE),
+	                TAG_DONE);
+
+	app->expReducedTapsGad = (Object *)NewObject(CHECKBOX_GetClass(), NULL,
+	                GA_ID, GID_EXPREDUCEDTAPS,
+	                GA_RelVerify, TRUE,
+	                GA_Text, (ULONG)"Reduced-tap dewindowing (lossy)",
+	                GA_Selected, (ULONG)(app->expReducedTaps ? TRUE : FALSE),
 	                TAG_DONE);
 
 	app->speedGad = (Object *)NewObject(CHOOSER_GetClass(), NULL,
@@ -2578,9 +2671,11 @@ static int MrOpenWindow(MrApp *app)
 	{ int i; for (i = 0; i < 5; i++) app->starGad[i] = (Object *)NewObject(BUTTON_GetClass(), NULL, GA_ID, GID_STAR1 + i, GA_RelVerify, TRUE, GA_Text, (ULONG)"-", TAG_DONE); }
 
 	if (!CheckGadget(app->fileGad, "file") || !CheckGadget(app->rateGad, "rate") ||
-		!CheckGadget(app->qualityGad, "quality") || !CheckGadget(app->channelGad, "channel") ||
+		!CheckGadget(app->qualityGad, "quality") || !CheckGadget(app->subbandCapGad, "subband cap") ||
+		!CheckGadget(app->channelGad, "channel") ||
 		!CheckGadget(app->volumeGad, "volume") || !CheckGadget(app->bufferGad, "buffer") ||
 		!CheckGadget(app->fastMemGad, "fast memory") || !CheckGadget(app->fastLowGad, "fast low-rate") ||
+		!CheckGadget(app->expPolyGad, "experimental polyphase") || !CheckGadget(app->expReducedTapsGad, "reduced taps") ||
 		!CheckGadget(app->speedGad, "speed") || !CheckGadget(app->widthGad, "width") ||
 		!CheckGadget(app->delayGad, "delay") || !CheckGadget(app->playGad, "play") ||
 		!CheckGadget(app->nextGad, "next") || !CheckGadget(app->stopGad, "stop") ||
@@ -2663,17 +2758,53 @@ static int MrOpenWindow(MrApp *app)
 
 			LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
 				LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
+				LAYOUT_EvenSize, TRUE,
+				/* Left-packed, size-to-content row, matching the layout the
+				 * Rating/stars/Track row below already uses successfully:
+				 * every item except the LAST gets CHILD_WeightedWidth 0 (no
+				 * stretch), and the last item is left as the row's one
+				 * flex child but capped with a tight CHILD_MaxWidth so it
+				 * can't visibly stretch either -- giving every item in the
+				 * row weight 0 made the layout fall back to dividing the
+				 * row into equal shares again instead of packing left. */
 				ADD_LABELLED(app->rateGad, "Rate"),
+				CHILD_WeightedWidth, 0,
 				ADD_LABELLED(app->qualityGad, "Quality"),
+				CHILD_WeightedWidth, 0,
+				ADD_LABELLED(app->subbandCapGad, "Subbands"),
+				CHILD_WeightedWidth, 0,
+				/* Widest label is "Stereo" -- this is the row's one flex
+				 * child (see comment above), capped tight so it still
+				 * reads as left-packed. */
 				ADD_LABELLED(app->channelGad, "Mono/Stereo"),
+				CHILD_WeightedWidth, 0,
+				CHILD_MaxWidth, 100,
 				TAG_DONE),
 			CHILD_WeightedHeight, 0,
 
 			LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
 				LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
+				/* Same left-packed treatment as the Rate row above: every
+				 * item but the last is CHILD_WeightedWidth 0 with no
+				 * explicit Min/Max, so it sizes to CHOOSER_GetClass's own
+				 * natural width for its widest label -- exactly how Rate
+				 * fits "28600 Hz" above. A forced CHILD_MinWidth was tried
+				 * here to stop "22050 Mono Ultrafast" overflowing the
+				 * gadget, but that only mattered while this row was still
+				 * being stretched to an equal share of the row width
+				 * (narrower than the chooser's own natural size); now that
+				 * it isn't, the forced minimum was wider than the chooser
+				 * actually needs and left dead space inside its own box --
+				 * so drop it and let the gadget size itself, same as Rate. */
 				ADD_LABELLED(app->speedGad, "Speed"),
+				CHILD_WeightedWidth, 0,
 				ADD_LABELLED(app->widthGad, "Mode/width"),
+				CHILD_WeightedWidth, 0,
+				/* Widest label is "192" -- a few pixels is plenty, instead
+				 * of an equal share of the row. This is the row's one flex
+				 * child (see comment above). */
 				ADD_LABELLED(app->delayGad, "Delay"),
+				CHILD_MaxWidth, 50,
 				TAG_DONE),
 			CHILD_WeightedHeight, 0,
 
@@ -2688,6 +2819,13 @@ static int MrOpenWindow(MrApp *app)
 				LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
 				LAYOUT_AddChild, (ULONG)app->fastMemGad,
 				LAYOUT_AddChild, (ULONG)app->fastLowGad,
+				TAG_DONE),
+			CHILD_WeightedHeight, 0,
+
+			LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
+				LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
+				LAYOUT_AddChild, (ULONG)app->expPolyGad,
+				LAYOUT_AddChild, (ULONG)app->expReducedTapsGad,
 				TAG_DONE),
 			CHILD_WeightedHeight, 0,
 			TAG_DONE),
@@ -2792,8 +2930,9 @@ static void MrCloseWindow(MrApp *app)
 		DisposeObject(app->winObj);	/* disposes the whole gadget tree too */
 		app->winObj = NULL;
 		app->win = NULL;
-		app->fileGad = app->rateGad = app->qualityGad = app->channelGad = NULL;
+		app->fileGad = app->rateGad = app->qualityGad = app->subbandCapGad = app->channelGad = NULL;
 		app->volumeGad = app->bufferGad = app->fastMemGad = app->fastLowGad = NULL;
+		app->expPolyGad = app->expReducedTapsGad = NULL;
 		app->speedGad = app->widthGad = app->delayGad = app->playGad = NULL;
 		app->nextGad = app->stopGad = app->filterGad = app->playlistGad = NULL;
 		app->radioGad = app->timeGad = app->fileInfoGad = app->titleGad = NULL;
@@ -4326,7 +4465,7 @@ char path[MR_MAX_PATH];
 fr = (struct FileRequester *)AllocAslRequestTags(ASL_FileRequest,
 ASLFR_TitleText, (ULONG)"Choose an audio file",
 ASLFR_DoPatterns, TRUE,
-ASLFR_InitialPattern, (ULONG)"#?.(mp3|flac|aac|ogg|oga|wav|aif|aiff)",
+ASLFR_InitialPattern, (ULONG)"#?.(mp3|flac|aac|ogg|oga|wav|wma|8svx|iff|svx|aif|aiff)",
 ASLFR_InitialDrawer, (ULONG)(app->lastDrawer[0] ? app->lastDrawer : NULL),
 TAG_DONE);
 
@@ -4337,6 +4476,7 @@ return;
 
 if (AslRequestTags(fr,
 ASLFR_Window, (ULONG)app->win,
+ASLFR_SleepWindow, TRUE,
 TAG_DONE)) {
 path[0] = '\0';
 
@@ -4575,6 +4715,102 @@ static void RadioSetStatus(MrApp *app, const char *text)
 	if (app->rbWin && app->rbStatusGad)
 		SetGadgetAttrs((struct Gadget *)app->rbStatusGad, app->rbWin, NULL,
 			STRINGA_TextVal, (ULONG)app->lastRadioError, TAG_DONE);
+}
+
+static void RadioProbeUrlAndStart(MrApp *app, const char *url, const char *stationName)
+{
+	static unsigned char peek[512];
+	RbStreamInfo info;
+	int peekLen = 0;
+	int rc;
+	char msg[256];
+	const char *name;
+	const char *err;
+
+	if (!app) return;
+	if (!url || !url[0]) {
+		RadioSetStatus(app, "No stream URL to play.");
+		SetStatus(app, "No stream URL to play.");
+		return;
+	}
+	if (!MrIsRadioInput(url)) {
+		RadioSetStatus(app, "Stream URL must start with HTTP or HTTPS.");
+		SetStatus(app, "Stream URL must start with HTTP or HTTPS.");
+		return;
+	}
+	if (!app->hasHttps && !strncmp(url, "https://", 8)) {
+		RadioSetStatus(app, "HTTPS not supported in this build");
+		SetStatus(app, "HTTPS not supported in this build");
+		return;
+	}
+	if (rb_probe_url_looks_hls(url)) {
+		RadioSetStatus(app, "HLS stream not supported");
+		SetStatus(app, "HLS stream not supported");
+		return;
+	}
+	if (Radio_PlaybackOwnsNetwork()) {
+		RADIO_DBG(printf("radio-ui: direct/favourite probe skipped while radio playback child owns networking url=\"%s\"\n", url);)
+		RadioSetStatus(app, "Radio playback owns networking; stop before probing another stream.");
+		SetStatus(app, "Radio playback owns networking; stop before probing another stream.");
+		return;
+	}
+	if (Radio_IsMemoryPoisoned()) {
+		RadioSetStatus(app, "Memory corruption detected. Save log and reboot before using MiniAMP3 again.");
+		SetStatus(app, "Memory corruption detected. Save log and reboot before using MiniAMP3 again.");
+		RADIO_DBG(printf("radio-memory: refusing direct/favourite probe after MiniMem/ring corruption url=\"%s\"\n", url);)
+		return;
+	}
+
+	app->haveRadioHostAddr = 0;
+	app->radioHostAddrBe = 0;
+	memset(&info, 0, sizeof(info));
+	RadioSetStatus(app, "Connecting...");
+	SetStatus(app, "Connecting...");
+	Radio_LogTestModeSummary();
+	RADIO_DBG(printf("radio-ui: direct/favourite probe start url=\"%s\" name=\"%s\"\n", url, stationName ? stationName : "");)
+	rc = rb_probe_stream_url(url, &info, peek, (int)sizeof(peek), &peekLen);
+	RADIO_DBG(printf("radio-ui: direct/favourite probe result rc=%d final=\"%s\" content=\"%s\" codec=%d redirects=%d\n",
+		rc, info.final_url, info.content_type, (int)info.codec, info.redirect_count);)
+	if (rc < 0) {
+		err = rb_probe_error_text(rc);
+		RadioSetStatus(app, err);
+		SetStatus(app, err);
+		return;
+	}
+	if (info.codec != RB_STREAM_CODEC_MP3 && info.codec != RB_STREAM_CODEC_AAC &&
+		info.codec != RB_STREAM_CODEC_OGG) {
+		sprintf(msg, "Unsupported stream codec: %s (%.48s)", ProbeCodecName(info.codec), info.content_type);
+		RadioSetStatus(app, msg);
+		SetStatus(app, msg);
+		return;
+	}
+	if (!info.final_url[0]) {
+		RadioSetStatus(app, "Stream probe did not return a playable URL.");
+		SetStatus(app, "Stream probe did not return a playable URL.");
+		return;
+	}
+#if defined(AMIGA_M68K)
+	if (app->lastCompletedWasHttps && !strncmp(info.final_url, "https://", 8) &&
+		!app->playbackActive && !app->playbackDonePending && !PlaybackProcessStillExists()) {
+		RADIO_DBG(printf("radio-done: Delay(4) between fully completed HTTPS sessions before starting next HTTPS URL\n");)
+		RadioSetStatus(app, "Waiting briefly before next HTTPS stream...");
+		Delay(4);
+	}
+#endif
+	SafeCopy(app->inputName, sizeof(app->inputName), info.final_url);
+	app->haveRadioHostAddr = info.have_host_addr;
+	app->radioHostAddrBe = info.host_addr_be;
+	app->currentRadioFavicon[0] = '\0';
+	name = (stationName && stationName[0]) ? stationName : "Internet Radio";
+	SafeCopy(app->currentRadioStationName, sizeof(app->currentRadioStationName), name);
+	UpdateFileGadget(app);
+	RefreshFileInfoAndTags(app);
+	sprintf(msg, "Buffering - %.140s", name);
+	RadioSetStatus(app, msg);
+	SetStatus(app, msg);
+	RADIO_DBG(printf("radio-ui: direct/favourite stream start url=\"%s\" hostCached=%d\n", info.final_url, info.have_host_addr);)
+	StartPlayback(app);
+	Radio_CheckMiniMem("after direct/favourite station switch");
 }
 
 
@@ -4924,17 +5160,10 @@ static void RadioDoProbeAndPlay(MrApp *app)
 			RadioSetStatus(app, "Select a favourite first.");
 			return;
 		}
-		SafeCopy(app->inputName, sizeof(app->inputName), app->rbFavouriteUrls[app->rbSelectedFavourite]);
-		app->currentRadioFavicon[0] = '\0';
-		app->haveRadioHostAddr = 0;
-		app->radioHostAddrBe = 0;
-		UpdateFileGadget(app);
-		RefreshFileInfoAndTags(app);
-		SafeCopy(app->currentRadioStationName, sizeof(app->currentRadioStationName), app->rbFavouriteNames[app->rbSelectedFavourite]);
-		sprintf(msg, "Buffering - %.120s", app->rbFavouriteNames[app->rbSelectedFavourite]);
-		RadioSetStatus(app, msg);
-		StartPlayback(app);
-		Radio_CheckMiniMem("after station switch");
+		RADIO_DBG(printf("radio-ui: favourite probe requested url=\"%s\" name=\"%s\"\n",
+			app->rbFavouriteUrls[app->rbSelectedFavourite], app->rbFavouriteNames[app->rbSelectedFavourite]);)
+		RadioProbeUrlAndStart(app, app->rbFavouriteUrls[app->rbSelectedFavourite],
+			app->rbFavouriteNames[app->rbSelectedFavourite]);
 		return;
 	}
 	if (app->rbController.selected_index < 0) {
@@ -5084,7 +5313,7 @@ static void OpenRadioWindow(MrApp *app)
 		LAYOUT_AddChild, (ULONG)app->rbStatusGad, CHILD_WeightedHeight, 0, TAG_DONE);
 	if (!root) goto fail;
 	app->rbWinObj = (Object *)NewObject(WINDOW_GetClass(), NULL, WA_Title, (ULONG)"Internet Radio", WA_Activate, TRUE, WA_DepthGadget, TRUE, WA_DragBar, TRUE, WA_CloseGadget, TRUE, WA_SizeGadget, TRUE, WA_IDCMP, IDCMP_GADGETUP | IDCMP_CLOSEWINDOW | IDCMP_IDCMPUPDATE | IDCMP_REFRESHWINDOW, WA_Width, 540, WA_Height, 340, WINDOW_Position, WPOS_CENTERSCREEN, WINDOW_ParentGroup, (ULONG)root, TAG_DONE);
-	if (!app->rbWinObj) goto fail; app->rbWin = (struct Window *)RA_OpenWindow(app->rbWinObj); if (!app->rbWin) goto fail; RadioRefreshResults(app); return;
+	if (!app->rbWinObj) goto fail; app->rbWin = (struct Window *)RA_OpenWindow(app->rbWinObj); if (!app->rbWin) goto fail; WindowToFront(app->rbWin); ActivateWindow(app->rbWin); RadioRefreshResults(app); return;
 fail:
 	if (!app->rbWinObj && root) DisposeObject(root); CloseRadioWindow(app);
 }
@@ -5182,7 +5411,7 @@ static void PlaylistAddFiles(MrApp *app)
 		ASLFR_TitleText, (ULONG)"Add to playlist",
 		ASLFR_DoMultiSelect, TRUE,
 		ASLFR_DoPatterns, TRUE,
-		ASLFR_InitialPattern, (ULONG)"#?.(mp3|flac|aac|ogg|oga|wav|aif|aiff)",
+		ASLFR_InitialPattern, (ULONG)"#?.(mp3|flac|aac|ogg|oga|wav|wma|8svx|iff|svx|aif|aiff)",
 		ASLFR_InitialDrawer, (ULONG)(app->lastDrawer[0] ? app->lastDrawer : NULL),
 		TAG_DONE);
 	if (!fr) {
@@ -5451,6 +5680,8 @@ static void OpenPlaylistWindow(MrApp *app)
 	app->plWin = (struct Window *)RA_OpenWindow(app->plWinObj);
 	if (!app->plWin)
 		goto fail;
+	WindowToFront(app->plWin);
+	ActivateWindow(app->plWin);
 	RefreshPlaylistView(app);
 	return;
 
@@ -5474,7 +5705,8 @@ static void BrowseForPlaylist(MrApp *app)
 		SetStatus(app, "Could not allocate playlist requester.");
 		return;
 	}
-	if (AslRequestTags(fr, ASLFR_Window, (ULONG)app->win, TAG_DONE)) {
+	if (AslRequestTags(fr, ASLFR_Window, (ULONG)app->win,
+		ASLFR_SleepWindow, TRUE, TAG_DONE)) {
 		path[0] = '\0';
 		if (fr->fr_Drawer && fr->fr_Drawer[0])
 			SafeCopy(path, sizeof(path), (const char *)fr->fr_Drawer);
@@ -5689,6 +5921,10 @@ static void SyncFromGadgets(MrApp *app)
 	}
 	if (app->qualityGad && GetAttr(CHOOSER_Selected, app->qualityGad, &v))
 		app->qualityIndex = (int)v;
+	if (app->subbandCapGad && GetAttr(CHOOSER_Selected, app->subbandCapGad, &v)) {
+		if ((int)v >= 0 && (int)v < (int)SUBBAND_CAP_COUNT)
+			app->subbandCapIndex = (int)v;
+	}
 	if (app->channelGad && GetAttr(CHOOSER_Selected, app->channelGad, &v))
 		app->mono = ((int)v == 1);
 	if (app->volumeGad && GetAttr(SLIDER_Level, app->volumeGad, &v)) {
@@ -5705,6 +5941,10 @@ static void SyncFromGadgets(MrApp *app)
 		app->fastMem = (v != 0);
 	if (app->fastLowGad && GetAttr(GA_Selected, app->fastLowGad, &v))
 		app->fastLowrate = (v != 0);
+	if (app->expPolyGad && GetAttr(GA_Selected, app->expPolyGad, &v))
+		app->expPoly = (v != 0);
+	if (app->expReducedTapsGad && GetAttr(GA_Selected, app->expReducedTapsGad, &v))
+		app->expReducedTaps = (v != 0);
 	if (app->speedGad && GetAttr(CHOOSER_Selected, app->speedGad, &v)) {
 		app->cd32Ultrafast = (app->rateIndex == MR_RATE_22050_INDEX && (int)v == 3);
 		app->ultrafast = ((int)v == 2);
@@ -5880,7 +6120,10 @@ static int MrMainReal(int argc, char **argv)
 						break;
 					case GID_PLAY:
 						SyncFromGadgets(&app);
-						StartPlayback(&app);
+						if (MrIsRadioInput(app.inputName))
+							RadioProbeUrlAndStart(&app, app.inputName, NULL);
+						else
+							StartPlayback(&app);
 						break;
 					case GID_NEXT:
 						SyncFromGadgets(&app);

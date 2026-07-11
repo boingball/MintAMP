@@ -46,12 +46,71 @@
 #include "amiga_profile_decode.h"
 #include "assembly.h"
 
+/*
+ * Diagnostic-only counter for FDCT32HalfSparse16()'s documented contract
+ * (buf[16..31] == 0). Disabled unless
+ * MP3EnableFdct32HalfSparse16PreconditionCheck(1) is called (wired to
+ * --debug-subband-precondition). The stride-2 sparse fast path still performs
+ * the high-half scan when compiled with AMIGA_FAST_SUBBAND_CAP so it can fall
+ * back safely when a manual subband cap keeps bands 16+ alive; the debug flag
+ * only controls whether those scans/violations are counted for diagnostics.
+ */
+static int gFdct32HalfSparse16CheckEnabled;
+volatile unsigned long gFdct32HalfSparse16PreconditionViolations;
+volatile unsigned long gFdct32HalfSparse16PreconditionChecks;
+
+void MP3EnableFdct32HalfSparse16PreconditionCheck(int enabled)
+{
+	gFdct32HalfSparse16CheckEnabled = enabled ? 1 : 0;
+	gFdct32HalfSparse16PreconditionViolations = 0;
+	gFdct32HalfSparse16PreconditionChecks = 0;
+}
+
+/*
+ * stride == 3 (14700 Hz) intentionally has no fast path here and falls
+ * through to the full FDCT32() below. FDCT32Half (stride 2) and
+ * FDCT32Quarter (stride 4) both work by skipping whole recursive
+ * sub-blocks of the DCT's shared radix-2 butterfly network -- safe only
+ * because 2 and 4 are powers of 2 that align with that network's
+ * even/odd and quarter splits. Stride 3's kept-row residue class (every
+ * 3rd of 32 rows) is coprime to 2, so it's spread evenly across every
+ * sub-block at every recursion depth: no sub-block is ever fully unused,
+ * and computing the ~11 needed rows directly (without the shared-butterfly
+ * reuse) costs more multiplies than the ~80 the existing full FDCT32
+ * already uses for all 32 rows. See README.amiga.md's "--rate 14700"
+ * section for the full writeup; the safe win at this rate is the
+ * dequant/IMDCT active-subbands cap (MP3FastLowrateEffectiveActiveSubbands),
+ * not FDCT32 pruning.
+ */
 void FDCT32FastLowrate(int *x, int *d, int offset, int oddBlock, int gb,
 	int stride, int phase)
 {
 #if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE)
 	if (stride == 2) {
+#if defined(AMIGA_FAST_SUBBAND_CAP)
+		{
+			int k;
+			int sparse16Ok;
+
+			sparse16Ok = 1;
+			if (gFdct32HalfSparse16CheckEnabled)
+				gFdct32HalfSparse16PreconditionChecks++;
+			for (k = 16; k < 32; k++) {
+				if (x[k] != 0) {
+					sparse16Ok = 0;
+					if (gFdct32HalfSparse16CheckEnabled)
+						gFdct32HalfSparse16PreconditionViolations++;
+					break;
+				}
+			}
+			if (sparse16Ok)
+				FDCT32HalfSparse16(x, d, offset, oddBlock, gb);
+			else
+				FDCT32Half(x, d, offset, oddBlock, gb);
+		}
+#else
 		FDCT32Half(x, d, offset, oddBlock, gb);
+#endif
 		return;
 	}
 	if (stride == 4 && MP3ExperimentalFDCT32QuarterEnabled()) {

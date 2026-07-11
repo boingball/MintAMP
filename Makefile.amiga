@@ -2,20 +2,78 @@
 # Override CC, CPU, OPTFLAGS, TARGET, or EXTRA_CFLAGS from the command line.
 # Example:
 #   make -f Makefile.amiga fast030
+#   make -f Makefile.amiga fast030 CPU=40   # target 68040 instead of the 68030 default
 
 ifeq ($(origin CC),default)
 CC := m68k-amigaos-gcc
 endif
-CPU ?= -m68020
+
+# CPU selects the target processor: 00=68000, 20=68020, 30=68030 (default),
+# 40=68040, 60=68060. This is the single source of truth for both the main
+# build below AND decoders/Makefile (see decoder-modules further down,
+# which forwards this same value) -- there used to be two different,
+# inconsistently-propagated notions of "target CPU" here; this replaces
+# both.
+#
+# The hand-written asm in this project (real/amiga_m68k_polyphase.S and
+# the AMIGA_M68K_ASM_* inline asm throughout real/*.c) uses 32x32->64
+# MULS.L, which does not exist on 68000 -- so CPU=00 excludes that .S file
+# entirely (the assembler would hard-fail on it otherwise) and leaves the
+# ASM_* defines off, falling back to the C reference paths throughout.
+# CPU=20/30/40/60 all get the full asm path; -mCPU alone can't express the
+# 68000 asm gap, hence gating CPU_ASM_CPPFLAGS/CPU_ASM_SOURCES on CPU too.
+CPU ?= 30
+CPU_MFLAG_00 := -m68000
+CPU_MFLAG_20 := -m68020
+CPU_MFLAG_30 := -m68030
+CPU_MFLAG_40 := -m68040
+CPU_MFLAG_60 := -m68060
+CPU_MFLAG := $(CPU_MFLAG_$(CPU))
+ifeq ($(CPU_MFLAG),)
+$(error Unknown CPU=$(CPU) -- expected one of: 00 20 30 40 60)
+endif
+
+ifeq ($(CPU),00)
+CPU_ASM_CPPFLAGS :=
+CPU_ASM_SOURCES :=
+else
+CPU_ASM_CPPFLAGS := \
+	-DAMIGA_M68K_ASM \
+	-DAMIGA_M68K_ASM_FDCT32 \
+	-DAMIGA_M68K_ASM_FDCT32_UNROLL \
+	-DAMIGA_FAST_POLYPHASE \
+	-DAMIGA_FAST_REDUCED_TAPS \
+	-DAMIGA_FAST_FDCT32_QUARTER \
+	-DAMIGA_M68K_IMDCT_THIN_OUTPUT \
+	-DAMIGA_FAST_SUBBAND_CAP \
+	-DAMIGA_M68K_ASM_POLYPHASE \
+	-DAMIGA_M68K_ASM_IMDCT \
+	-DAMIGA_M68K_ASM_ANTIALIAS \
+	-DAMIGA_M68K_ASM_MIDSIDE \
+	-DAMIGA_M68K_ASM_INTENSITY \
+	-DAMIGA_M68K_ASM_DEQUANT \
+	-DAMIGA_M68K_ASM_HUFFMAN \
+	-DAMIGA_M68K_ASM_JPEG_GREY \
+	-DAMIGA_M68K_ASM_PLANARS8
+# AMIGA_M68K_ASM_PLANARS8 was previously disabled here after real-hardware
+# testing found true-stereo playback corrupted at both 11025 and 22050 with
+# it on. Root cause was a wrong byte offset for the right channel in
+# PlanarS8FromInterleavedStereo_Amiga_m68k (amiga_m68k_planars8.S) -- it read
+# offset+1 (pcm[2i]'s own low byte) instead of offset+2 (pcm[2i+1]'s high
+# byte). Fixed and hardware-confirmed clean with the flag off (C-only path);
+# re-enabled here now that the asm kernel itself is ready for its own
+# hardware retest.
+CPU_ASM_SOURCES := real/amiga_m68k_polyphase.S amiga_m68k_planars8.S
+endif
+
 STD ?= -std=gnu89
 OPTFLAGS ?= -O2 -fomit-frame-pointer
 TARGET ?= amiga_mp3dec
 GUI_TARGET ?= miniamp3
 GUIR_TARGET ?= minimp3r
-AACASM ?= 1
 
 CPPFLAGS_COMMON := -Ipub -Ireal -DAMIGA_M68K
-CFLAGS_COMMON := $(CPU) $(STD) $(OPTFLAGS)
+CFLAGS_COMMON := $(CPU_MFLAG) $(STD) $(OPTFLAGS)
 DECODER_SOURCES := mp3dec.c mp3tabs.c $(wildcard real/*.c)
 RADIO_SOURCES :=
 RADIO_CPPFLAGS :=
@@ -89,31 +147,19 @@ GUIR_SOURCES := minimp3r.c picojpeg.c lodepng.c svgdec.c miniamp_memguard.c radi
 	radio_browser_controller.c radio_browser.c radio_browser_url.c \
 	radio_browser_http.c radio_browser_json.c radio_stream_probe.c
 
-FAST030_CPPFLAGS := \
-	-DAMIGA_M68K_ASM \
-	-DAMIGA_M68K_ASM_FDCT32 \
-	-DAMIGA_M68K_ASM_FDCT32_UNROLL \
-	-DAMIGA_FAST_POLYPHASE \
-	-DAMIGA_FAST_REDUCED_TAPS \
-	-DAMIGA_FAST_FDCT32_QUARTER \
-	-DAMIGA_M68K_IMDCT_THIN_OUTPUT \
-	-DAMIGA_FAST_SUBBAND_CAP \
-	-DAMIGA_M68K_ASM_POLYPHASE \
-	-DAMIGA_M68K_ASM_IMDCT \
-	-DAMIGA_M68K_ASM_ANTIALIAS \
-	-DAMIGA_M68K_ASM_MIDSIDE \
-	-DAMIGA_M68K_ASM_INTENSITY \
-	-DAMIGA_M68K_ASM_DEQUANT \
-	-DAMIGA_M68K_ASM_HUFFMAN \
-	-DAMIGA_M68K_ASM_JPEG_GREY
-FAST030_CFLAGS := -m68030 $(STD) -O3 -fomit-frame-pointer
+# FAST030_* names are kept for backward compatibility (every target rule
+# below still refers to them) even though they're no longer hardcoded to
+# -m68030 -- the actual CPU is now CPU_MFLAG/CPU_ASM_*, set above from the
+# numeric CPU= variable.
+FAST030_CPPFLAGS := $(CPU_ASM_CPPFLAGS)
+FAST030_CFLAGS := $(CPU_MFLAG) $(STD) -O3 -fomit-frame-pointer
 FAST030_TARGET := amiga_mp3dec.fastexp
 PROF030_TARGET := amiga_mp3dec.prof
 PROF030_CPPFLAGS := -DAMIGA_PROFILE_DECODE -DHAVE_AMIGA_AUDIO_DEVICE
 FAST030_HALFASM_TEST_TARGET := amiga_mp3dec.fdcthalf-test
 GUI_HALFASM_TEST_TARGET := miniamp3.fdcthalf-test
 HALFASM_TEST_CPPFLAGS := -DAMIGA_M68K_ASM_FDCT32
-FAST030_ASM_SOURCES := real/amiga_m68k_polyphase.S
+FAST030_ASM_SOURCES := $(CPU_ASM_SOURCES)
 AMIGA_HUNK_FAST_PREFERRED := python3 tools/amiga_fast_preferred_hunks.py
 
 .PHONY: all fast030 radio030 sslradio030 amissl-get-test amissl-free-repro-test amissl-spawn-repro-test amissl-exec-repro-test rb-stream-probe-test prof030 gui guir sslgui sslguir fast030-halfasm-test gui-halfasm-test decoder-modules clean print-command print-fast030-command print-gui-command print-guir-command
@@ -246,15 +292,21 @@ print-fast030-command:
 	@printf '%s\n' '$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(EXTRA_CFLAGS) -o $(FAST030_TARGET) $(SOURCES) $(FAST030_ASM_SOURCES)'
 	@printf '%s\n' '$(AMIGA_HUNK_FAST_PREFERRED) $(FAST030_TARGET)'
 
-# Build all decoder modules (FLAC and AAC) — requires upstream decoder libraries
+# Build all decoder modules (FLAC and AAC) — requires upstream decoder libraries.
+# CPU is forwarded as the same numeric 00/20/30/40/60 code used above so
+# decoders/Makefile derives the matching -mCPU flag itself; CFLAGS is
+# deliberately NOT forwarded here -- decoders/Makefile's own `override
+# CFLAGS` is self-sufficient (it already includes -DHAVE_AMIGA_AUDIO_DEVICE
+# and -DAMIGA_M68K) and forwarding a CFLAGS= from here would have overridden
+# it via normal GNU Make command-line precedence, silently dropping the
+# -fno-builtin-*/-ffunction-sections flags those modules actually need --
+# see the comment on `override CFLAGS` in decoders/Makefile.
 decoder-modules:
 	$(MAKE) -C decoders \
 		CC="$(CC)" \
-		CPU="$(CPU)" \
-		AACASM="$(AACASM)" \
-		CFLAGS="$(CFLAGS_COMMON) $(CPPFLAGS_COMMON) -DHAVE_AMIGA_AUDIO_DEVICE"
+		CPU="$(CPU)"
 
 clean:
-	rm -f $(TARGET) $(FAST030_TARGET) $(FAST030_HALFASM_TEST_TARGET) $(GUI_TARGET) $(GUIR_TARGET) $(GUI_HALFASM_TEST_TARGET) \
+	rm -f $(TARGET) $(FAST030_TARGET) $(PROF030_TARGET) $(FAST030_HALFASM_TEST_TARGET) $(GUI_TARGET) $(GUIR_TARGET) $(GUI_HALFASM_TEST_TARGET) \
 		amissl_https_get amissl_ssl_free_repro amissl_spawn_repro amissl_exec_repro amissl_child_worker_repro rb_stream_probe_test
 	$(MAKE) -C decoders clean

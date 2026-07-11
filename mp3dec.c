@@ -132,6 +132,17 @@ void MP3AddDecodeCoreIMDCTSubbands(unsigned long executed, unsigned long skipped
 #endif
 }
 
+void MP3AddDecodeCoreImdctBlockCounts(unsigned long longBlocks, unsigned long shortBlocks)
+{
+#ifdef AMIGA_PROFILE_DECODE
+	gDecodeCoreProfile.imdct36BlockCount += longBlocks;
+	gDecodeCoreProfile.imdct12x3BlockCount += shortBlocks;
+#else
+	(void)longBlocks;
+	(void)shortBlocks;
+#endif
+}
+
 void MP3AddDecodeCoreMonoMSSideSkip(int bucket)
 {
 #ifdef AMIGA_PROFILE_DECODE
@@ -150,6 +161,30 @@ void MP3AddDecodeCoreMonoMSSideSkip(int bucket)
 	case 9: counter = &gDecodeCoreProfile.monoMSSideFallbackIntensity; break;
 	case 10: counter = &gDecodeCoreProfile.monoMSSideFallbackDisabled; break;
 	case 11: counter = &gDecodeCoreProfile.monoMSSideFallbackMalformed; break;
+	default: break;
+	}
+	if (counter)
+		(*counter)++;
+#else
+	(void)bucket;
+#endif
+}
+
+/* bucket: 0 = MPEG1 intensity, 1 = MPEG2 intensity, 2 = M/S + intensity
+ * (modeExt == 3), 3 = intensity-only (modeExt == 1). A single granule with
+ * intensity stereo enabled bumps exactly one of {0,1} (MPEG version) and
+ * exactly one of {2,3} (whether mid-side also ran), so both counted
+ * together they always sum to the same total. */
+void MP3AddDecodeCoreIntensityUsage(int bucket)
+{
+#ifdef AMIGA_PROFILE_DECODE
+	unsigned long *counter = 0;
+
+	switch (bucket) {
+	case 0: counter = &gDecodeCoreProfile.intensityMPEG1Count; break;
+	case 1: counter = &gDecodeCoreProfile.intensityMPEG2Count; break;
+	case 2: counter = &gDecodeCoreProfile.intensityWithMidSideCount; break;
+	case 3: counter = &gDecodeCoreProfile.intensityOnlyCount; break;
 	default: break;
 	}
 	if (counter)
@@ -241,8 +276,10 @@ static int MP3FastLowrateActiveSubbandsForStride(int stride)
 {
 	if (stride >= 5)
 		return 6;	/* 8820/8287 Hz: output Nyquist ~4.4 kHz -> 6 subbands */
-	if (stride >= 4)
+	if (stride == 4)
 		return 8;
+	if (stride == 3)
+		return 10;	/* 14700 Hz: output Nyquist ~7.35 kHz -> 10 subbands */
 	if (stride == 2)
 		return 16;
 	return 32;

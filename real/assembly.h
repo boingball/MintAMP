@@ -64,6 +64,10 @@ extern void StereoFastPolyphaseStride4Half_Amiga_m68k(short *pcm, int *vbuf,
 	const int *coefBase, int phase)
 	__asm__("StereoFastPolyphaseStride4Half_Amiga_m68k")
 	__attribute__((weak));
+extern void StereoFastPolyphaseStride4HalfReduced_Amiga_m68k(short *pcm, int *vbuf,
+	const int *coefBase, int phase)
+	__asm__("StereoFastPolyphaseStride4HalfReduced_Amiga_m68k")
+	__attribute__((weak));
 extern int StereoFastPolyphaseStride5_Amiga_m68k(short *pcm, int *vbuf,
 	const int *coefBase, int phase)
 	__asm__("StereoFastPolyphaseStride5_Amiga_m68k")

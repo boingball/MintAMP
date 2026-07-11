@@ -132,18 +132,27 @@
 #define StereoFastPolyphaseStride5_Amiga_m68k_IsActive STATNAME(StereoFastPolyphaseStride5_Amiga_m68k_IsActive)
 #define PolyphaseMonoFastLowrateStride4Reduced_TEST_ACTIVE STATNAME(PolyphaseMonoFastLowrateStride4Reduced_TEST_ACTIVE)
 #define PolyphaseStereoFastLowrateStride4Reduced_TEST_ACTIVE STATNAME(PolyphaseStereoFastLowrateStride4Reduced_TEST_ACTIVE)
+#define PolyphaseStereoFastLowrateStride4Reduced_C_REFERENCE STATNAME(PolyphaseStereoFastLowrateStride4Reduced_C_REFERENCE)
+#define PolyphaseStereoFastLowrateStride4Reduced_HAS_AMIGA_M68K_ASM_RUNTIME STATNAME(PolyphaseStereoFastLowrateStride4Reduced_HAS_AMIGA_M68K_ASM_RUNTIME)
+#define StereoFastPolyphaseStride4HalfReduced_Amiga_m68k_IsActive STATNAME(StereoFastPolyphaseStride4HalfReduced_Amiga_m68k_IsActive)
 #define AmigaM68KPolyphaseMonoFast_IsActive STATNAME(AmigaM68KPolyphaseMonoFast_IsActive)
 #define AmigaM68KPolyphaseMonoFastStride2_IsActive STATNAME(AmigaM68KPolyphaseMonoFastStride2_IsActive)
 #define AmigaM68KPolyphaseMonoFastStride2Reduced_IsActive STATNAME(AmigaM68KPolyphaseMonoFastStride2Reduced_IsActive)
 #define MonoFastPolyphaseStride4_Amiga_m68k_IsActive STATNAME(MonoFastPolyphaseStride4_Amiga_m68k_IsActive)
+#define MonoFastPolyphaseStride4AllPhases_Amiga_m68k_IsActive STATNAME(MonoFastPolyphaseStride4AllPhases_Amiga_m68k_IsActive)
+#define MonoFastPolyphaseStride3_Amiga_m68k_IsActive STATNAME(MonoFastPolyphaseStride3_Amiga_m68k_IsActive)
+#define StereoFastPolyphaseStride3_Amiga_m68k_IsActive STATNAME(StereoFastPolyphaseStride3_Amiga_m68k_IsActive)
+#define MonoFastPolyphaseStride5_Amiga_m68k_IsActive STATNAME(MonoFastPolyphaseStride5_Amiga_m68k_IsActive)
 #define StereoFastPolyphaseStride2Phase0Reduced_Amiga_m68k_IsActive STATNAME(StereoFastPolyphaseStride2Phase0Reduced_Amiga_m68k_IsActive)
 #define FDCT32				STATNAME(FDCT32)
 #define FDCT32Half			STATNAME(FDCT32Half)
+#define FDCT32HalfSparse16		STATNAME(FDCT32HalfSparse16)
 #define FDCT32Quarter			STATNAME(FDCT32Quarter)
 #define FDCT32_C_REFERENCE	STATNAME(FDCT32_C_REFERENCE)
 #define FDCT32_HAS_AMIGA_M68K_ASM_RUNTIME STATNAME(FDCT32_HAS_AMIGA_M68K_ASM_RUNTIME)
 #define FDCT32Half_TEST_ACTIVE STATNAME(FDCT32Half_TEST_ACTIVE)
 #define FDCT32Half_AMIGA_M68K_ASM_RUNTIME STATNAME(FDCT32Half_AMIGA_M68K_ASM_RUNTIME)
+#define FDCT32HalfSparse16Selftest STATNAME(FDCT32HalfSparse16Selftest)
 #define AntiAlias_C_REFERENCE STATNAME(AntiAlias_C_REFERENCE)
 #define AntiAlias_TEST_ACTIVE STATNAME(AntiAlias_TEST_ACTIVE)
 #define AntiAlias_HAS_AMIGA_M68K_ASM_RUNTIME STATNAME(AntiAlias_HAS_AMIGA_M68K_ASM_RUNTIME)
@@ -152,6 +161,14 @@
 #define IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME STATNAME(IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME)
 #define IMDCTThinOutputSelftest STATNAME(IMDCTThinOutputSelftest)
 #define IMDCTSubbandCapSelftest STATNAME(IMDCTSubbandCapSelftest)
+#define AntiAliasSubbandCapSelftest STATNAME(AntiAliasSubbandCapSelftest)
+#define IMDCT36AsmGeneralPathSelftest STATNAME(IMDCT36AsmGeneralPathSelftest)
+#define MP3FastLowrateEffectiveActiveSubbands STATNAME(MP3FastLowrateEffectiveActiveSubbands)
+#define DequantSubbandCapSelftest STATNAME(DequantSubbandCapSelftest)
+#define CollapseStereoToMonoSelftest STATNAME(CollapseStereoToMonoSelftest)
+#define MidSideProcSubbandCapSelftest STATNAME(MidSideProcSubbandCapSelftest)
+#define CollapseStereoToMonoSubbandCapSelftest STATNAME(CollapseStereoToMonoSubbandCapSelftest)
+#define IntensityProcSubbandCapSelftest STATNAME(IntensityProcSubbandCapSelftest)
 #define DecodeHuffmanPairs_C_REFERENCE STATNAME(DecodeHuffmanPairs_C_REFERENCE)
 #define DecodeHuffmanPairs_TEST_ACTIVE STATNAME(DecodeHuffmanPairs_TEST_ACTIVE)
 #define DecodeHuffmanPairs_HAS_AMIGA_M68K_ASM_RUNTIME STATNAME(DecodeHuffmanPairs_HAS_AMIGA_M68K_ASM_RUNTIME)
@@ -407,8 +424,8 @@ int BitstreamRefillSelftest(void);
 int CalcBitsUsed(BitStreamInfo *bsi, unsigned char *startBuf, int startOffset);
 
 /* dequant.c, dqchan.c, stproc.c */
-int DequantChannel(int *sampleBuf, int *workBuf, int *nonZeroBound, FrameHeader *fh, SideInfoSub *sis, 
-					ScaleFactorInfoSub *sfis, CriticalBandInfo *cbi);
+int DequantChannel(int *sampleBuf, int *workBuf, int *nonZeroBound, FrameHeader *fh, SideInfoSub *sis,
+					ScaleFactorInfoSub *sfis, CriticalBandInfo *cbi, int subbandCapSampleLimit);
 int DequantBlock_C_REFERENCE(int *inbuf, int *outbuf, int num, int scale);
 int DequantBlock_TEST_ACTIVE(int *inbuf, int *outbuf, int num, int scale);
 int DequantBlock_HAS_AMIGA_M68K_ASM_RUNTIME(void);
@@ -429,6 +446,7 @@ int IntensityScaleRun_HAS_AMIGA_M68K_ASM_RUNTIME(void);
 // about 1 ms faster in RAM, but very large
 void FDCT32(int *x, int *d, int offset, int oddBlock, int gb);
 void FDCT32Half(int *x, int *d, int offset, int oddBlock, int gb);
+void FDCT32HalfSparse16(int *x, int *d, int offset, int oddBlock, int gb);
 void FDCT32Quarter(int *x, int *d, int offset, int oddBlock, int gb, int phase, int stride);
 void FDCT32FastLowrate(int *x, int *d, int offset, int oddBlock, int gb,
 	int stride, int phase);
@@ -436,6 +454,7 @@ void FDCT32_C_REFERENCE(int *x, int *d, int offset, int oddBlock, int gb);
 int FDCT32_HAS_AMIGA_M68K_ASM_RUNTIME(void);
 void FDCT32Half_TEST_ACTIVE(int *x, int *d, int offset, int oddBlock, int gb);
 int FDCT32Half_AMIGA_M68K_ASM_RUNTIME(void);
+int FDCT32HalfSparse16Selftest(void);
 
 /* imdct.c selftest hooks */
 int IMDCT36_C_REFERENCE(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, int blockIdx, int gb);
@@ -443,6 +462,14 @@ int IMDCT36_TEST_ACTIVE(int *xCurr, int *xPrev, int *y, int btCurr, int btPrev, 
 int IMDCT36_HAS_AMIGA_M68K_ASM_RUNTIME(void);
 int IMDCTThinOutputSelftest(void);
 int IMDCTSubbandCapSelftest(void);
+int AntiAliasSubbandCapSelftest(void);
+int IMDCT36AsmGeneralPathSelftest(void);
+int MP3FastLowrateEffectiveActiveSubbands(const MP3DecInfo *mp3DecInfo);
+int DequantSubbandCapSelftest(void);
+int CollapseStereoToMonoSelftest(void);
+int MidSideProcSubbandCapSelftest(void);
+int CollapseStereoToMonoSubbandCapSelftest(void);
+int IntensityProcSubbandCapSelftest(void);
 
 /* huffman.c selftest hooks */
 int DecodeHuffmanPairs_C_REFERENCE(int *xy, int nVals, int tabIdx, int bitsLeft, unsigned char *buf, int bitOffset);
@@ -488,10 +515,17 @@ int PolyphaseStereoFastLowrateStride5_TEST_ACTIVE(short *pcm, int *vbuf, const i
 int StereoFastPolyphaseStride5_Amiga_m68k_IsActive(void);
 int PolyphaseMonoFastLowrateStride4Reduced_TEST_ACTIVE(short *pcm, int *vbuf, const int *coefBase, int phase);
 int PolyphaseStereoFastLowrateStride4Reduced_TEST_ACTIVE(short *pcm, int *vbuf, const int *coefBase, int phase);
+int PolyphaseStereoFastLowrateStride4Reduced_C_REFERENCE(short *pcm, int *vbuf, const int *coefBase, int phase);
+int PolyphaseStereoFastLowrateStride4Reduced_HAS_AMIGA_M68K_ASM_RUNTIME(void);
+int StereoFastPolyphaseStride4HalfReduced_Amiga_m68k_IsActive(void);
 int AmigaM68KPolyphaseMonoFast_IsActive(void);
 int AmigaM68KPolyphaseMonoFastStride2_IsActive(void);
 int AmigaM68KPolyphaseMonoFastStride2Reduced_IsActive(void);
 int MonoFastPolyphaseStride4_Amiga_m68k_IsActive(void);
+int MonoFastPolyphaseStride4AllPhases_Amiga_m68k_IsActive(void);
+int MonoFastPolyphaseStride3_Amiga_m68k_IsActive(void);
+int StereoFastPolyphaseStride3_Amiga_m68k_IsActive(void);
+int MonoFastPolyphaseStride5_Amiga_m68k_IsActive(void);
 int StereoFastPolyphaseStride2Phase0Reduced_Amiga_m68k_IsActive(void);
 
 /* hufftabs.c */

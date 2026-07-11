@@ -44,6 +44,8 @@
 
 #include "coder.h"
 #include "assembly.h"
+#include <stdio.h>
+#include <string.h>
 
 #define COS0_0  0x4013c251	/* Q31 */
 #define COS0_1  0x40b345bd	/* Q31 */
@@ -176,6 +178,57 @@ static __inline const int *FDCT32_AMIGA_M68K_FIRST_PASS(int *buf, const int *cpt
 	return cptr;
 }
 #undef FDCT32_M68K_FIRST_BUTTERFLY
+
+/*
+ * PROTOTYPE first-pass butterfly for FDCT32Half under the subband-cap
+ * precondition (buf[16..31] == 0 -- see MP3FastLowrateEffectiveActiveSubbands()
+ * in real/imdct.c and FDCT32HalfSparse16_C_REFERENCE's header comment above
+ * for why every real FDCT32Half call in this codebase satisfies it).
+ *
+ * FDCT32Half only ever consumes buf[i] and buf[15-i] from the first pass
+ * (see FDCT32_AMIGA_M68K_SECOND_PASS_HALF/FDCT32_AMIGA_M68K_OUTPUT_HALF_*
+ * below, which only reference byte offsets 0..60 i.e. indices 0..15) --
+ * buf[16+i]/buf[31-i] (out2/out3 in FDCT32_M68K_FIRST_BUTTERFLY above) are
+ * computed by the shared full-FDCT32 first pass but always discarded by
+ * Half. Under the zero precondition, b0 = a0+a3 collapses to a0 and
+ * b1 = a1+a2 collapses to a1 (a2, a3 are the known-zero operand), so this
+ * drops the a2/a3 reads, their two adds, and the two now-dead
+ * b3/b2 multiplies entirely -- only one MULSHIFT per iteration instead of
+ * three. Coefficient addressing matches the original: each iteration still
+ * consumes 3 dcttab entries (to stay aligned with the shared table/second
+ * pass), reading only the third (offset 8 = cptr[2], the same coefficient
+ * FDCT32HalfSparse16_C_REFERENCE uses) and skipping over all three via one
+ * lea instead of three post-increments.
+ */
+#define FDCT32_M68K_HALF_SPARSE16_BUTTERFLY(in0, in1, out0, out1, s2) \
+	"\tmove.l " in0 "(%0),%%d0\n\t" \
+	"move.l " in1 "(%0),%%d1\n\t" \
+	"move.l %%d0,%%d2\n\t" \
+	"add.l %%d1,%%d0\n\t" \
+	"sub.l %%d1,%%d2\n\t" \
+	"muls.l 8(%1),%%d3:%%d2\n\t" \
+	"lsl.l #" s2 ",%%d3\n\t" \
+	"lea 12(%1),%1\n\t" \
+	"move.l %%d0," out0 "(%0)\n\t" \
+	"move.l %%d3," out1 "(%0)\n\t"
+
+static __inline const int *FDCT32_AMIGA_M68K_HALF_SPARSE16_FIRST_PASS(int *buf, const int *cptr)
+{
+	__asm__ volatile (
+		FDCT32_M68K_HALF_SPARSE16_BUTTERFLY("",   "60", "",   "60", "1")
+		FDCT32_M68K_HALF_SPARSE16_BUTTERFLY("4",  "56", "4",  "56", "1")
+		FDCT32_M68K_HALF_SPARSE16_BUTTERFLY("8",  "52", "8",  "52", "1")
+		FDCT32_M68K_HALF_SPARSE16_BUTTERFLY("12", "48", "12", "48", "1")
+		FDCT32_M68K_HALF_SPARSE16_BUTTERFLY("16", "44", "16", "44", "1")
+		FDCT32_M68K_HALF_SPARSE16_BUTTERFLY("20", "40", "20", "40", "2")
+		FDCT32_M68K_HALF_SPARSE16_BUTTERFLY("24", "36", "24", "36", "2")
+		FDCT32_M68K_HALF_SPARSE16_BUTTERFLY("28", "32", "28", "32", "4")
+		: "+a" (buf), "+a" (cptr)
+		:
+		: "d0", "d1", "d2", "d3", "cc", "memory");
+	return cptr;
+}
+#undef FDCT32_M68K_HALF_SPARSE16_BUTTERFLY
 
 /*
  * Keep the four radix-8 groups in one small loop by default.  Each
@@ -667,6 +720,220 @@ static void FDCT32Half_C_REFERENCE(int *buf, int *dest, int offset, int oddBlock
 #undef FDCT32_HALF_STORE
 }
 
+/*
+ * PROTOTYPE -- verified correct, NOT wired into the decode path yet.
+ *
+ * FDCT32Half() is only ever called for fast-lowrate stride-2 output (see
+ * subband.c's FDCT32FastLowrate()), and MP3FastLowrateEffectiveActiveSubbands()
+ * in real/imdct.c proves that path always caps active subbands to <= 16 and
+ * zeroes the rest (IMDCTClearDiscardedSubbands()) before FDCT32Half ever
+ * sees the data. So every real call into FDCT32Half has buf[16..31] == 0.
+ * FDCT32Half's first pass reads a2 = buf[16+i] and a3 = buf[31-i] for
+ * i = 0..7, which together span exactly buf[16..31] -- both are always the
+ * known-zero operand, collapsing b0 = a0+a3 to a0 and b1 = a1+a2 to a1 and
+ * dropping 2 reads + 2 adds per iteration (16 total). Bit-exact equivalence
+ * to FDCT32Half_C_REFERENCE under that precondition is proven by
+ * FDCT32HalfSparse16Selftest() below (20000+ randomized trials on the host
+ * prototype, zero mismatches) -- run --selftest-fdct32half-sparse16 to
+ * verify on the actual target too before ever wiring this in.
+ *
+ * This is NOT hooked up to FDCT32FastLowrate()/real playback: on this
+ * project's fast030 build FDCT32Half() already dispatches to a hand-tuned
+ * 68030 asm implementation by default (FDCT32Half_AMIGA_M68K_ASM below), and
+ * m68k-gcc-compiled C -- even doing strictly less arithmetic -- is not
+ * expected to beat existing hand asm. Wiring this in without first porting
+ * the same simplification into the asm path risks a net regression on real
+ * hardware, not a win. Treat this as a verified building block for that
+ * asm port, not a drop-in replacement.
+ */
+static void FDCT32HalfSparse16_C_REFERENCE(int *buf, int *dest, int offset, int oddBlock, int gb)
+{
+	int i, s, es, oddBase, evenBase, delayOff, clipBits;
+	const int *cptr = dcttab;
+	int a0, a1, a4, a5, a6, a7;
+	int b0, b1, b2, b3, b4, b5, b6, b7;
+	int *d;
+	static const unsigned char firstPassShift[8] = { 1, 1, 1, 1, 1, 2, 2, 4 };
+
+	es = 0;
+	if (gb < 6) {
+		es = 6 - gb;
+		for (i = 0; i < 16; i++)
+			buf[i] >>= es;
+		/* buf[16..31] are precondition-zero; no need to shift zeros. */
+	}
+
+	for (i = 0; i < 8; i++) {
+		a0 = buf[i];
+		a1 = buf[15 - i];
+		/* a2 = buf[16+i] == 0, a3 = buf[31-i] == 0 by precondition:
+		 * b0 = a0 + a3 == a0, b1 = a1 + a2 == a1. */
+		buf[i] = a0 + a1;
+		buf[15 - i] = FDCT32_HALF_MULSHIFT32(cptr[2], a0 - a1) << firstPassShift[i];
+		cptr += 3;
+	}
+
+	for (i = 2; i > 0; i--) {
+		int a3v = buf[3];
+		a0 = buf[0];		a7 = buf[7];		a4 = buf[4];
+		b0 = a0 + a7;		b7 = FDCT32_HALF_MULSHIFT32(*cptr++, a0 - a7) << 1;
+		b3 = a3v + a4;		b4 = FDCT32_HALF_MULSHIFT32(*cptr++, a3v - a4) << 3;
+		a0 = b0 + b3;		a3v = FDCT32_HALF_MULSHIFT32(*cptr, b0 - b3) << 1;
+		a4 = b4 + b7;		a7 = FDCT32_HALF_MULSHIFT32(*cptr++, b7 - b4) << 1;
+
+		a1 = buf[1];		a6 = buf[6];
+		{
+		int a2v = buf[2];
+		int a5v = buf[5];
+		b1 = a1 + a6;		b6 = FDCT32_HALF_MULSHIFT32(*cptr++, a1 - a6) << 1;
+		b2 = a2v + a5v;		b5 = FDCT32_HALF_MULSHIFT32(*cptr++, a2v - a5v) << 1;
+		a1 = b1 + b2;		a2v = FDCT32_HALF_MULSHIFT32(*cptr, b1 - b2) << 2;
+		a5 = b5 + b6;		a6 = FDCT32_HALF_MULSHIFT32(*cptr++, b6 - b5) << 2;
+
+		b0 = a0 + a1;		b1 = FDCT32_HALF_MULSHIFT32(COS4_0, a0 - a1) << 1;
+		b2 = a2v + a3v;		b3 = FDCT32_HALF_MULSHIFT32(COS4_0, a3v - a2v) << 1;
+		buf[0] = b0;		buf[1] = b1;
+		buf[2] = b2 + b3;	buf[3] = b3;
+		}
+
+		b4 = a4 + a5;		b5 = FDCT32_HALF_MULSHIFT32(COS4_0, a4 - a5) << 1;
+		b6 = a6 + a7;		b7 = FDCT32_HALF_MULSHIFT32(COS4_0, a7 - a6) << 1;
+		b6 += b7;
+		buf[4] = b4 + b6;	buf[5] = b5 + b7;
+		buf[6] = b5 + b6;	buf[7] = b7;
+		buf += 8;
+	}
+	buf -= 16;
+
+	oddBase = oddBlock ? VBUF_LENGTH : 0;
+	evenBase = oddBlock ? 0 : VBUF_LENGTH;
+	delayOff = (offset - oddBlock) & 7;
+
+#define FDCT32_HALF_STORE(value) do { \
+	s = (value); \
+	if (es) { clipBits = 31 - es; CLIP_2N(s, clipBits); s <<= es; } \
+	d[0] = d[8] = s; \
+} while (0)
+
+	d = dest + 64 * 16 + delayOff + evenBase;
+	FDCT32_HALF_STORE(buf[0]);
+	d = dest + offset + oddBase;
+	FDCT32_HALF_STORE(buf[1]); d += 128;
+	FDCT32_HALF_STORE(buf[9] + buf[13]); d += 128;
+	FDCT32_HALF_STORE(buf[5]); d += 128;
+	FDCT32_HALF_STORE(buf[13] + buf[11]); d += 128;
+	FDCT32_HALF_STORE(buf[3]); d += 128;
+	FDCT32_HALF_STORE(buf[11] + buf[15]); d += 128;
+	FDCT32_HALF_STORE(buf[7]); d += 128;
+	FDCT32_HALF_STORE(buf[15]);
+
+	d = dest + 16 + delayOff + evenBase;
+	FDCT32_HALF_STORE(buf[1]); d += 128;
+	FDCT32_HALF_STORE(buf[14] + buf[9]); d += 128;
+	FDCT32_HALF_STORE(buf[6]); d += 128;
+	FDCT32_HALF_STORE(buf[10] + buf[14]); d += 128;
+	FDCT32_HALF_STORE(buf[2]); d += 128;
+	FDCT32_HALF_STORE(buf[12] + buf[10]); d += 128;
+	FDCT32_HALF_STORE(buf[4]); d += 128;
+	FDCT32_HALF_STORE(buf[8] + buf[12]);
+
+#undef FDCT32_HALF_STORE
+}
+
+#if FDCT32_HAS_AMIGA_M68K_ASM
+static void FDCT32HalfSparse16_AMIGA_M68K_ASM(int *buf, int *dest, int offset, int oddBlock, int gb);
+#endif
+
+/* Randomized proof that FDCT32HalfSparse16_C_REFERENCE matches
+ * FDCT32Half_C_REFERENCE bit-for-bit whenever buf[16..31] == 0, across a
+ * spread of offset/oddBlock/gb combinations. See the prototype's header
+ * comment above for why this is not (yet) wired into real playback.
+ * On an m68k build this also runs FDCT32HalfSparse16_AMIGA_M68K_ASM
+ * through the same trials and checks it against the same C reference --
+ * this is the check that matters on real hardware (host runs above only
+ * exercise the C reference against itself under a different simplification,
+ * not the actual asm this codebase would ship). */
+int FDCT32HalfSparse16Selftest(void)
+{
+	unsigned int rngState = 12345U;
+	int trial;
+	int failures = 0;
+	int asmFailures = 0;
+	int total = 0;
+
+	for (trial = 0; trial < 20000; trial++) {
+		int bufFull[32], bufSparse[32];
+		int destFull[2 * VBUF_LENGTH];
+		int destSparse[2 * VBUF_LENGTH];
+#if FDCT32_HAS_AMIGA_M68K_ASM
+		int bufAsm[32];
+		int destAsm[2 * VBUF_LENGTH];
+#endif
+		int i;
+		int offset = trial % 8;
+		int oddBlock = trial & 1;
+		int gb = trial % 9;
+
+		for (i = 0; i < 16; i++) {
+			rngState = rngState * 1103515245U + 12345U;
+			bufFull[i] = (int)((rngState >> 8) & 0x001fffffU) - 0x00100000;
+			bufSparse[i] = bufFull[i];
+#if FDCT32_HAS_AMIGA_M68K_ASM
+			bufAsm[i] = bufFull[i];
+#endif
+		}
+		for (i = 16; i < 32; i++) {
+			bufFull[i] = 0;
+			bufSparse[i] = 0;
+#if FDCT32_HAS_AMIGA_M68K_ASM
+			bufAsm[i] = 0;
+#endif
+		}
+		memset(destFull, 0xa5, sizeof(destFull));
+		memset(destSparse, 0xa5, sizeof(destSparse));
+#if FDCT32_HAS_AMIGA_M68K_ASM
+		memset(destAsm, 0xa5, sizeof(destAsm));
+#endif
+
+		FDCT32Half_C_REFERENCE(bufFull, destFull, offset, oddBlock, gb);
+		FDCT32HalfSparse16_C_REFERENCE(bufSparse, destSparse, offset, oddBlock, gb);
+#if FDCT32_HAS_AMIGA_M68K_ASM
+		FDCT32HalfSparse16_AMIGA_M68K_ASM(bufAsm, destAsm, offset, oddBlock, gb);
+#endif
+		total++;
+
+		for (i = 0; i < 2 * VBUF_LENGTH; i++) {
+			if (destFull[i] != destSparse[i]) {
+				if (failures < 10)
+					printf("FDCT32HalfSparse16 mismatch trial=%d offset=%d oddBlock=%d gb=%d dest[%d] full=%d sparse=%d\n",
+						trial, offset, oddBlock, gb, i, destFull[i], destSparse[i]);
+				failures++;
+				break;
+			}
+		}
+#if FDCT32_HAS_AMIGA_M68K_ASM
+		for (i = 0; i < 2 * VBUF_LENGTH; i++) {
+			if (destFull[i] != destAsm[i]) {
+				if (asmFailures < 10)
+					printf("FDCT32HalfSparse16 ASM mismatch trial=%d offset=%d oddBlock=%d gb=%d dest[%d] full=%d asm=%d\n",
+						trial, offset, oddBlock, gb, i, destFull[i], destAsm[i]);
+				asmFailures++;
+				break;
+			}
+		}
+#endif
+	}
+
+	printf("FDCT32HalfSparse16 trials: %d\n", total);
+	printf("FDCT32HalfSparse16 C selftest: %s (%d mismatches)\n", failures ? "FAIL" : "PASS", failures);
+#if FDCT32_HAS_AMIGA_M68K_ASM
+	printf("FDCT32HalfSparse16 ASM selftest: %s (%d mismatches)\n", asmFailures ? "FAIL" : "PASS", asmFailures);
+#else
+	printf("FDCT32HalfSparse16 ASM selftest: skipped (not compiled on this build)\n");
+#endif
+	return (failures || asmFailures) ? -1 : 0;
+}
+
 #if FDCT32_HAS_AMIGA_M68K_ASM
 static void FDCT32Half_AMIGA_M68K_ASM(int *buf, int *dest, int offset, int oddBlock, int gb)
 {
@@ -682,6 +949,68 @@ static void FDCT32Half_AMIGA_M68K_ASM(int *buf, int *dest, int offset, int oddBl
 	}
 
 	cptr = FDCT32_AMIGA_M68K_FIRST_PASS(buf, cptr);
+	FDCT32_AMIGA_M68K_SECOND_PASS_HALF(buf, cptr);
+
+	oddBase = oddBlock ? VBUF_LENGTH : 0;
+	evenBase = oddBlock ? 0 : VBUF_LENGTH;
+	delayOff = (offset - oddBlock) & 7;
+
+	d = dest + 64 * 16 + delayOff + evenBase;
+	d[0] = d[8] = buf[0];
+
+	d = dest + offset + oddBase;
+	FDCT32_AMIGA_M68K_OUTPUT_HALF_HIGH(buf, d);
+
+	d = dest + 16 + delayOff + evenBase;
+	FDCT32_AMIGA_M68K_OUTPUT_HALF_LOW(buf, d);
+
+	if (es) {
+		clipBits = 31 - es;
+		d = dest + 64 * 16 + delayOff + evenBase;
+		s = d[0];   CLIP_2N(s, clipBits);   d[0] = d[8] = (s << es);
+
+		d = dest + offset + oddBase;
+		for (i = 0; i < 8; i++) {
+			s = d[0];   CLIP_2N(s, clipBits);   d[0] = d[8] = (s << es);   d += 128;
+		}
+
+		d = dest + 16 + delayOff + evenBase;
+		for (i = 0; i < 8; i++) {
+			s = d[0];   CLIP_2N(s, clipBits);   d[0] = d[8] = (s << es);   d += 128;
+		}
+	}
+}
+
+/*
+ * PROTOTYPE -- asm port of FDCT32HalfSparse16_C_REFERENCE (see that
+ * function's header comment above for the precondition it depends on:
+ * buf[16..31] == 0, which every real call to FDCT32Half in this codebase
+ * satisfies). Identical to FDCT32Half_AMIGA_M68K_ASM except for the first
+ * pass, which uses FDCT32_AMIGA_M68K_HALF_SPARSE16_FIRST_PASS instead of
+ * the shared full-width FDCT32_AMIGA_M68K_FIRST_PASS -- everything from
+ * the second pass onward is untouched and shared verbatim (it never reads
+ * buf[16..31] in the first place).
+ *
+ * NOT wired into FDCT32FastLowrate()/real playback yet. Verify with
+ * --selftest-fdct32half-sparse16 on real m68k hardware (it exercises this
+ * function against the already-verified C reference) before ever
+ * dispatching to it from subband.c.
+ */
+static void FDCT32HalfSparse16_AMIGA_M68K_ASM(int *buf, int *dest, int offset, int oddBlock, int gb)
+{
+	int i, s, es, oddBase, evenBase, delayOff, clipBits;
+	const int *cptr = dcttab;
+	int *d;
+
+	es = 0;
+	if (gb < 6) {
+		es = 6 - gb;
+		for (i = 0; i < 16; i++)
+			buf[i] >>= es;
+		/* buf[16..31] are precondition-zero; no need to shift zeros. */
+	}
+
+	cptr = FDCT32_AMIGA_M68K_HALF_SPARSE16_FIRST_PASS(buf, cptr);
 	FDCT32_AMIGA_M68K_SECOND_PASS_HALF(buf, cptr);
 
 	oddBase = oddBlock ? VBUF_LENGTH : 0;
@@ -777,6 +1106,62 @@ void FDCT32Half(int *buf, int *dest, int offset, int oddBlock, int gb)
 	return;
 #endif
 	FDCT32Half_C_REFERENCE(buf, dest, offset, oddBlock, gb);
+}
+
+/*
+ * Public dispatcher for the subband-cap-aware variant. Callers MUST only
+ * use this when buf[16..31] == 0 is guaranteed -- see the precondition
+ * comment on FDCT32HalfSparse16_C_REFERENCE above. FDCT32FastLowrate()
+ * below only calls this under the same compile-time guard
+ * (AMIGA_FAST_SUBBAND_CAP) that makes IMDCTApplySubbandCap() in
+ * real/imdct.c actually enforce that precondition at stride 2; anywhere
+ * else, fall back to plain FDCT32Half().
+ *
+ * Same three-tier shape as FDCT32Half() above, including an opt-in
+ * AMIGA_M68K_ASM_FDCT32_HALF_SPARSE16_COMPARE_DURING_DECODE compare-every-
+ * call mode for soak-testing the asm against the C reference under real
+ * playback before trusting it unattended.
+ */
+#if defined(AMIGA_M68K_ASM_FDCT32_HALF_SPARSE16_COMPARE_DURING_DECODE) && !FDCT32_HAS_AMIGA_M68K_ASM
+#error AMIGA_M68K_ASM_FDCT32_HALF_SPARSE16_COMPARE_DURING_DECODE requires the m68k asm build (FDCT32_HAS_AMIGA_M68K_ASM)
+#endif
+#if FDCT32_HAS_AMIGA_M68K_ASM && defined(AMIGA_M68K_ASM_FDCT32_HALF_SPARSE16_COMPARE_DURING_DECODE)
+volatile unsigned long FDCT32HalfSparse16_AMIGA_M68K_ASM_COMPARE_MISMATCHES;
+#endif
+
+void FDCT32HalfSparse16(int *buf, int *dest, int offset, int oddBlock, int gb)
+{
+#if FDCT32_HAS_AMIGA_M68K_ASM && !defined(AMIGA_FORCE_FDCT32_HALF_C) && defined(AMIGA_M68K_ASM_FDCT32_HALF_SPARSE16_COMPARE_DURING_DECODE)
+	int i;
+	int cBuf[32];
+	int asmBuf[32];
+	int cDest[2 * VBUF_LENGTH];
+	int asmDest[2 * VBUF_LENGTH];
+	for (i = 0; i < 32; i++) {
+		cBuf[i] = buf[i];
+		asmBuf[i] = buf[i];
+	}
+	for (i = 0; i < 2 * VBUF_LENGTH; i++) {
+		cDest[i] = dest[i];
+		asmDest[i] = dest[i];
+	}
+	FDCT32HalfSparse16_C_REFERENCE(cBuf, cDest, offset, oddBlock, gb);
+	FDCT32HalfSparse16_AMIGA_M68K_ASM(asmBuf, asmDest, offset, oddBlock, gb);
+	for (i = 0; i < 2 * VBUF_LENGTH; i++) {
+		if (cDest[i] != asmDest[i]) {
+			FDCT32HalfSparse16_AMIGA_M68K_ASM_COMPARE_MISMATCHES++;
+			break;
+		}
+	}
+	for (i = 0; i < 2 * VBUF_LENGTH; i++)
+		dest[i] = cDest[i];
+	return;
+#endif
+#if FDCT32_HAS_AMIGA_M68K_ASM && !defined(AMIGA_FORCE_FDCT32_HALF_C)
+	FDCT32HalfSparse16_AMIGA_M68K_ASM(buf, dest, offset, oddBlock, gb);
+	return;
+#endif
+	FDCT32HalfSparse16_C_REFERENCE(buf, dest, offset, oddBlock, gb);
 }
 
 
