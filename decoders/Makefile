@@ -12,11 +12,13 @@
 #
 # Usage
 # -----
-#   make -C decoders          # build FLAC, AAC and OGG modules
+#   make -C decoders          # build FLAC, AAC, OGG, WAV and IFF modules
 #   make -C decoders flac     # build only the FLAC module
 #   make -C decoders aac      # build only the AAC module
 #   make -C decoders ogg      # build only the OGG/Vorbis (Tremor) module
 #   make -C decoders ogg OGGASM=0  # build OGG/Tremor without m68k asm helpers
+#   make -C decoders wav      # build only the WAV (RIFF/PCM) module
+#   make -C decoders iff      # build only the IFF/8SVX module
 
 CC     := m68k-amigaos-gcc
 NM     := m68k-amigaos-nm
@@ -59,10 +61,10 @@ override CFLAGS := $(CPU_MFLAG) -O2 -fomit-frame-pointer -std=gnu89 -Wall -I. \
 # Post-link: mark hunks as "any RAM, prefer Fast" (same as main binary)
 FIXHUNKS := python3 ../tools/amiga_fast_preferred_hunks.py
 
-.PHONY: all flac aac ogg clean
+.PHONY: all flac aac ogg wav iff clean
 
 # The normal decoder build must produce every supported external module.
-all: flac aac ogg
+all: flac aac ogg wav iff
 	@echo "Decoder build complete."
 
 # --------------------------------------------------------------------------
@@ -355,8 +357,104 @@ ogg.decoder: $(OGG_OBJS) decoder_module.h tremor/src/tremor/ivorbisfile.h
 	@echo "Built $@"
 
 # --------------------------------------------------------------------------
+# WAV — plain RIFF/PCM decoder, hand-written for MiniAMP3 (no third-party
+# library, so unlike FLAC/AAC/OGG above there is no forced malloc/calloc/
+# free shim -- wav_alloc.c's WavModule* names are called directly).
+# 8/16/24/32-bit integer PCM, mono or stereo, classic and
+# WAVE_FORMAT_EXTENSIBLE 'fmt ' headers.
+# --------------------------------------------------------------------------
+WAV_SRCS := wav_entry.c wav_alloc.c wav_module.c
+WAV_OBJS := $(WAV_SRCS:.c=.o)
+
+wav: wav.decoder
+
+wav_entry.o wav_alloc.o wav_module.o: decoder_module.h
+wav_alloc.o wav_module.o: wav_alloc.h
+
+wav_entry.o wav_alloc.o wav_module.o: %.o: %.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+wav.decoder: $(WAV_OBJS) decoder_module.h
+	rm -f $@ $@.map
+	@echo "WAV decoder unresolved-symbol audit:"; \
+	    $(NM) -u $(WAV_OBJS) || true
+	@if $(NM) -u $(WAV_OBJS) 2>/dev/null | \
+	    grep -iE '(^|[[:space:]])(_?malloc_r|_?calloc_r|_?realloc_r|_?free_r|malloc|calloc|realloc|free|exit|_exit|abort|assert|___assert_func|printf|fprintf|puts|putchar|fflush|stdio|vfprintf)$$'; then \
+	    echo "ERROR: WAV decoder objects reference forbidden libc/startup symbols" >&2; \
+	    exit 1; \
+	fi
+	$(CC) $(CFLAGS) -nostartfiles -Wl,--gc-sections -Wl,-Map,$@.map -o $@ $(WAV_OBJS) -lgcc
+	@if grep -iE "printf|fprintf|puts|putchar|fflush|stdio|vfprintf|malloc\.o|lib_a-exit|abort|assert|___assert_func|_exit|__EXIT_LIST__|DOSBase|SysBase|dummy\.o|raise" $@.map; then \
+	    echo "ERROR: WAV decoder linked forbidden libc/startup symbols" >&2; \
+	    exit 1; \
+	fi
+	@if $(NM) -u $@ 2>/dev/null | \
+	    grep -iE 'printf|fprintf|puts|putchar|fflush|stdio|vfprintf|malloc\.o|lib_a-exit|abort|assert|___assert_func|(^|[[:space:]])_?exit$$|__EXIT_LIST__|DOSBase|SysBase|dummy\.o|raise'; then \
+	    echo "ERROR: WAV decoder has forbidden unresolved libc/startup symbols" >&2; \
+	    exit 1; \
+	fi
+	@if ! grep -q 'wav_module\.o' $@.map; then \
+	    echo "ERROR: WAV decoder map does not mention wav_module.o" >&2; \
+	    exit 1; \
+	fi
+	@if ! strings $@ | grep -q 'WAV MODULE BUILD MARKER 12345'; then \
+	    echo "ERROR: WAV decoder is missing build marker string" >&2; \
+	    exit 1; \
+	fi
+	$(FIXHUNKS) $@
+	@echo "Built $@"
+
+# --------------------------------------------------------------------------
+# IFF/8SVX — Amiga "8-bit Voice" decoder, hand-written for MiniAMP3 (no
+# third-party library). Mono, 8-bit signed PCM, sCompression 0 (raw) or 1
+# (Fibonacci-delta). IFF chunk sizes are big-endian, unlike WAV's RIFF.
+# --------------------------------------------------------------------------
+IFF_SRCS := iff_entry.c iff_alloc.c iff_module.c
+IFF_OBJS := $(IFF_SRCS:.c=.o)
+
+iff: iff.decoder
+
+iff_entry.o iff_alloc.o iff_module.o: decoder_module.h
+iff_alloc.o iff_module.o: iff_alloc.h
+
+iff_entry.o iff_alloc.o iff_module.o: %.o: %.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+iff.decoder: $(IFF_OBJS) decoder_module.h
+	rm -f $@ $@.map
+	@echo "IFF decoder unresolved-symbol audit:"; \
+	    $(NM) -u $(IFF_OBJS) || true
+	@if $(NM) -u $(IFF_OBJS) 2>/dev/null | \
+	    grep -iE '(^|[[:space:]])(_?malloc_r|_?calloc_r|_?realloc_r|_?free_r|malloc|calloc|realloc|free|exit|_exit|abort|assert|___assert_func|printf|fprintf|puts|putchar|fflush|stdio|vfprintf)$$'; then \
+	    echo "ERROR: IFF decoder objects reference forbidden libc/startup symbols" >&2; \
+	    exit 1; \
+	fi
+	$(CC) $(CFLAGS) -nostartfiles -Wl,--gc-sections -Wl,-Map,$@.map -o $@ $(IFF_OBJS) -lgcc
+	@if grep -iE "printf|fprintf|puts|putchar|fflush|stdio|vfprintf|malloc\.o|lib_a-exit|abort|assert|___assert_func|_exit|__EXIT_LIST__|DOSBase|SysBase|dummy\.o|raise" $@.map; then \
+	    echo "ERROR: IFF decoder linked forbidden libc/startup symbols" >&2; \
+	    exit 1; \
+	fi
+	@if $(NM) -u $@ 2>/dev/null | \
+	    grep -iE 'printf|fprintf|puts|putchar|fflush|stdio|vfprintf|malloc\.o|lib_a-exit|abort|assert|___assert_func|(^|[[:space:]])_?exit$$|__EXIT_LIST__|DOSBase|SysBase|dummy\.o|raise'; then \
+	    echo "ERROR: IFF decoder has forbidden unresolved libc/startup symbols" >&2; \
+	    exit 1; \
+	fi
+	@if ! grep -q 'iff_module\.o' $@.map; then \
+	    echo "ERROR: IFF decoder map does not mention iff_module.o" >&2; \
+	    exit 1; \
+	fi
+	@if ! strings $@ | grep -q 'IFF MODULE BUILD MARKER 12345'; then \
+	    echo "ERROR: IFF decoder is missing build marker string" >&2; \
+	    exit 1; \
+	fi
+	$(FIXHUNKS) $@
+	@echo "Built $@"
+
+# --------------------------------------------------------------------------
 
 clean:
 	rm -f flac.decoder flac.decoder.map $(FLAC_OBJS)
 	rm -f aac.decoder  aac.decoder.map  $(AAC_OBJS)
 	rm -f ogg.decoder  ogg.decoder.map  $(OGG_OBJS)
+	rm -f wav.decoder  wav.decoder.map  $(WAV_OBJS)
+	rm -f iff.decoder  iff.decoder.map  $(IFF_OBJS)

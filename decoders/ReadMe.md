@@ -3,7 +3,15 @@ Decoders for MiniAMP3
 Flac - https://github.com/astoeckel/libfoxenflac - 	
 Re-license as LGPLv2.1 or later
 
-WAV
+WAV - Plain RIFF/PCM — IMPLEMENTED, see wav_module.c
+  Hand-written (no third-party library): 8/16/24/32-bit integer PCM, mono
+  or stereo, classic and WAVE_FORMAT_EXTENSIBLE 'fmt ' headers. IEEE-float
+  WAVs are rejected at open() (not decoded).
+
+IFF/8SVX - Amiga "8-bit Voice" sample format — IMPLEMENTED, see iff_module.c
+  Hand-written (no third-party library): mono, 8-bit signed PCM,
+  sCompression 0 (raw) or 1 (Fibonacci-delta). Registers extensions
+  8svx/iff/svx.
 
 AAC - https://github.com/earlephilhower/ESP8266Audio/blob/master/src/libhelix-aac/aacdec.c
 LibHelix AAC Decoder
