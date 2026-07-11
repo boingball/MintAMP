@@ -3967,6 +3967,23 @@ static void FinalizePlayback(HelixAmp3Gui *gui)
 	failedRadioStart = (!stoppedByUser && IsRadioInputName(gui->inputName) &&
 		gGuiPlaybackStatus.radioStatus == RADIO_STATUS_ERROR &&
 		gGuiPlaybackStatus.decodedFrames == 0);
+	/* Task-death confirmation trace: FinalizePlayback() only ever runs once
+	 * PlaybackCanFinalize()/the recovery paths above it have already found
+	 * FindTask("MiniAMP3 playback") == NULL, i.e. DOS has actually reaped the
+	 * playback child -- this is "the exact moment the [AAC] task is confirmed
+	 * dead" the child itself cannot observe (it does not know when DOS
+	 * removes it).  Codec-agnostic and unconditional (not gated behind
+	 * MINIAMP3_DEBUG) so an AAC session's teardown can be diff'd directly
+	 * against an MP3 session's using this same line. */
+	if (IsRadioInputName(gui->inputName))
+		fprintf(stderr, "radio-stop-confirm: playback task confirmed dead runId=%lu doneRunId=%lu contentType=\"%s\" stoppedByUser=%d cleanupComplete=%d cleanupStage=%d phase=%s decodedFrames=%lu underruns=%lu radioStatus=%d taskLookup=%p\n",
+			gui->playbackRunId, (unsigned long)gDoneRunId,
+			(const char *)gGuiPlaybackStatus.radioContentType, stoppedByUser,
+			gGuiPlaybackStatus.cleanupComplete, gGuiPlaybackStatus.cleanupStage,
+			RadioStreamStateName(gGuiPlaybackStatus.phase),
+			gGuiPlaybackStatus.decodedFrames, gGuiPlaybackStatus.underruns,
+			(int)gGuiPlaybackStatus.radioStatus,
+			(void *)FindTask((STRPTR)"MiniAMP3 playback"));
 	SafeCopy(queuedInputName, sizeof(queuedInputName), gui->queuedInputName);
 	gui->playbackDonePending = 0;
 	gui->playbackStoppedByUser = 0;
@@ -8006,7 +8023,18 @@ int main(int argc, char **argv)
 	rc = GuiMainReal(argc, argv);
 
 	StackSwap(&gGuiOldStack);
-	FreeMem(gGuiAllocatedStack, GUI_STARTUP_STACK_SIZE);
+	/* Mirrors the same fix in minimp3r.c's main(): GuiMainReal()'s own
+	 * memory-poisoned early exit deliberately skips every further free, but
+	 * this FreeMem() ran unconditionally regardless of how GuiMainReal()
+	 * returned, undoing that protection on the way out of main() itself --
+	 * the reported "have to reboot, app won't close" symptom. StackSwap()
+	 * above is a pure register swap and stays safe either way. */
+	if (Radio_IsMemoryPoisoned()) {
+		RADIO_DBG(printf("main: memory corruption detected -- leaking startup stack (%lu bytes at %p) instead of FreeMem() on exit\n",
+			(unsigned long)GUI_STARTUP_STACK_SIZE, gGuiAllocatedStack);)
+	} else {
+		FreeMem(gGuiAllocatedStack, GUI_STARTUP_STACK_SIZE);
+	}
 	gGuiAllocatedStack = NULL;
 	return rc;
 }

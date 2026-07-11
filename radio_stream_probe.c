@@ -1013,6 +1013,26 @@ static int rb_probe_transport_open_ex(RbProbeTransport *transport, const char *u
         for (tries = 0; tries < 150; tries++) {
             sprintf(memcheck_where, "before probe SSL_connect attempt=%d", tries + 1);
             Radio_DebugCheckExecMem(memcheck_where);
+            /* Radio_DebugCheckExecMem() just above (or on a previous
+             * iteration) may have found a corrupted exec-heap chunk and
+             * called Radio_MarkMemoryPoisoned(), which also hard-poisons
+             * TLS -- but that flag was previously only checked at probe
+             * *entry*, not inside this retry loop.  A real production run
+             * (streaming.nrjaudio.fm) hit exactly this: corruption was
+             * detected and logged after attempt=1, the loop went on to call
+             * SSL_connect() again for attempt=2 anyway on a heap already
+             * known to be damaged, and that second call is what actually
+             * tripped AN_MemCorrupt (Software Failure 81000005) in the net
+             * worker task -- a real, uncontained Guru, not just a logged
+             * warning.  Stop calling into AmiSSL/OpenSSL the moment
+             * corruption is known, instead of riding out the rest of the
+             * 150-attempt budget on damaged memory. */
+            if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
+                RADIO_DBG(printf("rb-probe TLS: aborting SSL_connect retry loop attempt=%d -- memory/TLS poisoned\n", tries + 1);)
+                ssl_connect_rc = -1;
+                ssl_error = SSL_ERROR_SSL;
+                break;
+            }
             RADIO_DBG(printf("rb-probe TLS: BEFORE SSL_connect attempt=%d ssl=%p ctx=%p fd=%ld\n", tries + 1, (void *)transport->ssl, (void *)transport->ctx, (long)transport->sock);)
             ssl_connect_rc = SSL_connect(transport->ssl);
             ssl_error = (ssl_connect_rc == 1) ? 0 : SSL_get_error(transport->ssl, ssl_connect_rc);
@@ -1020,6 +1040,10 @@ static int rb_probe_transport_open_ex(RbProbeTransport *transport, const char *u
             sprintf(memcheck_where, "after probe SSL_connect attempt=%d", tries + 1);
             Radio_DebugCheckExecMem(memcheck_where);
             if (ssl_connect_rc == 1) break;
+            if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
+                RADIO_DBG(printf("rb-probe TLS: memory/TLS poisoned after SSL_connect attempt=%d -- not retrying\n", tries + 1);)
+                break;
+            }
             if (ssl_error == SSL_ERROR_WANT_READ || ssl_error == SSL_ERROR_WANT_WRITE) {
                 rb_probe_backoff_sleep();
                 continue;

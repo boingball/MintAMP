@@ -10149,8 +10149,17 @@ static int AmigaPlayStreamingGeneric(InputSource *input,
 	clock_t                  startupStartedAt;
 	int                      err;
 
-	(void)input;  /* module handles its own I/O via callbacks */
+	/* input->radio (session id, network status) is read by the radio-aac-stop
+	 * teardown trace below on every exit path, including the early-exit
+	 * goto-cleanup checks before the decode loop ever runs -- no longer
+	 * write-only. */
+	active = -1; /* sentinel: decode-fill loop below never started */
 
+	/* Zeroed up front (not just via GenericDecodeStreamInit() further down)
+	 * so the radio-aac-stop teardown trace can safely read stream.outOfData/
+	 * decodeError even on an early-exit goto cleanup that fires before
+	 * GenericDecodeStreamInit() runs. */
+	memset(&stream, 0, sizeof(stream));
 	memset(&player, 0, sizeof(player));
 	PlaybackCleanupStatusInit(&cleanupStatus);
 	GuiSetPlaybackPhase(GUIPLAY_PHASE_BUFFERING);
@@ -10470,14 +10479,65 @@ static int AmigaPlayStreamingGeneric(InputSource *input,
 	}
 
 cleanup:
-	if (err != 0 && ops && ops->info && ops->info->extensions &&
-		StrCaseCmp(ops->info->extensions, "aac") == 0) {
-		GuiSetPlaybackPhase(GUIPLAY_PHASE_ERROR);
-		gGuiPlaybackStatus.startupStage = GUISTART_FAILED;
-		fprintf(stderr, "radio-aac-startup: early exit reason=playback_start_failed cleanup called=yes global state reset called=yes final phase=%d interrupted=%d\n",
-			(int)gGuiPlaybackStatus.phase, gPlaybackInterrupted ? 1 : 0);
+	{
+		int isAac = ops && ops->info && ops->info->extensions &&
+			StrCaseCmp(ops->info->extensions, "aac") == 0;
+		unsigned long sessionId = (input && input->radio) ?
+			Radio_GetSessionId(input->radio) : 0UL;
+
+		if (err != 0 && isAac) {
+			GuiSetPlaybackPhase(GUIPLAY_PHASE_ERROR);
+			gGuiPlaybackStatus.startupStage = GUISTART_FAILED;
+			fprintf(stderr, "radio-aac-startup: early exit reason=playback_start_failed cleanup called=yes global state reset called=yes final phase=%d interrupted=%d\n",
+				(int)gGuiPlaybackStatus.phase, gPlaybackInterrupted ? 1 : 0);
+		}
+
+		/* STOP/teardown trace: mirrors the "radio-aac-startup:" logging above
+		 * but for the shutdown side, which previously had none.  Always on
+		 * for AAC radio sessions (matches the existing radio-aac-startup
+		 * convention of not gating this behind --debug-cleanup/RADIO_DEBUG). */
+		if (isAac && input && input->radio)
+			fprintf(stderr, "radio-aac-stop: decode loop exited session=%lu task=%p decoderHandle=%p err=%d interrupted=%d outOfData=%d decodeError=%d activeSlot=%d radioStatus=%d radioBuffered=%d radioError=\"%s\"\n",
+				sessionId, (void *)FindTask(NULL), (void *)handle, err,
+				gPlaybackInterrupted ? 1 : 0, stream.outOfData, stream.decodeError,
+				active, (int)Radio_GetStatus(input->radio),
+				Radio_GetBufferedBytes(input->radio), Radio_GetError(input->radio));
+
+		gGuiPlaybackStatus.cleanupComplete = 0;
+		if (gGuiPlaybackStatus.phase != GUIPLAY_PHASE_ERROR)
+			gGuiPlaybackStatus.phase = GUIPLAY_PHASE_STOPPING;
+
+		if (isAac && input && input->radio)
+			fprintf(stderr, "radio-aac-stop: entering AmigaAudioClose (audio/AHI shutdown) session=%lu task=%p sent=[%d,%d][%d,%d][%d,%d]\n",
+				sessionId, (void *)FindTask(NULL),
+				player.sent[0][0], player.sent[0][1], player.sent[1][0], player.sent[1][1],
+				player.sent[2][0], player.sent[2][1]);
+
+		AmigaAudioClose(&player, &cleanupStatus);
+
+		/* AmigaAudioClose() detects audio.device DMA that wrote past a
+		 * buffer's guard bytes during teardown -- the same check the native
+		 * MP3 path (AmigaPlayStreaming) already treats as fatal.  Wire it up
+		 * here too instead of silently discarding it: this is exactly the
+		 * class of corruption that can survive into the next station. */
+		if (cleanupStatus.canaryErrors) {
+			err = -1;
+			fprintf(stderr, "radio-aac-stop: AUDIO BUFFER CANARY CORRUPTED during Stop session=%lu errors=%lu -- audio.device wrote past a playback buffer boundary while it was being torn down\n",
+				sessionId, cleanupStatus.canaryErrors);
+		}
+		PrintPlaybackCleanupStatus(opt, &cleanupStatus);
+
+		if (gGuiPlaybackStatus.phase != GUIPLAY_PHASE_ERROR)
+			gGuiPlaybackStatus.phase = GUIPLAY_PHASE_DONE;
+
+		if (isAac && input && input->radio)
+			fprintf(stderr, "radio-aac-stop: AmigaAudioClose returned session=%lu task=%p err=%d devicesClosed=%lu ioAborted=%lu ioCompleted=%lu chipBuffersFreed=%lu workBuffersFreed=%lu quarantinedBuffers=%lu canaryErrors=%lu cleanupComplete=%d phase=%d\n",
+				sessionId, (void *)FindTask(NULL), err,
+				cleanupStatus.devicesClosed, cleanupStatus.ioAborted, cleanupStatus.ioCompleted,
+				cleanupStatus.chipBuffersFreed, cleanupStatus.workBuffersFreed,
+				cleanupStatus.quarantinedBuffers, cleanupStatus.canaryErrors,
+				gGuiPlaybackStatus.cleanupComplete, (int)gGuiPlaybackStatus.phase);
 	}
-	AmigaAudioClose(&player, &cleanupStatus);
 	return err;
 }
 
@@ -10497,6 +10557,9 @@ static int AmigaGenericInputPlay(const char *sourceName, InputSource *input, con
 	DecModPrefetchState   prefetch;
 	int                   hasPrefetch = 0;
 	int                   ret = 1;
+	int                   wasRadio = 0;
+	int                   wasAac = 0;
+	unsigned long         radioSessionId = 0UL;
 
 	memset(&mod,     0, sizeof(mod));
 	memset(&sinfo,   0, sizeof(sinfo));
@@ -10597,18 +10660,45 @@ static int AmigaGenericInputPlay(const char *sourceName, InputSource *input, con
 		opt, stats, NULL);
 
 done_handle:
-	if (input && input->radio) printf("radio-teardown: closing decoder handle=%p\n", (void *)handle);
+	if (input && input->radio) {
+		printf("radio-teardown: closing decoder handle=%p\n", (void *)handle);
+		if (ext && StrCaseCmp(ext, "aac") == 0)
+			fprintf(stderr, "radio-aac-stop: decoder close begin task=%p handle=%p moduleSegment=%p\n",
+				(void *)FindTask(NULL), (void *)handle, (void *)mod.segment);
+	}
 	mod.ops->close(handle);
+	if (input && input->radio && ext && StrCaseCmp(ext, "aac") == 0)
+		fprintf(stderr, "radio-aac-stop: decoder close returned (AACFreeDecoder/state freed) task=%p\n",
+			(void *)FindTask(NULL));
 done_module:
 	if (input && input->radio) printf("radio-teardown: unloading decoder module\n");
+	if (input && input->radio && ext && StrCaseCmp(ext, "aac") == 0)
+		fprintf(stderr, "radio-aac-stop: UnloadDecoderModule begin task=%p moduleSegment=%p\n",
+			(void *)FindTask(NULL), (void *)mod.segment);
 	UnloadDecoderModule(&mod);
+	if (input && input->radio && ext && StrCaseCmp(ext, "aac") == 0)
+		fprintf(stderr, "radio-aac-stop: UnloadDecoderModule returned task=%p\n", (void *)FindTask(NULL));
 	if (hasPrefetch)
 		DecModPrefetchFree(&prefetch);
 done_input:
-	if (input && input->radio) printf("radio-teardown: InputSourceClose (radio close) start\n");
+	/* input->radio is set to NULL from inside InputSourceClose() (which calls
+	 * Radio_Close()), so capture what we need to log the *return* from
+	 * teardown before that call, not after -- checking input->radio after
+	 * InputSourceClose() is always false and previously made the "finished"
+	 * line below silently never fire for any radio session. */
+	wasRadio = (input && input->radio) ? 1 : 0;
+	wasAac = wasRadio && ext && StrCaseCmp(ext, "aac") == 0;
+	radioSessionId = wasRadio ? Radio_GetSessionId(input->radio) : 0UL;
+	if (wasRadio) printf("radio-teardown: InputSourceClose (radio close) start\n");
+	if (wasAac)
+		fprintf(stderr, "radio-aac-stop: InputSourceClose (network stream teardown: Radio_RequestStop + Radio_Close) begin task=%p session=%lu radioPtr=%p closeInput=%d\n",
+			(void *)FindTask(NULL), radioSessionId, (void *)input->radio, closeInput);
 	if (closeInput)
 		InputSourceClose(input);
-	if (input && input->radio) printf("radio-teardown: AmigaGenericInputPlay finished ret=%d\n", ret);
+	if (wasRadio) printf("radio-teardown: AmigaGenericInputPlay finished ret=%d\n", ret);
+	if (wasAac)
+		fprintf(stderr, "radio-aac-stop: AmigaGenericInputPlay finished (network stream closed, decoder freed, module unloaded) task=%p session=%lu ret=%d -- child now returns to PlaybackEntry()\n",
+			(void *)FindTask(NULL), radioSessionId, ret);
 	return ret ? 1 : 0;
 }
 

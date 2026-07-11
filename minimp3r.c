@@ -1879,6 +1879,27 @@ static void FinalizePlayback(MrApp *app)
 		return;
 	RADIO_DBG(printf("radio-guard: before FinalizePlayback\n");)
 	MrCopyVolatileString(radioError, sizeof(radioError), gGuiPlaybackStatus.radioError);
+	/* Task-death confirmation trace (ReAction front-end counterpart of the
+	 * one added to amiga_mp3gui.c's FinalizePlayback()): FinalizePlayback()
+	 * here only ever runs once PlaybackProcessStillExists() has already found
+	 * FindTask("minimp3r playback") == NULL, i.e. DOS has actually reaped the
+	 * playback child -- this is "the exact moment the [AAC] task is confirmed
+	 * dead" the child itself cannot observe.  Codec-agnostic and unconditional
+	 * (not gated behind RADIO_DEBUG) so an AAC session's teardown can be
+	 * diff'd directly against an MP3 session's using this same line, and so
+	 * it survives in release/field builds where RADIO_DBG() is compiled out. */
+	if (MrIsRadioInput(gPlayer.url)) {
+		char contentType[64];
+		MrCopyVolatileString(contentType, sizeof(contentType), gGuiPlaybackStatus.radioContentType);
+		fprintf(stderr, "radio-stop-confirm: playback task confirmed dead runId=%lu doneRunId=%lu session=%lu contentType=\"%s\" stoppedByUser=%d cleanupComplete=%d cleanupStage=%d phase=%d decodedFrames=%lu underruns=%lu radioStatus=%d taskLookup=%p\n",
+			app->playbackRunId, (unsigned long)gDoneRunId, gPlayer.sessionId,
+			contentType, stoppedByUser,
+			gGuiPlaybackStatus.cleanupComplete, gGuiPlaybackStatus.cleanupStage,
+			(int)gGuiPlaybackStatus.phase,
+			gGuiPlaybackStatus.decodedFrames, gGuiPlaybackStatus.underruns,
+			(int)gGuiPlaybackStatus.radioStatus,
+			(void *)FindTask((STRPTR)"minimp3r playback"));
+	}
 	failedStart = (!stoppedByUser && MrIsRadioInput(gPlayer.url) && gGuiPlaybackStatus.decodedFrames == 0 &&
 		(gGuiPlaybackStatus.radioStatus == RADIO_STATUS_ERROR ||
 		 gGuiPlaybackStatus.radioStatus == RADIO_STATUS_CONNECTING ||
@@ -6265,7 +6286,20 @@ int main(int argc, char **argv)
 	rc = MrMainReal(argc, argv);
 
 	StackSwap(&gMrOldStack);
-	FreeMem(gMrAllocatedStack, MR_STARTUP_STACK_SIZE);
+	/* MrMainReal()'s own memory-poisoned early exit deliberately skips every
+	 * further free ("a leak here is recoverable with a reboot; another
+	 * corrupting free is not") -- but this FreeMem() ran unconditionally
+	 * regardless of how MrMainReal() returned, undoing that protection on
+	 * the way out of main() itself. This is why a corrupted run needed a
+	 * full Amiga reboot instead of just closing: the app's last act before
+	 * actually exiting was still a free on the same damaged exec heap.
+	 * StackSwap() above is a pure register swap and stays safe either way. */
+	if (Radio_IsMemoryPoisoned()) {
+		RADIO_DBG(printf("main: memory corruption detected -- leaking startup stack (%lu bytes at %p) instead of FreeMem() on exit\n",
+			(unsigned long)MR_STARTUP_STACK_SIZE, gMrAllocatedStack);)
+	} else {
+		FreeMem(gMrAllocatedStack, MR_STARTUP_STACK_SIZE);
+	}
 	gMrAllocatedStack = NULL;
 	return rc;
 }

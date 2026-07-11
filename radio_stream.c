@@ -270,6 +270,7 @@ static void radio_net_worker_entry(void)
 {
     struct MsgPort *port;
     int shuttingDown = 0;
+    int poisonedAbandon = 0;
     RadioNetWorkerJob *shutdownJob = NULL;
 
     RADIO_DBG(printf("radio-net-worker: starting task=%p\n", (void *)FindTask(NULL)););
@@ -325,9 +326,42 @@ static void radio_net_worker_entry(void)
                 }
             }
             if (shuttingDown) break;
+            /* MrMainReal()/GuiMainReal()'s memory-poisoned app-close path
+             * deliberately never calls Radio_NetworkShutdown() at all (it
+             * would risk CloseAmiSSL()/CloseLibrary() touching the same
+             * damaged heap) -- which means this task is never asked to
+             * leave and would otherwise sit in this loop forever as an
+             * orphaned background task, still holding this program's
+             * segments resident even after the main process has "exited".
+             * Reported symptom: "corruption -- app won't close, need to
+             * reboot". Self-detect the same poison flags the main process
+             * already checks and bail out on our own, skipping straight
+             * past CloseAmiSSL/CloseLibrary/DeleteMsgPort below (leaking
+             * those deliberately, same reasoning as everywhere else in this
+             * file) so the task actually terminates. */
+            if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
+                RADIO_DBG(printf("radio-net-worker: memory/TLS poisoned -- abandoning worker loop task=%p (skipping CloseAmiSSL/CloseLibrary/DeleteMsgPort)\n",
+                    (void *)FindTask(NULL));)
+                poisonedAbandon = 1;
+                break;
+            }
             radio_worker_pump_active_streams();
             Delay(2);
         }
+    }
+
+    if (poisonedAbandon) {
+        /* Leave AmiSSLBase/AmiSSLMasterBase/SocketBase/port exactly as they
+         * are (leaked) -- do not touch them. Only clear the globals other
+         * tasks read to decide whether the worker is available, so nothing
+         * tries to dispatch a job to a port whose task is about to vanish. */
+        radio_net_worker_port = NULL;
+        radio_net_worker_ready = 0;
+        radio_net_worker_libs_ok = 0;
+        radio_net_worker_https_ok = 0;
+        RADIO_DBG(printf("radio-net-worker: poisoned abandon complete, task exiting task=%p\n",
+            (void *)FindTask(NULL));)
+        return;
     }
 
     radio_net_worker_shutdown_stage = "shutdown-begin";
@@ -510,6 +544,36 @@ static int radio_net_worker_stop(void)
                 !radio_net_worker_libs_ok && !radio_net_worker_https_ok);
             DeleteMsgPort(replyPort);
             free(job);
+            /* The reply above only proves radio_net_worker_entry() reached the
+             * end of its own function body (it ReplyMsg()s the shutdown job
+             * as its very last statement, after CloseAmiSSL/CloseLibrary/
+             * DeleteMsgPort) -- it does not prove DOS has actually reaped the
+             * task yet.  The playback child's teardown (PlaybackProcessStill
+             * Exists() in amiga_mp3gui.c/minimp3r.c) learned this the hard
+             * way: "the done message can be consumed before the task has
+             * fully returned to DOS".  Radio_NetworkShutdown() is the last
+             * thing that runs before the app's final CloseLibrary() sequence,
+             * so give the worker task a bounded window to actually vanish
+             * from the task list before trusting the reply -- proceeding
+             * while it is still mid-return is exactly the kind of race that
+             * produces a recoverable alert at app exit. */
+            {
+                int deathTries;
+                int taskGone = 0;
+                for (deathTries = 0; deathTries < RADIO_NET_WORKER_START_TRIES; deathTries++) {
+                    struct Task *stillAlive;
+                    Forbid();
+                    stillAlive = FindTask((STRPTR)"MiniAMP3 radio net worker");
+                    Permit();
+                    if (!stillAlive) { taskGone = 1; break; }
+                    Delay(2);
+                }
+                RADIO_DBG(printf("radio-netshutdown: worker task death confirm taskGone=%d tries=%d\n",
+                    taskGone, deathTries););
+                if (!taskGone) {
+                    RADIO_DBG(printf("radio-netshutdown: worker task still present after shutdown reply -- proceeding anyway (timeout), risk of recoverable alert at app exit\n"););
+                }
+            }
             if (!stopped) {
                 RADIO_DBG(printf("radio-netshutdown: shutdown reply received but final state is not clean shutdownStage=\"%s\" stage=\"%s\" lastOp=\"%s\" lastSession=%lu heartbeat=%lu workerTask=%p ready=%d port=%p SocketBase=%p AmiSSLBase=%p AmiSSLMasterBase=%p libs_ok=%d https_ok=%d\n",
                     radio_net_worker_shutdown_stage ? radio_net_worker_shutdown_stage : "<unset>",
@@ -1481,10 +1545,30 @@ static int radio_ssl_do_handshake(RadioStream *rs)
     for (tries = 0; tries < 150; tries++) {
         int r, e;
         if (radio_is_stopping(rs)) return -1;
+        /* Mirrors the fix in radio_stream_probe.c's probe SSL_connect retry
+         * loop: Radio_DebugCheckExecMem() checkpoints elsewhere (before
+         * SSL_CTX_new/SSL_new in radio_ssl_connect(), or the ring-buffer/
+         * post-connect checkpoints in Radio_OpenWithHostAddr()/
+         * connect_http()) can mark memory/TLS poisoned between attempts of
+         * this loop, but nothing here used to check that before calling
+         * SSL_connect() again -- a production run (streaming.nrjaudio.fm,
+         * via the probe path) rode a WANT_READ retry straight into a real,
+         * uncontained AN_MemCorrupt Guru on an already-known-damaged heap.
+         * Bail out immediately once poisoned instead of spending the rest
+         * of the retry budget calling into AmiSSL/OpenSSL on it. */
+        if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
+            RADIO_DBG(printf("radio-tls: aborting SSL_connect retry loop session=%lu attempt=%d -- memory/TLS poisoned\n",
+                rs ? rs->session_id : 0, tries + 1););
+            return -1;
+        }
         RADIO_DBG(printf("BEFORE SSL_connect session=%lu attempt=%d ssl=%p ctx=%p fd=%ld\n",
             rs ? rs->session_id : 0, tries + 1, rs ? (void *)rs->ssl : 0,
             rs ? (void *)rs->ctx : 0, rs ? (long)rs->sock : -1L););
+        /* Matches the probe path's per-attempt checkpoints (radio_stream_
+         * probe.c), which the playback SSL_connect loop never had. */
+        Radio_DebugCheckExecMem("before playback SSL_connect");
         r = SSL_connect(rs->ssl);
+        Radio_DebugCheckExecMem("after playback SSL_connect");
         if (r == 1) {
             RADIO_DBG(printf("AFTER SSL_connect success session=%lu attempt=%d ssl=%p ctx=%p fd=%ld\n",
                 rs ? rs->session_id : 0, tries + 1, rs ? (void *)rs->ssl : 0,
@@ -1543,6 +1627,18 @@ static int radio_ssl_connect(RadioStream *rs)
     const SSL_METHOD *method;
     int set_fd_ok;
     radio_net_adopt_context(rs);
+    /* Radio_OpenWithHostAddr() only checks Radio_IsTlsPoisoned() once, at
+     * the very start of opening a stream -- corruption discovered by one of
+     * the exec-heap checkpoints during *this same session's* own ring-
+     * buffer allocation or TCP connect (Radio_OpenWithHostAddr()/
+     * connect_http()) was never re-checked before proceeding into
+     * SSL_CTX_new()/SSL_new()/SSL_connect() here. Re-check at the entry to
+     * every SSL object/handshake attempt instead of only at stream open. */
+    if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
+        set_error(rs, Radio_TlsPoisonedMessage());
+        RADIO_DBG(printf("radio-tls: refusing SSL_CTX_new/SSL_new session=%lu -- memory/TLS poisoned\n", rs->session_id););
+        return -1;
+    }
     if (radio_net_worker_amissl_ready(rs) != 0) return -1;
     if (rs->ctx && !rs->ctxFreed) radio_ssl_free_ctx(rs);
     if (!rs->ctx) {
@@ -1821,7 +1917,12 @@ static int radio_send_all(RadioStream *rs, const char *buf, int len)
                 close_current_socket(rs);
                 return -1;
             }
+            /* Closes the same instrumentation gap as the SSL_read checkpoint
+             * below: this call previously had no exec-heap checkpoint at
+             * all on the playback path. */
+            Radio_DebugCheckExecMem("before playback SSL_write");
             r = (int)SSL_write(rs->ssl, buf + sent, len - sent);
+            Radio_DebugCheckExecMem("after playback SSL_write");
             if (r > 0) { sent += r; continue; }
             {
                 int e = SSL_get_error(rs->ssl, r);
@@ -2173,6 +2274,13 @@ static int connect_http(RadioStream *rs){
     rs->streamStateFlags |= TRANSPORT_CONNECTED;
     if (radio_is_stopping(rs)) { close_current_socket(rs); return -1; }
     RADIO_DBG(printf("radio-connect: session=%lu TCP connected, starting SSL/HTTP request phase isSSL=%d\n", rs->session_id, rs->isSSL););
+    /* Bracket the DNS-cache-read/socket()/connect() window against the
+     * "after ring buffer allocated" check in Radio_OpenWithHostAddr(): if
+     * this reports CORRUPT but that one was clean, the corruptor is in this
+     * window (or in bsdsocket.library's own connect() path); if this is
+     * already CORRUPT, the damage predates connect() and the ring-allocation
+     * checkpoint just missed it. */
+    Radio_DebugCheckExecMem("after TCP connect, before TLS handshake");
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     if (rs->isSSL) {
         RADIO_DBG(printf("radio-child-net: before TLS session=%lu fd=%ld host=%s SocketBase=%p AmiSSLBase=%p AmiSSLExtBase=%p\n",
@@ -2711,6 +2819,16 @@ RadioStream *Radio_OpenWithHostAddr(const char *url, int haveHostAddr, unsigned 
      * whether malloc() is handing back an already-damaged block -- pointing
      * at heap/free-list corruption from an earlier session -- or whether
      * this allocation starts clean and something corrupts it afterward. */
+    /* Radio_CheckMiniMem() above only validates this session's own ring
+     * guard bytes; it says nothing about the exec free-chunk list a session
+     * or two away from this allocation.  A JOE (audio-streaming.joe.nl) AAC+
+     * session hit "CORRUPT bad chunk size" 4 bytes past this exact ring
+     * allocation's rear guard, first detected only at "before SSL_CTX_new" --
+     * but nothing between here and there ever ran the exec-heap walker, so
+     * whether the free chunk right after this ring buffer was already
+     * damaged at allocation time, or got damaged somewhere in the DNS-cache/
+     * socket()/connect() window that follows, was unknown.  Close that gap. */
+    Radio_DebugCheckExecMem("after ring buffer allocated");
     if (Radio_CheckMiniMem("after ring buffer allocated") > 0) {
         set_error(rs, "Memory corruption detected - restart app");
         return rs;
@@ -3274,8 +3392,22 @@ static int radio_pump_body(RadioStream *rs)
 	        }
 	        radio_net_adopt_context(rs);
 	        rs->workerReadCalls++;
+	        /* A CapitalUK playback session hit a real, uncontained CPU HALT
+	         * (WinUAE "HALT1") right here -- the log's very last line was
+	         * "before SSL_read", with no completion line at all, meaning
+	         * whatever failed did so hard enough to prevent even the next
+	         * printf from running.  Nothing between "after SSL_new" (the
+	         * last exec-heap checkpoint on this path) and this call was ever
+	         * instrumented for playback -- the probe path already checks
+	         * around every SSL_connect attempt, but this SSL_read (and
+	         * SSL_write below, and the playback SSL_connect retry loop) had
+	         * no equivalent.  Add the "before" checkpoint so the next repro
+	         * at least tells us whether the heap was already known-bad going
+	         * into this exact call. */
+	        Radio_DebugCheckExecMem("before playback SSL_read");
 	        n = (int)SSL_read(rs->ssl, (char *)b, requested);
             radio_worker_risk_log("after SSL_read", rs);
+            Radio_DebugCheckExecMem("after playback SSL_read");
 	        RADIO_DBG(printf("radio-ssl-read: session=%lu ssl=%p ctx=%p fd=%ld dst=%p dst_cap=%d requested=%d returned=%d fill=%lu ring_free=%lu\n",
 	            rs->session_id, (void *)rs->ssl, (void *)rs->ctx, (long)rs->sock, (void *)b, (int)sizeof(b), requested, n, rs->used, rs->size > rs->used ? rs->size - rs->used : 0));
 	        if (n <= 0) {
