@@ -557,6 +557,8 @@ static int radio_net_worker_stop(void)
     return 0;
 }
 #endif /* HAVE_AMISSL */
+static long radio_socket_library_open_count = 0;
+static long radio_socket_library_close_count = 0;
 #else
 #include <unistd.h>
 #include <errno.h>
@@ -2858,9 +2860,11 @@ void Radio_RequestStop(RadioStream *rs)
     RADIO_DBG(printf("radio-cleanup: close mode=%s session=%lu status=%d (Radio_RequestStop)\n", radio_close_mode_name(mode), rs->session_id, (int)rs->status););
     radio_stream_lock(rs);
     rs->stopping = 1;
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     rs->workerStopRequested = 1;
     rs->workerCloseRequested = 1;
     radio_worker_state = RADIO_WORKER_STOPPING;
+#endif
     rs->reconnectAttempts = RADIO_RECONNECT_MAX;
     rs->reconnectDelay = 0;
     rs->status = RADIO_STATUS_STOPPING;
