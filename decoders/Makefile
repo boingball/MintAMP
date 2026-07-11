@@ -531,6 +531,11 @@ wma.decoder: $(WMA_OBJS) decoder_module.h wma_alloc.h wma_asf.h wma/wmadec.h
 	    echo "ERROR: WMA decoder is missing build marker string" >&2; \
 	    exit 1; \
 	fi
+	@first_sym=$$($(NM) -n $@ | grep -iE ' [TtWw] ' | head -1 | awk '{print $$3}'); \
+	    if [ "$$first_sym" != "_DecoderModuleEntry" ] && [ "$$first_sym" != "DecoderModuleEntry" ]; then \
+	    echo "ERROR: WMA decoder first text symbol is '$$first_sym', expected DecoderModuleEntry" >&2; \
+	    exit 1; \
+	fi
 	$(FIXHUNKS) $@
 	@echo "Built $@"
 

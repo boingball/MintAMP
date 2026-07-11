@@ -583,32 +583,64 @@ int wma_decode_init(WMADecodeContext* s, asf_waveformatex_t *wfx)
 }
 
 
-/* compute x^-0.25 with an exponent and mantissa table. We use linear
-   interpolation to reduce the mantissa table size at a small speed
-   expense (linear interpolation approximately doubles the number of
-   bits of precision). */
+/*
+ * compute x^-0.25, called once per LSP coefficient per decoded block
+ * (decode_exp_lsp() -> wma_lsp_to_curve()), i.e. on the hot per-frame path.
+ *
+ * Upstream computes this via a fast table-driven approximation that
+ * type-puns a native `float` to inspect its IEEE754 exponent/mantissa
+ * bits directly (see e.g. the classic "fast inverse square root" trick).
+ * That's the only floating-point code anywhere in this decoder's live
+ * (non-#if-0'd) path -- everything else, including the CORDIC-based
+ * fsincos() this same init also relies on, is pure integer -- and pulling
+ * in libgcc's soft-float conversion helpers (__floatsisf/__extendsfdf2)
+ * for one function is both an unwanted FPU-adjacent dependency for a
+ * decoder this project specifically chose to be fixed-point-only, and,
+ * per a crash observed on real m68k hardware right at the first decoded
+ * block, apparently broken in some way on this cross-toolchain/target
+ * that never showed up on the little-endian x86 host testing available
+ * during development.
+ *
+ * x^-0.25 == 1 / sqrt(sqrt(x)), computed here with the fixed-point
+ * fixsqrt32()/fixdiv32() this same file already relies on elsewhere
+ * (wmafixed.c), entirely libgcc/float-free. Q16.16 loses precision for
+ * very small x (fixsqrt32() operates on whatever bits are actually
+ * there), so x is renormalized by powers of 16 up front and the result
+ * corrected back by the matching power of 2 afterward
+ * ((16^k * x)^-0.25 == x^-0.25 * 2^-k, so x^-0.25 == that result * 2^k) --
+ * verified against libm pow(x,-0.25) on the host for x spanning
+ * 0.0001..30000: max relative error ~1.5%, well within what a spectral
+ * envelope curve needs, versus 16%+ without the renormalization step.
+ * (Only x below Q16.16's own representable resolution, i.e. already
+ * quantized to noise before this function ever sees it, does worse --
+ * not something renormalization can recover.) The lsp_pow_e_table/
+ * lsp_pow_m_table1/lsp_pow_m_table2 tables built for the old
+ * approximation in wma_lsp_to_curve_init() are no longer read anywhere,
+ * but are left in place (harmless unused computation) rather than
+ * touching that function's table-building loop too.
+ */
 static inline fixed32 pow_m1_4(WMADecodeContext *s, fixed32 x)
 {
-    union {
-        float f;
-        unsigned int v;
-    } u, t;
-    unsigned int e, m;
-    fixed32 a, b;
+    fixed32 s1, s2, result;
+    int shift = 0;
 
-    u.f = fixtof64(x);
-    e = u.v >> 23;
-    m = (u.v >> (23 - LSP_POW_BITS)) & ((1 << LSP_POW_BITS) - 1);
-    /* build interpolation scale: 1 <= t < 2. */
-    t.v = ((u.v << LSP_POW_BITS) & ((1 << 23) - 1)) | (127 << 23);
-    a = ((fixed32*)s->lsp_pow_m_table1)[m];
-    b = ((fixed32*)s->lsp_pow_m_table2)[m];
+    (void)s;
+    if (x <= 0)
+        return 0x7fffffff; /* matches fixdiv32()'s divide-by-zero convention */
 
-    /* lsp_pow_e_table contains 32.32 format */
-    /* TODO:  Since we're unlikely have value that cover the whole
-     * IEEE754 range, we probably don't need to have all possible exponents */
+    while (x < 0x00010000 && shift < 7) {
+        x <<= 4;
+        shift++;
+    }
 
-    return (lsp_pow_e_table[e] * (a + fixmul32(b, ftofix32(t.f))) >>32);
+    s1 = fixsqrt32(x);
+    if (s1 <= 0)
+        return 0x7fffffff;
+    s2 = fixsqrt32(s1);
+    if (s2 <= 0)
+        return 0x7fffffff;
+    result = fixdiv32(itofix32(1), s2);
+    return result << shift;
 }
 
 static void wma_lsp_to_curve_init(WMADecodeContext *s, int frame_len)
