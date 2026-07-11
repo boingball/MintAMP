@@ -308,6 +308,7 @@ static int radio_release_printf(const char *fmt, ...)
          !strncmp(fmt, "radio-worker: backpressure", 26) ||
          !strncmp(fmt, "radio-cleanup: abort SSL_free policy", 36) ||
          !strncmp(fmt, "radio-cleanup: abort SSL_free/SSL_CTX_free skipped", 51) ||
+         !strncmp(fmt, "radio-tls-close:", 16) ||
          !strncmp(fmt, "radio-pump: stop/detach observed", 33)))
         return 0;
 

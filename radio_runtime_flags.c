@@ -142,6 +142,23 @@ const char *Radio_AbortSslFreePolicyName(void)
     }
 }
 
+/* See radio_runtime_flags.h: diagnostic-only per-category clean-close TLS
+ * leak switches for the corruption isolation matrix.  Deliberately separate
+ * from Radio_AbortSslFreePolicy() -- they neither change the authoritative
+ * policy nor its summary text; they only override the clean-close free of
+ * the one named category. */
+int Radio_TlsTestQuarantineEnabled(const char *category)
+{
+    if (!category) return 0;
+    if (radio_flag_ascii_equal_ignore_case(category, "probe"))
+        return radio_runtime_flag_enabled("MP3_PROBE_QUARANTINE_TLS_OBJECTS");
+    if (radio_flag_ascii_equal_ignore_case(category, "artwork"))
+        return radio_runtime_flag_enabled("MP3_ARTWORK_QUARANTINE_TLS_OBJECTS");
+    if (radio_flag_ascii_equal_ignore_case(category, "playback"))
+        return radio_runtime_flag_enabled("MP3_PLAYBACK_QUARANTINE_TLS_OBJECTS");
+    return 0;
+}
+
 void Radio_LogTestModeSummary(void)
 {
     int probeTest = radio_runtime_flag_enabled("MP3_TEST_ENABLE_STREAM_PROBE");
@@ -153,17 +170,23 @@ void Radio_LogTestModeSummary(void)
         radio_runtime_flag_is_set("MP3_SKIP_ABORT_SSL_FREE") ||
         radio_runtime_flag_is_set("MP3_ALLOW_ABORT_SSL_FREE") ||
         radio_runtime_flag_is_set("MP3_TEST_ENABLE_STREAM_PROBE") ||
-        radio_runtime_flag_is_set("MP3_TEST_ENABLE_ARTWORK"))
+        radio_runtime_flag_is_set("MP3_TEST_ENABLE_ARTWORK") ||
+        radio_runtime_flag_is_set("MP3_PROBE_QUARANTINE_TLS_OBJECTS") ||
+        radio_runtime_flag_is_set("MP3_ARTWORK_QUARANTINE_TLS_OBJECTS") ||
+        radio_runtime_flag_is_set("MP3_PLAYBACK_QUARANTINE_TLS_OBJECTS"))
         source = "env";
 
     (void)probeTest;
     (void)artworkTest;
 #ifdef RADIO_DEBUG
-    printf("radio-runtime: probe=%s artwork=%s abortSslFreePolicy=%s source=%s\n",
+    printf("radio-runtime: probe=%s artwork=%s abortSslFreePolicy=%s source=%s tlsTestQuarantine[probe=%d artwork=%d playback=%d]\n",
         radio_runtime_effective_probe_text(),
         radio_runtime_effective_artwork_text(),
         Radio_AbortSslFreePolicyName(),
-        source);
+        source,
+        Radio_TlsTestQuarantineEnabled("probe"),
+        Radio_TlsTestQuarantineEnabled("artwork"),
+        Radio_TlsTestQuarantineEnabled("playback"));
 #else
     (void)source;
     (void)radio_runtime_effective_probe_text;
@@ -174,7 +197,7 @@ void Radio_LogTestModeSummary(void)
 void Radio_LogRuntimeFlagsOnce(void)
 {
     static int logged = 0;
-    const char *names[6];
+    const char *names[9];
     int i;
 
     if (logged) return;
@@ -185,8 +208,11 @@ void Radio_LogRuntimeFlagsOnce(void)
     names[3] = "MP3_TEST_ENABLE_STREAM_PROBE";
     names[4] = "MP3_TEST_ENABLE_ARTWORK";
     names[5] = "MP3_ALLOW_ABORT_SSL_FREE";
+    names[6] = "MP3_PROBE_QUARANTINE_TLS_OBJECTS";
+    names[7] = "MP3_ARTWORK_QUARANTINE_TLS_OBJECTS";
+    names[8] = "MP3_PLAYBACK_QUARANTINE_TLS_OBJECTS";
 #ifdef RADIO_DEBUG
-    for (i = 0; i < 6; i++) {
+    for (i = 0; i < 9; i++) {
         const char *env_value = radio_runtime_flag_raw_getenv(names[i]);
         const char *getvar_value = radio_runtime_flag_raw_getvar(names[i]);
         int enabled = radio_runtime_flag_enabled(names[i]);

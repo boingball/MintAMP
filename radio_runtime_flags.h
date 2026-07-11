@@ -29,6 +29,22 @@ typedef enum {
 RadioAbortSslPolicy Radio_AbortSslFreePolicy(void);
 const char *Radio_AbortSslFreePolicyName(void);
 
+/* DIAGNOSTIC-ONLY isolation flags for the second-stream heap-corruption
+ * matrix -- never production defaults.  When the flag for a category is set,
+ * that category's CLEAN TLS sessions deliberately LEAK their SSL/SSL_CTX at
+ * close (raw socket still closed safely; pointers nulled after the leaked
+ * addresses are logged; test-quarantine counters incremented) instead of
+ * calling SSL_free()/SSL_CTX_free().  A deliberately test-quarantined clean
+ * session is never classified as a TLS fault and never disables HTTPS.
+ *   category "probe"    -> MP3_PROBE_QUARANTINE_TLS_OBJECTS
+ *   category "artwork"  -> MP3_ARTWORK_QUARANTINE_TLS_OBJECTS
+ *   category "playback" -> MP3_PLAYBACK_QUARANTINE_TLS_OBJECTS
+ * If test D/E/F (leaking category X) stops the corruption that the matching
+ * normal-mode test reproduces, category X's SSL/SSL_CTX free lifecycle is
+ * implicated.  These do not alter Radio_AbortSslFreePolicy() or its summary;
+ * they override only the affected category's clean-close free. */
+int Radio_TlsTestQuarantineEnabled(const char *category);
+
 #ifdef __cplusplus
 }
 #endif

@@ -52,7 +52,14 @@ enum {
      * MP3_NO_STREAM_PROBE / MP3_NO_ARTWORK, fatal artwork-disable-for-run,
      * or a busy worker/active transport. MP3_TEST_ENABLE_* are accepted as
      * compatibility/debug flags but are no longer required for RC1 defaults. */
-    RB_STREAM_PROBE_ERR_DISABLED = -19
+    RB_STREAM_PROBE_ERR_DISABLED = -19,
+    /* SSL_connect() itself returned success (ret=1), but the exec-memory
+     * checkpoint run immediately afterwards found the heap corrupt.  This is
+     * NOT a TLS handshake failure -- the handshake completed -- and must
+     * never be reported as one; it means an earlier operation left the heap
+     * (or AmiSSL's internals) damaged and this successful call was merely
+     * the first thing to reveal it. */
+    RB_STREAM_PROBE_ERR_MEM_POISONED_AFTER_TLS = -20
 };
 
 const char *rb_probe_error_text(int rc);
