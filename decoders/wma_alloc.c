@@ -135,10 +135,13 @@ int WmaMemcmp(const void *s1, const void *s2, size_t n)
     return 0;
 }
 
-/* Small, unremarkable recursive quicksort (first-element pivot, falls back
- * to insertion sort below a threshold). Only used at decoder-init time to
- * sort VLC code tables (at most a few hundred entries), so this need not
- * be fancy -- just correct. */
+/*
+ * Non-recursive diagnostic sort used while investigating the WMA startup
+ * #80000006 failure on real m68k hardware.  The previous first-element-pivot
+ * quicksort could recurse once per item for already ordered VLC data and
+ * exhaust the playback task stack.  WMA only sorts these tables at decoder
+ * initialisation, so the slower insertion sort is acceptable for this test.
+ */
 static void WmaSwapBytes(unsigned char *a, unsigned char *b, size_t size)
 {
     size_t i;
@@ -162,36 +165,10 @@ static void WmaInsertionSort(unsigned char *base, size_t nmemb, size_t size,
     }
 }
 
-static void WmaQuickSortRange(unsigned char *base, size_t nmemb, size_t size,
-                               int (*compar)(const void *, const void *))
-{
-    size_t i, storeIdx;
-    unsigned char *pivot;
-
-    if (nmemb < 12) {
-        WmaInsertionSort(base, nmemb, size, compar);
-        return;
-    }
-
-    /* Partition around the first element. */
-    pivot = base; /* pivot value is copied out logically via swaps below */
-    storeIdx = 0;
-    for (i = 1; i < nmemb; i++) {
-        if (compar(base + i * size, pivot) < 0) {
-            storeIdx++;
-            WmaSwapBytes(base + storeIdx * size, base + i * size, size);
-        }
-    }
-    WmaSwapBytes(base, base + storeIdx * size, size);
-
-    WmaQuickSortRange(base, storeIdx, size, compar);
-    WmaQuickSortRange(base + (storeIdx + 1) * size, nmemb - storeIdx - 1, size, compar);
-}
-
 void WmaQsort(void *base, size_t nmemb, size_t size,
               int (*compar)(const void *, const void *))
 {
     if (!base || nmemb < 2 || size == 0)
         return;
-    WmaQuickSortRange((unsigned char *)base, nmemb, size, compar);
+    WmaInsertionSort((unsigned char *)base, nmemb, size, compar);
 }
