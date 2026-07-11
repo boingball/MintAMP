@@ -14,8 +14,14 @@
 static size_t AmigaUtf8ToDisplay(char *dst, size_t dstSize, const char *src)
 {
     size_t si = 0, di = 0;
-    const char *structuredStart = NULL;
-    const char *structuredEnd = NULL;
+    char structured[256];
+    const char *textMarker;
+    const char *titleMarker;
+    const char *marker;
+    const char *valueStart;
+    const char *valueEnd;
+    size_t prefixLen;
+    size_t valueLen;
     unsigned char c;
 
     if (!dst || dstSize == 0)
@@ -25,32 +31,48 @@ static size_t AmigaUtf8ToDisplay(char *dst, size_t dstSize, const char *src)
         return 0;
 
     /* Some iHeart/KISS ICY streams put a vendor attribute list inside
-     * StreamTitle.  Two formats have been observed on the same station:
+     * StreamTitle.  The station can also prepend the artist using the usual
+     * "Artist - Title" convention, producing values such as:
      *
      *   text="Say So" song_spot="M" MediaBaseId="2546146" ...
-     *   title="Snooze",artist="SZA",url="..."
+     *   SZA - title="Snooze",artist="SZA",url="..."
+     *   Sombr - text="Back To Friends" song_spot="M" ...
      *
-     * The protocol parser has already bounded and terminated this string, so
-     * for display purposes extract only the first quoted title value.  Require
-     * both the exact leading marker and its closing quote; malformed or normal
-     * titles continue through the ordinary conversion path unchanged. */
-    if (strncmp(src, "text=\"", 6) == 0)
-        structuredStart = src + 6;
-    else if (strncmp(src, "title=\"", 7) == 0)
-        structuredStart = src + 7;
+     * Preserve an optional "Artist - " prefix so the GUI's normal title
+     * splitter still fills both fields, but replace the vendor payload with
+     * only its first quoted text/title value.  Only accept a marker at the
+     * start or immediately after " - " to avoid interpreting unrelated text
+     * attributes elsewhere in an ordinary title. */
+    textMarker = strstr(src, "text=\"");
+    titleMarker = strstr(src, "title=\"");
+    if (textMarker && titleMarker)
+        marker = textMarker < titleMarker ? textMarker : titleMarker;
+    else
+        marker = textMarker ? textMarker : titleMarker;
 
-    if (structuredStart) {
-        const char *end = structuredStart;
-        while (*end && *end != '"')
-            end++;
-        if (*end == '"') {
-            src = structuredStart;
-            structuredEnd = end;
+    if (marker &&
+        (marker == src ||
+         (marker >= src + 3 && marker[-3] == ' ' &&
+          marker[-2] == '-' && marker[-1] == ' '))) {
+        valueStart = marker + (marker == textMarker ? 6 : 7);
+        valueEnd = strchr(valueStart, '"');
+        if (valueEnd) {
+            prefixLen = (size_t)(marker - src);
+            valueLen = (size_t)(valueEnd - valueStart);
+            if (prefixLen >= sizeof(structured))
+                prefixLen = sizeof(structured) - 1;
+            if (valueLen > sizeof(structured) - 1 - prefixLen)
+                valueLen = sizeof(structured) - 1 - prefixLen;
+            if (prefixLen)
+                memcpy(structured, src, prefixLen);
+            if (valueLen)
+                memcpy(structured + prefixLen, valueStart, valueLen);
+            structured[prefixLen + valueLen] = 0;
+            src = structured;
         }
     }
 
-    while (src[si] && (!structuredEnd || src + si < structuredEnd) &&
-           di + 1 < dstSize) {
+    while (src[si] && di + 1 < dstSize) {
         c = (unsigned char)src[si++];
         if (c == '\t' || c == '\n' || c == '\r') {
             dst[di++] = ' ';
