@@ -9167,6 +9167,20 @@ static int GenericDecodeStreamFillS8(GenericDecodeStream *gs,
 			GenericDecodeChunkForRateConvert(gs, opt, 1));
 		if (!GenericDecodeStreamGuardOk(gs, "after mono decode"))
 			break;
+		/* Temporary diagnostic for the new WMA module -- unconditional
+		 * (not gated behind opt->debugDecoder, which the ReAction GUI
+		 * never sets) so the first several decode() calls are visible
+		 * from a Shell window regardless. Safe to remove once WMA
+		 * playback is confirmed working. */
+		if (gs->ops && gs->ops->info && gs->ops->info->extensions &&
+			StrCaseCmp(gs->ops->info->extensions, "wma") == 0) {
+			static unsigned long wmaMonoDebugCount = 0;
+			if (wmaMonoDebugCount < 20) {
+				fprintf(stderr, "wma-debug: mono decode() call #%lu rc=%ld\n",
+					wmaMonoDebugCount, (long)nDecoded);
+				wmaMonoDebugCount++;
+			}
+		}
 		if (opt->debugDecoder && !gs->firstDecodeDebugPrinted && gs->ops && gs->ops->info &&
 			gs->ops->info->extensions && StrCaseCmp(gs->ops->info->extensions, "aac") == 0)
 			fprintf(stderr, "AAC: after first decode rc=%ld\n", (long)nDecoded);
@@ -9376,6 +9390,20 @@ static int GenericDecodeStreamFillPlanarS8(GenericDecodeStream *gs,
 			GenericDecodeChunkForRateConvert(gs, opt, 2));
 		if (!GenericDecodeStreamGuardOk(gs, "after stereo decode"))
 			break;
+		/* Temporary diagnostic for the new WMA module -- unconditional
+		 * (not gated behind opt->debugDecoder, which the ReAction GUI
+		 * never sets) so the first several decode() calls are visible
+		 * from a Shell window regardless. Safe to remove once WMA
+		 * playback is confirmed working. */
+		if (gs->ops && gs->ops->info && gs->ops->info->extensions &&
+			StrCaseCmp(gs->ops->info->extensions, "wma") == 0) {
+			static unsigned long wmaStereoDebugCount = 0;
+			if (wmaStereoDebugCount < 20) {
+				fprintf(stderr, "wma-debug: stereo decode() call #%lu rc=%ld\n",
+					wmaStereoDebugCount, (long)nDecoded);
+				wmaStereoDebugCount++;
+			}
+		}
 		if (opt->debugDecoder && !gs->firstDecodeDebugPrinted && gs->ops && gs->ops->info &&
 			gs->ops->info->extensions && StrCaseCmp(gs->ops->info->extensions, "aac") == 0)
 			fprintf(stderr, "AAC: after first decode rc=%ld\n", (long)nDecoded);

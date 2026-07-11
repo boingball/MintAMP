@@ -19,6 +19,7 @@
 #   make -C decoders ogg OGGASM=0  # build OGG/Tremor without m68k asm helpers
 #   make -C decoders wav      # build only the WAV (RIFF/PCM) module
 #   make -C decoders iff      # build only the IFF/8SVX module
+#   make -C decoders wma      # build only the WMA (v1/v2) module
 
 CC     := m68k-amigaos-gcc
 NM     := m68k-amigaos-nm
@@ -61,10 +62,10 @@ override CFLAGS := $(CPU_MFLAG) -O2 -fomit-frame-pointer -std=gnu89 -Wall -I. \
 # Post-link: mark hunks as "any RAM, prefer Fast" (same as main binary)
 FIXHUNKS := python3 ../tools/amiga_fast_preferred_hunks.py
 
-.PHONY: all flac aac ogg wav iff clean
+.PHONY: all flac aac ogg wav iff wma clean
 
 # The normal decoder build must produce every supported external module.
-all: flac aac ogg wav iff
+all: flac aac ogg wav iff wma
 	@echo "Decoder build complete."
 
 # --------------------------------------------------------------------------
@@ -451,6 +452,89 @@ iff.decoder: $(IFF_OBJS) decoder_module.h
 	@echo "Built $@"
 
 # --------------------------------------------------------------------------
+# WMA — classic WMA v1/v2, vendored from Rockbox's fixed-point libwma
+# (lib/rbcodec/codecs/{libwma,lib}/*, LGPLv2.1+, derived from FFmpeg's WMA
+# decoder). Chosen over extracting FFmpeg's own libavcodec/wmadec.c
+# directly because Rockbox already did the work of decoupling it from
+# FFmpeg's framework for embeddable, fixed-point, no-OS bare-metal
+# playback (Coldfire/ARM/SH DAPs) -- the same constraints this project has
+# on m68k, and the same reason FLAC/OGG here use libfoxenflac/Tremor
+# instead of the reference libFLAC/full libvorbis. See decoders/wma/ for
+# the vendored sources (platform.h/codecs.h/codeclib.h are this project's
+# adaptation shims, not upstream Rockbox) and wma_asf.c for this project's
+# own ASF container demuxer (WMA files are ASF containers; Rockbox's own
+# ASF demux is split across its buffered-file/id3 metadata layer in a way
+# that doesn't map onto this project's DecoderReadCb/DecoderSeekCb model).
+#
+# No decoder-supplied test WMA/ASF files were available to verify actual
+# audio output in this build environment -- the ASF demux and decoder-core
+# integration were checked with host-side unit tests (see decoders/wma/
+# ReadMe or the project's development notes), but real playback on target
+# hardware is the first real-world correctness check this module gets.
+# --------------------------------------------------------------------------
+WMA_LIB_SRCS := wma/wmadeci.c wma/wmafixed.c wma/mdct.c wma/mdct_lookup.c \
+                wma/fft-ffmpeg.c wma/ffmpeg_bitstream.c
+WMA_SRCS := wma_entry.c wma_alloc.c wma_asf.c $(WMA_LIB_SRCS) wma_module.c
+WMA_OBJS := $(WMA_SRCS:.c=.o)
+
+wma: wma.decoder
+
+WMA_CFLAGS := $(CFLAGS) -I. -Iwma
+
+wma_entry.o wma_alloc.o wma_asf.o wma_module.o: decoder_module.h
+wma_alloc.o wma_asf.o wma_module.o: wma_alloc.h
+wma_asf.o wma_module.o: wma_asf.h
+wma_module.o: wma/wmadec.h
+
+# Compile our wrapper objects with base flags (no forced include needed).
+wma_entry.o wma_alloc.o wma_asf.o wma_module.o: %.o: %.c
+	$(CC) $(WMA_CFLAGS) -c -o $@ $<
+
+# Compile every vendored decoders/wma/ source with memcpy/memset/memmove/
+# memcmp/qsort redirected to wma_alloc.c's freestanding implementations --
+# same forced-rename pattern flac_module.c/aac_module.c/ogg_module.c use
+# for malloc/calloc/free, needed here because no libc is linked into these
+# -nostartfiles decoder-module hunks.
+wma/%.o: wma/%.c
+	$(CC) $(WMA_CFLAGS) \
+	    -Dmemcpy=WmaMemcpy \
+	    -Dmemset=WmaMemset \
+	    -Dmemmove=WmaMemmove \
+	    -Dmemcmp=WmaMemcmp \
+	    -Dqsort=WmaQsort \
+	    -c -o $@ $<
+
+wma.decoder: $(WMA_OBJS) decoder_module.h wma_alloc.h wma_asf.h wma/wmadec.h
+	rm -f $@ $@.map
+	@echo "WMA decoder unresolved-symbol audit:"; \
+	    $(NM) -u wma_entry.o wma_alloc.o wma_asf.o wma_module.o || true
+	@if $(NM) -u wma_entry.o wma_asf.o wma_module.o $(WMA_LIB_SRCS:.c=.o) 2>/dev/null | \
+	    grep -iE '(^|[[:space:]])(_?malloc_r|_?calloc_r|_?realloc_r|_?free_r|malloc|calloc|realloc|free|exit|_exit|abort|assert|___assert_func|printf|fprintf|puts|putchar|fflush|stdio|vfprintf|memcpy|memset|memmove|memcmp|qsort)$$'; then \
+	    echo "ERROR: WMA decoder objects reference forbidden libc/startup symbols outside wma_alloc.o" >&2; \
+	    exit 1; \
+	fi
+	$(CC) $(WMA_CFLAGS) -nostartfiles -Wl,--gc-sections -Wl,-Map,$@.map -o $@ $(WMA_OBJS) -lgcc
+	@if grep -iE "printf|fprintf|puts|putchar|fflush|stdio|vfprintf|malloc\.o|lib_a-exit|abort|assert|___assert_func|_exit|__EXIT_LIST__|DOSBase|SysBase|dummy\.o|raise" $@.map; then \
+	    echo "ERROR: WMA decoder linked forbidden libc/startup symbols" >&2; \
+	    exit 1; \
+	fi
+	@if $(NM) -u $@ 2>/dev/null | \
+	    grep -iE 'printf|fprintf|puts|putchar|fflush|stdio|vfprintf|malloc\.o|lib_a-exit|abort|assert|___assert_func|(^|[[:space:]])_?exit$$|__EXIT_LIST__|DOSBase|SysBase|dummy\.o|raise'; then \
+	    echo "ERROR: WMA decoder has forbidden unresolved libc/startup symbols" >&2; \
+	    exit 1; \
+	fi
+	@if ! grep -q 'wma_module\.o' $@.map; then \
+	    echo "ERROR: WMA decoder map does not mention wma_module.o" >&2; \
+	    exit 1; \
+	fi
+	@if ! strings $@ | grep -q 'WMA MODULE BUILD MARKER 12345'; then \
+	    echo "ERROR: WMA decoder is missing build marker string" >&2; \
+	    exit 1; \
+	fi
+	$(FIXHUNKS) $@
+	@echo "Built $@"
+
+# --------------------------------------------------------------------------
 
 clean:
 	rm -f flac.decoder flac.decoder.map $(FLAC_OBJS)
@@ -458,3 +542,4 @@ clean:
 	rm -f ogg.decoder  ogg.decoder.map  $(OGG_OBJS)
 	rm -f wav.decoder  wav.decoder.map  $(WAV_OBJS)
 	rm -f iff.decoder  iff.decoder.map  $(IFF_OBJS)
+	rm -f wma.decoder  wma.decoder.map  $(WMA_OBJS)
