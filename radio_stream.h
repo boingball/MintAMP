@@ -158,8 +158,23 @@ void Radio_AmiSslUnlock(void);
  * (on whichever task), 0 if the worker could not be started or the wait
  * timed out (the worker may be wedged inside a blocking call -- see the
  * lifecycle audit doc). No-op (returns 0) in non-Amiga/non-HAVE_AMISSL
- * builds. */
+ * builds.
+ *
+ * LIFETIME CONTRACT: on a timeout the queued job is detached, not cancelled
+ * -- the worker may still run fn(arg) long after this call returned.  arg
+ * must therefore point at heap or otherwise persistent storage, NEVER at
+ * the caller's stack.  Callers with stack-local argument blocks must use
+ * Radio_RunOnNetWorkerCopied() instead. */
 int Radio_RunOnNetWorker(void (*fn)(void *arg), void *arg);
+/* Same dispatch, but fn runs against a worker-owned heap copy of the
+ * arg_size bytes at arg, so a timed-out job can never touch the caller's
+ * (possibly dead) stack frame.  On success (return 1) the copy -- including
+ * any results fn wrote into it -- is copied back into arg.  On timeout
+ * (return 0) arg is untouched and the worker frees the copy exactly once,
+ * whether the job never ran or finishes later.  The copied block must be
+ * self-contained: any pointers stored inside it must target heap/persistent
+ * storage, never the caller's stack. */
+int Radio_RunOnNetWorkerCopied(void (*fn)(void *arg), void *arg, unsigned long arg_size);
 int Radio_IsMemoryPoisoned(void);
 void Radio_MarkMemoryPoisoned(const char *where);
 int Radio_IsTlsPoisoned(void);
@@ -245,6 +260,7 @@ static int Radio_AmiSslTaskIsOpener(void) { return 0; }
 static int Radio_AmiSslLock(void) { return 0; }
 static void Radio_AmiSslUnlock(void) { }
 static int Radio_RunOnNetWorker(void (*fn)(void *arg), void *arg) { (void)fn; (void)arg; return 0; }
+static int Radio_RunOnNetWorkerCopied(void (*fn)(void *arg), void *arg, unsigned long arg_size) { (void)fn; (void)arg; (void)arg_size; return 0; }
 static int Radio_IsMemoryPoisoned(void) { return 0; }
 static void Radio_MarkMemoryPoisoned(const char *where) { (void)where; }
 static int Radio_IsTlsPoisoned(void) { return 0; }

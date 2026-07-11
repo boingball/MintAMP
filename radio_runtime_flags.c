@@ -117,29 +117,35 @@ static const char *radio_runtime_effective_artwork_text(void)
     return "enabled";
 }
 
-static int radio_runtime_abort_ssl_free_skip_default(void)
-{
-#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-    return 1;
-#else
-    return 0;
-#endif
-}
-
-static int radio_runtime_abort_ssl_free_skip_effective(void)
+/* See the RadioAbortSslPolicy comment in radio_runtime_flags.h: this is the
+ * one authoritative answer, consumed both by the summary print below and by
+ * radio_stream.c's radio_skip_abort_ssl_free().  The default deliberately is
+ * NOT "always skip": a clean abort (user stop / station switch with no TLS
+ * fault) frees its SSL/SSL_CTX normally -- leaking them on every switch
+ * starves memory and leaves objects for CloseAmiSSL() to trip over at app
+ * exit.  Only a real session fault or task-wide poison quarantines. */
+RadioAbortSslPolicy Radio_AbortSslFreePolicy(void)
 {
     if (radio_runtime_flag_enabled("MP3_ALLOW_ABORT_SSL_FREE"))
-        return 0;
+        return RADIO_ABORT_SSL_POLICY_FORCE_FREE;
     if (radio_runtime_flag_enabled("MP3_SKIP_ABORT_SSL_FREE"))
-        return 1;
-    return radio_runtime_abort_ssl_free_skip_default();
+        return RADIO_ABORT_SSL_POLICY_FORCE_SKIP;
+    return RADIO_ABORT_SSL_POLICY_FREE_UNLESS_FAULT;
+}
+
+const char *Radio_AbortSslFreePolicyName(void)
+{
+    switch (Radio_AbortSslFreePolicy()) {
+    case RADIO_ABORT_SSL_POLICY_FORCE_FREE: return "free-on-abort(env)";
+    case RADIO_ABORT_SSL_POLICY_FORCE_SKIP: return "skip-on-abort(env)";
+    default: return "free-unless-fault";
+    }
 }
 
 void Radio_LogTestModeSummary(void)
 {
     int probeTest = radio_runtime_flag_enabled("MP3_TEST_ENABLE_STREAM_PROBE");
     int artworkTest = radio_runtime_flag_enabled("MP3_TEST_ENABLE_ARTWORK");
-    int skipAbortSslFree = radio_runtime_abort_ssl_free_skip_effective();
     const char *source = "default";
 
     if (radio_runtime_flag_is_set("MP3_NO_STREAM_PROBE") ||
@@ -156,10 +162,9 @@ void Radio_LogTestModeSummary(void)
     printf("radio-runtime: probe=%s artwork=%s abortSslFreePolicy=%s source=%s\n",
         radio_runtime_effective_probe_text(),
         radio_runtime_effective_artwork_text(),
-        skipAbortSslFree ? "skip-on-abort" : "free-on-abort",
+        Radio_AbortSslFreePolicyName(),
         source);
 #else
-    (void)skipAbortSslFree;
     (void)source;
     (void)radio_runtime_effective_probe_text;
     (void)radio_runtime_effective_artwork_text;

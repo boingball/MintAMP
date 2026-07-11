@@ -79,13 +79,22 @@ static int rb_probe_amissl_dirty = 0;
  * radio_stream.c around to track the opener task): that call already
  * initialized this task, so InitAmiSSL()/CleanupAmiSSL() must not run. */
 static int rb_probe_opened_shared_here = 0;
-/* One SSL_CTX shared by every HTTPS probe in this run.
- * Do not free it per probe: repeated SSL_CTX_new()/SSL_CTX_free() churn on
- * classic AmiSSL has correlated with delayed exec heap corruption during
- * station/favicon probe cycles. SSL_new()/SSL_free() remains per connection.
- * If a TLS fault poisons a transport, orphan this ctx and rebuild on the next
- * clean probe instead of freeing it through possibly damaged AmiSSL state. */
-static SSL_CTX *rb_probe_shared_ctx = NULL;
+/* Every HTTPS probe/fetch transport now owns a fresh per-connection SSL_CTX,
+ * created in rb_probe_transport_open_ex() and freed (or quarantined) by
+ * rb_probe_transport_close_mode() -- the same per-attempt lifecycle the
+ * playback path (radio_stream.c's radio_ssl_connect()) already uses, whose
+ * full connect/play/teardown cycle reports clean in the captured logs.
+ * The previous design instead RETAINED one shared SSL_CTX across every
+ * selected-stream probe of the run ("SSL_CTX churn correlated with heap
+ * corruption") -- but that retained ctx was the only AmiSSL object surviving
+ * from the first station's sequence into the second station's probe, and the
+ * captured second-switch failure detected corrupted exec heap chunks exactly
+ * across the second probe's SSL_connect() on it, while every per-connection
+ * create/free (playback ctx, artwork ctx) in the same log tore down clean.
+ * rb_probe_active_ctx_count tracks live probe/fetch-owned contexts for the
+ * per-probe diagnostics. */
+static long rb_probe_active_ctx_count = 0;
+static long rb_probe_ctx_quarantined_count = 0;
 /* Cumulative per-task InitAmiSSL()/CleanupAmiSSL() debug counters for this
  * (parent/GUI) task's probe/favicon fetches. */
 static long rb_probe_amissl_init_count = 0;
@@ -760,27 +769,20 @@ static void rb_probe_cleanup_amissl(void)
 void rb_probe_shutdown_tls_context(void)
 {
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-    RADIO_DBG(printf("radio-cleanup: probe shutdown TLS context shared_ctx=%p probe_active_ssl_count=%ld probe_open_socket_count=%ld tls_poisoned=%d\n",
-        (void *)rb_probe_shared_ctx, rb_probe_active_ssl_count,
-        rb_probe_open_socket_count, Radio_IsTlsPoisoned());)
-    if (rb_probe_active_ssl_count != 0 || rb_probe_open_socket_count != 0) {
-        RADIO_DBG(printf("radio-cleanup: probe shutdown TLS context dirty active_ssl=%ld open_socket=%ld shared_ctx=%p\n",
-            rb_probe_active_ssl_count, rb_probe_open_socket_count,
-            (void *)rb_probe_shared_ctx);)
-    }
-    if (rb_probe_shared_ctx) {
-        if (!Radio_IsTlsPoisoned()) {
-            Radio_DebugCheckExecMem("before rb_probe_shared_ctx SSL_CTX_free");
-            RADIO_DBG(printf("radio-cleanup: probe shared SSL_CTX_free start ctx=%p\n",
-                (void *)rb_probe_shared_ctx);)
-            SSL_CTX_free(rb_probe_shared_ctx);
-            RADIO_DBG(printf("radio-cleanup: probe shared SSL_CTX_free done\n");)
-            Radio_DebugCheckExecMem("after rb_probe_shared_ctx SSL_CTX_free");
-        } else {
-            RADIO_DBG(printf("radio-cleanup: probe shared SSL_CTX_free skipped (tls poisoned) ctx=%p\n",
-                (void *)rb_probe_shared_ctx);)
-        }
-        rb_probe_shared_ctx = NULL;
+    /* No run-long shared probe SSL_CTX exists any more (every transport owns
+     * a per-connection ctx freed by rb_probe_transport_close_mode()), so at
+     * worker shutdown there is nothing to free here -- only leftovers to
+     * report.  active counts should be 0; quarantined counts are deliberate
+     * leaks from faulted sessions. */
+    RADIO_DBG(printf("radio-cleanup: probe shutdown TLS context probe_active_ssl_count=%ld probe_active_ctx_count=%ld probe_ctx_quarantined_count=%ld probe_open_socket_count=%ld tls_poisoned=%d\n",
+        rb_probe_active_ssl_count, rb_probe_active_ctx_count,
+        rb_probe_ctx_quarantined_count, rb_probe_open_socket_count,
+        Radio_IsTlsPoisoned());)
+    if (rb_probe_active_ssl_count != 0 || rb_probe_active_ctx_count != 0 ||
+        rb_probe_open_socket_count != 0) {
+        RADIO_DBG(printf("radio-cleanup: probe shutdown TLS context dirty active_ssl=%ld active_ctx=%ld open_socket=%ld\n",
+            rb_probe_active_ssl_count, rb_probe_active_ctx_count,
+            rb_probe_open_socket_count);)
     }
 #endif
 }
@@ -951,37 +953,30 @@ static int rb_probe_transport_open_ex(RbProbeTransport *transport, const char *u
             rb_probe_transport_close(transport);
             return RB_STREAM_PROBE_ERR_CONNECT;
         }
-        if (private_ctx) {
-            Radio_DebugCheckExecMem("before artwork SSL_CTX_new");
-            transport->ctx = SSL_CTX_new(SSLv23_client_method());
-            Radio_DebugCheckExecMem("after artwork SSL_CTX_new");
-            transport->ctxOwnedByTransport = (transport->ctx != NULL);
-            RADIO_DBG(printf("radio-art: per-fetch SSL_CTX_new session=%lu ctx=%p shared_ctx=%p\n",
-                transport->session_id, (void *)transport->ctx, (void *)rb_probe_shared_ctx);)
-            if (transport->ctx) {
-                SSL_CTX_set_verify(transport->ctx, SSL_VERIFY_NONE, NULL);
+        /* Fresh per-connection SSL_CTX for stream probe and artwork fetch
+         * alike -- see the rb_probe_active_ctx_count comment at the top of
+         * this file for why nothing TLS-related survives from one probe
+         * into the next any more. */
+        (void)private_ctx;
+        Radio_DebugCheckExecMem("before probe SSL_CTX_new");
+        transport->ctx = SSL_CTX_new(SSLv23_client_method());
+        Radio_DebugCheckExecMem("after probe SSL_CTX_new");
+        transport->ctxOwnedByTransport = (transport->ctx != NULL);
+        if (transport->ctx) rb_probe_active_ctx_count++;
+        RADIO_DBG(printf("rb-probe TLS: session=%lu ctx=%p ctx_mode=new-per-%s ssl=%p active_ctx_count=%ld\n",
+            transport->session_id, (void *)transport->ctx,
+            private_ctx ? "fetch" : "probe", (void *)transport->ssl,
+            rb_probe_active_ctx_count);)
+        if (transport->ctx) {
+            /* No CA bundle on classic AmigaOS; skip cert verification for streams. */
+            SSL_CTX_set_verify(transport->ctx, SSL_VERIFY_NONE, NULL);
 #ifdef SSL_OP_IGNORE_UNEXPECTED_EOF
-                SSL_CTX_set_options(transport->ctx, SSL_OP_IGNORE_UNEXPECTED_EOF);
+            /* Treat an abrupt server disconnect as a clean end-of-stream
+             * instead of the fatal "unexpected eof" SSL_ERROR_SSL -- see the
+             * matching option (and rationale) in radio_stream.c's
+             * radio_ssl_connect(). */
+            SSL_CTX_set_options(transport->ctx, SSL_OP_IGNORE_UNEXPECTED_EOF);
 #endif
-            }
-        } else {
-            if (!rb_probe_shared_ctx) {
-                Radio_DebugCheckExecMem("before probe SSL_CTX_new");
-                rb_probe_shared_ctx = SSL_CTX_new(SSLv23_client_method());
-                Radio_DebugCheckExecMem("after probe SSL_CTX_new");
-                if (rb_probe_shared_ctx) {
-                    /* No CA bundle on classic AmigaOS; skip cert verification for streams. */
-                    SSL_CTX_set_verify(rb_probe_shared_ctx, SSL_VERIFY_NONE, NULL);
-#ifdef SSL_OP_IGNORE_UNEXPECTED_EOF
-                    /* Treat an abrupt server disconnect as a clean end-of-stream
-                     * instead of the fatal "unexpected eof" SSL_ERROR_SSL -- see the
-                     * matching option (and rationale) in radio_stream.c's
-                     * radio_ssl_connect(). */
-                    SSL_CTX_set_options(rb_probe_shared_ctx, SSL_OP_IGNORE_UNEXPECTED_EOF);
-#endif
-                }
-            }
-            transport->ctx = rb_probe_shared_ctx;
         }
         if (!transport->ctx) {
             rb_probe_transport_close(transport);
@@ -1011,6 +1006,19 @@ static int rb_probe_transport_open_ex(RbProbeTransport *transport, const char *u
          * must not be misread as this connection's fatal error below. */
         ERR_clear_error();
         for (tries = 0; tries < 150; tries++) {
+            /* The Radio_DebugCheckExecMem() checkpoints in this very loop
+             * can detect corruption and mark memory/TLS poisoned mid-
+             * handshake.  Once that happens, no further AmiSSL call of any
+             * kind may run -- not another SSL_connect() attempt and not the
+             * ERR_get_error()/free path below either; quarantine and bail. */
+            if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
+                RADIO_DBG(printf("rb-probe TLS: aborting SSL_connect retry loop attempt=%d session=%lu -- memory/TLS poisoned\n", tries + 1, transport->session_id);)
+                transport->sslStatePoisoned = 1;
+                rb_probe_amissl_dirty = 1;
+                ssl_connect_rc = -1;
+                ssl_error = 0;
+                break;
+            }
             sprintf(memcheck_where, "before probe SSL_connect attempt=%d", tries + 1);
             Radio_DebugCheckExecMem(memcheck_where);
             RADIO_DBG(printf("rb-probe TLS: BEFORE SSL_connect attempt=%d ssl=%p ctx=%p fd=%ld\n", tries + 1, (void *)transport->ssl, (void *)transport->ctx, (long)transport->sock);)
@@ -1019,6 +1027,13 @@ static int rb_probe_transport_open_ex(RbProbeTransport *transport, const char *u
             RADIO_DBG(printf("rb-probe TLS: AFTER SSL_connect attempt=%d ret=%d err=%d ssl=%p ctx=%p fd=%ld\n", tries + 1, ssl_connect_rc, ssl_error, (void *)transport->ssl, (void *)transport->ctx, (long)transport->sock);)
             sprintf(memcheck_where, "after probe SSL_connect attempt=%d", tries + 1);
             Radio_DebugCheckExecMem(memcheck_where);
+            if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
+                RADIO_DBG(printf("rb-probe TLS: memory/TLS poisoned after SSL_connect attempt=%d session=%lu -- not retrying\n", tries + 1, transport->session_id);)
+                transport->sslStatePoisoned = 1;
+                rb_probe_amissl_dirty = 1;
+                ssl_connect_rc = (ssl_connect_rc == 1) ? -1 : ssl_connect_rc;
+                break;
+            }
             if (ssl_connect_rc == 1) break;
             if (ssl_error == SSL_ERROR_WANT_READ || ssl_error == SSL_ERROR_WANT_WRITE) {
                 rb_probe_backoff_sleep();
@@ -1027,6 +1042,17 @@ static int rb_probe_transport_open_ex(RbProbeTransport *transport, const char *u
             break;
         }
         if (ssl_connect_rc != 1) {
+            if (transport->sslStatePoisoned || Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
+                /* Poisoned mid-handshake: skip even the ERR_get_error()/
+                 * ERR_clear_error() diagnostics (they are AmiSSL calls too)
+                 * and go straight to the quarantine close below. */
+                transport->sslStatePoisoned = 1;
+                rb_probe_amissl_dirty = 1;
+                RADIO_DBG(printf("rb-probe TLS: SSL_connect abandoned (memory/TLS poisoned) session=%lu rc=%d\n",
+                    transport->session_id, ssl_connect_rc);)
+                rb_probe_transport_close(transport);
+                return RB_STREAM_PROBE_ERR_TLS_HANDSHAKE;
+            }
             ssl_lib_error = ERR_get_error();
             if (ssl_lib_error != 0)
                 ERR_error_string_n(ssl_lib_error, ssl_error_buf, sizeof(ssl_error_buf));
@@ -1056,17 +1082,17 @@ static int rb_probe_transport_open_ex(RbProbeTransport *transport, const char *u
              * session's fault. */
             ERR_clear_error();
             if (transport->sslStatePoisoned || Radio_IsTlsPoisoned()) {
-                RADIO_DBG(printf("radio-cleanup: probe handshake-fail SSL_free/SSL_CTX_free skipped (quarantined/poisoned) session=%lu ssl=%p ctx=%p\n", transport->session_id, (void *)transport->ssl, (void *)transport->ctx);)
+                RADIO_DBG(printf("radio-cleanup: probe handshake-fail close reason=fault session=%lu ssl=%p ctx=%p ctx_mode=quarantined ssl_shutdown=skipped ssl_free=skipped ctx_free=skipped\n", transport->session_id, (void *)transport->ssl, (void *)transport->ctx);)
                 rb_probe_ssl_free_skipped_poison_count++;
+                if (transport->ctxOwnedByTransport) rb_probe_ctx_quarantined_count++;
                 transport->ssl = NULL;
-                if (!transport->ctxOwnedByTransport)
-                    rb_probe_shared_ctx = NULL;
                 transport->ctx = NULL;
+                transport->ctxOwnedByTransport = 0;
             } else {
                 /* Plain connect timeout (WANT_READ/WANT_WRITE budget
                  * exhausted, empty error queue): the SSL object is healthy
-                 * and freeing it is the normal, safe path. Shared probe ctx
-                 * stays alive; per-fetch artwork ctx is freed immediately. */
+                 * and freeing it -- and this transport's own per-connection
+                 * ctx -- is the normal, safe path. */
                 rb_probe_debug_mem_report(transport->session_id, "before handshake-fail SSL_free");
                 Radio_DebugCheckExecMem("before probe SSL_free");
                 SSL_free(transport->ssl); transport->ssl = NULL;
@@ -1074,11 +1100,12 @@ static int rb_probe_transport_open_ex(RbProbeTransport *transport, const char *u
                 Radio_DebugCheckExecMem("after probe SSL_free");
                 rb_probe_debug_mem_report(transport->session_id, "after handshake-fail SSL_free");
                 if (transport->ctxOwnedByTransport && transport->ctx) {
-                    Radio_DebugCheckExecMem("before artwork handshake-fail SSL_CTX_free");
-                    RADIO_DBG(printf("radio-art: per-fetch SSL_CTX_free after handshake failure session=%lu ctx=%p\n",
+                    Radio_DebugCheckExecMem("before probe handshake-fail SSL_CTX_free");
+                    RADIO_DBG(printf("radio-cleanup: probe handshake-fail close reason=connect-timeout session=%lu ctx=%p ctx_mode=freed ssl_shutdown=skipped\n",
                         transport->session_id, (void *)transport->ctx);)
                     SSL_CTX_free(transport->ctx);
-                    Radio_DebugCheckExecMem("after artwork handshake-fail SSL_CTX_free");
+                    if (rb_probe_active_ctx_count > 0) rb_probe_active_ctx_count--;
+                    Radio_DebugCheckExecMem("after probe handshake-fail SSL_CTX_free");
                 }
                 transport->ctx = NULL;
                 transport->ctxOwnedByTransport = 0;
@@ -1127,15 +1154,14 @@ static void rb_probe_transport_close_mode(RbProbeTransport *transport, RbProbeCl
         RADIO_DBG(printf("radio-cleanup: probe ssl_shutdown session=%lu mode=%s %s\n",
             transport->session_id, rb_probe_close_mode_name(mode), shutdown_called ? "called" : "skipped");)
         if (transport->ssl && (transport->sslStatePoisoned || Radio_IsTlsPoisoned())) {
-            RADIO_DBG(printf("radio-cleanup: probe SSL_free skipped (%s) session=%lu ssl=%p leaking to avoid crashing on AmiSSL close/free path\n",
+            RADIO_DBG(printf("radio-cleanup: probe SSL_free skipped (%s) session=%lu ssl=%p ctx=%p ctx_mode=quarantined leaking both to avoid crashing on AmiSSL close/free path\n",
                 transport->sslStatePoisoned ? "poisoned" : "tls-poisoned",
-                transport->session_id, (void *)transport->ssl);)
+                transport->session_id, (void *)transport->ssl, (void *)transport->ctx);)
             rb_probe_ssl_free_skipped_poison_count++;
+            if (transport->ctxOwnedByTransport && transport->ctx)
+                rb_probe_ctx_quarantined_count++;
             transport->ssl = NULL;
             transport->sslHandshakeDone = 0;
-            if (!transport->ctxOwnedByTransport &&
-                (transport->sslStatePoisoned || Radio_IsTlsPoisoned()))
-                rb_probe_shared_ctx = NULL;
             transport->ctx = NULL;
             transport->ctxOwnedByTransport = 0;
         } else if (transport->ssl) {
@@ -1153,20 +1179,28 @@ static void rb_probe_transport_close_mode(RbProbeTransport *transport, RbProbeCl
             rb_probe_debug_mem_report(transport->session_id, "after close SSL_free");
             Radio_DebugCheckExecMem("after probe SSL_free");
         }
-        if (transport->ctxOwnedByTransport && transport->ctx) {
+        if (transport->ctxOwnedByTransport && transport->ctx &&
+            (transport->sslStatePoisoned || Radio_IsTlsPoisoned() || Radio_IsMemoryPoisoned())) {
+            /* Covers the ssl==NULL cases (e.g. SSL_new() failed, or the SSL
+             * was already quarantined separately) where the ctx would
+             * otherwise be freed through poisoned AmiSSL state. */
+            RADIO_DBG(printf("radio-cleanup: probe SSL_CTX_free skipped (poisoned) session=%lu ctx=%p ctx_mode=quarantined\n",
+                transport->session_id, (void *)transport->ctx);)
+            rb_probe_ctx_quarantined_count++;
+            transport->ctx = NULL;
+            transport->ctxOwnedByTransport = 0;
+        } else if (transport->ctxOwnedByTransport && transport->ctx) {
             rb_probe_debug_mem_report(transport->session_id, "before close SSL_CTX_free");
-            Radio_DebugCheckExecMem("before artwork SSL_CTX_free");
-            RADIO_DBG(printf("radio-art: per-fetch SSL_CTX_free session=%lu ctx=%p shared_ctx=%p\n",
-                transport->session_id, (void *)transport->ctx, (void *)rb_probe_shared_ctx);)
+            Radio_DebugCheckExecMem("before probe SSL_CTX_free");
+            RADIO_DBG(printf("radio-cleanup: probe per-connection SSL_CTX_free session=%lu ctx=%p ctx_mode=freed active_ctx_count=%ld\n",
+                transport->session_id, (void *)transport->ctx, rb_probe_active_ctx_count);)
             SSL_CTX_free(transport->ctx);
+            if (rb_probe_active_ctx_count > 0) rb_probe_active_ctx_count--;
             transport->ctx = NULL;
             transport->ctxOwnedByTransport = 0;
             rb_probe_debug_mem_report(transport->session_id, "after close SSL_CTX_free");
-            Radio_DebugCheckExecMem("after artwork SSL_CTX_free");
+            Radio_DebugCheckExecMem("after probe SSL_CTX_free");
         } else {
-            /* Shared selected-stream probe ctx is deliberately kept for the
-             * run and freed once by rb_probe_shutdown_tls_context(). Artwork
-             * never uses rb_probe_shared_ctx. */
             transport->ctx = NULL;
         }
 #endif
@@ -1555,26 +1589,31 @@ static int rb_probe_optional_network_gate(const char *kind, const char *url)
 /* rb_probe_stream_url_impl()'s entire body -- DNS/connect/TLS handshake/
  * SSL_read()/rb_probe_cleanup_amissl() -- touches bsdsocket.library/AmiSSL,
  * so per this file's single-net-worker-task rule (see radio_stream.c's
- * Radio_RunOnNetWorker()) it may only run on that one worker task. Nothing
- * inside rb_probe_stream_url_impl() itself needs to change: it already only
- * ever ran in whichever task called rb_probe_stream_url(), and now that is
- * always the worker task, so its existing rb_probe_ensure_amissl()/
- * Radio_AmiSslTaskIsOpener() logic (adopt the shared instance, skip a
- * manual InitAmiSSL() for the opener task) does exactly the right thing
- * unmodified. */
+ * Radio_RunOnNetWorker()) it may only run on that one worker task.
+ *
+ * WORKER-OWNED, SELF-CONTAINED job payload: the previous version queued a
+ * stack-local struct full of pointers into the caller's frame (url, info,
+ * peek_buf, peek_len).  When the dispatch wait timed out (wedged resolver/
+ * stalled server) the worker could resume the job later and write results
+ * straight through those pointers into a dead -- possibly already reused or
+ * freed -- stack frame: silent memory corruption.  The payload now carries
+ * its own copies of the url and result buffers inline, is deep-copied to
+ * worker-owned heap by Radio_RunOnNetWorkerCopied(), and is freed exactly
+ * once by whichever side ends up owning it. */
 typedef struct RbProbeStreamUrlJobArgs {
-    const char *url;
-    RbStreamInfo *info;
-    unsigned char *peek_buf;
+    char url[RB_PROBE_MAX_URL];
+    RbStreamInfo info;
     int peek_buf_size;
-    int *peek_len;
+    int peek_len;
     int result;
+    unsigned char peek_buf[1]; /* really peek_buf_size bytes (allocated after the struct) */
 } RbProbeStreamUrlJobArgs;
 
 static void rb_probe_stream_url_job(void *arg)
 {
     RbProbeStreamUrlJobArgs *a = (RbProbeStreamUrlJobArgs *)arg;
-    a->result = rb_probe_stream_url_impl(a->url, a->info, a->peek_buf, a->peek_buf_size, a->peek_len);
+    a->result = rb_probe_stream_url_impl(a->url, &a->info,
+        a->peek_buf_size > 0 ? a->peek_buf : NULL, a->peek_buf_size, &a->peek_len);
     rb_probe_cleanup_amissl();
 }
 #endif
@@ -1592,28 +1631,58 @@ int rb_probe_stream_url(const char *url, RbStreamInfo *info,
         return RB_STREAM_PROBE_ERR_DISABLED;
     }
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-    if (!rb_probe_optional_network_gate("probe", url))
-        return RB_STREAM_PROBE_ERR_DISABLED;
-    RbProbeStreamUrlJobArgs args;
-    args.url = url;
-    args.info = info;
-    args.peek_buf = peek_buf;
-    args.peek_buf_size = peek_buf_size;
-    args.peek_len = peek_len;
-    args.result = RB_STREAM_PROBE_ERR_CONNECT;
-    if (!Radio_RunOnNetWorker(rb_probe_stream_url_job, &args))
-        return RB_STREAM_PROBE_ERR_CONNECT;
-    if (!rb_probe_optional_network_gate("probe", url)) {
-        RADIO_DBG(printf("radio-probe: probe finished but temp transport/counters are not clean url=\"%s\"\n", url ? url : "");)
-        return RB_STREAM_PROBE_ERR_CONNECT;
+    {
+        RbProbeStreamUrlJobArgs *args;
+        unsigned long args_size;
+        int url_len;
+        int rc;
+
+        if (!url || !info || !peek_len || peek_buf_size < 0 ||
+            (peek_buf_size > 0 && !peek_buf))
+            return RB_STREAM_PROBE_ERR_BAD_ARG;
+        if (!rb_probe_optional_network_gate("probe", url))
+            return RB_STREAM_PROBE_ERR_DISABLED;
+        url_len = (int)strlen(url);
+        if (url_len >= RB_PROBE_MAX_URL)
+            return RB_STREAM_PROBE_ERR_URL_TOO_LONG;
+        args_size = (unsigned long)sizeof(*args) + (unsigned long)peek_buf_size;
+        args = (RbProbeStreamUrlJobArgs *)malloc(args_size);
+        if (!args)
+            return RB_STREAM_PROBE_ERR_CONNECT;
+        memset(args, 0, sizeof(*args));
+        memcpy(args->url, url, (size_t)url_len + 1);
+        args->peek_buf_size = peek_buf_size;
+        args->result = RB_STREAM_PROBE_ERR_CONNECT;
+        if (!Radio_RunOnNetWorkerCopied(rb_probe_stream_url_job, args, args_size)) {
+            /* Timed out or worker unavailable: the worker (not us) owns and
+             * frees its payload copy; this staging block is ours to free. */
+            free(args);
+            return RB_STREAM_PROBE_ERR_CONNECT;
+        }
+        *info = args->info;
+        *peek_len = 0;
+        if (peek_buf_size > 0 && args->peek_len > 0) {
+            int n = args->peek_len;
+            if (n > peek_buf_size) n = peek_buf_size;
+            memcpy(peek_buf, args->peek_buf, (size_t)n);
+            *peek_len = n;
+        }
+        rc = args->result;
+        free(args);
+        if (!rb_probe_optional_network_gate("probe", url)) {
+            RADIO_DBG(printf("radio-probe: probe finished but temp transport/counters are not clean url=\"%s\"\n", url ? url : "");)
+            return RB_STREAM_PROBE_ERR_CONNECT;
+        }
+        return rc;
     }
-    return args.result;
 #else
-    int rc = rb_probe_stream_url_impl(url, info, peek_buf, peek_buf_size, peek_len);
+    {
+        int rc = rb_probe_stream_url_impl(url, info, peek_buf, peek_buf_size, peek_len);
 #if defined(AMIGA_M68K) && !defined(RB_STREAM_PROBE_EXTERNAL_SOCKETBASE)
-    rb_probe_release_idle_socketbase();
+        rb_probe_release_idle_socketbase();
 #endif
-    return rc;
+        return rc;
+    }
 #endif
 }
 
@@ -1994,21 +2063,25 @@ int rb_probe_artwork_disabled(void)
 }
 
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+/* Same worker-owned, self-contained payload treatment as
+ * RbProbeStreamUrlJobArgs above -- the old struct held pointers into the
+ * caller's frame (out_len/out_content_type at least were stack-local at
+ * every call site), which a timed-out-then-resumed job would write through
+ * after the frame died. */
 typedef struct RbProbeFetchBinaryJobArgs {
-    const char *url;
-    unsigned char *out_buf;
+    char url[RB_PROBE_MAX_URL];
     int out_buf_size;
-    int *out_len;
-    char *out_content_type;
-    int out_content_type_size;
+    int out_len;
+    char content_type[64];
     int result;
+    unsigned char out_buf[1]; /* really out_buf_size bytes (allocated after the struct) */
 } RbProbeFetchBinaryJobArgs;
 
 static void rb_probe_fetch_binary_job(void *arg)
 {
     RbProbeFetchBinaryJobArgs *a = (RbProbeFetchBinaryJobArgs *)arg;
     a->result = rb_probe_fetch_binary_impl(a->url, a->out_buf, a->out_buf_size,
-        a->out_len, a->out_content_type, a->out_content_type_size);
+        &a->out_len, a->content_type, (int)sizeof(a->content_type));
     rb_probe_cleanup_amissl();
 }
 #endif
@@ -2028,36 +2101,65 @@ int rb_probe_fetch_binary(const char *url, unsigned char *out_buf, int out_buf_s
     }
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     {
-        RbProbeFetchBinaryJobArgs args;
+        RbProbeFetchBinaryJobArgs *args;
+        unsigned long args_size;
+        int url_len;
+        int rc;
+
+        if (!url || !out_buf || out_buf_size <= 0 || !out_len)
+            return RB_STREAM_PROBE_ERR_BAD_ARG;
         if (!rb_probe_optional_network_gate("art", url))
             return RB_STREAM_PROBE_ERR_DISABLED;
-        args.url = url;
-        args.out_buf = out_buf;
-        args.out_buf_size = out_buf_size;
-        args.out_len = out_len;
-        args.out_content_type = out_content_type;
-        args.out_content_type_size = out_content_type_size;
-        args.result = RB_STREAM_PROBE_ERR_CONNECT;
-        if (!Radio_RunOnNetWorker(rb_probe_fetch_binary_job, &args))
+        url_len = (int)strlen(url);
+        if (url_len >= RB_PROBE_MAX_URL)
+            return RB_STREAM_PROBE_ERR_URL_TOO_LONG;
+        args_size = (unsigned long)sizeof(*args) + (unsigned long)out_buf_size;
+        args = (RbProbeFetchBinaryJobArgs *)malloc(args_size);
+        if (!args)
             return RB_STREAM_PROBE_ERR_CONNECT;
-        RADIO_DBG(printf("radio-art: transport cleanup after fetch url=\"%s\" open_socket_count=%ld active_ssl_count=%ld active_ssl_ctx_count=0 zero_return=%ld zero_return_ssl_free=%ld ssl_free_skipped_poison=%ld\n",
+        memset(args, 0, sizeof(*args));
+        memcpy(args->url, url, (size_t)url_len + 1);
+        args->out_buf_size = out_buf_size;
+        args->result = RB_STREAM_PROBE_ERR_CONNECT;
+        if (!Radio_RunOnNetWorkerCopied(rb_probe_fetch_binary_job, args, args_size)) {
+            free(args);
+            return RB_STREAM_PROBE_ERR_CONNECT;
+        }
+        *out_len = 0;
+        if (args->out_len > 0) {
+            int n = args->out_len;
+            if (n > out_buf_size) n = out_buf_size;
+            memcpy(out_buf, args->out_buf, (size_t)n);
+            *out_len = n;
+        }
+        if (out_content_type && out_content_type_size > 0) {
+            int n = (int)strlen(args->content_type);
+            if (n > out_content_type_size - 1) n = out_content_type_size - 1;
+            memcpy(out_content_type, args->content_type, (size_t)n);
+            out_content_type[n] = '\0';
+        }
+        rc = args->result;
+        free(args);
+        RADIO_DBG(printf("radio-art: transport cleanup after fetch url=\"%s\" open_socket_count=%ld active_ssl_count=%ld active_ssl_ctx_count=%ld zero_return=%ld zero_return_ssl_free=%ld ssl_free_skipped_poison=%ld\n",
             url ? url : "",
             rb_probe_open_socket_count,
             rb_probe_active_ssl_count,
+            rb_probe_active_ctx_count,
             rb_probe_zero_return_count,
             rb_probe_zero_return_ssl_free_count,
             rb_probe_ssl_free_skipped_poison_count);)
         if (rb_probe_open_socket_count != 0 || rb_probe_active_ssl_count != 0 || Radio_IsTlsPoisoned()) {
             rb_probe_artwork_disabled_for_run = 1;
-            printf("radio-art: disabled for run after fatal TLS/artwork transport fault open_socket_count=%ld active_ssl_count=%ld active_ssl_ctx_count=0 tls_poisoned=%d\n",
-                rb_probe_open_socket_count, rb_probe_active_ssl_count, Radio_IsTlsPoisoned());
+            printf("radio-art: disabled for run after fatal TLS/artwork transport fault open_socket_count=%ld active_ssl_count=%ld active_ssl_ctx_count=%ld tls_poisoned=%d\n",
+                rb_probe_open_socket_count, rb_probe_active_ssl_count,
+                rb_probe_active_ctx_count, Radio_IsTlsPoisoned());
             return RB_STREAM_PROBE_ERR_CONNECT;
         }
         if (!rb_probe_optional_network_gate("art", url)) {
             RADIO_DBG(printf("radio-art: fetch finished but temp transport/counters are not clean url=\"%s\"\n", url ? url : "");)
             return RB_STREAM_PROBE_ERR_CONNECT;
         }
-        return args.result;
+        return rc;
     }
 #else
     {

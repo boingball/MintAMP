@@ -245,6 +245,22 @@ typedef struct RadioNetWorkerJob {
     void (*fn)(void *arg);
     void *arg;
     int isShutdown;
+    /* Detach handshake between the dispatching caller and the worker, so a
+     * job whose caller gave up waiting is owned (and freed) by exactly one
+     * side and can never touch a dead caller stack frame.  Both flags are
+     * only ever read/written inside Forbid()/Permit() pairs (single-CPU
+     * AmigaOS: Forbid() makes the read-modify-write atomic between the two
+     * tasks).  detached: the caller timed out and abandoned the job -- the
+     * worker must not ReplyMsg() (the reply port is gone) and must free the
+     * job itself, whether it has run fn yet or not.  completed: the worker
+     * finished fn and ReplyMsg()'d (both inside one Forbid() window) -- the
+     * caller owns the job again and frees it after reading the reply. */
+    volatile int detached;
+    volatile int completed;
+    /* When set, arg points at the worker-owned payload copy appended to this
+     * same allocation (see Radio_RunOnNetWorkerCopied()) -- freeing the job
+     * frees the payload with it. */
+    int ownsArg;
 } RadioNetWorkerJob;
 
 static int radio_net_worker_is_self(void)
@@ -317,11 +333,40 @@ static void radio_net_worker_entry(void)
                     shutdownJob = job;
                     shuttingDown = 1;
                 } else {
+                    int detached;
+                    Forbid();
+                    detached = job->detached;
+                    Permit();
+                    if (detached) {
+                        /* The dispatching caller timed out while this job
+                         * was still queued: its stack-side context is gone
+                         * and its reply port has been deleted.  Never run
+                         * fn, never ReplyMsg -- just free the orphaned job
+                         * (and its owned payload copy, if any) here, the
+                         * one place left that may. */
+                        RADIO_DBG(printf("radio-net-worker: dropping detached queued job=%p fn=%p (caller timed out before it ran)\n", (void *)job, (void *)job->fn););
+                        free(job);
+                        continue;
+                    }
                     radio_worker_breadcrumb("job-start", "run", 0);
                     if (job->fn)
                         job->fn(job->arg);
                     radio_worker_breadcrumb("job-reply", "run", 0);
+                    Forbid();
+                    if (job->detached) {
+                        /* Caller timed out while fn was running.  Its reply
+                         * port is gone -- ownership is ours; free the job. */
+                        Permit();
+                        RADIO_DBG(printf("radio-net-worker: freeing orphaned job=%p fn=%p (completed after caller timed out)\n", (void *)job, (void *)job->fn););
+                        free(job);
+                        continue;
+                    }
+                    /* completed + ReplyMsg inside one Forbid() window: a
+                     * caller that observes completed==1 is therefore
+                     * guaranteed the reply message is already at its port. */
+                    job->completed = 1;
                     ReplyMsg(&job->msg);
+                    Permit();
                 }
             }
             if (shuttingDown) break;
@@ -425,27 +470,40 @@ static int radio_net_worker_ensure_started(void)
     return radio_net_worker_ready ? radio_net_worker_libs_ok : 0;
 }
 
-/* Run fn(arg) synchronously, either directly (already on the worker task --
+/* Common dispatch core for Radio_RunOnNetWorker()/Radio_RunOnNetWorkerCopied().
+ * Runs fn(arg) synchronously, either directly (already on the worker task --
  * e.g. a job calling back into another helper) or by shipping it to the
  * worker task over its message port and blocking for the reply. This is the
  * ONLY way any code in this program may touch bsdsocket.library/AmiSSL: no
  * other task ever calls socket()/connect()/SSL_*()/InitAmiSSL() itself.
- * Returns 1 if fn ran (on whichever task), 0 if the worker could not be
- * started or the wait timed out. On a timeout, job/replyPort are
- * deliberately leaked rather than freed -- the worker may still be about to
- * write its reply into them -- same "leak rather than risk a crash"
- * trade-off this file already makes for a wedged CleanupAmiSSL(). */
-int Radio_RunOnNetWorker(void (*fn)(void *arg), void *arg)
+ *
+ * copy_size == 0: fn receives arg itself, so arg must point at heap or
+ * persistent storage that outlives the job even if this wait times out --
+ * NEVER at the caller's stack.  copy_size > 0: arg points at a caller buffer
+ * of copy_size bytes; a worker-owned heap copy is appended to the job and fn
+ * receives THAT, so a timed-out job can never see a dead caller frame.  On
+ * completion the (possibly modified) copy is memcpy'd back into arg so the
+ * caller sees results.
+ *
+ * Returns 1 if fn ran to completion within the wait budget, 0 if the worker
+ * could not be started or the wait timed out.  On a timeout the job is
+ * DETACHED, not leaked-forever: the Forbid()-guarded handshake with the
+ * worker loop guarantees the worker (a) never ReplyMsg()s into the reply
+ * port we delete below and (b) frees the job -- payload copy included --
+ * exactly once, whether it had not started fn yet or finishes it later.
+ * Nothing the worker may still touch is freed here. */
+static int radio_net_worker_dispatch(void (*fn)(void *arg), void *arg, unsigned long copy_size)
 {
     RadioNetWorkerJob *job;
     struct MsgPort *replyPort;
     int tries;
 
     if (!fn) return 0;
+    if (copy_size > 0 && !arg) return 0;
     if (radio_net_worker_is_self()) { fn(arg); return 1; }
     if (!radio_net_worker_ensure_started()) return 0;
 
-    job = (RadioNetWorkerJob *)malloc(sizeof(*job));
+    job = (RadioNetWorkerJob *)malloc(sizeof(*job) + copy_size);
     if (!job) return 0;
     replyPort = CreateMsgPort();
     if (!replyPort) { free(job); return 0; }
@@ -454,19 +512,55 @@ int Radio_RunOnNetWorker(void (*fn)(void *arg), void *arg)
     job->msg.mn_ReplyPort = replyPort;
     job->msg.mn_Length = sizeof(*job);
     job->fn = fn;
-    job->arg = arg;
     job->isShutdown = 0;
+    job->detached = 0;
+    job->completed = 0;
+    if (copy_size > 0) {
+        job->arg = (void *)(job + 1);
+        memcpy(job->arg, arg, (size_t)copy_size);
+        job->ownsArg = 1;
+    } else {
+        job->arg = arg;
+        job->ownsArg = 0;
+    }
     PutMsg(radio_net_worker_port, &job->msg);
 
     for (tries = 0; tries < RADIO_NET_WORKER_WAIT_TRIES; tries++) {
         if (GetMsg(replyPort)) {
+            if (copy_size > 0) memcpy(arg, job->arg, (size_t)copy_size);
             DeleteMsgPort(replyPort);
             free(job);
             return 1;
         }
         Delay(2);
     }
-    RADIO_DBG(printf("radio-net-worker: job dispatch timed out, worker may be wedged -- leaking job=%p replyPort=%p\n", (void *)job, (void *)replyPort););
+    /* Timed out.  Atomically either take the reply that raced in, or detach
+     * the job so the worker owns (and eventually frees) it.  The worker sets
+     * completed and ReplyMsg()s inside a single Forbid() window, so seeing
+     * completed==1 here guarantees the reply message is already at the port. */
+    {
+        int completed;
+        void (*detached_fn)(void *arg) = job->fn;
+        int detached_owns = job->ownsArg;
+        Forbid();
+        completed = job->completed;
+        if (!completed) job->detached = 1;
+        Permit();
+        if (completed) {
+            struct Message *m = GetMsg(replyPort);
+            if (m && copy_size > 0) memcpy(arg, job->arg, (size_t)copy_size);
+            DeleteMsgPort(replyPort);
+            free(job);
+            return m != NULL;
+        }
+        /* From here on the worker owns (and eventually frees) the job: it
+         * must not be dereferenced again on this side -- log the locals
+         * captured above instead. */
+        RADIO_DBG(printf("radio-net-worker: job dispatch timed out, worker may be wedged -- detached job=%p fn=%p ownsArg=%d (worker frees it if/when it resumes)\n", (void *)job, (void *)detached_fn, detached_owns););
+        (void)detached_fn;
+        (void)detached_owns;
+    }
+    DeleteMsgPort(replyPort);
     /* The job itself may be sitting inside a masked blocking bsdsocket call
      * (gethostbyname() in connect_http() or in the stream/favicon prober --
      * both wrap their call in SBTC_BREAKMASK/SIGBREAKF_CTRL_C for exactly
@@ -479,6 +573,30 @@ int Radio_RunOnNetWorker(void (*fn)(void *arg), void *arg)
     if (radio_net_worker_task)
         Signal(radio_net_worker_task, SIGBREAKF_CTRL_C);
     return 0;
+}
+
+/* Persistent-arg dispatch: fn receives arg itself.  arg MUST point at heap
+ * or otherwise persistent storage (in practice: a RadioStream, which
+ * Radio_Close() deliberately leaks whenever a worker job for it may still be
+ * outstanding) -- never at the caller's stack, because on a dispatch timeout
+ * the worker can still run the job long after this call returned.  Callers
+ * with stack-local argument blocks must use Radio_RunOnNetWorkerCopied(). */
+int Radio_RunOnNetWorker(void (*fn)(void *arg), void *arg)
+{
+    return radio_net_worker_dispatch(fn, arg, 0);
+}
+
+/* Copying dispatch for stack-local argument blocks: fn runs against a
+ * worker-owned heap copy of the arg_size bytes at arg, and on success the
+ * copy (including any results fn wrote into it) is copied back into arg.
+ * The copy must be self-contained: fn may only dereference pointers stored
+ * inside it if they target heap/persistent storage, never the caller's
+ * stack.  Returns 1 when fn completed (results are in arg), 0 on dispatch
+ * failure or timeout (arg is untouched; the worker frees the copy). */
+int Radio_RunOnNetWorkerCopied(void (*fn)(void *arg), void *arg, unsigned long arg_size)
+{
+    if (arg_size == 0) return 0;
+    return radio_net_worker_dispatch(fn, arg, arg_size);
 }
 
 /* Ask the worker task to close its libraries and exit, then wait, bounded,
@@ -1422,7 +1540,7 @@ int Radio_PlaybackOwnsNetwork(void) { return !Radio_WorkerIsIdle(); }
 static void radio_ssl_attempt_shutdown(RadioStream *rs);
 static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode);
 static void radio_ssl_close_stream(RadioStream *rs);
-static void radio_ssl_free_ctx(RadioStream *rs);
+static int radio_ssl_free_ctx(RadioStream *rs);
 static void radio_abort_current_socket(RadioStream *rs);
 static void close_current_socket(RadioStream *rs);
 
@@ -1439,21 +1557,31 @@ static void close_current_socket(RadioStream *rs);
  * (observed as an AN_BadFreeAddr 0100000F recoverable alert). Treat every
  * outcome outside the two known-safe buckets as fatal instead. */
 /* Whether to leak (rather than SSL_free()/SSL_CTX_free()) an abort-mode
- * close. This must NOT be an unconditional "always skip" for every abort --
- * a normal user Stop/station-switch is not a fault, and leaking its SSL/
- * SSL_CTX on every station switch is what starves CleanupAmiSSL()/
- * CloseAmiSSL() and produces the app-close alert later (see
- * docs/amissl-lifecycle-audit.md F2). Quarantine/leak only when this
- * session (or the whole AmiSSL instance) actually took a real fault --
- * a classified-fatal SSL_connect/SSL_read/SSL_write error
- * (rs->noReconnect/rs->fatalStop), detected ring/heap corruption
- * (rs->sslStatePoisoned), or a task-wide TLS/memory poison flag. */
+ * close. The policy itself now lives in one authoritative place --
+ * Radio_AbortSslFreePolicy() in radio_runtime_flags.c -- so the runtime-flag
+ * summary and this actual cleanup decision can never contradict each other
+ * again. The default (RADIO_ABORT_SSL_POLICY_FREE_UNLESS_FAULT) is NOT an
+ * unconditional "always skip" for every abort -- a normal user Stop/
+ * station-switch is not a fault, and leaking its SSL/SSL_CTX on every
+ * station switch is what starves CleanupAmiSSL()/CloseAmiSSL() and produces
+ * the app-close alert later (see docs/amissl-lifecycle-audit.md F2).
+ * Case by case:
+ *   - clean completed connection ..... free (and the caller already ran
+ *     SSL_shutdown() via radio_ssl_attempt_shutdown() where applicable);
+ *   - user stop / station switch ..... free (no fault -- the objects are
+ *     healthy and freeing them is the normal path);
+ *   - handshake/read/write fault ..... quarantine/leak (rs->sslStatePoisoned/
+ *     rs->fatalStop/rs->noReconnect -- SSL_free() after a fatal AmiSSL error
+ *     has crashed inside AmiSSL, see Radio_Pump()'s handler);
+ *   - detected memory/TLS poison ..... quarantine/leak, and no further
+ *     AmiSSL calls of any kind this run. */
 static int radio_skip_abort_ssl_free(RadioStream *rs)
 {
+    RadioAbortSslPolicy policy = Radio_AbortSslFreePolicy();
     Radio_LogRuntimeFlagsOnce();
-    if (radio_runtime_flag_enabled("MP3_ALLOW_ABORT_SSL_FREE"))
+    if (policy == RADIO_ABORT_SSL_POLICY_FORCE_FREE)
         return 0;
-    if (radio_runtime_flag_enabled("MP3_SKIP_ABORT_SSL_FREE"))
+    if (policy == RADIO_ABORT_SSL_POLICY_FORCE_SKIP)
         return 1;
     if (rs && (rs->sslStatePoisoned || rs->fatalStop || rs->noReconnect))
         return 1;
@@ -1647,9 +1775,10 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
             Radio_IsMemoryPoisoned()));
         if (mode == RADIO_CLOSE_ABORT) {
             int skip_abort_ssl_free = radio_skip_abort_ssl_free(rs);
+            RadioAbortSslPolicy abort_policy = Radio_AbortSslFreePolicy();
             const char *skip_source =
-                radio_runtime_flag_enabled("MP3_ALLOW_ABORT_SSL_FREE") ? "env-allow" :
-                radio_runtime_flag_enabled("MP3_SKIP_ABORT_SSL_FREE") ? "env-skip" :
+                abort_policy == RADIO_ABORT_SSL_POLICY_FORCE_FREE ? "env-allow" :
+                abort_policy == RADIO_ABORT_SSL_POLICY_FORCE_SKIP ? "env-skip" :
                 (rs->sslStatePoisoned || rs->fatalStop || rs->noReconnect) ? "session-fault" :
                 (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) ? "task-poisoned" : "clean";
             printf("radio-cleanup: abort SSL_free policy skip=%d mode=abort session=%lu source=%s\n",
@@ -1747,12 +1876,17 @@ static void radio_ssl_free_ctx_job(void *arg) { radio_ssl_free_ctx_local((RadioS
  * this file (radio_ssl_connect(), radio_ssl_close_stream_mode() -- where
  * radio_net_worker_is_self() is already true, so this just falls through to
  * the local call with no IPC overhead) and from foreign-task entry points
- * (Radio_Close()), which need the dispatch. */
-static void radio_ssl_free_ctx(RadioStream *rs)
+ * (Radio_Close()), which need the dispatch.  rs is heap-owned (never a
+ * caller stack frame), satisfying Radio_RunOnNetWorker()'s persistent-arg
+ * contract.  Returns 1 once the free/skip actually ran, 0 if the dispatch
+ * timed out -- in which case the detached job may still run later, so the
+ * caller must NOT free rs (Radio_Close() leaks it, matching its existing
+ * close/detach-timeout handling). */
+static int radio_ssl_free_ctx(RadioStream *rs)
 {
-    if (!rs) return;
-    if (radio_net_worker_is_self()) { radio_ssl_free_ctx_local(rs); return; }
-    Radio_RunOnNetWorker(radio_ssl_free_ctx_job, rs);
+    if (!rs) return 1;
+    if (radio_net_worker_is_self()) { radio_ssl_free_ctx_local(rs); return 1; }
+    return Radio_RunOnNetWorker(radio_ssl_free_ctx_job, rs);
 }
 #endif /* AMIGA_M68K && HAVE_AMISSL */
 
@@ -2395,10 +2529,15 @@ static void close_current_socket_mode(RadioStream *rs, RadioCloseMode mode)
     if (!rs) return;
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     if (!radio_net_worker_is_self()) {
+        /* args is stack-local, so it must go through the copying dispatch:
+         * on a timeout the detached job runs later against the worker-owned
+         * copy, never this dead frame.  The rs pointer inside the copy is
+         * heap-owned and outlives any detached job (Radio_Close() leaks rs
+         * whenever a worker job for it may still be outstanding). */
         RadioCloseModeJobArgs args;
         args.rs = rs;
         args.mode = mode;
-        Radio_RunOnNetWorker(close_current_socket_mode_job, &args);
+        Radio_RunOnNetWorkerCopied(close_current_socket_mode_job, &args, sizeof(args));
         return;
     }
 #endif
@@ -2744,10 +2883,20 @@ RadioStream *Radio_OpenWithHostAddr(const char *url, int haveHostAddr, unsigned 
     }
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     {
+        /* openArgs is stack-local (this runs on the playback child task, and
+         * the child's stack is FreeMem'd the moment it exits): it must go
+         * through the copying dispatch.  Before this fix a timed-out open
+         * job that later resumed wrote a->result straight into the exited
+         * child's freed stack -- an exec free-chunk write, i.e. exactly the
+         * "corrupted Exec heap chunks" signature.  If the copy-dispatch
+         * times out, the detached job may still connect and register the
+         * stream later; the Radio_Close() that follows this failure queues
+         * its stop/close jobs BEHIND it on the same worker port (FIFO), so
+         * the late-connected stream is still torn down in order. */
         RadioOpenJobArgs openArgs;
         openArgs.rs = rs;
         openArgs.result = -1;
-        if (!Radio_RunOnNetWorker(radio_worker_job_open, &openArgs))
+        if (!Radio_RunOnNetWorkerCopied(radio_worker_job_open, &openArgs, sizeof(openArgs)))
             set_error(rs, "AmiSSL unavailable: network worker not running");
         else if (openArgs.result == 0) {
             rs->status = RADIO_STATUS_BUFFERING;
@@ -2944,7 +3093,16 @@ void Radio_Close(RadioStream *rs)
      * self-dispatching (it runs on the worker task even though Radio_Close()
      * itself runs on the playback child), same as close_current_socket(). */
     Radio_DebugCheckExecMem("before SSL_CTX_free/skip");
-    radio_ssl_free_ctx(rs);
+    if (!radio_ssl_free_ctx(rs)) {
+        /* Dispatch timed out: the detached job may still run radio_ssl_free_
+         * ctx_local(rs) whenever the worker resumes, so rs must stay alive.
+         * Leak it, exactly like the close/detach timeout above. */
+        radio_stream_lock(rs);
+        rs->workerAbandoned = 1;
+        radio_stream_unlock(rs);
+        RADIO_DBG(printf("radio-net-worker: SSL_CTX free dispatch timed out for session=%lu -- leaking RadioStream while the detached job may still touch it\n", rs->session_id););
+        return;
+    }
     Radio_DebugCheckExecMem("after SSL_CTX_free/skip");
     rs->amissl_cleanup_count++;
 #endif
