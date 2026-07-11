@@ -1617,7 +1617,8 @@ static int radio_ssl_connect(RadioStream *rs)
 static void radio_ssl_attempt_shutdown(RadioStream *rs)
 {
     if (!rs) return;
-    if (Radio_IsMemoryPoisoned()) return;
+    if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) return;
+    if (rs->sslStatePoisoned || rs->fatalStop || rs->noReconnect) return;
     if (!rs->ssl || rs->sslFreed) return;
     if (!rs->sslHandshakeDone) return;
     if (rs->sock == RADIO_INVALID_SOCKET || rs->socketClosed) return;
@@ -2231,26 +2232,6 @@ static void radio_abort_current_socket_local(RadioStream *rs)
         radio_worker_risk_log("before CloseSocket", rs);
         RADIO_DBG(printf("radio-cleanup: active abort CloseSocket start session=%lu fd=%ld\n",
             rs->session_id, closing_fd););
-#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-        /* rs->ssl (if any) still has this fd wired into its BIO via
-         * SSL_set_fd(), but SSL_free() for this session doesn't run until
-         * much later (close_current_socket_mode(), after Radio_Close()) --
-         * this is the immediate abort path used to unblock a live session
-         * right away. In the gap between closing the fd here and SSL_free()
-         * finally running, bsdsocket.library is free to hand the same fd
-         * number to an unrelated socket opened by another task sharing this
-         * SocketBase (e.g. a probe/favicon fetch). Detach the BIO's fd now,
-         * before it goes stale, so SSL_free()'s internal cleanup can never
-         * later touch a since-reused fd -- this is the SSL_free()-crashes
-         * (AN_BadFreeAddr) case tied to aborting a live/playing stream. */
-        if (rs->ssl) {
-            BIO *rbio = SSL_get_rbio(rs->ssl);
-            BIO *wbio = SSL_get_wbio(rs->ssl);
-            if (rbio) BIO_set_fd(rbio, -1, BIO_NOCLOSE);
-            if (wbio && wbio != rbio) BIO_set_fd(wbio, -1, BIO_NOCLOSE);
-            RADIO_DBG(printf("radio-cleanup: abort BIO fd detached session=%lu ssl=%p fd=%ld\n", rs->session_id, (void *)rs->ssl, (long)rs->sock);)
-        }
-#endif
         RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: abort CloseSocket start fd=%ld\n", (long)rs->sock));
         RADIO_DBG(printf("BEFORE CloseSocket session=%lu fd=%ld open_socket_count=%ld playback_open_socket_count=%ld\n",
             rs->session_id, (long)rs->sock, radio_open_socket_count,
@@ -2311,8 +2292,7 @@ static void radio_worker_stop_unregister_abort_job(void *arg)
 }
 #endif
 
-/* Self-dispatching: CloseSocket() (and, via rs->ssl, the SSL_get_rbio()/
- * BIO_set_fd() detach above) touches bsdsocket.library/AmiSSL, so it may
+/* Self-dispatching: CloseSocket() touches bsdsocket.library/AmiSSL, so it may
  * only run on the net worker task. Radio_RequestStop() calls this directly
  * from whichever (foreign) task owns this session; close_current_socket_
  * mode() below (itself self-dispatching) calls it again once already
@@ -2355,16 +2335,26 @@ static void close_current_socket_mode_local(RadioStream *rs, RadioCloseMode mode
     RADIO_DBG(printf("radio-cleanup: close mode=%s session=%lu status=%d fd=%ld open_socket_count_before=%ld\n",
         radio_close_mode_name(mode), rs->session_id, (int)rs->status, (long)rs->sock, before););
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-    /* Match the AmiSSL reference order exactly: SSL_shutdown() (while the
-     * socket is still open) -> CloseSocket() -> SSL_free()/SSL_CTX_free().
-     * radio_ssl_attempt_shutdown() must run before radio_abort_current_
-     * socket() -- once the fd is gone there is nothing for the close_notify
-     * to write to. */
-    radio_ssl_attempt_shutdown(rs);
+    /* Healthy TLS teardown follows the AmiSSL reference object order while the
+     * fd is still attached: SSL_shutdown() -> SSL_free() -> SSL_CTX_free(),
+     * then CloseSocket(). Fatal/poisoned sessions skip every SSL/BIO touch and
+     * fall through to the raw socket close only. */
+    {
+        int fatal_close = rs->sslStatePoisoned || rs->fatalStop || rs->noReconnect ||
+            Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned();
+        int shutdown_will_call = rs->ssl && !rs->sslFreed && rs->sslHandshakeDone &&
+            rs->sock != RADIO_INVALID_SOCKET && !rs->socketClosed && !fatal_close;
+        radio_ssl_attempt_shutdown(rs);
+        radio_ssl_close_stream_mode(rs, mode);
 #endif
-    radio_abort_current_socket(rs);
+        radio_abort_current_socket(rs);
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-    radio_ssl_close_stream_mode(rs, mode);
+        printf("radio-tls-close: category=playback session=%lu health=%s shutdown=%s ssl=%s ctx=%s socket=closed\n",
+            rs->session_id, fatal_close ? "fatal" : "healthy",
+            shutdown_will_call ? "called" : "skipped",
+            (!fatal_close && rs->sslFreed && !rs->ssl) ? "freed" : "quarantined",
+            (!fatal_close && rs->ctxFreed && !rs->ctx) ? "freed" : "quarantined");
+    }
 #endif
     RADIO_DBG(printf("radio-cleanup: close mode=%s session=%lu complete open_socket_count_after=%ld\n",
         radio_close_mode_name(mode), rs->session_id, radio_open_socket_count););
@@ -2405,12 +2395,10 @@ static void close_current_socket_mode(RadioStream *rs, RadioCloseMode mode)
     close_current_socket_mode_local(rs, mode);
 }
 
-/* Safe default: always abort (skip SSL_shutdown).  Every call site below
- * this comment represents a failed/aborted transport (connect/handshake
- * failure, send/recv error, start timeout, stop before healthy playback) --
- * exactly the states where SSL_shutdown() can provoke a recoverable AmiSSL
- * alert.  The one deliberate exception is Radio_RequestStop()'s explicit
- * graceful pre-close of a still-healthy RADIO_STATUS_PLAYING session. */
+/* Default close path: the authoritative worker-owned close function classifies
+ * the session from its fatal/poison flags. Healthy stops/station switches get
+ * shutdown/free/free/close; fatal or poisoned sessions get raw-socket-only
+ * quarantine. */
 static void close_current_socket(RadioStream *rs) { close_current_socket_mode(rs, RADIO_CLOSE_ABORT); }
 
 static int reconnect_http(RadioStream *rs)
