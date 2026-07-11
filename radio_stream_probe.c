@@ -852,7 +852,8 @@ static int rb_probe_transport_open_ex(RbProbeTransport *transport, const char *u
     transport->sslStatePoisoned = 0;
     transport->sslReadCloseSeen = 0;
     transport->ctxOwnedByTransport = 0;
-    transport->category = "probe";
+    if (!transport->category)
+        transport->category = "probe";
 #endif
 
 #if defined(AMIGA_M68K) && !defined(RB_STREAM_PROBE_EXTERNAL_SOCKETBASE)
@@ -1014,7 +1015,8 @@ static int rb_probe_transport_open_ex(RbProbeTransport *transport, const char *u
                 rb_probe_amissl_dirty = 1;
                 Radio_ReportTlsFault("probe SSL_connect returned then memory/TLS poison was detected");
                 RADIO_DBG(printf("rb-probe TLS: SSL_connect ret=%d but post-connect memory/TLS poison was detected session=%lu\n", ssl_connect_rc, transport->session_id);)
-                break;
+                rb_probe_transport_close(transport);
+                return RB_STREAM_PROBE_ERR_TLS_POISONED;
             }
             ssl_error = (ssl_connect_rc == 1) ? 0 : SSL_get_error(transport->ssl, ssl_connect_rc);
             RADIO_DBG(printf("rb-probe TLS: AFTER SSL_connect attempt=%d ret=%d err=%d ssl=%p ctx=%p fd=%ld\n", tries + 1, ssl_connect_rc, ssl_error, (void *)transport->ssl, (void *)transport->ctx, (long)transport->sock);)
@@ -1096,6 +1098,7 @@ static int rb_probe_transport_open_ex(RbProbeTransport *transport, const char *u
 
 static int rb_probe_transport_open(RbProbeTransport *transport, const char *url, const char *host, int port, int use_ssl, unsigned long *host_addr_be)
 {
+    if (transport) transport->category = "probe";
     return rb_probe_transport_open_ex(transport, url, host, port, use_ssl, host_addr_be, 0);
 }
 
@@ -1108,11 +1111,22 @@ static int rb_probe_transport_open_artwork(RbProbeTransport *transport, const ch
     return rc;
 }
 
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+static int rb_probe_transport_is_fatal(const RbProbeTransport *transport)
+{
+    return !transport || transport->sslStatePoisoned ||
+        Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned();
+}
+#endif
+
 static void rb_probe_transport_close_mode(RbProbeTransport *transport, RbProbeCloseMode mode, int http_status)
 {
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     int shutdown_called = 0;
-    int fatal_close;
+    int ssl_freed = 0;
+    int ssl_quarantined = 0;
+    int ctx_freed = 0;
+    int ctx_quarantined = 0;
 #endif
     if (!transport) return;
     RADIO_DBG(printf("radio-cleanup: probe close mode=%s session=%lu http_status=%d sslHandshakeDone=%d ssl=%p ctx=%p fd=%ld open_socket_count_before=%ld\n",
@@ -1123,23 +1137,23 @@ static void rb_probe_transport_close_mode(RbProbeTransport *transport, RbProbeCl
         0, (void *)0, (void *)0,
 #endif
         (long)transport->sock, rb_probe_open_socket_count);)
-#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-    fatal_close = transport->sslStatePoisoned || Radio_IsTlsPoisoned() || Radio_IsMemoryPoisoned();
-#endif
     if (transport->sock != RB_PROBE_INVALID_SOCKET) {
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
         if (mode == RB_PROBE_CLOSE_GRACEFUL && transport->ssl && transport->sslHandshakeDone &&
-            !fatal_close) {
+            !rb_probe_transport_is_fatal(transport)) {
             SSL_shutdown(transport->ssl);
             shutdown_called = 1;
+            Radio_DebugCheckExecMem("after probe SSL_shutdown");
         }
         RADIO_DBG(printf("radio-cleanup: probe ssl_shutdown session=%lu mode=%s %s\n",
             transport->session_id, rb_probe_close_mode_name(mode), shutdown_called ? "called" : "skipped");)
-        if (transport->ssl && fatal_close) {
+        if (transport->ssl && rb_probe_transport_is_fatal(transport)) {
             RADIO_DBG(printf("radio-cleanup: probe SSL_free skipped (%s) session=%lu ssl=%p leaking to avoid crashing on AmiSSL close/free path\n",
                 transport->sslStatePoisoned ? "poisoned" : "tls-poisoned",
                 transport->session_id, (void *)transport->ssl);)
             rb_probe_ssl_free_skipped_poison_count++;
+            ssl_quarantined = 1;
+            if (transport->ctx) ctx_quarantined = 1;
             transport->ssl = NULL;
             transport->sslHandshakeDone = 0;
             transport->ctx = NULL;
@@ -1147,29 +1161,53 @@ static void rb_probe_transport_close_mode(RbProbeTransport *transport, RbProbeCl
         } else if (transport->ssl) {
             rb_probe_debug_mem_report(transport->session_id, "before close SSL_free");
             Radio_DebugCheckExecMem("before probe SSL_free");
-            if (transport->sslReadCloseSeen) {
+            if (rb_probe_transport_is_fatal(transport)) {
+                ssl_quarantined = 1;
+                if (transport->ctx) ctx_quarantined = 1;
+                transport->ssl = NULL;
+                transport->sslHandshakeDone = 0;
+                transport->ctx = NULL;
+                transport->ctxOwnedByTransport = 0;
+            } else {
+                if (transport->sslReadCloseSeen) {
                 RADIO_DBG(printf("radio-cleanup: probe SSL_free after clean zero-return session=%lu ssl=%p\n",
                     transport->session_id, (void *)transport->ssl);)
                 rb_probe_zero_return_ssl_free_count++;
+                }
+                SSL_free(transport->ssl);
+                ssl_freed = 1;
+                transport->ssl = NULL;
+                transport->sslHandshakeDone = 0;
+                if (rb_probe_active_ssl_count > 0) rb_probe_active_ssl_count--;
+                rb_probe_debug_mem_report(transport->session_id, "after close SSL_free");
+                Radio_DebugCheckExecMem("after probe SSL_free");
+                if (rb_probe_transport_is_fatal(transport) && transport->ctx) {
+                    ctx_quarantined = 1;
+                    transport->ctx = NULL;
+                    transport->ctxOwnedByTransport = 0;
+                }
             }
-            SSL_free(transport->ssl);
-            transport->ssl = NULL;
-            transport->sslHandshakeDone = 0;
-            if (rb_probe_active_ssl_count > 0) rb_probe_active_ssl_count--;
-            rb_probe_debug_mem_report(transport->session_id, "after close SSL_free");
-            Radio_DebugCheckExecMem("after probe SSL_free");
         }
-        if (!fatal_close && transport->ctxOwnedByTransport && transport->ctx) {
+        if (!rb_probe_transport_is_fatal(transport) && transport->ctxOwnedByTransport && transport->ctx) {
             rb_probe_debug_mem_report(transport->session_id, "before close SSL_CTX_free");
             Radio_DebugCheckExecMem("before artwork SSL_CTX_free");
-            RADIO_DBG(printf("radio-art: per-fetch SSL_CTX_free session=%lu ctx=%p shared_ctx=%p\n",
-                transport->session_id, (void *)transport->ctx, (void *)rb_probe_shared_ctx);)
-            SSL_CTX_free(transport->ctx);
-            transport->ctx = NULL;
-            transport->ctxOwnedByTransport = 0;
-            rb_probe_debug_mem_report(transport->session_id, "after close SSL_CTX_free");
-            Radio_DebugCheckExecMem("after artwork SSL_CTX_free");
+            if (rb_probe_transport_is_fatal(transport)) {
+                ctx_quarantined = 1;
+                transport->ctx = NULL;
+                transport->ctxOwnedByTransport = 0;
+            } else {
+                RADIO_DBG(printf("radio-art: per-fetch SSL_CTX_free session=%lu ctx=%p shared_ctx=%p\n",
+                    transport->session_id, (void *)transport->ctx, (void *)rb_probe_shared_ctx);)
+                SSL_CTX_free(transport->ctx);
+                ctx_freed = 1;
+                transport->ctx = NULL;
+                transport->ctxOwnedByTransport = 0;
+                rb_probe_debug_mem_report(transport->session_id, "after close SSL_CTX_free");
+                Radio_DebugCheckExecMem("after artwork SSL_CTX_free");
+            }
         } else {
+            if (rb_probe_transport_is_fatal(transport) && transport->ctx)
+                ctx_quarantined = 1;
             transport->ctx = NULL;
         }
 #endif
@@ -1187,10 +1225,10 @@ static void rb_probe_transport_close_mode(RbProbeTransport *transport, RbProbeCl
     printf("radio-tls-close: category=%s session=%lu health=%s shutdown=%s ssl=%s ctx=%s socket=closed\n",
         transport->category ? transport->category : "probe", transport->session_id,
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-        (transport->sslStatePoisoned || Radio_IsTlsPoisoned() || Radio_IsMemoryPoisoned()) ? "fatal" : "healthy",
+        rb_probe_transport_is_fatal(transport) ? "fatal" : "healthy",
         shutdown_called ? "called" : "skipped",
-        transport->ssl ? "quarantined" : "freed",
-        transport->ctx ? "quarantined" : "freed"
+        ssl_freed ? "freed" : (ssl_quarantined ? "quarantined" : "freed"),
+        ctx_freed ? "freed" : (ctx_quarantined ? "quarantined" : "freed")
 #else
         "healthy", "skipped", "freed", "freed"
 #endif

@@ -1653,8 +1653,21 @@ static void radio_ssl_attempt_shutdown(RadioStream *rs)
     RADIO_DBG(printf("radio-cleanup: SSL_shutdown session=%lu ssl=%p fd=%ld\n",
         rs->session_id, (void *)rs->ssl, (long)rs->sock););
     Radio_DebugCheckExecMem("before SSL_shutdown");
+    if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
+        rs->sslStatePoisoned = 1;
+        rs->fatalStop = 1;
+        rs->noReconnect = 1;
+        radio_tls_shutdown_quarantine = 1;
+        return;
+    }
     SSL_shutdown(rs->ssl);
     Radio_DebugCheckExecMem("after SSL_shutdown");
+    if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
+        rs->sslStatePoisoned = 1;
+        rs->fatalStop = 1;
+        rs->noReconnect = 1;
+        radio_tls_shutdown_quarantine = 1;
+    }
     RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_shutdown done\n"));
 }
 
@@ -1711,13 +1724,22 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
             RADIO_DBG(printf("BEFORE SSL_free session=%lu ssl=%p ctx=%p\n",
                 rs->session_id, (void *)rs->ssl, (void *)rs->ctx););
             Radio_DebugCheckExecMem("before SSL_free");
+            if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
+                radio_tls_shutdown_quarantine = 1;
+                rs->sslStatePoisoned = 1;
+            } else {
             SSL_free(rs->ssl);
             Radio_DebugCheckExecMem("after SSL_free");
+            if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
+                radio_tls_shutdown_quarantine = 1;
+                rs->sslStatePoisoned = 1;
+            }
             rs->ssl_free_count++;
             radio_worker_risk_log("after SSL_free", rs);
             RADIO_DBG(printf("AFTER SSL_free session=%lu ssl_free_count=%u\n",
                 rs->session_id, rs->ssl_free_count););
             RADIO_DBG(printf("radio-cleanup: SSL_free done session=%lu\n", rs->session_id));
+            }
         }
         rs->sslFreed = 1;
         if (radio_active_ssl_count > 0) radio_active_ssl_count--;
@@ -1751,12 +1773,21 @@ static void radio_ssl_free_ctx_local(RadioStream *rs)
             RADIO_DBG(printf("BEFORE SSL_CTX_free session=%lu ctx=%p\n",
                 rs->session_id, (void *)rs->ctx););
             Radio_DebugCheckExecMem("before SSL_CTX_free");
+            if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
+                radio_tls_shutdown_quarantine = 1;
+                rs->sslStatePoisoned = 1;
+            } else {
             SSL_CTX_free(rs->ctx);
             Radio_DebugCheckExecMem("after SSL_CTX_free");
+            if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
+                radio_tls_shutdown_quarantine = 1;
+                rs->sslStatePoisoned = 1;
+            }
             rs->ssl_ctx_free_count++;
             RADIO_DBG(printf("AFTER SSL_CTX_free session=%lu ssl_ctx_free_count=%u\n",
                 rs->session_id, rs->ssl_ctx_free_count););
             RADIO_DBG(printf("radio-cleanup: SSL_CTX_free done session=%lu\n", rs->session_id));
+            }
         }
         rs->ctxFreed = 1;
         if (radio_active_ssl_ctx_count > 0) radio_active_ssl_ctx_count--;
@@ -2372,6 +2403,8 @@ static void close_current_socket_mode_local(RadioStream *rs, RadioCloseMode mode
         int ssl_freed = 0, ssl_quarantined = 0, ctx_freed = 0, ctx_quarantined = 0;
         radio_ssl_attempt_shutdown(rs);
         radio_ssl_close_stream_mode(rs, mode);
+        fatal_close = rs->sslStatePoisoned || rs->fatalStop || rs->noReconnect ||
+            Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned();
         if (fatal_close) { ssl_quarantined = 1; ctx_quarantined = 1; }
         else { ssl_freed = 1; ctx_freed = 1; }
 #endif
