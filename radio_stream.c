@@ -247,6 +247,25 @@ typedef struct RadioNetWorkerJob {
     int isShutdown;
 } RadioNetWorkerJob;
 
+static RadioNetWorkerJob *radio_net_job_alloc(void)
+{
+#if defined(AMIGA_M68K)
+    return (RadioNetWorkerJob *)AllocVec(sizeof(RadioNetWorkerJob), MEMF_ANY | MEMF_CLEAR);
+#else
+    return (RadioNetWorkerJob *)calloc(1, sizeof(RadioNetWorkerJob));
+#endif
+}
+
+static void radio_net_job_free(RadioNetWorkerJob *job)
+{
+    if (!job) return;
+#if defined(AMIGA_M68K)
+    FreeVec(job);
+#else
+    free(job);
+#endif
+}
+
 static int radio_net_worker_is_self(void)
 {
     return radio_net_worker_task != NULL && FindTask(NULL) == radio_net_worker_task;
@@ -445,10 +464,10 @@ int Radio_RunOnNetWorker(void (*fn)(void *arg), void *arg)
     if (radio_net_worker_is_self()) { fn(arg); return 1; }
     if (!radio_net_worker_ensure_started()) return 0;
 
-    job = (RadioNetWorkerJob *)malloc(sizeof(*job));
+    job = radio_net_job_alloc();
     if (!job) return 0;
     replyPort = CreateMsgPort();
-    if (!replyPort) { free(job); return 0; }
+    if (!replyPort) { radio_net_job_free(job); return 0; }
 
     memset(&job->msg, 0, sizeof(job->msg));
     job->msg.mn_ReplyPort = replyPort;
@@ -461,7 +480,7 @@ int Radio_RunOnNetWorker(void (*fn)(void *arg), void *arg)
     for (tries = 0; tries < RADIO_NET_WORKER_WAIT_TRIES; tries++) {
         if (GetMsg(replyPort)) {
             DeleteMsgPort(replyPort);
-            free(job);
+            radio_net_job_free(job);
             return 1;
         }
         Delay(2);
@@ -492,10 +511,10 @@ static int radio_net_worker_stop(void)
 
     if (!radio_net_worker_ready || !radio_net_worker_port) return 1; /* never started, or already gone */
 
-    job = (RadioNetWorkerJob *)malloc(sizeof(*job));
+    job = radio_net_job_alloc();
     if (!job) return 0;
     replyPort = CreateMsgPort();
-    if (!replyPort) { free(job); return 0; }
+    if (!replyPort) { radio_net_job_free(job); return 0; }
     memset(&job->msg, 0, sizeof(job->msg));
     job->msg.mn_ReplyPort = replyPort;
     job->msg.mn_Length = sizeof(*job);
@@ -509,7 +528,7 @@ static int radio_net_worker_stop(void)
             stopped = (!radio_net_worker_ready && radio_net_worker_port == NULL &&
                 !radio_net_worker_libs_ok && !radio_net_worker_https_ok);
             DeleteMsgPort(replyPort);
-            free(job);
+            radio_net_job_free(job);
             if (!stopped) {
                 RADIO_DBG(printf("radio-netshutdown: shutdown reply received but final state is not clean shutdownStage=\"%s\" stage=\"%s\" lastOp=\"%s\" lastSession=%lu heartbeat=%lu workerTask=%p ready=%d port=%p SocketBase=%p AmiSSLBase=%p AmiSSLMasterBase=%p libs_ok=%d https_ok=%d\n",
                     radio_net_worker_shutdown_stage ? radio_net_worker_shutdown_stage : "<unset>",
@@ -1485,6 +1504,12 @@ static int radio_ssl_do_handshake(RadioStream *rs)
             rs ? rs->session_id : 0, tries + 1, rs ? (void *)rs->ssl : 0,
             rs ? (void *)rs->ctx : 0, rs ? (long)rs->sock : -1L););
         r = SSL_connect(rs->ssl);
+        Radio_DebugCheckExecMem("after SSL_connect");
+        if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
+            rs->sslStatePoisoned = 1; rs->fatalStop = 1; rs->noReconnect = 1;
+            RADIO_DBG(printf("radio-tls: SSL_connect returned %d but post-connect memory/TLS poison was detected session=%lu\n", r, rs ? rs->session_id : 0););
+            return -1;
+        }
         if (r == 1) {
             RADIO_DBG(printf("AFTER SSL_connect success session=%lu attempt=%d ssl=%p ctx=%p fd=%ld\n",
                 rs ? rs->session_id : 0, tries + 1, rs ? (void *)rs->ssl : 0,
@@ -2344,16 +2369,19 @@ static void close_current_socket_mode_local(RadioStream *rs, RadioCloseMode mode
             Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned();
         int shutdown_will_call = rs->ssl && !rs->sslFreed && rs->sslHandshakeDone &&
             rs->sock != RADIO_INVALID_SOCKET && !rs->socketClosed && !fatal_close;
+        int ssl_freed = 0, ssl_quarantined = 0, ctx_freed = 0, ctx_quarantined = 0;
         radio_ssl_attempt_shutdown(rs);
         radio_ssl_close_stream_mode(rs, mode);
+        if (fatal_close) { ssl_quarantined = 1; ctx_quarantined = 1; }
+        else { ssl_freed = 1; ctx_freed = 1; }
 #endif
         radio_abort_current_socket(rs);
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
         printf("radio-tls-close: category=playback session=%lu health=%s shutdown=%s ssl=%s ctx=%s socket=closed\n",
             rs->session_id, fatal_close ? "fatal" : "healthy",
             shutdown_will_call ? "called" : "skipped",
-            (!fatal_close && rs->sslFreed && !rs->ssl) ? "freed" : "quarantined",
-            (!fatal_close && rs->ctxFreed && !rs->ctx) ? "freed" : "quarantined");
+            ssl_freed ? "freed" : (ssl_quarantined ? "quarantined" : "freed"),
+            ctx_freed ? "freed" : (ctx_quarantined ? "quarantined" : "freed"));
     }
 #endif
     RADIO_DBG(printf("radio-cleanup: close mode=%s session=%lu complete open_socket_count_after=%ld\n",

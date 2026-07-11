@@ -1007,10 +1007,17 @@ static int rb_probe_transport_open_ex(RbProbeTransport *transport, const char *u
             Radio_DebugCheckExecMem(memcheck_where);
             RADIO_DBG(printf("rb-probe TLS: BEFORE SSL_connect attempt=%d ssl=%p ctx=%p fd=%ld\n", tries + 1, (void *)transport->ssl, (void *)transport->ctx, (long)transport->sock);)
             ssl_connect_rc = SSL_connect(transport->ssl);
-            ssl_error = (ssl_connect_rc == 1) ? 0 : SSL_get_error(transport->ssl, ssl_connect_rc);
-            RADIO_DBG(printf("rb-probe TLS: AFTER SSL_connect attempt=%d ret=%d err=%d ssl=%p ctx=%p fd=%ld\n", tries + 1, ssl_connect_rc, ssl_error, (void *)transport->ssl, (void *)transport->ctx, (long)transport->sock);)
             sprintf(memcheck_where, "after probe SSL_connect attempt=%d", tries + 1);
             Radio_DebugCheckExecMem(memcheck_where);
+            if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
+                transport->sslStatePoisoned = 1;
+                rb_probe_amissl_dirty = 1;
+                Radio_ReportTlsFault("probe SSL_connect returned then memory/TLS poison was detected");
+                RADIO_DBG(printf("rb-probe TLS: SSL_connect ret=%d but post-connect memory/TLS poison was detected session=%lu\n", ssl_connect_rc, transport->session_id);)
+                break;
+            }
+            ssl_error = (ssl_connect_rc == 1) ? 0 : SSL_get_error(transport->ssl, ssl_connect_rc);
+            RADIO_DBG(printf("rb-probe TLS: AFTER SSL_connect attempt=%d ret=%d err=%d ssl=%p ctx=%p fd=%ld\n", tries + 1, ssl_connect_rc, ssl_error, (void *)transport->ssl, (void *)transport->ctx, (long)transport->sock);)
             if (ssl_connect_rc == 1) break;
             if (ssl_error == SSL_ERROR_WANT_READ || ssl_error == SSL_ERROR_WANT_WRITE) {
                 rb_probe_backoff_sleep();
@@ -1094,8 +1101,10 @@ static int rb_probe_transport_open(RbProbeTransport *transport, const char *url,
 
 static int rb_probe_transport_open_artwork(RbProbeTransport *transport, const char *url, const char *host, int port, int use_ssl)
 {
-    int rc = rb_probe_transport_open_ex(transport, url, host, port, use_ssl, NULL, 1);
-    transport->category = "artwork";
+    int rc;
+    if (transport) transport->category = "artwork";
+    rc = rb_probe_transport_open_ex(transport, url, host, port, use_ssl, NULL, 1);
+    if (transport) transport->category = "artwork";
     return rc;
 }
 
