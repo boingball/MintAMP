@@ -6,6 +6,10 @@ on:
       - codex/implement-tls-lifecycle-corrections-1egenr
     paths:
       - .github/workflows/fix-pr469-ownership.yml
+  pull_request:
+    types: [edited]
+    branches:
+      - codex/implement-tls-lifecycle-corrections
 
 permissions:
   contents: write
