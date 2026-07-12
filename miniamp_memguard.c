@@ -30,8 +30,12 @@ static int gMiniMemLockReady;
  * child spawned yet), so skipping the semaphore is safe; after it, every
  * task -- including playback children in the same address space -- shares
  * this one lock. */
-#define MINIMEM_LOCK()   do { if (gMiniMemLockReady) ObtainSemaphore(&gMiniMemLock); } while (0)
-#define MINIMEM_UNLOCK() do { if (gMiniMemLockReady) ReleaseSemaphore(&gMiniMemLock); } while (0)
+#define MINIMEM_LOCK()   MiniMem_AllocLock()
+#define MINIMEM_UNLOCK() MiniMem_AllocUnlock()
+void MiniMem_AllocLock(void) { if (gMiniMemLockReady) ObtainSemaphore(&gMiniMemLock); }
+void MiniMem_AllocUnlock(void) { if (gMiniMemLockReady) ReleaseSemaphore(&gMiniMemLock); }
+int MiniMem_AllocLockReady(void) { return gMiniMemLockReady; }
+void *MiniMem_CurrentTask(void) { return MINIMEM_TASK(); }
 void MiniMem_LockInit(void)
 {
     InitSemaphore(&gMiniMemLock);
@@ -39,8 +43,12 @@ void MiniMem_LockInit(void)
 }
 #else
 #define MINIMEM_TASK() ((void *)0)
-#define MINIMEM_LOCK()   do { } while (0)
-#define MINIMEM_UNLOCK() do { } while (0)
+#define MINIMEM_LOCK()   MiniMem_AllocLock()
+#define MINIMEM_UNLOCK() MiniMem_AllocUnlock()
+void MiniMem_AllocLock(void) { }
+void MiniMem_AllocUnlock(void) { }
+int MiniMem_AllocLockReady(void) { return 0; }
+void *MiniMem_CurrentTask(void) { return MINIMEM_TASK(); }
 void MiniMem_LockInit(void) { }
 #endif
 

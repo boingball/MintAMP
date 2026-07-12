@@ -25,6 +25,7 @@
 #include "radio_runtime_flags.h"
 #include "amiga_display_text.h"
 #include "miniamp_memguard.h"
+#include "libnix_alloc_audit.h"
 
 #if defined(AMIGA_M68K)
 
@@ -6356,6 +6357,7 @@ static int MrMainReal(int argc, char **argv)
 	 * remaining live-allocation count and each entry's task pins whether a
 	 * survivor belongs to the alerting GUI/CRT task. */
 	MiniMem_DumpLive("before main return");
+	LibnixAllocAudit_DumpLive("before main return");
 	MiniMem_ReportLeaks();
 	return 0;
 }

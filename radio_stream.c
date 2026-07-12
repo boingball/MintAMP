@@ -3131,11 +3131,34 @@ static int reconnect_http(RadioStream *rs)
     return 0;
 }
 
-static void parse_headers(RadioStream *rs,char *h){ if (radio_stream_magic_valid(rs, "parse_headers") < 1) return; char *line=strtok(h,"\r\n"); int code=0; if(line && ci_starts(line,"ICY")) code=200; else if(line && ci_starts(line,"HTTP/")) sscanf(line,"HTTP/%*s %d",&code); else { set_error(rs,"invalid HTTP stream response"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: HTTP header failed\n")); return; } if(code<200||code>299){ char msg[64]; sprintf(msg,"HTTP %d stream error",code); set_error(rs,msg); RADIO_OPEN_DEBUG_PRINTF(("radio-open: HTTP header failed status %d\n", code)); return; } while((line=strtok(NULL,"\r\n"))){ char *v=strchr(line,':'); if(!v) continue; *v++=0; line=trim(line); v=trim(v); if(ci_equals(line,"Content-Type")) radio_copy_string(rs->contentType,sizeof(rs->contentType),v); else if(ci_equals(line,"icy-metaint")){ rs->metaint=atoi(v); rs->audioUntilMeta=rs->metaint; } else if(ci_equals(line,"icy-br")) rs->bitrate=atoi(v); else if(ci_equals(line,"icy-name")) radio_copy_metadata_string(rs->stationName,sizeof(rs->stationName),v,"icy-name"); else if(ci_equals(line,"icy-genre")) radio_copy_metadata_string(rs->genre,sizeof(rs->genre),v,"icy-genre"); else if(ci_equals(line,"icy-url")) radio_copy_string(rs->streamUrl,sizeof(rs->streamUrl),v); } if(rs->contentType[0] && (ci_starts(rs->contentType,"application/vnd.apple.mpegurl") || ci_starts(rs->contentType,"application/x-mpegurl"))) { set_error(rs,"HLS stream not supported"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: HLS content type unsupported: %s\n", rs->contentType)); return; } RADIO_OPEN_DEBUG_PRINTF(("radio-open: final URL=%s content-type=%s URL codec hint=%s final selected codec=%s\n",
+static char *radio_next_header_line(char **cursor)
+{
+    char *line;
+    char *p;
+    if (!cursor || !*cursor) return NULL;
+    p = *cursor;
+    while (*p == '\r' || *p == '\n') ++p;
+    if (!*p) { *cursor = NULL; return NULL; }
+    line = p;
+    while (*p && *p != '\r' && *p != '\n') ++p;
+    if (*p) { *p++ = 0; }
+    *cursor = p;
+    return line;
+}
+
+static void parse_headers(RadioStream *rs,char *h)
+{
+    char *cursor = h;
+    char *line;
+    int code = 0;
+    if (radio_stream_magic_valid(rs, "parse_headers") < 1) return;
+    line = radio_next_header_line(&cursor);
+    if(line && ci_starts(line,"ICY")) code=200; else if(line && ci_starts(line,"HTTP/")) sscanf(line,"HTTP/%*s %d",&code); else { set_error(rs,"invalid HTTP stream response"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: HTTP header failed\n")); return; } if(code<200||code>299){ char msg[64]; sprintf(msg,"HTTP %d stream error",code); set_error(rs,msg); RADIO_OPEN_DEBUG_PRINTF(("radio-open: HTTP header failed status %d\n", code)); return; } while((line=radio_next_header_line(&cursor))){ char *v=strchr(line,':'); if(!v) continue; *v++=0; line=trim(line); v=trim(v); if(ci_equals(line,"Content-Type")) radio_copy_string(rs->contentType,sizeof(rs->contentType),v); else if(ci_equals(line,"icy-metaint")){ rs->metaint=atoi(v); rs->audioUntilMeta=rs->metaint; } else if(ci_equals(line,"icy-br")) rs->bitrate=atoi(v); else if(ci_equals(line,"icy-name")) radio_copy_metadata_string(rs->stationName,sizeof(rs->stationName),v,"icy-name"); else if(ci_equals(line,"icy-genre")) radio_copy_metadata_string(rs->genre,sizeof(rs->genre),v,"icy-genre"); else if(ci_equals(line,"icy-url")) radio_copy_string(rs->streamUrl,sizeof(rs->streamUrl),v); } if(rs->contentType[0] && (ci_starts(rs->contentType,"application/vnd.apple.mpegurl") || ci_starts(rs->contentType,"application/x-mpegurl"))) { set_error(rs,"HLS stream not supported"); RADIO_OPEN_DEBUG_PRINTF(("radio-open: HLS content type unsupported: %s\n", rs->contentType)); return; } RADIO_OPEN_DEBUG_PRINTF(("radio-open: final URL=%s content-type=%s URL codec hint=%s final selected codec=%s\n",
     rs->url, rs->contentType,
     radio_contains_nocase(rs->path,"mp3") ? "MP3" : (radio_contains_nocase(rs->path,"aac") ? "AAC" : "none"),
     (ci_starts(rs->contentType,"audio/mpeg") || ci_starts(rs->contentType,"audio/mp3") || radio_contains_nocase(rs->path,"mp3")) ? "MP3" :
-    ((ci_starts(rs->contentType,"audio/aac") || ci_starts(rs->contentType,"audio/aacp") || radio_contains_nocase(rs->path,"aac")) ? "AAC" : "unknown"))); }
+    ((ci_starts(rs->contentType,"audio/aac") || ci_starts(rs->contentType,"audio/aacp") || radio_contains_nocase(rs->path,"aac")) ? "AAC" : "unknown")));
+}
 
 static void parse_meta(RadioStream *rs,const unsigned char *m,int n)
 {
