@@ -199,6 +199,36 @@ static char *rb_probe_dup_string(const char *src)
     return copy;
 }
 
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+enum {
+    RB_PROBE_REQ_PENDING = 0,
+    RB_PROBE_REQ_COMPLETED = 1,
+    RB_PROBE_REQ_ABANDONED = 2
+};
+
+typedef struct RbProbeRequestSync {
+    int state;
+    struct SignalSemaphore lock;
+} RbProbeRequestSync;
+
+static void rb_probe_request_sync_init(RbProbeRequestSync *sync)
+{
+    if (!sync) return;
+    sync->state = RB_PROBE_REQ_PENDING;
+    InitSemaphore(&sync->lock);
+}
+
+static void rb_probe_request_lock(RbProbeRequestSync *sync)
+{
+    if (sync) ObtainSemaphore(&sync->lock);
+}
+
+static void rb_probe_request_unlock(RbProbeRequestSync *sync)
+{
+    if (sync) ReleaseSemaphore(&sync->lock);
+}
+#endif
+
 static int rb_probe_set_final_url(RbStreamInfo *info, const char *url)
 {
     int len;
@@ -786,13 +816,13 @@ static int rb_probe_optional_network_gate(const char *kind, const char *url)
  * manual InitAmiSSL() for the opener task) does exactly the right thing
  * unmodified. */
 typedef struct RbProbeStreamUrlJobArgs {
+    RbProbeRequestSync sync;
     char *url;
     RbStreamInfo info;
     unsigned char *peek_buf;
     int peek_buf_size;
     int peek_len;
     int result;
-    volatile int abandoned;
 } RbProbeStreamUrlJobArgs;
 
 static void rb_probe_stream_url_job_free(RbProbeStreamUrlJobArgs *a)
@@ -803,6 +833,19 @@ static void rb_probe_stream_url_job_free(RbProbeStreamUrlJobArgs *a)
     free(a);
 }
 
+static void rb_probe_stream_url_job_complete(RbProbeStreamUrlJobArgs *a)
+{
+    int abandoned;
+    if (!a) return;
+    rb_probe_request_lock(&a->sync);
+    abandoned = (a->sync.state == RB_PROBE_REQ_ABANDONED);
+    if (!abandoned)
+        a->sync.state = RB_PROBE_REQ_COMPLETED;
+    rb_probe_request_unlock(&a->sync);
+    if (abandoned)
+        rb_probe_stream_url_job_free(a);
+}
+
 static void rb_probe_stream_url_job(void *arg)
 {
     RbProbeStreamUrlJobArgs *a = (RbProbeStreamUrlJobArgs *)arg;
@@ -810,6 +853,7 @@ static void rb_probe_stream_url_job(void *arg)
     if (!a) return;
     a->result = rb_probe_stream_url_impl(a->url, &a->info, a->peek_buf, a->peek_buf_size, &local_peek_len);
     a->peek_len = local_peek_len;
+    rb_probe_stream_url_job_complete(a);
 }
 #endif
 
@@ -833,6 +877,7 @@ int rb_probe_stream_url(const char *url, RbStreamInfo *info,
             return RB_STREAM_PROBE_ERR_DISABLED;
         args = (RbProbeStreamUrlJobArgs *)calloc(1, sizeof(*args));
         if (!args) return RB_STREAM_PROBE_ERR_CONNECT;
+        rb_probe_request_sync_init(&args->sync);
         args->url = rb_probe_dup_string(url ? url : "");
         args->peek_buf_size = peek_buf_size;
         args->peek_buf = peek_buf_size > 0 ? (unsigned char *)malloc((size_t)peek_buf_size) : NULL;
@@ -842,14 +887,28 @@ int rb_probe_stream_url(const char *url, RbStreamInfo *info,
             return RB_STREAM_PROBE_ERR_CONNECT;
         }
         if (!Radio_RunOnNetWorker(rb_probe_stream_url_job, args)) {
-            args->abandoned = 1;
+            rb_probe_request_lock(&args->sync);
+            if (args->sync.state == RB_PROBE_REQ_COMPLETED) {
+                result = args->result;
+                if (info) *info = args->info;
+                if (peek_len) *peek_len = args->peek_len;
+                if (peek_buf && args->peek_len > 0)
+                    memcpy(peek_buf, args->peek_buf, (size_t)args->peek_len);
+                rb_probe_request_unlock(&args->sync);
+                rb_probe_stream_url_job_free(args);
+                return result;
+            }
+            args->sync.state = RB_PROBE_REQ_ABANDONED;
+            rb_probe_request_unlock(&args->sync);
             return RB_STREAM_PROBE_ERR_CONNECT;
         }
+        rb_probe_request_lock(&args->sync);
         result = args->result;
         if (info) *info = args->info;
         if (peek_len) *peek_len = args->peek_len;
         if (peek_buf && args->peek_len > 0)
             memcpy(peek_buf, args->peek_buf, (size_t)args->peek_len);
+        rb_probe_request_unlock(&args->sync);
         rb_probe_stream_url_job_free(args);
         if (!rb_probe_optional_network_gate("probe", url))
             return RB_STREAM_PROBE_ERR_CONNECT;
@@ -1207,6 +1266,7 @@ int rb_probe_artwork_disabled(void)
 
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
 typedef struct RbProbeFetchBinaryJobArgs {
+    RbProbeRequestSync sync;
     char *url;
     unsigned char *out_buf;
     int out_buf_size;
@@ -1214,7 +1274,6 @@ typedef struct RbProbeFetchBinaryJobArgs {
     char *out_content_type;
     int out_content_type_size;
     int result;
-    volatile int abandoned;
 } RbProbeFetchBinaryJobArgs;
 
 static void rb_probe_fetch_binary_job_free(RbProbeFetchBinaryJobArgs *a)
@@ -1226,6 +1285,19 @@ static void rb_probe_fetch_binary_job_free(RbProbeFetchBinaryJobArgs *a)
     free(a);
 }
 
+static void rb_probe_fetch_binary_job_complete(RbProbeFetchBinaryJobArgs *a)
+{
+    int abandoned;
+    if (!a) return;
+    rb_probe_request_lock(&a->sync);
+    abandoned = (a->sync.state == RB_PROBE_REQ_ABANDONED);
+    if (!abandoned)
+        a->sync.state = RB_PROBE_REQ_COMPLETED;
+    rb_probe_request_unlock(&a->sync);
+    if (abandoned)
+        rb_probe_fetch_binary_job_free(a);
+}
+
 static void rb_probe_fetch_binary_job(void *arg)
 {
     RbProbeFetchBinaryJobArgs *a = (RbProbeFetchBinaryJobArgs *)arg;
@@ -1234,6 +1306,7 @@ static void rb_probe_fetch_binary_job(void *arg)
     a->result = rb_probe_fetch_binary_impl(a->url, a->out_buf, a->out_buf_size,
         &local_len, a->out_content_type, a->out_content_type_size);
     a->out_len = local_len;
+    rb_probe_fetch_binary_job_complete(a);
 }
 #endif
 
@@ -1258,6 +1331,7 @@ int rb_probe_fetch_binary(const char *url, unsigned char *out_buf, int out_buf_s
             return RB_STREAM_PROBE_ERR_DISABLED;
         args = (RbProbeFetchBinaryJobArgs *)calloc(1, sizeof(*args));
         if (!args) return RB_STREAM_PROBE_ERR_CONNECT;
+        rb_probe_request_sync_init(&args->sync);
         args->url = rb_probe_dup_string(url ? url : "");
         args->out_buf_size = out_buf_size;
         args->out_content_type_size = out_content_type_size;
@@ -1270,9 +1344,24 @@ int rb_probe_fetch_binary(const char *url, unsigned char *out_buf, int out_buf_s
             return RB_STREAM_PROBE_ERR_CONNECT;
         }
         if (!Radio_RunOnNetWorker(rb_probe_fetch_binary_job, args)) {
-            args->abandoned = 1;
+            rb_probe_request_lock(&args->sync);
+            if (args->sync.state == RB_PROBE_REQ_COMPLETED) {
+                result = args->result;
+                if (out_len) *out_len = args->out_len;
+                if (out_buf && args->out_len > 0) memcpy(out_buf, args->out_buf, (size_t)args->out_len);
+                if (out_content_type && out_content_type_size > 0 && args->out_content_type) {
+                    strncpy(out_content_type, args->out_content_type, (size_t)out_content_type_size - 1);
+                    out_content_type[out_content_type_size - 1] = '\0';
+                }
+                rb_probe_request_unlock(&args->sync);
+                rb_probe_fetch_binary_job_free(args);
+                return result;
+            }
+            args->sync.state = RB_PROBE_REQ_ABANDONED;
+            rb_probe_request_unlock(&args->sync);
             return RB_STREAM_PROBE_ERR_CONNECT;
         }
+        rb_probe_request_lock(&args->sync);
         result = args->result;
         if (out_len) *out_len = args->out_len;
         if (out_buf && args->out_len > 0) memcpy(out_buf, args->out_buf, (size_t)args->out_len);
@@ -1280,6 +1369,7 @@ int rb_probe_fetch_binary(const char *url, unsigned char *out_buf, int out_buf_s
             strncpy(out_content_type, args->out_content_type, (size_t)out_content_type_size - 1);
             out_content_type[out_content_type_size - 1] = '\0';
         }
+        rb_probe_request_unlock(&args->sync);
         rb_probe_fetch_binary_job_free(args);
         if (rb_probe_open_socket_count != 0 || rb_probe_active_ssl_count != 0 || Radio_IsTlsPoisoned()) {
             rb_probe_artwork_disabled_for_run = 1;
