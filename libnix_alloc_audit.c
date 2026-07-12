@@ -102,7 +102,6 @@ void *__wrap_malloc(size_t size)
     ptr = __real_malloc(size);
     AuditRecordAlloc("LIBNIX-ALLOC", ptr, size, task, caller);
     MiniMem_AllocUnlock();
-    if (ptr) printf("LIBNIX-ALLOC seq=%lu ptr=%p size=%lu task=%p caller=%p state=live\n", gSeq, ptr, (unsigned long)size, task, caller);
     return ptr;
 }
 
@@ -117,7 +116,6 @@ void *__wrap_calloc(size_t count, size_t size)
     ptr = __real_calloc(count, size);
     AuditRecordAlloc("LIBNIX-CALLOC", ptr, total, task, caller);
     MiniMem_AllocUnlock();
-    if (ptr) printf("LIBNIX-CALLOC seq=%lu ptr=%p size=%lu task=%p caller=%p state=live\n", gSeq, ptr, (unsigned long)total, task, caller);
     return ptr;
 }
 
@@ -146,7 +144,6 @@ void *__wrap_realloc(void *oldptr, size_t size)
     }
     MiniMem_AllocUnlock();
     if (unknown) printf("LIBNIX-REALLOC-UNKNOWN seq=%lu oldptr=%p ptr=%p size=%lu task=%p caller=%p state=unknown\n", gSeq, oldptr, newptr, (unsigned long)size, task, caller);
-    if (newptr) printf("LIBNIX-REALLOC seq=%lu oldptr=%p ptr=%p size=%lu task=%p caller=%p state=live\n", gSeq, oldptr, newptr, (unsigned long)size, task, caller);
     return newptr;
 }
 
@@ -170,7 +167,6 @@ void __wrap_free(void *ptr)
     MiniMem_AllocUnlock();
     if (unknown) printf("LIBNIX-FREE-UNKNOWN seq=%lu ptr=%p task=%p caller=%p state=unknown\n", gSeq, ptr, task, caller);
     else if (dbl) printf("LIBNIX-DOUBLE-FREE seq=%lu ptr=%p task=%p caller=%p state=freed\n", gSeq, ptr, task, caller);
-    else printf("LIBNIX-FREE seq=%lu ptr=%p task=%p caller=%p state=freed\n", gSeq, ptr, task, caller);
 }
 
 unsigned long LibnixAllocAudit_LiveCount(void) { return gLive; }

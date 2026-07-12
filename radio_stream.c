@@ -12,6 +12,7 @@
 #include <ctype.h>
 #include <time.h>
 #include "miniamp_memguard.h"
+#include "libnix_alloc_audit.h"
 
 #ifndef RADIO_RING_BYTES
 #define RADIO_RING_BYTES 65536UL
@@ -752,6 +753,7 @@ struct RadioStream {
      * handshake/read the worker is running on this session's behalf. */
     struct Task *requestingTask;
     SSL *ssl;
+    unsigned long sslGeneration;
     SSL_CTX *ctx;
     int sslHandshakeDone;
     int sslStatePoisoned; /* see radio_ssl_read()'s SSL_ERROR_SSL handling */
@@ -1059,6 +1061,169 @@ static int radio_worker_shutdown_ssl_ctx(void)
 }
 #endif
 
+
+#if defined(AMIGA_M68K) && defined(RADIO_DEBUG)
+#define RADIO_EXEC_SNAPSHOT_MAX 2048U
+typedef struct RadioExecFreeSnapEntry {
+    struct MemHeader *mh;
+    struct MemChunk *node;
+    unsigned long size;
+    struct MemChunk *next;
+    struct MemChunk *prev;
+    struct MemChunk *following;
+} RadioExecFreeSnapEntry;
+static RadioExecFreeSnapEntry gRadioExecSnap[RADIO_EXEC_SNAPSHOT_MAX];
+static unsigned int gRadioExecSnapCount;
+static unsigned long gRadioExecSnapSeq;
+static const char *gRadioExecSnapWhere;
+static int gRadioExecCorruptionReported;
+
+static void Radio_DebugSnapshotExecMem(const char *where)
+{
+    struct MemHeader *mh;
+    unsigned int count = 0;
+    Forbid();
+    for (mh = (struct MemHeader *)((struct ExecBase *)SysBase)->MemList.lh_Head;
+         mh->mh_Node.ln_Succ && count < RADIO_EXEC_SNAPSHOT_MAX;
+         mh = (struct MemHeader *)mh->mh_Node.ln_Succ) {
+        struct MemChunk *prev = NULL;
+        struct MemChunk *mc = mh->mh_First;
+        long guard = 0;
+        while (mc && count < RADIO_EXEC_SNAPSHOT_MAX && guard++ < 65536) {
+            gRadioExecSnap[count].mh = mh;
+            gRadioExecSnap[count].node = mc;
+            gRadioExecSnap[count].size = mc->mc_Bytes;
+            gRadioExecSnap[count].next = mc->mc_Next;
+            gRadioExecSnap[count].prev = prev;
+            gRadioExecSnap[count].following = mc->mc_Next;
+            prev = mc;
+            ++count;
+            mc = mc->mc_Next;
+        }
+    }
+    gRadioExecSnapCount = count;
+    gRadioExecSnapWhere = where;
+    ++gRadioExecSnapSeq;
+    Permit();
+}
+
+static long Radio_DebugFindSnapNode(void *node)
+{
+    unsigned int i;
+    for (i = 0; i < gRadioExecSnapCount; ++i)
+        if ((void *)gRadioExecSnap[i].node == node) return (long)i;
+    return -1;
+}
+
+static long Radio_DebugFindNearestSnapNode(void *node, int before)
+{
+    unsigned int i;
+    long best = -1;
+    unsigned long addr = (unsigned long)node;
+    unsigned long best_addr = before ? 0UL : ~0UL;
+    for (i = 0; i < gRadioExecSnapCount; ++i) {
+        unsigned long cur = (unsigned long)gRadioExecSnap[i].node;
+        if (before) {
+            if (cur < addr && cur >= best_addr) { best_addr = cur; best = (long)i; }
+        } else {
+            if (cur > addr && cur <= best_addr) { best_addr = cur; best = (long)i; }
+        }
+    }
+    return best;
+}
+
+static void Radio_DebugReportExecSnapshotFault(const char *where, const char *fault, void *fault_addr)
+{
+    long exact = Radio_DebugFindSnapNode(fault_addr);
+    long prev = Radio_DebugFindNearestSnapNode(fault_addr, 1);
+    long next = Radio_DebugFindNearestSnapNode(fault_addr, 0);
+    printf("radio-memcheck-snapshot: where=%s snapshot=%s seq=%lu bad=%p fault=%s existed_before=%s entries=%u\n",
+        where ? where : "", gRadioExecSnapWhere ? gRadioExecSnapWhere : "", gRadioExecSnapSeq,
+        fault_addr, fault ? fault : "", exact >= 0 ? "yes" : "no", gRadioExecSnapCount);
+    if (exact >= 0) {
+        RadioExecFreeSnapEntry *e = &gRadioExecSnap[exact];
+        printf("radio-memcheck-snapshot: bad-before mh=%p node=%p size=%lu next=%p prev=%p following=%p\n",
+            (void *)e->mh, (void *)e->node, e->size, (void *)e->next, (void *)e->prev, (void *)e->following);
+    }
+    if (prev >= 0) {
+        RadioExecFreeSnapEntry *e = &gRadioExecSnap[prev];
+        printf("radio-memcheck-snapshot: nearest-prev mh=%p node=%p size=%lu next=%p prev=%p following=%p\n",
+            (void *)e->mh, (void *)e->node, e->size, (void *)e->next, (void *)e->prev, (void *)e->following);
+    }
+    if (next >= 0) {
+        RadioExecFreeSnapEntry *e = &gRadioExecSnap[next];
+        printf("radio-memcheck-snapshot: nearest-next mh=%p node=%p size=%lu next=%p prev=%p following=%p\n",
+            (void *)e->mh, (void *)e->node, e->size, (void *)e->next, (void *)e->prev, (void *)e->following);
+    }
+}
+#else
+static void Radio_DebugSnapshotExecMem(const char *where) { (void)where; }
+#endif
+
+
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL) && defined(RADIO_DEBUG)
+#define RADIO_SSL_REGISTRY_MAX 128U
+typedef struct RadioSslRegistryEntry {
+    SSL *ptr;
+    unsigned long generation;
+    const char *category;
+    unsigned long session;
+    struct Task *owner;
+    int live;
+} RadioSslRegistryEntry;
+static RadioSslRegistryEntry gRadioSslRegistry[RADIO_SSL_REGISTRY_MAX];
+static unsigned long gRadioSslGeneration;
+
+static unsigned long Radio_DebugRegisterSsl(SSL *ssl, const char *category, unsigned long session)
+{
+    unsigned int i, slot = RADIO_SSL_REGISTRY_MAX;
+    if (!ssl) return 0;
+    for (i = 0; i < RADIO_SSL_REGISTRY_MAX; ++i) {
+        if (gRadioSslRegistry[i].ptr == ssl && !gRadioSslRegistry[i].live) { slot = i; break; }
+        if (slot == RADIO_SSL_REGISTRY_MAX && !gRadioSslRegistry[i].ptr) slot = i;
+    }
+    if (slot == RADIO_SSL_REGISTRY_MAX) slot = 0;
+    gRadioSslRegistry[slot].ptr = ssl;
+    gRadioSslRegistry[slot].generation = ++gRadioSslGeneration;
+    gRadioSslRegistry[slot].category = category;
+    gRadioSslRegistry[slot].session = session;
+    gRadioSslRegistry[slot].owner = FindTask(NULL);
+    gRadioSslRegistry[slot].live = 1;
+    printf("radio-ssl-gen: SSL_new ptr=%p gen=%lu category=%s session=%lu owner=%p state=live\n",
+        (void *)ssl, gRadioSslRegistry[slot].generation, category ? category : "", session, (void *)gRadioSslRegistry[slot].owner);
+    return gRadioSslRegistry[slot].generation;
+}
+
+static RadioSslRegistryEntry *Radio_DebugFindSsl(SSL *ssl, unsigned long generation)
+{
+    unsigned int i;
+    for (i = 0; i < RADIO_SSL_REGISTRY_MAX; ++i)
+        if (gRadioSslRegistry[i].ptr == ssl && (!generation || gRadioSslRegistry[i].generation == generation)) return &gRadioSslRegistry[i];
+    return NULL;
+}
+
+static void Radio_DebugAssertSsl(const char *op, SSL *ssl, unsigned long generation, unsigned long session)
+{
+    RadioSslRegistryEntry *e = Radio_DebugFindSsl(ssl, generation);
+    printf("radio-ssl-gen: op=%s ptr=%p expected_gen=%lu session=%lu task=%p registry_gen=%lu registry_session=%lu owner=%p state=%s\n",
+        op ? op : "", (void *)ssl, generation, session, (void *)FindTask(NULL),
+        e ? e->generation : 0, e ? e->session : 0, e ? (void *)e->owner : NULL,
+        e ? (e->live ? "live" : "freed") : "missing");
+}
+
+static void Radio_DebugMarkSslFreed(SSL *ssl, unsigned long generation, unsigned long session)
+{
+    RadioSslRegistryEntry *e = Radio_DebugFindSsl(ssl, generation);
+    if (e) e->live = 0;
+    printf("radio-ssl-gen: SSL_free-complete ptr=%p expected_gen=%lu session=%lu task=%p registry_gen=%lu state=%s\n",
+        (void *)ssl, generation, session, (void *)FindTask(NULL), e ? e->generation : 0, e ? "freed" : "missing");
+}
+#else
+static unsigned long Radio_DebugRegisterSsl(void *ssl, const char *category, unsigned long session) { (void)ssl; (void)category; (void)session; return 0; }
+static void Radio_DebugAssertSsl(const char *op, void *ssl, unsigned long generation, unsigned long session) { (void)op; (void)ssl; (void)generation; (void)session; }
+static void Radio_DebugMarkSslFreed(void *ssl, unsigned long generation, unsigned long session) { (void)ssl; (void)generation; (void)session; }
+#endif
+
 int Radio_CheckMiniMem(const char *where)
 {
     int corrupt = MiniMem_CheckAll(where);
@@ -1111,6 +1276,11 @@ void Radio_DebugCheckExecMem(const char *where)
     if (fault) {
         printf("radio-memcheck: CORRUPT %s at %p where=%s (exec heap damaged BEFORE this point)\n",
             fault, fault_addr, where ? where : "");
+        Radio_DebugReportExecSnapshotFault(where, fault, fault_addr);
+        if (!gRadioExecCorruptionReported) {
+            gRadioExecCorruptionReported = 1;
+            LibnixAllocAudit_DumpLive("after first exec heap corruption");
+        }
         fflush(stdout);
         /* This walk previously only printed: a real exec-heap corruption hit
          * in production here (a "bad chunk size" fault) and the app kept
@@ -1625,6 +1795,7 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
             rs->sslFreed = 1;
             if (radio_active_ssl_count > 0) radio_active_ssl_count--;
             rs->ssl = NULL;
+            rs->sslGeneration = 0;
             rs->sslHandshakeDone = 0;
         } else if (radio_runtime_diag_leak_ssl_enabled()) {
             printf("radio-diag-leak: category=playback session=%lu ssl=%p action=quarantined-no-SSL_free\n",
@@ -1632,18 +1803,22 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
             rs->sslFreed = 1;
             if (radio_active_ssl_count > 0) radio_active_ssl_count--;
             rs->ssl = NULL;
+            rs->sslGeneration = 0;
             rs->sslHandshakeDone = 0;
         } else if (rs->sock == RADIO_INVALID_SOCKET || rs->socketClosed) {
             SSL *ssl_to_free = rs->ssl;
             Radio_DebugCheckExecMem("before playback SSL_free after socket close");
             printf("radio-tls-order: category=playback session=%lu step=SSL_free-begin ssl=%p\n",
                 rs->session_id, (void *)ssl_to_free);
+            Radio_DebugAssertSsl("SSL_free", ssl_to_free, rs->sslGeneration, rs->session_id);
             SSL_free(ssl_to_free);
+            Radio_DebugMarkSslFreed(ssl_to_free, rs->sslGeneration, rs->session_id);
             printf("radio-tls-order: category=playback session=%lu step=SSL_free-complete\n", rs->session_id);
             Radio_DebugCheckExecMem("after playback SSL_free after socket close");
             rs->sslFreed = 1;
             if (radio_active_ssl_count > 0) radio_active_ssl_count--;
             rs->ssl = NULL;
+            rs->sslGeneration = 0;
             rs->sslHandshakeDone = 0;
         } else {
             RADIO_DBG(printf("radio-cleanup: SSL_free deferred until after CloseSocket session=%lu ssl=%p fd=%ld\n",
@@ -1721,6 +1896,8 @@ static int radio_ssl_do_handshake(RadioStream *rs)
         RADIO_DBG(printf("BEFORE SSL_connect session=%lu attempt=%d ssl=%p ctx=%p fd=%ld\n",
             rs ? rs->session_id : 0, tries + 1, rs ? (void *)rs->ssl : 0,
             rs ? (void *)rs->ctx : 0, rs ? (long)rs->sock : -1L););
+        Radio_DebugAssertSsl("SSL_connect", rs->ssl, rs->sslGeneration, rs ? rs->session_id : 0);
+        Radio_DebugSnapshotExecMem("before playback SSL_connect");
         r = SSL_connect(rs->ssl);
         Radio_DebugCheckExecMem("after SSL_connect");
         if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
@@ -1738,6 +1915,7 @@ static int radio_ssl_do_handshake(RadioStream *rs)
             RADIO_DBG(printf("SSL_CONNECT_DONE session=%lu\n", rs ? rs->session_id : 0););
             return 0;
         }
+        Radio_DebugAssertSsl("SSL_get_error", rs->ssl, rs->sslGeneration, rs ? rs->session_id : 0);
         e = SSL_get_error(rs->ssl, r);
         RADIO_DBG(printf("AFTER SSL_connect fail session=%lu attempt=%d ret=%d err=%d ssl=%p ctx=%p fd=%ld\n",
             rs ? rs->session_id : 0, tries + 1, r, e, rs ? (void *)rs->ssl : 0,
@@ -1800,6 +1978,7 @@ static int radio_ssl_connect(RadioStream *rs)
         return -1;
     }
     rs->ssl = SSL_new(rs->ctx);
+    rs->sslGeneration = Radio_DebugRegisterSsl(rs->ssl, "playback", rs->session_id);
     Radio_DebugCheckExecMem("after SSL_new");
     if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
         radio_worker_ssl_ctx_poisoned = 1;
@@ -1819,6 +1998,7 @@ static int radio_ssl_connect(RadioStream *rs)
     }
     if (!rs->ssl) { radio_ssl_close_stream(rs); set_error(rs, "AmiSSL init failed"); return -1; }
 #ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
+    Radio_DebugAssertSsl("SSL_set_tlsext_host_name", rs->ssl, rs->sslGeneration, rs->session_id);
     SSL_set_tlsext_host_name(rs->ssl, rs->host);
 #endif
 #ifdef RADIO_SSL_VERIFY_PEER
@@ -1827,6 +2007,7 @@ static int radio_ssl_connect(RadioStream *rs)
         if (verify_param) X509_VERIFY_PARAM_set1_host(verify_param, rs->host, 0);
     }
 #endif
+    Radio_DebugAssertSsl("SSL_set_fd", rs->ssl, rs->sslGeneration, rs->session_id);
     set_fd_ok = SSL_set_fd(rs->ssl, (int)rs->sock);
     if (!set_fd_ok) { RADIO_DBG(printf("radio-tls: SSL_set_fd failed session=%lu fd=%ld ssl=%p ctx=%p\n", rs->session_id, (long)rs->sock, (void *)rs->ssl, (void *)rs->ctx);); radio_ssl_close_stream(rs); set_error(rs, "TLS handshake failed"); return -1; }
     if (radio_ssl_do_handshake(rs) != 0) {
@@ -1873,6 +2054,7 @@ static void radio_ssl_attempt_shutdown(RadioStream *rs)
         radio_tls_shutdown_quarantine = 1;
         return;
     }
+    Radio_DebugAssertSsl("SSL_shutdown", rs->ssl, rs->sslGeneration, rs->session_id);
     SSL_shutdown(rs->ssl);
     Radio_DebugCheckExecMem("after SSL_shutdown");
     if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
@@ -1956,10 +2138,13 @@ static int radio_send_all(RadioStream *rs, const char *buf, int len)
                 close_current_socket(rs);
                 return -1;
             }
+            Radio_DebugAssertSsl("SSL_write", rs->ssl, rs->sslGeneration, rs->session_id);
             r = (int)SSL_write(rs->ssl, buf + sent, len - sent);
             if (r > 0) { sent += r; continue; }
             {
-                int e = SSL_get_error(rs->ssl, r);
+                int e;
+                Radio_DebugAssertSsl("SSL_get_error", rs->ssl, rs->sslGeneration, rs->session_id);
+                e = SSL_get_error(rs->ssl, r);
                 unsigned long ssl_lib_error;
                 if (e == SSL_ERROR_WANT_WRITE || e == SSL_ERROR_WANT_READ) {
                     radio_backoff_sleep(); tries++; continue;
@@ -1995,6 +2180,7 @@ struct RadioNetTransport {
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     SSL_CTX *ctx;
     SSL *ssl;
+    unsigned long ssl_generation;
 #endif
     int handshake_done;
     int ssl_poisoned;
@@ -2045,14 +2231,16 @@ static int radio_net_transport_tls_connect(RadioNetTransport *t, const char *hos
 #endif
     Radio_DebugCheckExecMem("before transport SSL_new");
     t->ssl = SSL_new(t->ctx);
+    t->ssl_generation = Radio_DebugRegisterSsl(t->ssl, t->category, t->session_id);
     if (t->ssl) radio_net_transport_count_ssl(t);
     Radio_DebugCheckExecMem("after transport SSL_new");
     if (!t->ssl || Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) return -1;
 #ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
-    if (host && host[0]) SSL_set_tlsext_host_name(t->ssl, host);
+    if (host && host[0]) { Radio_DebugAssertSsl("SSL_set_tlsext_host_name", t->ssl, t->ssl_generation, t->session_id); SSL_set_tlsext_host_name(t->ssl, host); }
 #endif
     Radio_DebugCheckExecMem("after transport SSL_set_tlsext_host_name");
     Radio_DebugCheckExecMem("before transport SSL_set_fd");
+    Radio_DebugAssertSsl("SSL_set_fd", t->ssl, t->ssl_generation, t->session_id);
     if (SSL_set_fd(t->ssl, (int)t->sock) != 1) {
         Radio_DebugCheckExecMem("after transport SSL_set_fd");
         return -1;
@@ -2061,8 +2249,13 @@ static int radio_net_transport_tls_connect(RadioNetTransport *t, const char *hos
     ERR_clear_error();
     for (tries = 0; tries < 150; tries++) {
         int r, e;
+        Radio_DebugAssertSsl("SSL_connect", t->ssl, t->ssl_generation, t->session_id);
+        Radio_DebugSnapshotExecMem("before transport SSL_connect");
         r = SSL_connect(t->ssl);
+        Radio_DebugCheckExecMem("after transport SSL_connect");
+        if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) { t->ssl_poisoned = 1; return -1; }
         if (r == 1) { t->handshake_done = 1; return 0; }
+        Radio_DebugAssertSsl("SSL_get_error", t->ssl, t->ssl_generation, t->session_id);
         e = SSL_get_error(t->ssl, r);
         if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
             radio_backoff_sleep();
@@ -2329,8 +2522,10 @@ static void radio_net_write_worker(void *arg)
         int n;
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
         if (t->use_tls && t->ssl) {
+            Radio_DebugAssertSsl("SSL_write", t->ssl, t->ssl_generation, t->session_id);
             n = (int)SSL_write(t->ssl, a->buffer + done, a->length - done);
             if (n > 0) { done += n; continue; }
+            Radio_DebugAssertSsl("SSL_get_error", t->ssl, t->ssl_generation, t->session_id);
             n = SSL_get_error(t->ssl, n);
             if (n == SSL_ERROR_WANT_READ || n == SSL_ERROR_WANT_WRITE) { radio_backoff_sleep(); tries++; continue; }
             if (radio_ssl_error_is_fatal(n)) { t->ssl_poisoned = 1; Radio_ReportTlsFault("transport fatal TLS write"); }
@@ -2388,6 +2583,7 @@ static void radio_net_read_worker(void *arg)
         int n;
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
         if (t->use_tls && t->ssl) {
+            Radio_DebugAssertSsl("SSL_read", t->ssl, t->ssl_generation, t->session_id);
             n = (int)SSL_read(t->ssl, a->buffer, a->length);
             if (n > 0) { a->result = n; radio_net_io_complete(a); return; }
             n = SSL_get_error(t->ssl, n);
@@ -2453,6 +2649,7 @@ static void radio_net_close_transport_worker(RadioNetTransport *t, int graceful)
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     if (graceful && t->ssl && t->handshake_done && !t->ssl_poisoned &&
         !Radio_IsMemoryPoisoned() && !Radio_IsTlsPoisoned()) {
+        Radio_DebugAssertSsl("SSL_shutdown", t->ssl, t->ssl_generation, t->session_id);
         SSL_shutdown(t->ssl);
         printf("radio-tls-order: category=%s session=%lu step=SSL_shutdown-complete\n", t->category, t->session_id);
     }
@@ -2470,14 +2667,19 @@ static void radio_net_close_transport_worker(RadioNetTransport *t, int graceful)
         if (t->ssl_poisoned || Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
             Radio_MarkWorkerSslCtxPoisoned("transport close fatal SSL quarantined");
             t->ssl = NULL;
+            t->ssl_generation = 0;
         } else if (radio_runtime_diag_leak_ssl_enabled()) {
             printf("radio-diag-leak: category=%s session=%lu ssl=%p action=quarantined-no-SSL_free\n", t->category, t->session_id, (void *)t->ssl);
             t->ssl = NULL;
+            t->ssl_generation = 0;
         } else {
             printf("radio-tls-order: category=%s session=%lu step=SSL_free-begin ssl=%p\n", t->category, t->session_id, (void *)t->ssl);
+            Radio_DebugAssertSsl("SSL_free", t->ssl, t->ssl_generation, t->session_id);
             SSL_free(t->ssl);
+            Radio_DebugMarkSslFreed(t->ssl, t->ssl_generation, t->session_id);
             printf("radio-tls-order: category=%s session=%lu step=SSL_free-complete\n", t->category, t->session_id);
             t->ssl = NULL;
+            t->ssl_generation = 0;
             if (t->ssl_counted && radio_active_ssl_count > 0) radio_active_ssl_count--;
             t->ssl_counted = 0;
         }
@@ -3988,12 +4190,15 @@ static int radio_pump_body(RadioStream *rs)
 	        }
 	        radio_net_adopt_context(rs);
 	        rs->workerReadCalls++;
+            Radio_DebugAssertSsl("SSL_read", rs->ssl, rs->sslGeneration, rs->session_id);
 	        n = (int)SSL_read(rs->ssl, (char *)b, requested);
             radio_worker_risk_log("after SSL_read", rs);
 	        RADIO_DBG(printf("radio-ssl-read: session=%lu ssl=%p ctx=%p fd=%ld dst=%p dst_cap=%d requested=%d returned=%d fill=%lu ring_free=%lu\n",
 	            rs->session_id, (void *)rs->ssl, (void *)rs->ctx, (long)rs->sock, (void *)b, (int)sizeof(b), requested, n, rs->used, rs->size > rs->used ? rs->size - rs->used : 0));
 	        if (n <= 0) {
-	            int e = SSL_get_error(rs->ssl, n);
+	            int e;
+                Radio_DebugAssertSsl("SSL_get_error", rs->ssl, rs->sslGeneration, rs->session_id);
+                e = SSL_get_error(rs->ssl, n);
 	            RADIO_DBG(printf("radio-ssl-read: session=%lu SSL_get_error=%d ret=%d fd=%ld\n", rs->session_id, e, n, (long)rs->sock));
 	            if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) { wb = 1; rs->workerWantReadCount++; }
 	            else if (e == SSL_ERROR_ZERO_RETURN) {
