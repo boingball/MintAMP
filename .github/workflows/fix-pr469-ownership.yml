@@ -1,13 +1,8 @@
 name: Fix PR469 final ownership defects
 
 on:
-  push:
-    branches:
-      - codex/implement-tls-lifecycle-corrections-1egenr
-    paths:
-      - .github/workflows/fix-pr469-ownership.yml
   pull_request:
-    types: [edited, opened, reopened, synchronize]
+    types: [edited]
     branches:
       - codex/implement-tls-lifecycle-corrections
 
@@ -22,11 +17,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: codex/implement-tls-lifecycle-corrections-1egenr
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Apply exact ownership fixes
         shell: bash
         run: |
+          set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
 
@@ -54,20 +50,23 @@ jobs:
 
           for index, (old, new) in enumerate(replacements, 1):
               count = text.count(old)
+              print(f"replacement {index}: matches={count}")
               if count != 1:
                   raise SystemExit(f"replacement {index}: expected exactly one match, found {count}")
               text = text.replace(old, new, 1)
 
           path.write_text(text, encoding="utf-8")
+          print("exact ownership patch applied")
           PY
 
-          bash tools/check_network_ownership.sh
           git diff --check
-          git diff -- radio_stream.c
+          bash tools/check_network_ownership.sh
+          git diff --stat
 
       - name: Commit and push
         shell: bash
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add radio_stream.c
