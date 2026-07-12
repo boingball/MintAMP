@@ -62,6 +62,8 @@ jobs:
 
           rm -f .github/workflows/fix-pr469-ownership.yml
           git diff --check
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ripgrep
           bash tools/check_network_ownership.sh
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
