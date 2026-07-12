@@ -18,6 +18,7 @@ jobs:
         with:
           ref: codex/implement-tls-lifecycle-corrections-1egenr
           fetch-depth: 1
+          show-progress: false
 
       - name: Apply exact ownership fixes
         shell: bash
@@ -59,6 +60,9 @@ jobs:
           print("exact ownership patch applied")
           PY
 
+          # Remove this one-shot workflow before running the ownership grep so
+          # its literal diagnostic strings cannot be mistaken for production code.
+          rm -f .github/workflows/fix-pr469-ownership.yml
           git diff --check
           bash tools/check_network_ownership.sh
           git diff --stat
@@ -69,6 +73,6 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add radio_stream.c
+          git add -A
           git commit -m "Fix final RadioNet ownership races"
           git push origin HEAD:codex/implement-tls-lifecycle-corrections-1egenr
