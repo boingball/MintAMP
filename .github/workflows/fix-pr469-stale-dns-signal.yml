@@ -1,0 +1,85 @@
+name: Fix PR469 stale DNS worker signal
+
+on:
+  pull_request:
+    types: [edited]
+    branches:
+      - codex/implement-tls-lifecycle-corrections
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Patch, validate, commit and push
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git init -q work
+          cd work
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch -q --depth=1 origin codex/implement-tls-lifecycle-corrections-1egenr
+          git checkout -q -b codex/implement-tls-lifecycle-corrections-1egenr FETCH_HEAD
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("radio_stream.c")
+          text = path.read_text(encoding="utf-8")
+          old = '''    he = gethostbyname((char *)a->host);'''
+          new = '''#if defined(AMIGA_M68K)
+    /* The persistent worker may still have SIGBREAKF_CTRL_C pending from the
+     * previous stream's stop request. Clear that stale bit before arming the
+     * resolver break mask, otherwise the next station's DNS lookup can wedge
+     * or abort immediately. Keep the mask scoped to gethostbyname() so it
+     * cannot interfere with later AmiSSL operations on the same worker. */
+    SetSignal(0, SIGBREAKF_CTRL_C);
+    SocketBaseTags(SBTM_SETVAL(SBTC_BREAKMASK),
+                   (ULONG)SIGBREAKF_CTRL_C,
+                   TAG_DONE);
+#endif
+    RADIO_DBG(printf("radio-net: DNS begin category=%s session=%lu host=%s\\n",
+        t->category, t->session_id, a->host);)
+    he = gethostbyname((char *)a->host);
+#if defined(AMIGA_M68K)
+    SocketBaseTags(SBTM_SETVAL(SBTC_BREAKMASK), 0UL, TAG_DONE);
+#endif
+    RADIO_DBG(printf("radio-net: DNS complete category=%s session=%lu host=%s result=%p\\n",
+        t->category, t->session_id, a->host, (void *)he);)'''
+
+          count = text.count(old)
+          print(f"DNS replacement matches={count}")
+          if count != 1:
+              raise SystemExit(f"expected exactly one opaque transport DNS call, found {count}")
+          text = text.replace(old, new, 1)
+          path.write_text(text, encoding="utf-8")
+          print("stale DNS worker signal fix applied")
+          PY
+
+          rm -f .github/workflows/fix-pr469-stale-dns-signal.yml
+          git diff --check
+
+          python3 - <<'PY'
+          from pathlib import Path
+          text = Path("radio_stream.c").read_text(encoding="utf-8")
+          required = [
+              'SetSignal(0, SIGBREAKF_CTRL_C);',
+              'SBTM_SETVAL(SBTC_BREAKMASK)',
+              'radio-net: DNS begin',
+              'radio-net: DNS complete',
+          ]
+          for needle in required:
+              if needle not in text:
+                  raise SystemExit(f"missing expected DNS fix text: {needle}")
+          print("DNS signal-scope assertions passed")
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Fix stale worker signal before probe DNS"
+          git push -q origin HEAD:codex/implement-tls-lifecycle-corrections-1egenr
