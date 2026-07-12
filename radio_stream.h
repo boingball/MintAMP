@@ -136,8 +136,6 @@ const char *Radio_WorkerStateName(void);
  * a second one of its own (its weak-symbol copies of the bases do not
  * reliably merge with the strong definitions under the m68k hunk linker). */
 void Radio_GetAmiSslShared(void **amissl_base, void **amissl_ext_base, void **amissl_master_base);
-void *Radio_GetWorkerSslCtx(const char *category, unsigned long session_id);
-void Radio_MarkWorkerSslCtxPoisoned(const char *where);
 
 RadioNetTransport *RadioNet_Open(
     const char *url,
@@ -256,8 +254,6 @@ static void Radio_GetAmiSslShared(void **amissl_base, void **amissl_ext_base, vo
     if (amissl_ext_base) *amissl_ext_base = 0;
     if (amissl_master_base) *amissl_master_base = 0;
 }
-static void *Radio_GetWorkerSslCtx(const char *category, unsigned long session_id) { (void)category; (void)session_id; return 0; }
-static void Radio_MarkWorkerSslCtxPoisoned(const char *where) { (void)where; }
 static RadioNetTransport *RadioNet_Open(const char *url, const char *host, int port, int use_tls, const char *category, unsigned long session_id) { (void)url; (void)host; (void)port; (void)use_tls; (void)category; (void)session_id; return 0; }
 static int RadioNet_Write(RadioNetTransport *transport, const void *buffer, int length) { (void)transport; (void)buffer; (void)length; return -1; }
 static int RadioNet_Read(RadioNetTransport *transport, void *buffer, int length) { (void)transport; (void)buffer; (void)length; return -1; }
