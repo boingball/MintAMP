@@ -946,7 +946,7 @@ static int rb_probe_transport_open_ex(RbProbeTransport *transport, const char *u
         /* Fresh SSL per HTTPS socket; diagnostic mode still leaks it on close. */
         Radio_DebugCheckExecMem("before probe SSL_new");
         transport->ssl = SSL_new(transport->ctx);
-            Radio_DebugCheckExecMem("after probe SSL_new");
+        Radio_DebugCheckExecMem("after probe SSL_new");
         if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
             transport->sslStatePoisoned = 1;
             rb_probe_amissl_dirty = 1;
@@ -959,13 +959,19 @@ static int rb_probe_transport_open_ex(RbProbeTransport *transport, const char *u
             return RB_STREAM_PROBE_ERR_CONNECT;
         }
         rb_probe_active_ssl_count++;
-        SSL_set_fd(transport->ssl, (int)transport->sock);
+        Radio_DebugCheckExecMem("before probe SSL_set_fd");
+        if (SSL_set_fd(transport->ssl, (int)transport->sock) != 1) {
+            Radio_DebugCheckExecMem("after probe SSL_set_fd");
+            rb_probe_transport_close(transport);
+            return RB_STREAM_PROBE_ERR_CONNECT;
+        }
+        Radio_DebugCheckExecMem("after probe SSL_set_fd");
 #ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
         sni_set = (SSL_set_tlsext_host_name(transport->ssl, host) == 1);
 #else
         sni_set = -1;
 #endif
-        }
+        Radio_DebugCheckExecMem("after probe SSL_set_tlsext_host_name");
         RADIO_DBG(printf("rb-probe TLS: host=%s port=%d sni=%s verify=disabled method=SSLv23_client_method\n",
                host, port, sni_set > 0 ? host : (sni_set == 0 ? "not-set" : "unavailable"));)
         /* SSL_connect() can legitimately need several calls (WANT_READ/

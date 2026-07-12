@@ -2464,8 +2464,9 @@ static void close_current_socket_mode_local(RadioStream *rs, RadioCloseMode mode
         radio_close_mode_name(mode), rs->session_id, (int)rs->status, (long)rs->sock, before););
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     /* Healthy TLS teardown keeps the worker-owned shared SSL_CTX retained:
-     * SSL_shutdown() -> SSL_free() -> CloseSocket(). Fatal/poisoned sessions
-     * skip every SSL/BIO/CTX touch and fall through to raw socket close only. */
+     * SSL_shutdown() -> CloseSocket() -> SSL_free(). Fatal/poisoned sessions
+     * close the raw socket, then quarantine SSL instead of making further
+     * AmiSSL calls if memory/TLS poison is present. */
     {
         int fatal_close = rs->sslStatePoisoned || rs->fatalStop || rs->noReconnect ||
             Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned();
