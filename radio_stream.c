@@ -2132,7 +2132,7 @@ int RadioNet_Write(RadioNetTransport *t, const void *buffer, int length)
             return -1;
         }
 #endif
-        n = (int)send(t->sock, (const char *)buffer + done, length - done, 0);
+        n = (int)send(t->sock, (char *)buffer + done, length - done, 0);
         if (n > 0) { done += n; continue; }
         if (n < 0 && radio_would_block()) { radio_backoff_sleep(); tries++; continue; }
         return -1;

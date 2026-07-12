@@ -395,6 +395,8 @@ static int rb_probe_resolve_location(const RbProbeUrl *base, const char *locatio
 
 void rb_probe_shutdown_tls_context(void) { }
 
+static void rb_probe_cleanup_amissl(void) { }
+
 static void rb_probe_transport_close_mode(RbProbeTransport *transport, RbProbeCloseMode mode, int http_status);
 static void rb_probe_transport_close(RbProbeTransport *transport);
 
