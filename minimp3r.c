@@ -202,10 +202,24 @@ static void MrTaskIdentityLog(const char *phase)
 #define MR_FREE_END(site, owner, ptr, gen) \
 	MrFreeAuditLog("END", (site), (owner), (const void *)(ptr), (unsigned long)(gen))
 #define MR_TASK_IDENTITY(phase) MrTaskIdentityLog((phase))
+
+/* Cross-family free guard: shout if a pointer about to be handed to exec
+ * FreeMem()/FreeVec() is actually a live malloc/calloc/realloc/strdup block
+ * (MiniMem_Owns() is only ever true under HEAPGUARD, where every app
+ * malloc-family call is shadowed).  Freeing a libnix block with FreeMem
+ * releases the wrong base/size and leaves the block on libnix's list for
+ * ___free_all() to double-free at exit -- precisely the AN_FreeTwice/
+ * AN_BadFreeAddr pair seen after main() returns.  This turns that latent
+ * mismatch into a loud, pin-pointed log line at the offending call. */
+#define MR_EXEC_FREE_GUARD(ptr, where) \
+	do { if (MiniMem_Owns((const void *)(ptr))) \
+		RADIO_DBG_PRINTF(("MIXED-FAMILY-FREE: exec FreeMem on malloc-family ptr=%p at %s task=%p\n", \
+			(void *)(ptr), (where), (void *)FindTask(NULL))); } while (0)
 #else
 #define MR_FREE_BEGIN(site, owner, ptr, gen) do { } while (0)
 #define MR_FREE_END(site, owner, ptr, gen) do { } while (0)
 #define MR_TASK_IDENTITY(phase) do { } while (0)
+#define MR_EXEC_FREE_GUARD(ptr, where) do { } while (0)
 #endif
 
 /* How often we poll the shared playback status block while a track plays.
@@ -3118,6 +3132,7 @@ static void FreeMp3Info(MrMp3Info *info)
 		 * free is here -- clearing artData/artBytes immediately below makes a
 		 * repeat call a proven no-op instead of a stale double free. */
 		MR_FREE_BEGIN("FreeMp3Info", "id3/folder-artData", info->artData, info->artBytes);
+		MR_EXEC_FREE_GUARD(info->artData, "FreeMp3Info");
 		FreeMem(info->artData, info->artBytes);
 		info->artData = NULL;
 		info->artBytes = 0;
@@ -3252,6 +3267,7 @@ static void TryFolderArt(const char *inputName, MrMp3Info *info)
 						 * !info->artData guard nor a later FreeMp3Info() can
 						 * see (and re-free) this now-dead pointer. */
 						MR_FREE_BEGIN("TryFolderArt", "folder-artData(short-read)", info->artData, (unsigned long)sz);
+						MR_EXEC_FREE_GUARD(info->artData, "TryFolderArt");
 						FreeMem(info->artData, (unsigned long)sz);
 						info->artData = NULL;
 						MR_FREE_END("TryFolderArt", "folder-artData(short-read)", info->artData, 0);
@@ -6334,6 +6350,12 @@ static int MrMainReal(int argc, char **argv)
 	PostCloseLibsAudit(&app, 1);
 	RADIO_DBG(printf("app-close: CloseLibs done, returning from main\n");)
 	Radio_CheckMiniMem("before app exit");
+	/* Last app code before returning up to main() and, from there, into
+	 * libnix ___free_all().  Whatever is still live here is exactly the set
+	 * ___free_all() will FreeMem() at exit, so the "live=N" tail is the
+	 * remaining live-allocation count and each entry's task pins whether a
+	 * survivor belongs to the alerting GUI/CRT task. */
+	MiniMem_DumpLive("before main return");
 	MiniMem_ReportLeaks();
 	return 0;
 }
@@ -6349,6 +6371,12 @@ int main(int argc, char **argv)
 	 * spawned. See amiga_mp3dec.c's radio_console_lock definition and
 	 * RADIO_CONSOLE_LOCK_INIT_ELSEWHERE above. */
 	InitSemaphore(&radio_console_lock);
+	/* Same rationale for the process-wide allocator lock: libnix's shared
+	 * malloc list has no native locking, and the GUI task, net worker and
+	 * playback children all allocate against it.  Initialise the guarding
+	 * SignalSemaphore here, before any of those tasks exists, so every later
+	 * malloc-family call serialises on it (see miniamp_memguard.c). */
+	MiniMem_LockInit();
 
 	gMrDetectedStackLower = (ULONG)task->tc_SPLower;
 	gMrDetectedStackUpper = (ULONG)task->tc_SPUpper;
@@ -6385,6 +6413,7 @@ int main(int argc, char **argv)
 	StackSwap(&gMrOldStack);
 	MR_TASK_IDENTITY("shutdown-free-startup-stack");
 	MR_FREE_BEGIN("MrMain", "startup-stack", gMrAllocatedStack, MR_STARTUP_STACK_SIZE);
+	MR_EXEC_FREE_GUARD(gMrAllocatedStack, "MrMain-startup-stack");
 	FreeMem(gMrAllocatedStack, MR_STARTUP_STACK_SIZE);
 	gMrAllocatedStack = NULL;
 	MR_FREE_END("MrMain", "startup-stack", gMrAllocatedStack, 0);

@@ -45,10 +45,19 @@
  *  the only file you'll need to change.
  **************************************************************************************/
 
-//#include "hlxclib/stdlib.h"		/* for malloc, free */ 
+//#include "hlxclib/stdlib.h"		/* for malloc, free */
 #include <stdlib.h>
 #include <string.h>
 #include "coder.h"
+/* Route this decoder's malloc()/free() (the MP3DecInfo/FrameHeader/SideInfo/
+ * ... structs below) through the same MiniMem wrapper the rest of the exe
+ * uses, so the playback child's allocations take the one process-wide
+ * allocator lock instead of hitting libnix's shared malloc list unguarded and
+ * racing the GUI/worker tasks.  Relative path: this file lives in real/ and
+ * the build only adds -Ipub -Ireal, so the root header is reached via "../".
+ * Only the linked-in decoder compiles this file; the standalone *.decoder
+ * modules do not, so their separate libnix is unaffected. */
+#include "../miniamp_memguard.h"
 
 /**************************************************************************************
  * Function:    ClearBuffer
