@@ -7125,10 +7125,16 @@ static signed char *AmigaAllocGuarded(unsigned long requestedBytes, int chip,
 	*allocationBaseOut = allocationBase;
 	if (totalAllocationBytesOut)
 		*totalAllocationBytesOut = totalAllocationBytes;
+#ifdef RADIO_DEBUG
+	RadioDebugUnsuppressedPrintf("audio-guard-alloc: base=%p user=%p requested=%lu total=%lu\n",
+		(void *)allocationBase, (void *)userPointer, requestedBytes,
+		totalAllocationBytes);
+#else
 	printf("audio-guard-alloc: base=%p user=%p requested=%lu total=%lu\n",
 		(void *)allocationBase, (void *)userPointer, requestedBytes,
 		totalAllocationBytes);
 	fflush(stdout);
+#endif
 	return userPointer;
 }
 
@@ -7147,9 +7153,14 @@ static void AmigaFreeGuarded(void **allocationBasePtr, void **userPointerPtr,
 		(void *)((unsigned char *)allocationBase + PLAYBACK_GUARD_BYTES);
 	if (totalAllocationBytes == 0)
 		totalAllocationBytes = AmigaGuardedTotalBytes(requestedBytes);
+#ifdef RADIO_DEBUG
+	RadioDebugUnsuppressedPrintf("audio-guard-free: base=%p user=%p requested=%lu total=%lu\n",
+		allocationBase, userPointer, requestedBytes, totalAllocationBytes);
+#else
 	printf("audio-guard-free: base=%p user=%p requested=%lu total=%lu\n",
 		allocationBase, userPointer, requestedBytes, totalAllocationBytes);
 	fflush(stdout);
+#endif
 	if (!PlaybackBufferCanaryOk(allocationBase, requestedBytes) && status)
 		status->canaryErrors++;
 	FreeMem(allocationBase, totalAllocationBytes);

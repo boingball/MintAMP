@@ -135,6 +135,8 @@ const char *Radio_WorkerStateName(void);
  * a second one of its own (its weak-symbol copies of the bases do not
  * reliably merge with the strong definitions under the m68k hunk linker). */
 void Radio_GetAmiSslShared(void **amissl_base, void **amissl_ext_base, void **amissl_master_base);
+void *Radio_GetWorkerSslCtx(const char *category, unsigned long session_id);
+void Radio_MarkWorkerSslCtxPoisoned(const char *where);
 /* True when the calling task is the net worker task -- the only task that
  * ever runs OpenAmiSSLTags()/InitAmiSSL() in this process, so per the AmiSSL
  * v5/v6 SDK it is already initialized and must NOT run a manual
@@ -241,6 +243,8 @@ static void Radio_GetAmiSslShared(void **amissl_base, void **amissl_ext_base, vo
     if (amissl_ext_base) *amissl_ext_base = 0;
     if (amissl_master_base) *amissl_master_base = 0;
 }
+static void *Radio_GetWorkerSslCtx(const char *category, unsigned long session_id) { (void)category; (void)session_id; return 0; }
+static void Radio_MarkWorkerSslCtxPoisoned(const char *where) { (void)where; }
 static int Radio_AmiSslTaskIsOpener(void) { return 0; }
 static int Radio_AmiSslLock(void) { return 0; }
 static void Radio_AmiSslUnlock(void) { }
@@ -251,7 +255,7 @@ static int Radio_IsTlsPoisoned(void) { return 0; }
 static void Radio_MarkTlsPoisoned(const char *where) { (void)where; }
 static void Radio_SetTlsFaultContext(unsigned long session_id, const char *url) { (void)session_id; (void)url; }
 static void Radio_ReportTlsFault(const char *where) { (void)where; }
-static const char *Radio_TlsPoisonedMessage(void) { return "HTTPS disabled after memory corruption; reboot before using HTTPS."; }
+static const char *Radio_TlsPoisonedMessage(void) { return "HTTPS disabled after TLS/memory poison; restart the app before using HTTPS."; }
 static const char *Radio_TlsPoisonReason(void) { return "not-poisoned"; }
 static int Radio_CheckMiniMem(const char *where) { (void)where; return 0; }
 static void Radio_DebugCheckExecMem(const char *where) { (void)where; }
