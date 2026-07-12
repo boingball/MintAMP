@@ -1978,13 +1978,18 @@ static int radio_send_all(RadioStream *rs, const char *buf, int len)
 struct RadioNetTransport {
     RADIO_SOCKET sock;
     int use_tls;
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     SSL_CTX *ctx;
     SSL *ssl;
+#endif
     int handshake_done;
     int ssl_poisoned;
     char category[16];
     unsigned long session_id;
     unsigned long host_addr_be;
+    int socket_counted;
+    int ssl_counted;
+    int ctx_counted;
 };
 
 static int radio_net_transport_wait_connected(RadioNetTransport *t, struct sockaddr_in *sa)
@@ -2056,14 +2061,63 @@ static int radio_net_transport_tls_connect(RadioNetTransport *t, const char *hos
 }
 
 typedef struct RadioNetOpenArgs {
-    const char *url;
-    const char *host;
+    char *url;
+    char *host;
+    char *category;
     int port;
     int use_tls;
-    const char *category;
     unsigned long session_id;
+    volatile int abandoned;
     RadioNetTransport *result;
 } RadioNetOpenArgs;
+
+typedef struct RadioNetIoArgs {
+    RadioNetTransport *transport;
+    char *buffer;
+    int length;
+    int result;
+    int graceful;
+    volatile int abandoned;
+} RadioNetIoArgs;
+
+static char *radio_net_strdup(const char *s)
+{
+    char *copy;
+    size_t n;
+    if (!s) s = "";
+    n = strlen(s) + 1;
+    copy = (char *)malloc(n);
+    if (copy) memcpy(copy, s, n);
+    return copy;
+}
+
+static void radio_net_open_args_free(RadioNetOpenArgs *a)
+{
+    if (!a) return;
+    if (a->url) free(a->url);
+    if (a->host) free(a->host);
+    if (a->category) free(a->category);
+    free(a);
+}
+
+static void radio_net_io_args_free(RadioNetIoArgs *a)
+{
+    if (!a) return;
+    if (a->buffer) free(a->buffer);
+    free(a);
+}
+
+static void radio_net_transport_count_socket(RadioNetTransport *t)
+{
+    if (t && !t->socket_counted) { radio_open_socket_count++; t->socket_counted = 1; }
+}
+
+static void radio_net_transport_count_tls(RadioNetTransport *t)
+{
+    if (!t) return;
+    if (!t->ctx_counted) { radio_active_ssl_ctx_count++; t->ctx_counted = 1; }
+    if (!t->ssl_counted) { radio_active_ssl_count++; t->ssl_counted = 1; }
+}
 
 static void radio_net_open_worker(void *arg)
 {
@@ -2071,7 +2125,11 @@ static void radio_net_open_worker(void *arg)
     RadioNetTransport *t;
     const struct hostent *he;
     struct sockaddr_in sa;
-    (void)a->url;
+    if (!radio_net_worker_is_self()) {
+        RADIO_DBG(printf("radio-net: open refused off worker\n");)
+        return;
+    }
+    if (!a || !a->host) return;
     t = (RadioNetTransport *)calloc(1, sizeof(*t));
     if (!t) return;
     t->sock = RADIO_INVALID_SOCKET;
@@ -2083,6 +2141,7 @@ static void radio_net_open_worker(void *arg)
     memcpy(&t->host_addr_be, he->h_addr_list[0], 4);
     t->sock = socket(AF_INET, SOCK_STREAM, 0);
     if (t->sock == RADIO_INVALID_SOCKET) { free(t); return; }
+    radio_net_transport_count_socket(t);
     radio_set_nonblocking(t->sock);
     memset(&sa, 0, sizeof(sa));
     sa.sin_family = AF_INET;
@@ -2090,82 +2149,146 @@ static void radio_net_open_worker(void *arg)
     memcpy(&sa.sin_addr, he->h_addr_list[0], 4);
     if (connect(t->sock, (struct sockaddr *)&sa, sizeof(sa)) < 0 &&
         radio_net_transport_wait_connected(t, &sa) != 0) {
-        radio_close_socket(t->sock);
-        free(t);
+        RadioNet_Close(t, 0);
         return;
     }
     if (a->use_tls && radio_net_transport_tls_connect(t, a->host) != 0) {
         RadioNet_Close(t, 0);
         return;
     }
-    a->result = t;
+    if (a->use_tls) radio_net_transport_count_tls(t);
+    if (a->abandoned) RadioNet_Close(t, 0);
+    else a->result = t;
 }
 
 RadioNetTransport *RadioNet_Open(const char *url, const char *host, int port, int use_tls, const char *category, unsigned long session_id)
 {
-    RadioNetOpenArgs args;
-    memset(&args, 0, sizeof(args));
-    args.url = url;
-    args.host = host;
-    args.port = port;
-    args.use_tls = use_tls;
-    args.category = category;
-    args.session_id = session_id;
-    if (radio_net_worker_is_self()) radio_net_open_worker(&args);
-    else Radio_RunOnNetWorker(radio_net_open_worker, &args);
-    return args.result;
+    RadioNetOpenArgs *args;
+    RadioNetTransport *result;
+    args = (RadioNetOpenArgs *)calloc(1, sizeof(*args));
+    if (!args) return NULL;
+    args->url = radio_net_strdup(url ? url : "");
+    args->host = radio_net_strdup(host ? host : "");
+    args->category = radio_net_strdup(category ? category : "transport");
+    args->port = port;
+    args->use_tls = use_tls;
+    args->session_id = session_id;
+    if (!args->host || !args->category || (url && !args->url)) { radio_net_open_args_free(args); return NULL; }
+    if (radio_net_worker_is_self()) radio_net_open_worker(args);
+    else if (!Radio_RunOnNetWorker(radio_net_open_worker, args)) { args->abandoned = 1; return NULL; }
+    result = args->result;
+    radio_net_open_args_free(args);
+    return result;
+}
+
+static void radio_net_write_worker(void *arg)
+{
+    RadioNetIoArgs *a = (RadioNetIoArgs *)arg;
+    RadioNetTransport *t;
+    int done = 0, tries = 0;
+    if (!radio_net_worker_is_self()) { RADIO_DBG(printf("radio-net: write refused off worker\n");) return; }
+    if (!a || !a->transport || !a->buffer || a->length < 0) { if (a) a->result = -1; return; }
+    t = a->transport;
+    while (done < a->length && tries < 250) {
+        int n;
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+        if (t->use_tls && t->ssl) {
+            n = (int)SSL_write(t->ssl, a->buffer + done, a->length - done);
+            if (n > 0) { done += n; continue; }
+            n = SSL_get_error(t->ssl, n);
+            if (n == SSL_ERROR_WANT_READ || n == SSL_ERROR_WANT_WRITE) { radio_backoff_sleep(); tries++; continue; }
+            if (radio_ssl_error_is_fatal(n)) { t->ssl_poisoned = 1; Radio_ReportTlsFault("transport fatal TLS write"); }
+            a->result = -1; return;
+        }
+#endif
+        n = (int)send(t->sock, a->buffer + done, a->length - done, 0);
+        if (n > 0) { done += n; continue; }
+        if (n < 0 && radio_would_block()) { radio_backoff_sleep(); tries++; continue; }
+        a->result = -1; return;
+    }
+    a->result = (done == a->length) ? 0 : -1;
 }
 
 int RadioNet_Write(RadioNetTransport *t, const void *buffer, int length)
 {
-    int done = 0, tries = 0;
+    RadioNetIoArgs *args;
+    int result;
     if (!t || !buffer || length < 0) return -1;
-    while (done < length && tries < 250) {
-        int n;
-#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-        if (t->use_tls && t->ssl) {
-            n = (int)SSL_write(t->ssl, (const char *)buffer + done, length - done);
-            if (n > 0) { done += n; continue; }
-            n = SSL_get_error(t->ssl, n);
-            if (n == SSL_ERROR_WANT_READ || n == SSL_ERROR_WANT_WRITE) { radio_backoff_sleep(); tries++; continue; }
-            if (radio_ssl_error_is_fatal(n)) t->ssl_poisoned = 1;
-            return -1;
-        }
-#endif
-        n = (int)send(t->sock, (char *)buffer + done, length - done, 0);
-        if (n > 0) { done += n; continue; }
-        if (n < 0 && radio_would_block()) { radio_backoff_sleep(); tries++; continue; }
-        return -1;
+    args = (RadioNetIoArgs *)calloc(1, sizeof(*args));
+    if (!args) return -1;
+    args->transport = t;
+    args->length = length;
+    if (length > 0) {
+        args->buffer = (char *)malloc((size_t)length);
+        if (!args->buffer) { radio_net_io_args_free(args); return -1; }
+        memcpy(args->buffer, buffer, (size_t)length);
     }
-    return done == length ? 0 : -1;
+    if (radio_net_worker_is_self()) radio_net_write_worker(args);
+    else if (!Radio_RunOnNetWorker(radio_net_write_worker, args)) { args->abandoned = 1; return -1; }
+    result = args->result;
+    radio_net_io_args_free(args);
+    return result;
 }
 
-int RadioNet_Read(RadioNetTransport *t, void *buffer, int length)
+static void radio_net_read_worker(void *arg)
 {
+    RadioNetIoArgs *a = (RadioNetIoArgs *)arg;
+    RadioNetTransport *t;
     int tries;
-    if (!t || !buffer || length <= 0) return -1;
+    if (!radio_net_worker_is_self()) { RADIO_DBG(printf("radio-net: read refused off worker\n");) return; }
+    if (!a || !a->transport || !a->buffer || a->length <= 0) { if (a) a->result = -1; return; }
+    t = a->transport;
     for (tries = 0; tries < 250; tries++) {
         int n;
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
         if (t->use_tls && t->ssl) {
-            n = (int)SSL_read(t->ssl, buffer, length);
-            if (n >= 0) return n;
+            n = (int)SSL_read(t->ssl, a->buffer, a->length);
+            if (n > 0) { a->result = n; return; }
             n = SSL_get_error(t->ssl, n);
+#ifdef SSL_ERROR_ZERO_RETURN
+            if (n == SSL_ERROR_ZERO_RETURN) { a->result = 0; return; }
+#endif
             if (n == SSL_ERROR_WANT_READ || n == SSL_ERROR_WANT_WRITE) { radio_backoff_sleep(); continue; }
-            if (radio_ssl_error_is_fatal(n)) t->ssl_poisoned = 1;
-            return -1;
+            t->ssl_poisoned = 1;
+            Radio_ReportTlsFault("transport fatal TLS read");
+            a->result = -1;
+            return;
         }
 #endif
-        n = (int)recv(t->sock, buffer, length, 0);
-        if (n >= 0) return n;
-        if (!radio_would_block()) return -1;
+        n = (int)recv(t->sock, a->buffer, a->length, 0);
+        if (n >= 0) { a->result = n; return; }
+        if (!radio_would_block()) { a->result = -1; return; }
         radio_backoff_sleep();
     }
-    return -1;
+    a->result = -1;
 }
 
-void RadioNet_Close(RadioNetTransport *t, int graceful)
+int RadioNet_Read(RadioNetTransport *t, void *buffer, int length)
 {
+    RadioNetIoArgs *args;
+    int result;
+    if (!t || !buffer || length <= 0) return -1;
+    args = (RadioNetIoArgs *)calloc(1, sizeof(*args));
+    if (!args) return -1;
+    args->transport = t;
+    args->length = length;
+    args->buffer = (char *)malloc((size_t)length);
+    if (!args->buffer) { radio_net_io_args_free(args); return -1; }
+    args->result = -1;
+    if (radio_net_worker_is_self()) radio_net_read_worker(args);
+    else if (!Radio_RunOnNetWorker(radio_net_read_worker, args)) { args->abandoned = 1; return -1; }
+    result = args->result;
+    if (result > 0) memcpy(buffer, args->buffer, (size_t)result);
+    radio_net_io_args_free(args);
+    return result;
+}
+
+static void radio_net_close_worker(void *arg)
+{
+    RadioNetIoArgs *a = (RadioNetIoArgs *)arg;
+    RadioNetTransport *t = a ? a->transport : NULL;
+    int graceful = a ? a->graceful : 0;
+    if (!radio_net_worker_is_self()) { RADIO_DBG(printf("radio-net: close refused off worker\n");) return; }
     if (!t) return;
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     if (graceful && t->ssl && t->handshake_done && !t->ssl_poisoned &&
@@ -2179,6 +2302,8 @@ void RadioNet_Close(RadioNetTransport *t, int graceful)
         radio_close_socket(t->sock);
         printf("radio-tls-order: category=%s session=%lu step=CloseSocket-complete\n", t->category, t->session_id);
         t->sock = RADIO_INVALID_SOCKET;
+        if (t->socket_counted && radio_open_socket_count > 0) radio_open_socket_count--;
+        t->socket_counted = 0;
     }
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     if (t->ssl) {
@@ -2192,6 +2317,8 @@ void RadioNet_Close(RadioNetTransport *t, int graceful)
             printf("radio-tls-order: category=%s session=%lu step=SSL_free-complete\n", t->category, t->session_id);
         }
         t->ssl = NULL;
+        if (t->ssl_counted && radio_active_ssl_count > 0) radio_active_ssl_count--;
+        t->ssl_counted = 0;
     }
     if (t->ctx) {
         if (t->ssl_poisoned || Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned() || radio_runtime_diag_leak_ssl_enabled()) {
@@ -2200,9 +2327,25 @@ void RadioNet_Close(RadioNetTransport *t, int graceful)
             SSL_CTX_free(t->ctx);
             t->ctx = NULL;
         }
+        if (t->ctx_counted && radio_active_ssl_ctx_count > 0) radio_active_ssl_ctx_count--;
+        t->ctx_counted = 0;
     }
 #endif
     free(t);
+    if (a) a->transport = NULL;
+}
+
+void RadioNet_Close(RadioNetTransport *t, int graceful)
+{
+    RadioNetIoArgs *args;
+    if (!t) return;
+    args = (RadioNetIoArgs *)calloc(1, sizeof(*args));
+    if (!args) return;
+    args->transport = t;
+    args->graceful = graceful;
+    if (radio_net_worker_is_self()) radio_net_close_worker(args);
+    else if (!Radio_RunOnNetWorker(radio_net_close_worker, args)) { args->abandoned = 1; return; }
+    radio_net_io_args_free(args);
 }
 
 unsigned long RadioNet_HostAddr(RadioNetTransport *t)

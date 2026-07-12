@@ -188,6 +188,17 @@ static int rb_probe_copy_string(char *dst, int dst_size, const char *src)
     return RB_STREAM_PROBE_OK;
 }
 
+static char *rb_probe_dup_string(const char *src)
+{
+    char *copy;
+    size_t n;
+    if (!src) src = "";
+    n = strlen(src) + 1;
+    copy = (char *)malloc(n);
+    if (copy) memcpy(copy, src, n);
+    return copy;
+}
+
 static int rb_probe_set_final_url(RbStreamInfo *info, const char *url)
 {
     int len;
@@ -395,8 +406,6 @@ static int rb_probe_resolve_location(const RbProbeUrl *base, const char *locatio
 
 void rb_probe_shutdown_tls_context(void) { }
 
-static void rb_probe_cleanup_amissl(void) { }
-
 static void rb_probe_transport_close_mode(RbProbeTransport *transport, RbProbeCloseMode mode, int http_status);
 static void rb_probe_transport_close(RbProbeTransport *transport);
 
@@ -410,7 +419,7 @@ static int rb_probe_transport(RbProbeTransport *transport, void *buf, int want)
     return n;
 }
 
-static int rb_probe_transport_open_ex(RbProbeTransport *transport, const char *url, const char *host, int port, int use_ssl, unsigned long *host_addr_be, int private_ctx)
+static int rb_probe_transport_open_ex(RbProbeTransport *transport, const char *url, const char *host, int port, int use_ssl, const char *category, unsigned long *host_addr_be, int private_ctx)
 {
     (void)private_ctx;
     if (!transport || !host) return RB_STREAM_PROBE_ERR_BAD_ARG;
@@ -419,7 +428,7 @@ static int rb_probe_transport_open_ex(RbProbeTransport *transport, const char *u
     transport->session_id = rb_probe_next_session_id++;
     rb_probe_copy_trim(transport->host, (int)sizeof(transport->host), host, (int)strlen(host));
     rb_probe_copy_string(transport->url, (int)sizeof(transport->url), url ? url : "");
-    if (!transport->category) transport->category = "probe";
+    transport->category = category ? category : "probe";
     Radio_SetTlsFaultContext(transport->session_id, transport->url);
     transport->net = RadioNet_Open(url, host, port, use_ssl, transport->category, transport->session_id);
     if (!transport->net) return use_ssl && Radio_IsTlsPoisoned() ? RB_STREAM_PROBE_ERR_TLS_POISONED : RB_STREAM_PROBE_ERR_CONNECT;
@@ -438,14 +447,12 @@ static int rb_probe_transport_open_ex(RbProbeTransport *transport, const char *u
 
 static int rb_probe_transport_open(RbProbeTransport *transport, const char *url, const char *host, int port, int use_ssl, unsigned long *host_addr_be)
 {
-    if (transport) transport->category = "probe";
-    return rb_probe_transport_open_ex(transport, url, host, port, use_ssl, host_addr_be, 0);
+    return rb_probe_transport_open_ex(transport, url, host, port, use_ssl, "probe", host_addr_be, 0);
 }
 
 static int rb_probe_transport_open_artwork(RbProbeTransport *transport, const char *url, const char *host, int port, int use_ssl)
 {
-    if (transport) transport->category = "artwork";
-    return rb_probe_transport_open_ex(transport, url, host, port, use_ssl, NULL, 1);
+    return rb_probe_transport_open_ex(transport, url, host, port, use_ssl, "artwork", NULL, 1);
 }
 
 static void rb_probe_transport_close_mode(RbProbeTransport *transport, RbProbeCloseMode mode, int http_status)
@@ -779,19 +786,30 @@ static int rb_probe_optional_network_gate(const char *kind, const char *url)
  * manual InitAmiSSL() for the opener task) does exactly the right thing
  * unmodified. */
 typedef struct RbProbeStreamUrlJobArgs {
-    const char *url;
-    RbStreamInfo *info;
+    char *url;
+    RbStreamInfo info;
     unsigned char *peek_buf;
     int peek_buf_size;
-    int *peek_len;
+    int peek_len;
     int result;
+    volatile int abandoned;
 } RbProbeStreamUrlJobArgs;
+
+static void rb_probe_stream_url_job_free(RbProbeStreamUrlJobArgs *a)
+{
+    if (!a) return;
+    if (a->url) free(a->url);
+    if (a->peek_buf) free(a->peek_buf);
+    free(a);
+}
 
 static void rb_probe_stream_url_job(void *arg)
 {
     RbProbeStreamUrlJobArgs *a = (RbProbeStreamUrlJobArgs *)arg;
-    a->result = rb_probe_stream_url_impl(a->url, a->info, a->peek_buf, a->peek_buf_size, a->peek_len);
-    rb_probe_cleanup_amissl();
+    int local_peek_len = 0;
+    if (!a) return;
+    a->result = rb_probe_stream_url_impl(a->url, &a->info, a->peek_buf, a->peek_buf_size, &local_peek_len);
+    a->peek_len = local_peek_len;
 }
 #endif
 
@@ -808,22 +826,35 @@ int rb_probe_stream_url(const char *url, RbStreamInfo *info,
         return RB_STREAM_PROBE_ERR_DISABLED;
     }
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-    if (!rb_probe_optional_network_gate("probe", url))
-        return RB_STREAM_PROBE_ERR_DISABLED;
-    RbProbeStreamUrlJobArgs args;
-    args.url = url;
-    args.info = info;
-    args.peek_buf = peek_buf;
-    args.peek_buf_size = peek_buf_size;
-    args.peek_len = peek_len;
-    args.result = RB_STREAM_PROBE_ERR_CONNECT;
-    if (!Radio_RunOnNetWorker(rb_probe_stream_url_job, &args))
-        return RB_STREAM_PROBE_ERR_CONNECT;
-    if (!rb_probe_optional_network_gate("probe", url)) {
-        RADIO_DBG(printf("radio-probe: probe finished but temp transport/counters are not clean url=\"%s\"\n", url ? url : "");)
-        return RB_STREAM_PROBE_ERR_CONNECT;
+    {
+        RbProbeStreamUrlJobArgs *args;
+        int result;
+        if (!rb_probe_optional_network_gate("probe", url))
+            return RB_STREAM_PROBE_ERR_DISABLED;
+        args = (RbProbeStreamUrlJobArgs *)calloc(1, sizeof(*args));
+        if (!args) return RB_STREAM_PROBE_ERR_CONNECT;
+        args->url = rb_probe_dup_string(url ? url : "");
+        args->peek_buf_size = peek_buf_size;
+        args->peek_buf = peek_buf_size > 0 ? (unsigned char *)malloc((size_t)peek_buf_size) : NULL;
+        args->result = RB_STREAM_PROBE_ERR_CONNECT;
+        if (!args->url || (peek_buf_size > 0 && !args->peek_buf)) {
+            rb_probe_stream_url_job_free(args);
+            return RB_STREAM_PROBE_ERR_CONNECT;
+        }
+        if (!Radio_RunOnNetWorker(rb_probe_stream_url_job, args)) {
+            args->abandoned = 1;
+            return RB_STREAM_PROBE_ERR_CONNECT;
+        }
+        result = args->result;
+        if (info) *info = args->info;
+        if (peek_len) *peek_len = args->peek_len;
+        if (peek_buf && args->peek_len > 0)
+            memcpy(peek_buf, args->peek_buf, (size_t)args->peek_len);
+        rb_probe_stream_url_job_free(args);
+        if (!rb_probe_optional_network_gate("probe", url))
+            return RB_STREAM_PROBE_ERR_CONNECT;
+        return result;
     }
-    return args.result;
 #else
     int rc = rb_probe_stream_url_impl(url, info, peek_buf, peek_buf_size, peek_len);
     return rc;
@@ -983,7 +1014,6 @@ n2 = rb_probe_transport(&transport, (char *)peek_buf + *peek_len, want2);
     rc = rb_probe_set_final_url(info, current_url);
     if (rc < 0) {
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-        rb_probe_cleanup_amissl();
 #endif
         return rc;
     }
@@ -994,20 +1024,17 @@ n2 = rb_probe_transport(&transport, (char *)peek_buf + *peek_len, want2);
            info->codec == RB_STREAM_CODEC_MP3 ? "MP3" : (info->codec == RB_STREAM_CODEC_AAC ? "AAC" : (info->codec == RB_STREAM_CODEC_OGG ? "OGG" : "unsupported")));)
     if (rb_probe_is_hls(&parsed, info)) {
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-        rb_probe_cleanup_amissl();
 #endif
         return RB_STREAM_PROBE_ERR_HLS_UNSUPPORTED;
     }
     if (info->content_type[0] && info->codec == RB_STREAM_CODEC_UNKNOWN) {
         RADIO_DBG(printf("rb-probe cleanup: unsupported cleanup start final_url=%s content_type=%s\n", current_url, info->content_type);)
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-        rb_probe_cleanup_amissl();
 #endif
         RADIO_DBG(printf("rb-probe cleanup: unsupported cleanup end final_state=ERROR codec=unsupported\n");)
         return RB_STREAM_PROBE_ERR_UNSUPPORTED_CONTENT_TYPE;
     }
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-    rb_probe_cleanup_amissl();
 #endif
     return RB_STREAM_PROBE_OK;
 }
@@ -1180,21 +1207,33 @@ int rb_probe_artwork_disabled(void)
 
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
 typedef struct RbProbeFetchBinaryJobArgs {
-    const char *url;
+    char *url;
     unsigned char *out_buf;
     int out_buf_size;
-    int *out_len;
+    int out_len;
     char *out_content_type;
     int out_content_type_size;
     int result;
+    volatile int abandoned;
 } RbProbeFetchBinaryJobArgs;
+
+static void rb_probe_fetch_binary_job_free(RbProbeFetchBinaryJobArgs *a)
+{
+    if (!a) return;
+    if (a->url) free(a->url);
+    if (a->out_buf) free(a->out_buf);
+    if (a->out_content_type) free(a->out_content_type);
+    free(a);
+}
 
 static void rb_probe_fetch_binary_job(void *arg)
 {
     RbProbeFetchBinaryJobArgs *a = (RbProbeFetchBinaryJobArgs *)arg;
+    int local_len = 0;
+    if (!a) return;
     a->result = rb_probe_fetch_binary_impl(a->url, a->out_buf, a->out_buf_size,
-        a->out_len, a->out_content_type, a->out_content_type_size);
-    rb_probe_cleanup_amissl();
+        &local_len, a->out_content_type, a->out_content_type_size);
+    a->out_len = local_len;
 }
 #endif
 
@@ -1213,44 +1252,46 @@ int rb_probe_fetch_binary(const char *url, unsigned char *out_buf, int out_buf_s
     }
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     {
-        RbProbeFetchBinaryJobArgs args;
+        RbProbeFetchBinaryJobArgs *args;
+        int result;
         if (!rb_probe_optional_network_gate("art", url))
             return RB_STREAM_PROBE_ERR_DISABLED;
-        args.url = url;
-        args.out_buf = out_buf;
-        args.out_buf_size = out_buf_size;
-        args.out_len = out_len;
-        args.out_content_type = out_content_type;
-        args.out_content_type_size = out_content_type_size;
-        args.result = RB_STREAM_PROBE_ERR_CONNECT;
-        if (!Radio_RunOnNetWorker(rb_probe_fetch_binary_job, &args))
+        args = (RbProbeFetchBinaryJobArgs *)calloc(1, sizeof(*args));
+        if (!args) return RB_STREAM_PROBE_ERR_CONNECT;
+        args->url = rb_probe_dup_string(url ? url : "");
+        args->out_buf_size = out_buf_size;
+        args->out_content_type_size = out_content_type_size;
+        args->out_buf = out_buf_size > 0 ? (unsigned char *)malloc((size_t)out_buf_size) : NULL;
+        args->out_content_type = out_content_type_size > 0 ? (char *)malloc((size_t)out_content_type_size) : NULL;
+        args->result = RB_STREAM_PROBE_ERR_CONNECT;
+        if (!args->url || (out_buf_size > 0 && !args->out_buf) ||
+            (out_content_type_size > 0 && !args->out_content_type)) {
+            rb_probe_fetch_binary_job_free(args);
             return RB_STREAM_PROBE_ERR_CONNECT;
-        RADIO_DBG(printf("radio-art: transport cleanup after fetch url=\"%s\" open_socket_count=%ld active_ssl_count=%ld active_ssl_ctx_count=0 zero_return=%ld zero_return_ssl_free=%ld ssl_free_skipped_poison=%ld\n",
-            url ? url : "",
-            rb_probe_open_socket_count,
-            rb_probe_active_ssl_count,
-            rb_probe_zero_return_count,
-            rb_probe_zero_return_ssl_free_count,
-            rb_probe_ssl_free_skipped_poison_count);)
+        }
+        if (!Radio_RunOnNetWorker(rb_probe_fetch_binary_job, args)) {
+            args->abandoned = 1;
+            return RB_STREAM_PROBE_ERR_CONNECT;
+        }
+        result = args->result;
+        if (out_len) *out_len = args->out_len;
+        if (out_buf && args->out_len > 0) memcpy(out_buf, args->out_buf, (size_t)args->out_len);
+        if (out_content_type && out_content_type_size > 0 && args->out_content_type) {
+            strncpy(out_content_type, args->out_content_type, (size_t)out_content_type_size - 1);
+            out_content_type[out_content_type_size - 1] = '\0';
+        }
+        rb_probe_fetch_binary_job_free(args);
         if (rb_probe_open_socket_count != 0 || rb_probe_active_ssl_count != 0 || Radio_IsTlsPoisoned()) {
             rb_probe_artwork_disabled_for_run = 1;
-            printf("radio-art: disabled for run after fatal TLS/artwork transport fault open_socket_count=%ld active_ssl_count=%ld active_ssl_ctx_count=0 tls_poisoned=%d\n",
-                rb_probe_open_socket_count, rb_probe_active_ssl_count, Radio_IsTlsPoisoned());
             return RB_STREAM_PROBE_ERR_CONNECT;
         }
-        if (!rb_probe_optional_network_gate("art", url)) {
-            RADIO_DBG(printf("radio-art: fetch finished but temp transport/counters are not clean url=\"%s\"\n", url ? url : "");)
-            return RB_STREAM_PROBE_ERR_CONNECT;
-        }
-        return args.result;
+        if (!rb_probe_optional_network_gate("art", url)) return RB_STREAM_PROBE_ERR_CONNECT;
+        return result;
     }
 #else
     {
         int rc = rb_probe_fetch_binary_impl(url, out_buf, out_buf_size, out_len,
                                              out_content_type, out_content_type_size);
-#if defined(AMIGA_M68K) && !defined(RB_STREAM_PROBE_EXTERNAL_SOCKETBASE)
-        rb_probe_release_idle_socketbase();
-#endif
         return rc;
     }
 #endif
