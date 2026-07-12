@@ -13,6 +13,10 @@ extern "C" {
  * worker or any playback child task is created -- so every later malloc-family
  * call from any task serialises on the same lock.  No-op off AmigaOS. */
 void MiniMem_LockInit(void);
+void MiniMem_AllocLock(void);
+void MiniMem_AllocUnlock(void);
+int MiniMem_AllocLockReady(void);
+void *MiniMem_CurrentTask(void);
 
 void *MiniMem_Malloc(size_t size, const char *file, int line);
 void *MiniMem_Calloc(size_t count, size_t size, const char *file, int line);
