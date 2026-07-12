@@ -27,6 +27,7 @@ extern struct SignalSemaphore radio_console_lock;
 #endif
 
 typedef struct RadioStream RadioStream;
+typedef struct RadioNetTransport RadioNetTransport;
 
 typedef enum {
     RADIO_STATUS_IDLE,
@@ -74,7 +75,7 @@ int Radio_GetBufferedBytes(RadioStream *rs);
  * opaque).  Returns 0 for a NULL stream. */
 unsigned long Radio_GetSessionId(RadioStream *rs);
 /* True once a fatal TLS fault (SSL_ERROR_SSL/SYSCALL/unknown from
- * SSL_connect/SSL_read/SSL_write, or detected ring corruption) has marked
+ * TLS I/O, or detected ring corruption) has marked
  * this session's object graph unsafe. Callers outside radio_stream.c (the
  * playback child's main()/InputSourceClose() teardown) must not free the
  * decoder context or the fast-input-memory buffer for a fatal session --
@@ -84,7 +85,7 @@ int Radio_IsSessionFatal(RadioStream *rs);
 const char *Radio_StatusText(RadioStatus status);
 /* Start the single long-lived radio net worker task (HAVE_AMISSL builds) --
  * it owns its own bsdsocket.library base, its own amisslmaster.library base,
- * its own AmiSSLBase/AmiSSLExtBase and its own AmiSSL_ErrNoPtr storage
+ * its own TLS bases and its own AmiSSL_ErrNoPtr storage
  * privately, opens AmiSSL (OpenAmiSSLTags()/InitAmiSSL) exactly once for the
  * app's whole run, and then owns the pump loop for active stations. Open/close
  * requests still use Radio_RunOnNetWorker(), but Radio_Pump() itself is only
@@ -109,7 +110,7 @@ void Radio_GetTeardownStats(long *active_stream_sessions, long *active_stream_ta
     long *open_socket_count, long *playback_open_socket_count,
     long *active_decoder_count, long *active_audio_buffer_count,
     long *active_stream_buffer_count);
-/* The net worker task's SocketBase/AmiSSLBase/AmiSSLMasterBase are private
+/* The net worker task's network base/TLS base/TLS master base are private
  * to that one task: this only ever returns non-NULL pointers when called BY
  * the worker task itself (radio_stream_probe.c's code, which now only runs
  * via Radio_RunOnNetWorker()) -- every other (GUI/opener) task always gets
@@ -120,7 +121,7 @@ void Radio_GetNetworkBases(void **socket_base, void **amissl_base, void **amissl
  * HAVE_AMISSL builds, Radio_NetworkInit()'s own base otherwise) -- lets the
  * GUI grey out internet-radio features up front on a machine with no
  * network stack installed, instead of failing later on first connect. A
- * plain status flag: never exposes the SocketBase pointer itself. */
+ * plain status flag: never exposes the network base pointer itself. */
 int Radio_HasNetwork(void);
 /* True once the net worker task has successfully opened its AmiSSL instance
  * -- lets the GUI grey out the HTTPS scheme option up front on a machine
@@ -137,13 +138,25 @@ const char *Radio_WorkerStateName(void);
 void Radio_GetAmiSslShared(void **amissl_base, void **amissl_ext_base, void **amissl_master_base);
 void *Radio_GetWorkerSslCtx(const char *category, unsigned long session_id);
 void Radio_MarkWorkerSslCtxPoisoned(const char *where);
+
+RadioNetTransport *RadioNet_Open(
+    const char *url,
+    const char *host,
+    int port,
+    int use_tls,
+    const char *category,
+    unsigned long session_id);
+int RadioNet_Write(RadioNetTransport *transport, const void *buffer, int length);
+int RadioNet_Read(RadioNetTransport *transport, void *buffer, int length);
+void RadioNet_Close(RadioNetTransport *transport, int graceful);
+unsigned long RadioNet_HostAddr(RadioNetTransport *transport);
 /* True when the calling task is the net worker task -- the only task that
  * ever runs OpenAmiSSLTags()/InitAmiSSL() in this process, so per the AmiSSL
  * v5/v6 SDK it is already initialized and must NOT run a manual
  * InitAmiSSL()/CleanupAmiSSL() pair on top of that. */
 int Radio_AmiSslTaskIsOpener(void);
-/* Historically serialized the shared AmiSSLBase/AmiSSLExtBase/AmiSSLMasterBase/
- * SocketBase globals against concurrent use by more than one task. With the
+/* Historically serialized the shared TLS bases/TLS master base/
+ * network base globals against concurrent use by more than one task. With the
  * single-net-worker-task architecture only that one task ever touches those
  * globals, so there is no more concurrent access to guard: both functions
  * are now trivial (Lock always "succeeds", Unlock is a no-op), kept only so
@@ -166,7 +179,7 @@ int Radio_IsMemoryPoisoned(void);
 void Radio_MarkMemoryPoisoned(const char *where);
 int Radio_IsTlsPoisoned(void);
 void Radio_MarkTlsPoisoned(const char *where);
-/* Record a fatal-but-survivable TLS fault (SSL_ERROR_SSL from SSL_read):
+/* Record a fatal-but-survivable TLS fault (fatal TLS read fault):
  * the failing session's SSL objects are quarantined (leaked, never freed)
  * and HTTPS stays enabled -- always. Only detected memory corruption
  * hard-poisons HTTPS (Radio_MarkTlsPoisoned()). */
@@ -245,6 +258,11 @@ static void Radio_GetAmiSslShared(void **amissl_base, void **amissl_ext_base, vo
 }
 static void *Radio_GetWorkerSslCtx(const char *category, unsigned long session_id) { (void)category; (void)session_id; return 0; }
 static void Radio_MarkWorkerSslCtxPoisoned(const char *where) { (void)where; }
+static RadioNetTransport *RadioNet_Open(const char *url, const char *host, int port, int use_tls, const char *category, unsigned long session_id) { (void)url; (void)host; (void)port; (void)use_tls; (void)category; (void)session_id; return 0; }
+static int RadioNet_Write(RadioNetTransport *transport, const void *buffer, int length) { (void)transport; (void)buffer; (void)length; return -1; }
+static int RadioNet_Read(RadioNetTransport *transport, void *buffer, int length) { (void)transport; (void)buffer; (void)length; return -1; }
+static void RadioNet_Close(RadioNetTransport *transport, int graceful) { (void)transport; (void)graceful; }
+static unsigned long RadioNet_HostAddr(RadioNetTransport *transport) { (void)transport; return 0; }
 static int Radio_AmiSslTaskIsOpener(void) { return 0; }
 static int Radio_AmiSslLock(void) { return 0; }
 static void Radio_AmiSslUnlock(void) { }
@@ -294,8 +312,8 @@ static int radio_release_printf(const char *fmt, ...)
          !strncmp(fmt, "radio-input: zero read", 22) ||
          !strncmp(fmt, "radio-worker: session=", 22) ||
          !strncmp(fmt, "radio-worker: backpressure", 26) ||
-         !strncmp(fmt, "radio-cleanup: abort SSL_free policy", 36) ||
-         !strncmp(fmt, "radio-cleanup: abort SSL_free/SSL_CTX_free skipped", 51) ||
+         !strncmp(fmt, "radio-cleanup: abort TLS free policy", 36) ||
+         !strncmp(fmt, "radio-cleanup: abort TLS free/TLS ctx free skipped", 51) ||
          !strncmp(fmt, "radio-pump: stop/detach observed", 33)))
         return 0;
 

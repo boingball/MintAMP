@@ -40,9 +40,6 @@ struct SignalSemaphore radio_console_lock;
 #include <dos/dos.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
-#ifdef HAVE_AMISSL
-extern struct Library *AmiSSLMasterBase;
-#endif
 #ifndef AUDIONAME
 #define AUDIONAME "audio.device"
 #endif
@@ -9094,7 +9091,7 @@ static const char *GenericCodecName(const GenericDecodeStream *gs)
 #ifdef HAVE_AMISSL
 static void *GenericAmiSSLMasterSnapshot(void)
 {
-	return (void *)AmiSSLMasterBase;
+	{ void *socket_base = 0, *amissl_base = 0, *amissl_master_base = 0; Radio_GetNetworkBases(&socket_base, &amissl_base, &amissl_master_base); (void)socket_base; (void)amissl_base; return amissl_master_base; }
 }
 #else
 static void *GenericAmiSSLMasterSnapshot(void)
@@ -9139,7 +9136,7 @@ static int GenericValidateDecodedPcm(GenericDecodeStream *gs,
 	}
 	if (masterBefore != masterAfter) {
 		fprintf(stderr,
-			"MEMORY CORRUPTION: AmiSSLMasterBase changed during AAC output handling section=%s before=%p after=%p\n",
+			"MEMORY CORRUPTION: TLS master base changed during AAC output handling section=%s before=%p after=%p\n",
 			where ? where : "decode", masterBefore, masterAfter);
 		return 0;
 	}

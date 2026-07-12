@@ -757,7 +757,7 @@ static void AppCloseDebug(const char *stage, const MrApp *app)
 	Radio_GetNetworkStats(&active_stream_sessions, &active_stream_tasks,
 		&open_socket_count, &active_ssl_count, &active_ssl_ctx_count);
 	Radio_GetNetworkBases(&socket_base, &amissl_base, &amissl_master_base);
-	printf("APP_CLOSE: %s streamState=%s playbackActive=%d playbackDonePending=%d activeChildCount=%lu gPlayer.process=%p gPlayer.task=%p gPlayer.stopRequested=%d active_stream_sessions=%ld active_stream_tasks=%ld open_socket_count=%ld active_ssl_count=%ld active_ssl_ctx_count=%ld browser_probe_socket_counts=unavailable SocketBase=%p AmiSSLBase=%p AmiSSLMasterBase=%p\n",
+	printf("APP_CLOSE: %s streamState=%s playbackActive=%d playbackDonePending=%d activeChildCount=%lu gPlayer.process=%p gPlayer.task=%p gPlayer.stopRequested=%d active_stream_sessions=%ld active_stream_tasks=%ld open_socket_count=%ld active_ssl_count=%ld active_ssl_ctx_count=%ld browser_probe_socket_counts=unavailable net_base=%p tls_base=%p tls_master=%p\n",
 		stage ? stage : "stage",
 		app ? MrStreamStateName(app->streamState) : "(no-app)",
 		app ? app->playbackActive : 0,
@@ -6206,7 +6206,7 @@ static int MrMainReal(int argc, char **argv)
 	 * that the probe/search/streams opened.  Without this the app left
 	 * bsdsocket.library open on exit and the next launch could not open a working
 	 * socket ("Search failed" with the network otherwise up). */
-	AppCloseDebug("close SocketBase fallback", &app);
+	AppCloseDebug("close network base fallback", &app);
 	AppCloseDebug("AmiSSL shutdown fallback", &app);
 	Radio_NetworkShutdown();
 	RADIO_DBG(printf("app-close: Radio_NetworkShutdown done\n");)

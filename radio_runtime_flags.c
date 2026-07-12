@@ -94,14 +94,14 @@ int radio_runtime_flag_enabled(const char *name)
 
 /* MP3_DIAG_LEAK_SSL: diagnostic-only runtime mode. When enabled, every
  * per-connection SSL * (playback, probe, artwork -- healthy or failed) is
- * quarantined/leaked instead of ever being passed to SSL_free(), and the
+ * quarantined/leaked instead of ever being passed to TLS free(), and the
  * final AmiSSL/SSL_CTX/library teardown at app exit is deliberately
  * abandoned, so a real-hardware run can answer one question: does the Exec
  * heap corruption still occur when no SSL object is ever freed or reused
  * after free? Intentionally leaky -- suitable only for a short run from a
  * fresh reboot. Cached on first query so per-connection close decisions and
  * the final teardown can never disagree if the environment variable changes
- * mid-run. Defaults to disabled: with the flag absent, SSL_free()/teardown
+ * mid-run. Defaults to disabled: with the flag absent, TLS free()/teardown
  * behaviour is completely unchanged. */
 int radio_runtime_diag_leak_ssl_enabled(void)
 {
