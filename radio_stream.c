@@ -281,6 +281,70 @@ static int radio_net_worker_is_self(void)
  * InitAmiSSL()/CleanupAmiSSL() pair on top of that. */
 int Radio_AmiSslTaskIsOpener(void) { return radio_net_worker_is_self(); }
 
+
+#if defined(AMIGA_M68K)
+#define RADIO_WORKER_STACK_CANARY_WORDS 16U
+static ULONG *radio_worker_stack_canary = NULL;
+static ULONG radio_worker_stack_canary_expected[RADIO_WORKER_STACK_CANARY_WORDS];
+static ULONG radio_worker_stack_lower = 0;
+static ULONG radio_worker_stack_upper = 0;
+static int radio_worker_stack_reported = 0;
+static int radio_worker_stack_damage_reported = 0;
+
+static void radio_worker_stack_init(const char *where)
+{
+    struct Task *task = FindTask(NULL);
+    ULONG sp = (ULONG)&task;
+    unsigned int i;
+    radio_worker_stack_lower = (ULONG)task->tc_SPLower;
+    radio_worker_stack_upper = (ULONG)task->tc_SPUpper;
+    radio_worker_stack_canary = (ULONG *)radio_worker_stack_lower;
+    for (i = 0; i < RADIO_WORKER_STACK_CANARY_WORDS; ++i) {
+        radio_worker_stack_canary_expected[i] = 0x52435700UL + (ULONG)i;
+        radio_worker_stack_canary[i] = radio_worker_stack_canary_expected[i];
+    }
+    printf("radio-worker-stack: where=%s task=%p SPLower=%p SPUpper=%p size=%lu current_sp=%p margin=%lu canary=%p words=%u\n",
+        where ? where : "", (void *)task, (void *)radio_worker_stack_lower, (void *)radio_worker_stack_upper,
+        (unsigned long)(radio_worker_stack_upper - radio_worker_stack_lower), (void *)sp,
+        (unsigned long)(sp > radio_worker_stack_lower ? sp - radio_worker_stack_lower : 0),
+        (void *)radio_worker_stack_canary, RADIO_WORKER_STACK_CANARY_WORDS);
+    radio_worker_stack_reported = 1;
+}
+
+static void radio_worker_stack_check(const char *where)
+{
+    struct Task *task = FindTask(NULL);
+    ULONG sp = (ULONG)&task;
+    unsigned int i;
+    if (!radio_worker_stack_canary) return;
+    for (i = 0; i < RADIO_WORKER_STACK_CANARY_WORDS; ++i) {
+        if (radio_worker_stack_canary[i] != radio_worker_stack_canary_expected[i]) {
+            if (!radio_worker_stack_damage_reported) {
+                radio_worker_stack_damage_reported = 1;
+                printf("radio-worker-stack: CORRUPT where=%s task=%p index=%u expected=%08lx actual=%08lx SPLower=%p SPUpper=%p current_sp=%p margin=%lu\n",
+                    where ? where : "", (void *)task, i,
+                    (unsigned long)radio_worker_stack_canary_expected[i], (unsigned long)radio_worker_stack_canary[i],
+                    (void *)radio_worker_stack_lower, (void *)radio_worker_stack_upper, (void *)sp,
+                    (unsigned long)(sp > radio_worker_stack_lower ? sp - radio_worker_stack_lower : 0));
+            }
+            return;
+        }
+    }
+}
+
+static void radio_amissl_audit_log(const char *op)
+{
+    printf("radio-amissl-lifecycle: op=%s task=%p worker=%p SocketBase=%p AmiSSLMasterBase=%p AmiSSLBase=%p AmiSSLExtBase=%p ErrNoPtr=%p\n",
+        op ? op : "", (void *)FindTask(NULL), (void *)radio_net_worker_task,
+        (void *)SocketBase, (void *)AmiSSLMasterBase, (void *)AmiSSLBase, (void *)AmiSSLExtBase,
+        (void *)&radio_net_worker_errno_store);
+}
+#else
+static void radio_worker_stack_init(const char *where) { (void)where; }
+static void radio_worker_stack_check(const char *where) { (void)where; }
+static void radio_amissl_audit_log(const char *op) { (void)op; }
+#endif
+
 static void radio_worker_breadcrumb(const char *stage, const char *op, unsigned long session)
 {
     radio_net_worker_stage = stage ? stage : "<null>";
@@ -299,13 +363,20 @@ static void radio_net_worker_entry(void)
 
     RADIO_DBG(printf("radio-net-worker: starting task=%p\n", (void *)FindTask(NULL)););
     radio_worker_breadcrumb("startup", "worker-entry", 0);
+    radio_worker_stack_init("worker-entry");
 
+    radio_amissl_audit_log("before OpenLibrary bsdsocket.library");
     SocketBase = OpenLibrary("bsdsocket.library", 4);
+    radio_amissl_audit_log("after OpenLibrary bsdsocket.library");
     if (SocketBase) radio_socket_library_open_count++;
-    if (SocketBase)
+    if (SocketBase) {
+        radio_amissl_audit_log("before OpenLibrary amisslmaster.library");
         AmiSSLMasterBase = OpenLibrary("amisslmaster.library", AMISSLMASTER_MIN_VERSION);
+        radio_amissl_audit_log("after OpenLibrary amisslmaster.library");
+    }
     if (AmiSSLMasterBase) radio_amisslmaster_open_count++;
     if (SocketBase && AmiSSLMasterBase) {
+        radio_amissl_audit_log("before OpenAmiSSLTags");
         if (OpenAmiSSLTags(AMISSL_CURRENT_VERSION,
                            AmiSSL_UsesOpenSSLStructs, TRUE,
                            AmiSSL_InitAmiSSL, TRUE,
@@ -317,6 +388,7 @@ static void radio_net_worker_entry(void)
             AmiSSLBase = NULL;
             AmiSSLExtBase = NULL;
         } else {
+            radio_amissl_audit_log("after OpenAmiSSLTags");
             radio_openamissltags_count++;
             radio_amissl_init_count++;
         }
@@ -968,6 +1040,7 @@ static SSL_CTX *radio_playback_create_ssl_ctx(unsigned long session_id)
     if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) return NULL;
     ctx = SSL_CTX_new(method);
     Radio_DebugCheckExecMem("after playback SSL_CTX_new");
+    radio_worker_stack_check("after playback SSL_CTX_new");
     if (!ctx) return NULL;
     radio_active_ssl_ctx_count++;
     SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
@@ -1780,6 +1853,7 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
             Radio_DebugMarkSslFreed(ssl_to_free, rs->sslGeneration, rs->session_id);
             printf("radio-tls-order: category=playback session=%lu step=SSL_free-complete\n", rs->session_id);
             Radio_DebugCheckExecMem("after playback SSL_free after socket close");
+            radio_worker_stack_check("after playback SSL_free");
             rs->sslFreed = 1;
             if (radio_active_ssl_count > 0) radio_active_ssl_count--;
             rs->ssl = NULL;
@@ -1807,6 +1881,7 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
             SSL_CTX_free(rs->ctx);
             Radio_DebugMarkSslCtxDone(rs->ctx, rs->ctxGeneration, rs->session_id, 0);
             Radio_DebugCheckExecMem("after playback SSL_CTX_free");
+            radio_worker_stack_check("after playback SSL_CTX_free");
             rs->ctx = NULL;
             rs->ctxGeneration = 0;
             rs->ctxFreed = 1;
@@ -1881,10 +1956,12 @@ static int radio_ssl_do_handshake(RadioStream *rs)
         RADIO_DBG(printf("BEFORE SSL_connect session=%lu attempt=%d ssl=%p ctx=%p fd=%ld\n",
             rs ? rs->session_id : 0, tries + 1, rs ? (void *)rs->ssl : 0,
             rs ? (void *)rs->ctx : 0, rs ? (long)rs->sock : -1L););
+        radio_amissl_audit_log("before playback SSL_connect");
         Radio_DebugAssertSsl("SSL_connect", rs->ssl, rs->sslGeneration, rs ? rs->session_id : 0);
         Radio_DebugSnapshotExecMem("before playback SSL_connect");
         r = SSL_connect(rs->ssl);
         Radio_DebugCheckExecMem("after SSL_connect");
+        radio_worker_stack_check("after playback SSL_connect");
         if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
             rs->sslStatePoisoned = 1; rs->fatalStop = 1; rs->noReconnect = 1;
             radio_playback_tls_ctx_poisoned = 1;
@@ -1966,6 +2043,7 @@ static int radio_ssl_connect(RadioStream *rs)
     rs->ssl = SSL_new(rs->ctx);
     rs->sslGeneration = Radio_DebugRegisterSsl(rs->ssl, "playback", rs->session_id);
     Radio_DebugCheckExecMem("after SSL_new");
+    radio_worker_stack_check("after playback SSL_new");
     if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
         radio_playback_tls_ctx_poisoned = 1;
         rs->sslStatePoisoned = 1;
@@ -2208,6 +2286,7 @@ static int radio_net_transport_tls_connect(RadioNetTransport *t, const char *hos
     t->ctx = SSL_CTX_new(method);
     if (t->ctx) radio_net_transport_count_ctx(t);
     Radio_DebugCheckExecMem("after transport SSL_CTX_new");
+    radio_worker_stack_check("after transport SSL_CTX_new");
     if (!t->ctx || Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) return -1;
     SSL_CTX_set_verify(t->ctx, SSL_VERIFY_NONE, NULL);
 #ifdef SSL_OP_IGNORE_UNEXPECTED_EOF
@@ -2218,6 +2297,7 @@ static int radio_net_transport_tls_connect(RadioNetTransport *t, const char *hos
     t->ssl_generation = Radio_DebugRegisterSsl(t->ssl, t->category, t->session_id);
     if (t->ssl) radio_net_transport_count_ssl(t);
     Radio_DebugCheckExecMem("after transport SSL_new");
+    radio_worker_stack_check("after transport SSL_new");
     if (!t->ssl || Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) return -1;
 #ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
     if (host && host[0]) { Radio_DebugAssertSsl("SSL_set_tlsext_host_name", t->ssl, t->ssl_generation, t->session_id); SSL_set_tlsext_host_name(t->ssl, host); }
@@ -2233,10 +2313,12 @@ static int radio_net_transport_tls_connect(RadioNetTransport *t, const char *hos
     ERR_clear_error();
     for (tries = 0; tries < 150; tries++) {
         int r, e;
+        radio_amissl_audit_log("before transport SSL_connect");
         Radio_DebugAssertSsl("SSL_connect", t->ssl, t->ssl_generation, t->session_id);
         Radio_DebugSnapshotExecMem("before transport SSL_connect");
         r = SSL_connect(t->ssl);
         Radio_DebugCheckExecMem("after transport SSL_connect");
+        radio_worker_stack_check("after transport SSL_connect");
         if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) { t->ssl_poisoned = 1; return -1; }
         if (r == 1) { t->handshake_done = 1; return 0; }
         Radio_DebugAssertSsl("SSL_get_error", t->ssl, t->ssl_generation, t->session_id);
