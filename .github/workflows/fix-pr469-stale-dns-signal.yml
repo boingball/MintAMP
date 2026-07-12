@@ -1,6 +1,11 @@
 name: Fix PR469 stale DNS worker signal
 
 on:
+  push:
+    branches:
+      - codex/implement-tls-lifecycle-corrections-1egenr
+    paths:
+      - .github/workflows/fix-pr469-stale-dns-signal.yml
   pull_request:
     types: [edited]
     branches:
