@@ -2036,18 +2036,18 @@ static int radio_net_transport_tls_connect(RadioNetTransport *t, const char *hos
     if (!method) return -1;
     Radio_DebugCheckExecMem("before transport SSL_CTX_new");
     t->ctx = SSL_CTX_new(method);
+    if (t->ctx) radio_net_transport_count_ctx(t);
     Radio_DebugCheckExecMem("after transport SSL_CTX_new");
     if (!t->ctx || Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) return -1;
-    radio_net_transport_count_ctx(t);
     SSL_CTX_set_verify(t->ctx, SSL_VERIFY_NONE, NULL);
 #ifdef SSL_OP_IGNORE_UNEXPECTED_EOF
     SSL_CTX_set_options(t->ctx, SSL_OP_IGNORE_UNEXPECTED_EOF);
 #endif
     Radio_DebugCheckExecMem("before transport SSL_new");
     t->ssl = SSL_new(t->ctx);
+    if (t->ssl) radio_net_transport_count_ssl(t);
     Radio_DebugCheckExecMem("after transport SSL_new");
     if (!t->ssl || Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) return -1;
-    radio_net_transport_count_ssl(t);
 #ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
     if (host && host[0]) SSL_set_tlsext_host_name(t->ssl, host);
 #endif
@@ -2519,7 +2519,6 @@ void RadioNet_Close(RadioNetTransport *t, int graceful)
     }
     args = (RadioNetIoArgs *)calloc(1, sizeof(*args));
     if (!args) {
-        t->ssl_poisoned = 1;
         Radio_MarkTlsPoisoned("RadioNet_Close request allocation failed");
         return;
     }
@@ -2534,7 +2533,6 @@ void RadioNet_Close(RadioNetTransport *t, int graceful)
             return;
         }
         args->state = RADIO_NET_REQ_ABANDONED;
-        t->ssl_poisoned = 1;
         radio_net_io_req_unlock(args);
         Radio_MarkTlsPoisoned("RadioNet_Close dispatch timed out");
         return;
