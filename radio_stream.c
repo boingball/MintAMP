@@ -174,6 +174,26 @@ static long radio_openamissltags_count = 0;
 static long radio_closeamissl_count = 0;
 static SSL_CTX *radio_worker_ssl_ctx = NULL;
 static int radio_worker_ssl_ctx_poisoned = 0;
+/* Production TLS lifecycle: ONE worker-lifetime reusable SSL object shared
+ * (sequentially, never concurrently) by every probe/artwork/playback HTTPS
+ * connection. Created once with SSL_new(shared ctx), recycled between
+ * connections with SSL_clear(), freed exactly once at worker shutdown --
+ * there is no per-connection SSL_free() in normal operation any more (the
+ * MP3_DIAG_LEAK_SSL diagnostic run proved per-connection SSL_free()/
+ * freed-SSL allocator reuse drives the Exec heap corruption). The counters
+ * deliberately distinguish the one-time allocation (0 or 1) from
+ * per-connection ownership: radio_active_ssl_count keeps its per-connection
+ * ownership meaning, while these track the single object itself. */
+static SSL *radio_worker_ssl = NULL;
+static long radio_worker_ssl_alloc_count = 0;          /* 0 or 1 for the whole run */
+static int radio_worker_ssl_in_use = 0;                 /* 0 or 1: a connection owns it */
+static unsigned long radio_worker_ssl_generation = 0;   /* completed acquisitions */
+static unsigned long radio_worker_ssl_owner_session = 0;
+static const char *radio_worker_ssl_owner_category = NULL;
+/* Set at release while the owning connection's raw socket is still open;
+ * cleared by the socket-close paths. A new acquire while this is still set
+ * means a lifecycle violation (reuse before the previous socket closed). */
+static int radio_worker_ssl_socket_close_pending = 0;
 
 /* ------------------------------------------------------------------------
  * Single long-lived AmiSSL/bsdsocket worker task.
@@ -232,6 +252,10 @@ static void radio_worker_pump_active_streams(void);
 static void radio_stream_lock(RadioStream *rs);
 static SSL_CTX *radio_worker_get_ssl_ctx(const char *category, unsigned long session_id);
 static int radio_worker_shutdown_ssl_ctx(void);
+static SSL *radio_worker_ssl_acquire(const char *category, unsigned long session_id, const char *host, long fd);
+static void radio_worker_ssl_release(const char *category, unsigned long session_id, int quarantined, int socket_still_open);
+static void radio_worker_ssl_note_socket_closed(void);
+static int radio_worker_shutdown_worker_ssl(void);
 static void radio_stream_unlock(RadioStream *rs);
 
 /* ~60s at ~40ms/poll: generous enough to cover connect_http()'s worst-case
@@ -381,7 +405,15 @@ static void radio_net_worker_entry(void)
 #ifdef RADIO_HAVE_STREAM_PROBE
         rb_probe_shutdown_tls_context();
 #endif
-        safe_to_close_amissl = radio_worker_shutdown_ssl_ctx();
+        /* Production TLS lifecycle order: the one final SSL_free() of the
+         * reusable worker SSL first (with heap checks either side), then --
+         * only if the heap stayed clean -- the shared SSL_CTX free and the
+         * CloseAmiSSL()/CloseLibrary() sequence below. A dirty result
+         * quarantines everything via the existing skip path. */
+        if (radio_worker_shutdown_worker_ssl())
+            safe_to_close_amissl = radio_worker_shutdown_ssl_ctx();
+        else
+            safe_to_close_amissl = 0;
         if (safe_to_close_amissl) {
             RADIO_DBG(printf("radio-worker-risk: before CloseAmiSSL workerTask=%p active_ssl=%ld active_ctx=%ld open_socket=%ld\n",
                 (void *)radio_net_worker_task, radio_active_ssl_count, radio_active_ssl_ctx_count, radio_open_socket_count););
@@ -990,6 +1022,273 @@ void Radio_MarkWorkerSslCtxPoisoned(const char *where)
 {
     radio_worker_ssl_ctx_poisoned = 1;
     Radio_MarkTlsPoisoned(where && where[0] ? where : "shared SSL_CTX poisoned");
+}
+
+/* ------------------------------------------------------------------------
+ * Worker-lifetime reusable SSL object (production TLS lifecycle).
+ *
+ * The MP3_DIAG_LEAK_SSL diagnostic run completed the full station list with
+ * a clean Exec heap once no per-connection SSL * was ever passed to
+ * SSL_free(): the corruption is driven by SSL_free()/freed-SSL allocator
+ * reuse between connections. The production shape of that result is one SSL
+ * object for the whole app run: SSL_new(shared ctx) exactly once,
+ * SSL_clear() between healthy connections, SSL_free() exactly once at final
+ * worker shutdown. No replacement SSL is ever allocated after a reuse
+ * failure -- that would recreate the unbounded leak the diagnostic mode
+ * accepts deliberately; instead any SSL_clear() failure, heap damage or
+ * ownership inconsistency poisons TLS for the run and quarantines the
+ * object and the shared ctx (never freed). */
+
+static int radio_worker_ssl_unsafe(void)
+{
+    return radio_worker_ssl_ctx_poisoned || Radio_IsMemoryPoisoned() ||
+        Radio_IsTlsPoisoned();
+}
+
+/* Bind (or rebind) the persistent socket BIO to this connection's fd. The
+ * first call creates the BIO via SSL_set_fd() -- a socket BIO with
+ * BIO_NOCLOSE installed as both read and write BIO -- and every later call
+ * keeps that same BIO alive across SSL_clear() (which does not touch the
+ * BIOs) and only swaps the descriptor with BIO_set_fd(..., BIO_NOCLOSE).
+ * No per-connection BIO_free()/detach cycle is introduced; BIO_NOCLOSE means
+ * the BIO never owns the socket, which is still closed by the existing
+ * socket lifecycle. Returns 1 on success. */
+static int radio_worker_ssl_bind_fd(long fd)
+{
+    BIO *rbio = SSL_get_rbio(radio_worker_ssl);
+    BIO *wbio = SSL_get_wbio(radio_worker_ssl);
+    if (!rbio)
+        return SSL_set_fd(radio_worker_ssl, (int)fd) == 1;
+#if defined(BIO_set_fd)
+    if (BIO_set_fd(rbio, (int)fd, BIO_NOCLOSE) != 1) return 0;
+    if (wbio && wbio != rbio && BIO_set_fd(wbio, (int)fd, BIO_NOCLOSE) != 1) return 0;
+    return 1;
+#elif defined(BIO_C_SET_FD)
+    if (BIO_int_ctrl(rbio, BIO_C_SET_FD, BIO_NOCLOSE, (int)fd) != 1) return 0;
+    if (wbio && wbio != rbio && BIO_int_ctrl(wbio, BIO_C_SET_FD, BIO_NOCLOSE, (int)fd) != 1) return 0;
+    return 1;
+#else
+    /* This AmiSSL build exposes neither BIO_set_fd() nor BIO_C_SET_FD, so
+     * persistent BIO rebinding is impossible here. Report it loudly rather
+     * than silently reverting: the SSL_set_fd() fallback below replaces (and
+     * frees) the previous socket BIO on every connection. */
+    printf("radio-resource: worker SSL persistent BIO rebind unavailable in this AmiSSL build; falling back to per-connection SSL_set_fd\n");
+    return SSL_set_fd(radio_worker_ssl, (int)fd) == 1;
+#endif
+}
+
+static SSL *radio_worker_ssl_acquire(const char *category, unsigned long session_id, const char *host, long fd)
+{
+    SSL_CTX *ctx;
+    const char *cat = category ? category : "unknown";
+
+    if (!radio_net_worker_is_self()) {
+        RADIO_DBG(printf("radio-resource: worker SSL refused off worker category=%s session=%lu\n",
+            cat, session_id););
+        return NULL;
+    }
+    if (radio_runtime_diag_leak_ssl_enabled()) {
+        /* MP3_DIAG_LEAK_SSL runs use fresh per-connection SSL objects that
+         * are quarantined/leaked on close; the reusable worker SSL exists
+         * only in normal production mode. */
+        return NULL;
+    }
+    if (radio_worker_ssl_unsafe()) {
+        RADIO_DBG(printf("radio-resource: worker SSL refused poisoned category=%s session=%lu ssl=%p\n",
+            cat, session_id, (void *)radio_worker_ssl););
+        return NULL;
+    }
+    if (radio_worker_ssl_in_use) {
+        /* Only one connection may own the object at a time. A long-lived
+         * playback session owns it for its whole duration, so a probe or
+         * artwork request arriving mid-playback is ordinary contention, not
+         * state corruption: refuse this connection, leave TLS healthy. */
+        printf("radio-resource: worker SSL busy category=%s session=%lu owner_category=%s owner_session=%lu ssl=%p\n",
+            cat, session_id,
+            radio_worker_ssl_owner_category ? radio_worker_ssl_owner_category : "unknown",
+            radio_worker_ssl_owner_session, (void *)radio_worker_ssl);
+        return NULL;
+    }
+    if (radio_worker_ssl && radio_worker_ssl_socket_close_pending) {
+        /* Previous owner released the object but its raw socket close was
+         * never confirmed: reuse while the previous socket may remain open
+         * is a lifecycle violation -- inconsistent state, poison the run. */
+        printf("radio-resource: worker SSL reuse refused, previous connection socket close unconfirmed category=%s session=%lu ssl=%p\n",
+            cat, session_id, (void *)radio_worker_ssl);
+        Radio_MarkWorkerSslCtxPoisoned("worker SSL reuse before previous socket closed");
+        return NULL;
+    }
+    ctx = radio_worker_get_ssl_ctx(cat, session_id);
+    if (!ctx)
+        return NULL;
+    if (!radio_worker_ssl) {
+        /* One-time allocation for the entire app run. */
+        Radio_DebugCheckExecMem("before worker SSL_new");
+        if (radio_worker_ssl_unsafe())
+            return NULL;
+        radio_worker_ssl = SSL_new(ctx);
+        Radio_DebugCheckExecMem("after worker SSL_new");
+        if (radio_worker_ssl)
+            radio_worker_ssl_alloc_count++;
+        if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
+            /* If the object was created it stays quarantined, never freed. */
+            Radio_MarkWorkerSslCtxPoisoned("worker SSL_new post-check poison");
+            return NULL;
+        }
+        if (!radio_worker_ssl)
+            return NULL;
+        printf("radio-resource: worker SSL created ssl=%p ctx=%p\n",
+            (void *)radio_worker_ssl, (void *)ctx);
+    } else {
+        int clear_rc;
+        printf("radio-resource: worker SSL clear begin ssl=%p previous_generation=%lu\n",
+            (void *)radio_worker_ssl, radio_worker_ssl_generation);
+        Radio_DebugCheckExecMem("before worker SSL_clear");
+        if (radio_worker_ssl_unsafe())
+            return NULL;
+        clear_rc = SSL_clear(radio_worker_ssl);
+        Radio_DebugCheckExecMem("after worker SSL_clear");
+        printf("radio-resource: worker SSL clear complete ssl=%p generation=%lu rc=%d\n",
+            (void *)radio_worker_ssl, radio_worker_ssl_generation + 1, clear_rc);
+        if (clear_rc != 1 || Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
+            /* SSL_clear() failure or heap damage around it: poison TLS for
+             * the run, retain/quarantine the object and the shared ctx, and
+             * never allocate a replacement. */
+            Radio_MarkWorkerSslCtxPoisoned(clear_rc != 1 ?
+                "worker SSL_clear failed" : "worker SSL_clear post-check poison");
+            return NULL;
+        }
+    }
+    /* Per-connection (re)configuration -- everything the old per-connection
+     * SSL_new() path applied after allocation. */
+    SSL_set_connect_state(radio_worker_ssl);
+#ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
+    if (host && host[0])
+        SSL_set_tlsext_host_name(radio_worker_ssl, host);
+#endif
+#ifdef RADIO_SSL_VERIFY_PEER
+    {
+        X509_VERIFY_PARAM *verify_param = SSL_get0_param(radio_worker_ssl);
+        if (verify_param && host && host[0])
+            X509_VERIFY_PARAM_set1_host(verify_param, host, 0);
+    }
+#endif
+    if (!radio_worker_ssl_bind_fd(fd)) {
+        /* Descriptor (re)bind failed: the object's I/O binding is unknown,
+         * so driving it would be worse than stopping. Poison, retain, no
+         * free, no replacement. */
+        printf("radio-resource: worker SSL fd bind failed ssl=%p fd=%ld category=%s session=%lu\n",
+            (void *)radio_worker_ssl, fd, cat, session_id);
+        Radio_MarkWorkerSslCtxPoisoned("worker SSL fd bind failed");
+        return NULL;
+    }
+    radio_worker_ssl_generation++;
+    radio_worker_ssl_in_use = 1;
+    radio_worker_ssl_owner_session = session_id;
+    radio_worker_ssl_owner_category = cat;
+    radio_worker_ssl_socket_close_pending = 0;
+    if (radio_worker_ssl_generation > 1)
+        printf("radio-resource: worker SSL reused category=%s session=%lu ssl=%p ctx=%p\n",
+            cat, session_id, (void *)radio_worker_ssl, (void *)ctx);
+    return radio_worker_ssl;
+}
+
+static void radio_worker_ssl_release(const char *category, unsigned long session_id, int quarantined, int socket_still_open)
+{
+    const char *cat = category ? category : "unknown";
+    if (!radio_worker_ssl || !radio_worker_ssl_in_use)
+        return; /* diag leak mode, plain-HTTP session, or never acquired */
+    if (radio_worker_ssl_owner_session != session_id) {
+        /* Release from a session that does not own the object: ownership
+         * state is inconsistent -- poison TLS for the run (the object and
+         * shared ctx stay quarantined, never freed). */
+        printf("radio-resource: worker SSL release owner mismatch category=%s session=%lu owner_session=%lu ssl=%p\n",
+            cat, session_id, radio_worker_ssl_owner_session, (void *)radio_worker_ssl);
+        Radio_MarkWorkerSslCtxPoisoned("worker SSL release owner mismatch");
+    }
+    radio_worker_ssl_in_use = 0;
+    radio_worker_ssl_owner_session = 0;
+    radio_worker_ssl_owner_category = NULL;
+    radio_worker_ssl_socket_close_pending = socket_still_open ? 1 : 0;
+    if (quarantined) {
+        /* Fatal/poisoned session: retain the object but never clear/reuse or
+         * free it again this run. Callers set the ctx/TLS quarantine flags
+         * that make radio_worker_ssl_unsafe() true; enforce it here too so a
+         * missed flag cannot let a poisoned object be recycled. */
+        radio_worker_ssl_ctx_poisoned = 1;
+        printf("radio-resource: worker SSL quarantined category=%s session=%lu ssl=%p generation=%lu\n",
+            cat, session_id, (void *)radio_worker_ssl, radio_worker_ssl_generation);
+        return;
+    }
+    printf("radio-resource: worker SSL released category=%s session=%lu ssl=%p generation=%lu\n",
+        cat, session_id, (void *)radio_worker_ssl, radio_worker_ssl_generation);
+}
+
+static void radio_worker_ssl_note_socket_closed(void)
+{
+    radio_worker_ssl_socket_close_pending = 0;
+}
+
+void *Radio_AcquireWorkerSsl(const char *category, unsigned long session_id, const char *host, long fd)
+{
+    return (void *)radio_worker_ssl_acquire(category, session_id, host, fd);
+}
+
+void Radio_ReleaseWorkerSsl(const char *category, unsigned long session_id, int quarantined, int socket_still_open)
+{
+    radio_worker_ssl_release(category, session_id, quarantined, socket_still_open);
+}
+
+void Radio_WorkerSslNoteSocketClosed(void)
+{
+    radio_worker_ssl_note_socket_closed();
+}
+
+/* Final, one-time SSL_free() of the reusable worker SSL at worker shutdown.
+ * Runs only after all probe/artwork/playback work has stopped and the worker
+ * is exiting; there is no later SSL_new()/SSL_clear()/SSL_connect()/SSL_read()
+ * after this. Returns 1 when the heap stayed clean and the shared
+ * SSL_CTX_free() / CloseAmiSSL() / library-close sequence may proceed, 0 to
+ * quarantine the rest of the teardown (the caller's existing skip path logs
+ * the quarantine shutdown message). Never reached in MP3_DIAG_LEAK_SSL mode
+ * -- the worker skips the whole teardown there. */
+static int radio_worker_shutdown_worker_ssl(void)
+{
+    if (!radio_worker_ssl)
+        return 1; /* no HTTPS this run; ctx shutdown makes its own poison checks */
+    if (radio_worker_ssl_in_use || radio_worker_ssl_socket_close_pending) {
+        printf("radio-resource: final worker SSL_free skipped, worker SSL still in use or socket close pending ssl=%p in_use=%d socket_close_pending=%d owner_session=%lu -- quarantining teardown\n",
+            (void *)radio_worker_ssl, radio_worker_ssl_in_use,
+            radio_worker_ssl_socket_close_pending, radio_worker_ssl_owner_session);
+        radio_worker_ssl_ctx_poisoned = 1;
+        radio_worker_ssl = NULL;
+        return 0;
+    }
+    if (radio_worker_ssl_unsafe()) {
+        RADIO_DBG(printf("radio-resource: final worker SSL_free skipped (quarantined) ssl=%p generations=%lu ctx_poisoned=%d memory_poisoned=%d tls_poisoned=%d\n",
+            (void *)radio_worker_ssl, radio_worker_ssl_generation,
+            radio_worker_ssl_ctx_poisoned, Radio_IsMemoryPoisoned(), Radio_IsTlsPoisoned()););
+        radio_worker_ssl = NULL;
+        return 0;
+    }
+    Radio_DebugCheckExecMem("before final worker SSL_free");
+    if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
+        radio_worker_ssl_ctx_poisoned = 1;
+        radio_worker_ssl = NULL;
+        return 0;
+    }
+    printf("radio-resource: final worker SSL_free begin ssl=%p generations=%lu\n",
+        (void *)radio_worker_ssl, radio_worker_ssl_generation);
+    SSL_free(radio_worker_ssl);
+    radio_worker_ssl = NULL;
+    if (radio_worker_ssl_alloc_count > 0) radio_worker_ssl_alloc_count--;
+    Radio_DebugCheckExecMem("after final worker SSL_free");
+    if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
+        RADIO_DBG(printf("radio-resource: final worker SSL_free completed but post-free heap/TLS poison detected -- skipping SSL_CTX_free/CloseAmiSSL/library closes\n"););
+        return 0;
+    }
+    printf("radio-resource: final worker SSL_free complete\n");
+    return 1;
 }
 
 static int radio_worker_shutdown_ssl_ctx(void)
@@ -1720,6 +2019,35 @@ static int radio_ssl_connect(RadioStream *rs)
     rs->ctx = radio_worker_get_ssl_ctx("playback", rs->session_id);
     rs->ctxFreed = 0;
     if (!rs->ctx) { set_error(rs, "AmiSSL init failed"); return -1; }
+    if (!radio_runtime_diag_leak_ssl_enabled()) {
+        /* Production TLS lifecycle: borrow the one worker-lifetime reusable
+         * SSL object. Connect state, SNI, verification and the socket/BIO
+         * binding are all (re)applied inside the acquire; no per-connection
+         * SSL_new() or SSL_free() happens on this path. */
+        rs->ssl = radio_worker_ssl_acquire("playback", rs->session_id, rs->host, (long)rs->sock);
+        if (!rs->ssl) {
+            if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
+                rs->sslStatePoisoned = 1;
+                rs->fatalStop = 1;
+                rs->noReconnect = 1;
+            }
+            set_error(rs, "AmiSSL init failed");
+            return -1;
+        }
+        rs->sslFreed = 0;
+        rs->sslReadCloseSeen = 0;
+        radio_active_ssl_count++;
+        RADIO_DBG(printf("radio-resource: session=%lu worker SSL acquired active_ssl_count=%ld\n",
+            rs->session_id, radio_active_ssl_count));
+        if (radio_ssl_do_handshake(rs) != 0) {
+            RADIO_DBG(printf("radio-tls: handshake cleanup session=%lu error_ptr=%p stream_range=%p..%p status=%d open_socket_count=%ld active_ssl_count=%ld active_ssl_ctx_count=%ld SocketBase=%p AmiSSLBase=%p AmiSSLMasterBase=%p\n", rs->session_id, (void *)rs->error, (void *)rs, (void *)(rs + 1), (int)rs->status, radio_open_socket_count, radio_active_ssl_count, radio_active_ssl_ctx_count, (void *)SocketBase, (void *)AmiSSLBase, (void *)AmiSSLMasterBase););
+            radio_ssl_close_stream(rs);
+            set_error(rs, "TLS handshake failed"); return -1;
+        }
+        return 0;
+    }
+    /* MP3_DIAG_LEAK_SSL diagnostic leak mode: fresh per-connection SSL
+     * object, quarantined/leaked on close -- unchanged proven behaviour. */
     RADIO_DBG(printf("BEFORE SSL_new session=%lu ctx=%p\n",
         rs->session_id, (void *)rs->ctx););
     Radio_DebugCheckExecMem("before SSL_new");
@@ -1844,6 +2172,8 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
                     rs->session_id, (void *)rs->ssl, (void *)rs->ctx);
                 radio_tls_shutdown_quarantine = 1;
                 radio_worker_ssl_ctx_poisoned = 1;
+                radio_worker_ssl_release("playback", rs->session_id, 1,
+                    rs->sock != RADIO_INVALID_SOCKET && !rs->socketClosed);
                 rs->sslFreed = 1;
                 if (radio_active_ssl_count > 0) radio_active_ssl_count--;
                 rs->ssl = NULL;
@@ -1858,10 +2188,11 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
             radio_amissl_task_poisoned = 1;
             radio_tls_shutdown_quarantine = 1;
             radio_worker_ssl_ctx_poisoned = 1;
+            radio_worker_ssl_release("playback", rs->session_id, 1,
+                rs->sock != RADIO_INVALID_SOCKET && !rs->socketClosed);
         } else if (radio_runtime_diag_leak_ssl_enabled()) {
-            /* MP3_DIAG_LEAK_SSL: this is the branch that would otherwise be
-             * the only playback path into SSL_free(). Quarantine/leak the
-             * SSL * instead -- covers both healthy closes and merely
+            /* MP3_DIAG_LEAK_SSL: quarantine/leak this connection's fresh
+             * per-connection SSL * -- covers both healthy closes and merely
              * timed-out handshakes (a fatal/poisoned session never reaches
              * this branch; its existing quarantine above is unchanged). No
              * BIO detach/free replaces the free, and none of the quarantine/
@@ -1873,29 +2204,14 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
             printf("radio-diag-leak: category=playback session=%lu ssl=%p action=quarantined-no-SSL_free\n",
                 rs->session_id, (void *)rs->ssl);
         } else {
-            radio_worker_risk_log("before SSL_free", rs);
-            RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_free start ssl=%p\n", (void *)rs->ssl));
-            RADIO_DBG(printf("BEFORE SSL_free session=%lu ssl=%p ctx=%p\n",
-                rs->session_id, (void *)rs->ssl, (void *)rs->ctx););
-            Radio_DebugCheckExecMem("before SSL_free");
-            if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
-                radio_tls_shutdown_quarantine = 1;
-                rs->sslStatePoisoned = 1;
-                radio_worker_ssl_ctx_poisoned = 1;
-            } else {
-            SSL_free(rs->ssl);
-            Radio_DebugCheckExecMem("after SSL_free");
-            if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
-                radio_tls_shutdown_quarantine = 1;
-                rs->sslStatePoisoned = 1;
-                radio_worker_ssl_ctx_poisoned = 1;
-            }
-            rs->ssl_free_count++;
-            radio_worker_risk_log("after SSL_free", rs);
-            RADIO_DBG(printf("AFTER SSL_free session=%lu ssl_free_count=%u\n",
-                rs->session_id, rs->ssl_free_count););
-            RADIO_DBG(printf("radio-cleanup: SSL_free done session=%lu\n", rs->session_id));
-            }
+            /* Production TLS lifecycle: hand the reusable worker SSL back --
+             * no per-connection SSL_free() exists on this path any more.
+             * Covers healthy closes AND merely timed-out (non-fatal)
+             * handshakes: the object stays retained and unpoisoned so the
+             * next acquisition can recycle it with SSL_clear(). The one
+             * final SSL_free() happens at worker shutdown. */
+            radio_worker_ssl_release("playback", rs->session_id, 0,
+                rs->sock != RADIO_INVALID_SOCKET && !rs->socketClosed);
         }
         rs->sslFreed = 1;
         if (radio_active_ssl_count > 0) radio_active_ssl_count--;
@@ -1920,6 +2236,9 @@ static void radio_net_adopt_context(RadioStream *rs) { (void)rs; }
 int Radio_PlaybackOwnsNetwork(void) { return 0; }
 void *Radio_GetWorkerSslCtx(const char *category, unsigned long session_id) { (void)category; (void)session_id; return NULL; }
 void Radio_MarkWorkerSslCtxPoisoned(const char *where) { (void)where; }
+void *Radio_AcquireWorkerSsl(const char *category, unsigned long session_id, const char *host, long fd) { (void)category; (void)session_id; (void)host; (void)fd; return NULL; }
+void Radio_ReleaseWorkerSsl(const char *category, unsigned long session_id, int quarantined, int socket_still_open) { (void)category; (void)session_id; (void)quarantined; (void)socket_still_open; }
+void Radio_WorkerSslNoteSocketClosed(void) { }
 #endif
 
 /* Drive a non-blocking connect() to completion by re-issuing connect() and
@@ -2412,6 +2731,12 @@ static void radio_abort_current_socket_local(RadioStream *rs)
             rs->session_id, closing_fd, rs->socket_close_count););
         rs->sock = RADIO_INVALID_SOCKET;
         rs->socketClosed = 1;
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+        /* Confirm to the worker-SSL lifecycle that the raw socket of a just
+         * released connection is now closed, so the next acquire's
+         * "previous socket still open" defensive check can pass. */
+        radio_worker_ssl_note_socket_closed();
+#endif
         if (radio_open_socket_count > 0) radio_open_socket_count--;
         if (radio_playback_open_socket_count > 0) radio_playback_open_socket_count--;
         RADIO_DBG(printf("radio-socket: playback socket close session=%lu fd=%ld open_socket_count %ld->%ld playback_open_socket_count %ld->%ld\n", rs->session_id, closing_fd, before_all, radio_open_socket_count, before_playback, radio_playback_open_socket_count););
@@ -2512,12 +2837,14 @@ static void close_current_socket_mode_local(RadioStream *rs, RadioCloseMode mode
         int ssl_freed = 0, ssl_quarantined = 0;
         int ssl_diag_leaked = radio_runtime_diag_leak_ssl_enabled() &&
             rs->ssl && !rs->sslFreed && !fatal_close;
+        int ssl_worker_retained = !radio_runtime_diag_leak_ssl_enabled() &&
+            rs->ssl && !rs->sslFreed && !fatal_close;
         radio_ssl_attempt_shutdown(rs);
         radio_ssl_close_stream_mode(rs, mode);
         fatal_close = rs->sslStatePoisoned || rs->fatalStop || rs->noReconnect ||
             Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned();
-        if (fatal_close) { ssl_quarantined = 1; ssl_diag_leaked = 0; radio_worker_ssl_ctx_poisoned = 1; }
-        else if (!ssl_diag_leaked) { ssl_freed = 1; }
+        if (fatal_close) { ssl_quarantined = 1; ssl_diag_leaked = 0; ssl_worker_retained = 0; radio_worker_ssl_ctx_poisoned = 1; }
+        else if (!ssl_diag_leaked && !ssl_worker_retained) { ssl_freed = 1; }
 #endif
         radio_abort_current_socket(rs);
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
@@ -2525,7 +2852,8 @@ static void close_current_socket_mode_local(RadioStream *rs, RadioCloseMode mode
             rs->session_id, fatal_close ? "fatal" : "healthy",
             shutdown_will_call ? "called" : "skipped",
             ssl_diag_leaked ? "diag-leaked" :
-                (ssl_freed ? "freed" : (ssl_quarantined ? "quarantined" : "freed")),
+                (ssl_worker_retained ? "worker-retained" :
+                (ssl_freed ? "freed" : (ssl_quarantined ? "quarantined" : "freed"))),
             fatal_close ? "quarantined" : "shared-retained");
     }
 #endif

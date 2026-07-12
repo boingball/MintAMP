@@ -137,6 +137,25 @@ const char *Radio_WorkerStateName(void);
 void Radio_GetAmiSslShared(void **amissl_base, void **amissl_ext_base, void **amissl_master_base);
 void *Radio_GetWorkerSslCtx(const char *category, unsigned long session_id);
 void Radio_MarkWorkerSslCtxPoisoned(const char *where);
+/* Production TLS lifecycle: one worker-lifetime reusable SSL object, created
+ * once with SSL_new(shared ctx) and recycled between connections with
+ * SSL_clear() -- never SSL_free()d per connection (the one final SSL_free()
+ * happens at worker shutdown). Only one probe/artwork/playback connection
+ * may own it at a time; all TLS work is already serialized on the net worker
+ * task. Acquire returns the SSL * (as void *) already configured for this
+ * connection (connect state, SNI hostname, verification, socket/BIO binding)
+ * or NULL on refusal: poisoned/quarantined TLS, another connection currently
+ * owning the object, or an SSL_clear()/bind failure (which poisons TLS for
+ * the run -- no replacement SSL is ever allocated). Release hands ownership
+ * back WITHOUT freeing; quarantined=1 additionally marks the object
+ * untouchable for the rest of the run. socket_still_open tells the worker
+ * the connection's raw socket close is still pending; the socket-close path
+ * must then call Radio_WorkerSslNoteSocketClosed() so the next acquire can
+ * verify the previous socket really closed. Worker-task-only, and all three
+ * are no-ops while MP3_DIAG_LEAK_SSL diagnostic leak mode is enabled. */
+void *Radio_AcquireWorkerSsl(const char *category, unsigned long session_id, const char *host, long fd);
+void Radio_ReleaseWorkerSsl(const char *category, unsigned long session_id, int quarantined, int socket_still_open);
+void Radio_WorkerSslNoteSocketClosed(void);
 /* True when the calling task is the net worker task -- the only task that
  * ever runs OpenAmiSSLTags()/InitAmiSSL() in this process, so per the AmiSSL
  * v5/v6 SDK it is already initialized and must NOT run a manual
@@ -245,6 +264,9 @@ static void Radio_GetAmiSslShared(void **amissl_base, void **amissl_ext_base, vo
 }
 static void *Radio_GetWorkerSslCtx(const char *category, unsigned long session_id) { (void)category; (void)session_id; return 0; }
 static void Radio_MarkWorkerSslCtxPoisoned(const char *where) { (void)where; }
+static void *Radio_AcquireWorkerSsl(const char *category, unsigned long session_id, const char *host, long fd) { (void)category; (void)session_id; (void)host; (void)fd; return 0; }
+static void Radio_ReleaseWorkerSsl(const char *category, unsigned long session_id, int quarantined, int socket_still_open) { (void)category; (void)session_id; (void)quarantined; (void)socket_still_open; }
+static void Radio_WorkerSslNoteSocketClosed(void) { }
 static int Radio_AmiSslTaskIsOpener(void) { return 0; }
 static int Radio_AmiSslLock(void) { return 0; }
 static void Radio_AmiSslUnlock(void) { }
