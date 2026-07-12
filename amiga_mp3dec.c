@@ -7151,17 +7151,21 @@ static void AmigaFreeGuarded(void **allocationBasePtr, void **userPointerPtr,
 	if (totalAllocationBytes == 0)
 		totalAllocationBytes = AmigaGuardedTotalBytes(requestedBytes);
 #ifdef RADIO_DEBUG
-	RadioDebugUnsuppressedPrintf("audio-guard-free: base=%p user=%p requested=%lu total=%lu\n",
-		allocationBase, userPointer, requestedBytes, totalAllocationBytes);
+	RadioDebugUnsuppressedPrintf("audio-guard-free: task=%p base=%p user=%p requested=%lu total=%lu\n",
+		(void *)FindTask(NULL), allocationBase, userPointer, requestedBytes, totalAllocationBytes);
 #else
-	printf("audio-guard-free: base=%p user=%p requested=%lu total=%lu\n",
-		allocationBase, userPointer, requestedBytes, totalAllocationBytes);
+	printf("audio-guard-free: task=%p base=%p user=%p requested=%lu total=%lu\n",
+		(void *)FindTask(NULL), allocationBase, userPointer, requestedBytes, totalAllocationBytes);
 	fflush(stdout);
 #endif
 	if (!PlaybackBufferCanaryOk(allocationBase, requestedBytes) && status)
 		status->canaryErrors++;
 	FreeMem(allocationBase, totalAllocationBytes);
 	Radio_DebugCheckExecMem("audio-guard-free: after FreeMem");
+	/* Base and user pointers cleared immediately: the caller's
+	 * player->splitBase[]/splitBuf[] (etc.) are the only owners, and leaving
+	 * either non-NULL after this FreeMem is what a later cleanup pass would
+	 * re-free as AN_FreeTwice. */
 	*allocationBasePtr = NULL;
 	if (userPointerPtr)
 		*userPointerPtr = NULL;
@@ -7243,17 +7247,23 @@ static void AmigaAudioLogBufferEvent(const AmigaAudioPlayer *player,
 	const char *event, const char *owner, const char *site,
 	long slot, long ch, const void *ptr, unsigned long size)
 {
+	/* task=FindTask(NULL) ties every audio buffer/IORequest free to the task
+	 * that actually runs it.  The audio player is torn down by the playback
+	 * child, not the GUI/main task, so a recoverable AN_FreeTwice/
+	 * AN_BadFreeAddr whose task pointer matches this line is a child-task
+	 * defect, and one that does NOT match points the hunt back at the GUI
+	 * task's own frees instead. */
 #ifndef RADIO_DEBUG
 	if (!player || !player->debugCleanup)
 		return;
-	printf("debug-cleanup: %s owner=%s site=%s session=%lu slot=%ld ch=%ld ptr=%p size=%lu cleanup#=%lu\n",
-		event, owner, site, player->sessionId, slot, ch, ptr, size,
+	printf("debug-cleanup: %s owner=%s site=%s task=%p session=%lu slot=%ld ch=%ld ptr=%p size=%lu cleanup#=%lu\n",
+		event, owner, site, (void *)FindTask(NULL), player->sessionId, slot, ch, ptr, size,
 		player->cleanupInvocationCount);
 #else
 	if (!player)
 		return;
-	RadioDebugUnsuppressedPrintf("debug-cleanup: %s owner=%s site=%s session=%lu slot=%ld ch=%ld ptr=%p size=%lu cleanup#=%lu\n",
-		event, owner, site, player->sessionId, slot, ch, ptr, size,
+	RadioDebugUnsuppressedPrintf("debug-cleanup: %s owner=%s site=%s task=%p session=%lu slot=%ld ch=%ld ptr=%p size=%lu cleanup#=%lu\n",
+		event, owner, site, (void *)FindTask(NULL), player->sessionId, slot, ch, ptr, size,
 		player->cleanupInvocationCount);
 #endif
 }
