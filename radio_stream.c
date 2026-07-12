@@ -294,6 +294,7 @@ static void radio_net_worker_entry(void)
     struct MsgPort *port;
     int shuttingDown = 0;
     int safe_to_close_amissl = 1;
+    int diag_leak_abandon = radio_runtime_diag_leak_ssl_enabled();
     RadioNetWorkerJob *shutdownJob = NULL;
 
     RADIO_DBG(printf("radio-net-worker: starting task=%p\n", (void *)FindTask(NULL)););
@@ -357,7 +358,20 @@ static void radio_net_worker_entry(void)
     radio_net_worker_shutdown_stage = "shutdown-begin";
     radio_worker_breadcrumb("shutdown-begin", "shutdown", 0);
     RADIO_DBG(printf("radio-net-worker: shutdown begin task=%p shutdownJob=%p\n", (void *)FindTask(NULL), (void *)shutdownJob););
-    if (AmiSSLBase) {
+    if (diag_leak_abandon) {
+        /* MP3_DIAG_LEAK_SSL: leaked per-connection SSL objects may still
+         * reference the shared SSL_CTX and AmiSSL internal state, so the
+         * final teardown must not walk that object graph at all: no shared
+         * SSL_CTX_free(), no CloseAmiSSL(), no CloseLibrary() on
+         * AmiSSLMasterBase or the worker's SocketBase. This is deliberate,
+         * expected abandonment for the diagnostic run, not a shutdown
+         * failure -- the worker still exits normally below (message port
+         * teardown is plain Exec and touches nothing of AmiSSL's). */
+        radio_net_worker_shutdown_stage = "diag-leak teardown skipped";
+        radio_worker_breadcrumb("diag-leak teardown skipped", "shutdown", 0);
+        printf("radio-diag-leak: final AmiSSL/SSL_CTX/library teardown skipped; reboot required after diagnostic run\n");
+    }
+    if (AmiSSLBase && !diag_leak_abandon) {
         radio_net_worker_shutdown_stage = "before CloseAmiSSL";
         radio_worker_breadcrumb("before CloseAmiSSL", "CloseAmiSSL", 0);
         /* Only GUI radio-browser builds link radio_stream_probe.c.
@@ -385,7 +399,7 @@ static void radio_net_worker_entry(void)
             AmiSSLExtBase = NULL;
         }
     }
-    if (AmiSSLMasterBase && safe_to_close_amissl) {
+    if (AmiSSLMasterBase && safe_to_close_amissl && !diag_leak_abandon) {
         radio_net_worker_shutdown_stage = "before CloseLibrary AmiSSLMasterBase";
         radio_worker_breadcrumb("before CloseLibrary AmiSSLMasterBase", "CloseLibrary", 0);
         RADIO_DBG(printf("radio-net-worker: before CloseLibrary AmiSSLMasterBase=%p\n", (void *)AmiSSLMasterBase););
@@ -395,7 +409,7 @@ static void radio_net_worker_entry(void)
         radio_worker_breadcrumb("after CloseLibrary AmiSSLMasterBase", "CloseLibrary", 0);
         RADIO_DBG(printf("radio-net-worker: after CloseLibrary AmiSSLMasterBase\n"););
     }
-    if (SocketBase && safe_to_close_amissl) {
+    if (SocketBase && safe_to_close_amissl && !diag_leak_abandon) {
         radio_net_worker_shutdown_stage = "before CloseLibrary SocketBase";
         radio_worker_breadcrumb("before CloseLibrary SocketBase", "CloseLibrary", 0);
         RADIO_DBG(printf("radio-net-worker: before CloseLibrary SocketBase=%p\n", (void *)SocketBase););
@@ -1844,6 +1858,20 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
             radio_amissl_task_poisoned = 1;
             radio_tls_shutdown_quarantine = 1;
             radio_worker_ssl_ctx_poisoned = 1;
+        } else if (radio_runtime_diag_leak_ssl_enabled()) {
+            /* MP3_DIAG_LEAK_SSL: this is the branch that would otherwise be
+             * the only playback path into SSL_free(). Quarantine/leak the
+             * SSL * instead -- covers both healthy closes and merely
+             * timed-out handshakes (a fatal/poisoned session never reaches
+             * this branch; its existing quarantine above is unchanged). No
+             * BIO detach/free replaces the free, and none of the quarantine/
+             * poison flags are raised: the shared worker SSL_CTX stays
+             * retained and healthy so the next connection can start. The
+             * common cleanup below still clears rs->ssl and decrements
+             * radio_active_ssl_count so nothing can touch the leaked object
+             * and the connection accounting stays balanced. */
+            printf("radio-diag-leak: category=playback session=%lu ssl=%p action=quarantined-no-SSL_free\n",
+                rs->session_id, (void *)rs->ssl);
         } else {
             radio_worker_risk_log("before SSL_free", rs);
             RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_free start ssl=%p\n", (void *)rs->ssl));
@@ -2482,19 +2510,22 @@ static void close_current_socket_mode_local(RadioStream *rs, RadioCloseMode mode
         int shutdown_will_call = rs->ssl && !rs->sslFreed && rs->sslHandshakeDone &&
             rs->sock != RADIO_INVALID_SOCKET && !rs->socketClosed && !fatal_close;
         int ssl_freed = 0, ssl_quarantined = 0;
+        int ssl_diag_leaked = radio_runtime_diag_leak_ssl_enabled() &&
+            rs->ssl && !rs->sslFreed && !fatal_close;
         radio_ssl_attempt_shutdown(rs);
         radio_ssl_close_stream_mode(rs, mode);
         fatal_close = rs->sslStatePoisoned || rs->fatalStop || rs->noReconnect ||
             Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned();
-        if (fatal_close) { ssl_quarantined = 1; radio_worker_ssl_ctx_poisoned = 1; }
-        else { ssl_freed = 1; }
+        if (fatal_close) { ssl_quarantined = 1; ssl_diag_leaked = 0; radio_worker_ssl_ctx_poisoned = 1; }
+        else if (!ssl_diag_leaked) { ssl_freed = 1; }
 #endif
         radio_abort_current_socket(rs);
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
         printf("radio-tls-close: category=playback session=%lu health=%s shutdown=%s ssl=%s ctx=%s socket=closed\n",
             rs->session_id, fatal_close ? "fatal" : "healthy",
             shutdown_will_call ? "called" : "skipped",
-            ssl_freed ? "freed" : (ssl_quarantined ? "quarantined" : "freed"),
+            ssl_diag_leaked ? "diag-leaked" :
+                (ssl_freed ? "freed" : (ssl_quarantined ? "quarantined" : "freed")),
             fatal_close ? "quarantined" : "shared-retained");
     }
 #endif
@@ -3276,6 +3307,12 @@ void Radio_NetworkShutdown(void)
          * exit; radio_net_worker_stop() waits, bounded, for it to finish. */
         if (!radio_net_worker_stop()) {
             RADIO_DBG(printf("radio-netshutdown: net worker did not confirm shutdown within the timeout\n"););
+        } else if (radio_runtime_diag_leak_ssl_enabled()) {
+            /* MP3_DIAG_LEAK_SSL: the worker exited cleanly but deliberately
+             * abandoned CloseAmiSSL()/CloseLibrary() (see its own
+             * radio-diag-leak log), so the close counters below must not
+             * pretend those closes happened. */
+            RADIO_DBG(printf("radio-netshutdown: worker exited with final AmiSSL/library teardown deliberately skipped (MP3_DIAG_LEAK_SSL)\n"););
         } else {
             if (radio_openamissltags_count > radio_closeamissl_count) {
                 radio_closeamissl_count++;

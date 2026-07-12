@@ -1034,6 +1034,20 @@ static int rb_probe_transport_open_ex(RbProbeTransport *transport, const char *u
                 if (rb_probe_active_ssl_count > 0) rb_probe_active_ssl_count--;
                 transport->ssl = NULL;
                 transport->ctx = NULL;
+            } else if (radio_runtime_diag_leak_ssl_enabled()) {
+                /* MP3_DIAG_LEAK_SSL: a merely timed-out (non-fatal)
+                 * handshake's SSL * is quarantined/leaked too -- with the
+                 * diagnostic flag set, no SSL object is ever passed to
+                 * SSL_free(), regardless of how its connection ended. The
+                 * fatal/poisoned branch above keeps its existing quarantine
+                 * behaviour unchanged. */
+                printf("radio-diag-leak: category=%s session=%lu ssl=%p action=quarantined-no-SSL_free\n",
+                    transport->category ? transport->category : "probe",
+                    transport->session_id, (void *)transport->ssl);
+                if (rb_probe_active_ssl_count > 0) rb_probe_active_ssl_count--;
+                transport->ssl = NULL;
+                transport->ctx = NULL;
+                transport->ctxOwnedByTransport = 0;
             } else {
                 /* Plain connect timeout (WANT_READ/WANT_WRITE budget
                  * exhausted, empty error queue): the SSL object is healthy
@@ -1089,6 +1103,7 @@ static void rb_probe_transport_close_mode(RbProbeTransport *transport, RbProbeCl
     int shutdown_called = 0;
     int ssl_freed = 0;
     int ssl_quarantined = 0;
+    int ssl_diag_leaked = 0;
     int ctx_quarantined = 0;
 #endif
     if (!transport) return;
@@ -1118,6 +1133,24 @@ static void rb_probe_transport_close_mode(RbProbeTransport *transport, RbProbeCl
             Radio_MarkWorkerSslCtxPoisoned("probe close fatal SSL quarantined");
             ssl_quarantined = 1;
             if (transport->ctx) ctx_quarantined = 1;
+            transport->ssl = NULL;
+            transport->sslHandshakeDone = 0;
+            if (rb_probe_active_ssl_count > 0) rb_probe_active_ssl_count--;
+            transport->ctx = NULL;
+            transport->ctxOwnedByTransport = 0;
+        } else if (transport->ssl && radio_runtime_diag_leak_ssl_enabled()) {
+            /* MP3_DIAG_LEAK_SSL: healthy probe/artwork close. The one
+             * best-effort SSL_shutdown() above already ran (handshake done,
+             * socket still open); quarantine/leak the SSL * instead of
+             * SSL_free()ing it. No BIO detach/free replaces the free and the
+             * shared worker SSL_CTX stays retained and unpoisoned. Clearing
+             * transport->ssl and decrementing rb_probe_active_ssl_count
+             * keeps the leaked object unreachable and the connection
+             * accounting balanced so the next connection can start. */
+            printf("radio-diag-leak: category=%s session=%lu ssl=%p action=quarantined-no-SSL_free\n",
+                transport->category ? transport->category : "probe",
+                transport->session_id, (void *)transport->ssl);
+            ssl_diag_leaked = 1;
             transport->ssl = NULL;
             transport->sslHandshakeDone = 0;
             if (rb_probe_active_ssl_count > 0) rb_probe_active_ssl_count--;
@@ -1179,7 +1212,8 @@ static void rb_probe_transport_close_mode(RbProbeTransport *transport, RbProbeCl
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
         rb_probe_transport_is_fatal(transport) ? "fatal" : "healthy",
         shutdown_called ? "called" : "skipped",
-        ssl_freed ? "freed" : (ssl_quarantined ? "quarantined" : "freed"),
+        ssl_diag_leaked ? "diag-leaked" :
+            (ssl_freed ? "freed" : (ssl_quarantined ? "quarantined" : "freed")),
         ctx_quarantined ? "quarantined" : "shared-retained"
 #else
         "healthy", "skipped", "freed", "freed"
