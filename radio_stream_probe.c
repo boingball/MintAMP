@@ -942,28 +942,8 @@ static int rb_probe_transport_open_ex(RbProbeTransport *transport, const char *u
             rb_probe_transport_close(transport);
             return RB_STREAM_PROBE_ERR_CONNECT;
         }
-        if (!radio_runtime_diag_leak_ssl_enabled()) {
-            /* Production TLS lifecycle: borrow the one worker-lifetime
-             * reusable SSL object (created once, recycled via SSL_clear();
-             * never SSL_free()d per connection). Connect state, the SNI
-             * hostname, verification and the socket/BIO binding are all
-             * (re)applied inside the acquire. NULL means poisoned TLS, a
-             * clear/bind failure, or another connection currently owning
-             * the object (e.g. active playback) -- fail this probe/artwork
-             * fetch gracefully. */
-            transport->ssl = (SSL *)Radio_AcquireWorkerSsl(
-                transport->category ? transport->category : "probe",
-                transport->session_id, host, (long)transport->sock);
-            if (!transport->ssl) {
-                int tls_poisoned = Radio_IsTlsPoisoned() || Radio_IsMemoryPoisoned();
-                rb_probe_transport_close(transport);
-                return tls_poisoned ? RB_STREAM_PROBE_ERR_TLS_POISONED : RB_STREAM_PROBE_ERR_CONNECT;
-            }
-            rb_probe_active_ssl_count++;
-            sni_set = 1; /* applied inside Radio_AcquireWorkerSsl() */
-        } else {
-        /* MP3_DIAG_LEAK_SSL diagnostic leak mode: fresh per-connection SSL
-         * object, quarantined/leaked on close -- unchanged proven behaviour. */
+
+        /* Fresh SSL per HTTPS socket; diagnostic mode still leaks it on close. */
         Radio_DebugCheckExecMem("before probe SSL_new");
         transport->ssl = SSL_new(transport->ctx);
             Radio_DebugCheckExecMem("after probe SSL_new");
@@ -1054,16 +1034,7 @@ static int rb_probe_transport_open_ex(RbProbeTransport *transport, const char *u
             if (transport->sslStatePoisoned || Radio_IsTlsPoisoned() || Radio_IsMemoryPoisoned()) {
                 RADIO_DBG(printf("radio-cleanup: probe handshake-fail SSL_free/SSL_CTX_free skipped (quarantined/poisoned) session=%lu ssl=%p ctx=%p\n", transport->session_id, (void *)transport->ssl, (void *)transport->ctx);)
                 rb_probe_ssl_free_skipped_poison_count++;
-                /* Production mode: also hand the (now quarantined) worker
-                 * SSL back so ownership state stays consistent; no-op in
-                 * diagnostic leak mode where this is a fresh object. */
-                Radio_ReleaseWorkerSsl(
-                    transport->category ? transport->category : "probe",
-                    transport->session_id, 1,
-                    transport->sock != RB_PROBE_INVALID_SOCKET);
-                if (rb_probe_active_ssl_count > 0) rb_probe_active_ssl_count--;
-                transport->ssl = NULL;
-                transport->ctx = NULL;
+                /* close path will close socket first, then quarantine SSL. */
             } else if (radio_runtime_diag_leak_ssl_enabled()) {
                 /* MP3_DIAG_LEAK_SSL: a merely timed-out (non-fatal)
                  * handshake's SSL * is quarantined/leaked too -- with the
@@ -1079,22 +1050,7 @@ static int rb_probe_transport_open_ex(RbProbeTransport *transport, const char *u
                 transport->ctx = NULL;
                 transport->ctxOwnedByTransport = 0;
             } else {
-                /* Plain connect timeout (WANT_READ/WANT_WRITE budget
-                 * exhausted, empty error queue): the SSL object is healthy.
-                 * Production TLS lifecycle: hand the reusable worker SSL
-                 * back -- no SSL_free(); the next acquisition recycles it
-                 * with SSL_clear(). Shared worker ctx stays alive until
-                 * final worker shutdown. */
-                rb_probe_debug_mem_report(transport->session_id, "before handshake-fail worker SSL release");
-                Radio_ReleaseWorkerSsl(
-                    transport->category ? transport->category : "probe",
-                    transport->session_id, 0,
-                    transport->sock != RB_PROBE_INVALID_SOCKET);
-                transport->ssl = NULL;
-                if (rb_probe_active_ssl_count > 0) rb_probe_active_ssl_count--;
-                rb_probe_debug_mem_report(transport->session_id, "after handshake-fail worker SSL release");
-                transport->ctx = NULL;
-                transport->ctxOwnedByTransport = 0;
+                /* close path will close socket first, then SSL_free(). */
             }
             rb_probe_transport_close(transport);
             return RB_STREAM_PROBE_ERR_TLS_HANDSHAKE;
@@ -1138,140 +1094,75 @@ static void rb_probe_transport_close_mode(RbProbeTransport *transport, RbProbeCl
     int ssl_freed = 0;
     int ssl_quarantined = 0;
     int ssl_diag_leaked = 0;
-    int ssl_worker_released = 0;
     int ctx_quarantined = 0;
 #endif
     if (!transport) return;
-    RADIO_DBG(printf("radio-cleanup: probe close mode=%s session=%lu http_status=%d sslHandshakeDone=%d ssl=%p ctx=%p fd=%ld open_socket_count_before=%ld\n",
-        rb_probe_close_mode_name(mode), transport->session_id, http_status,
+    (void)http_status;
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-        transport->sslHandshakeDone, (void *)transport->ssl, (void *)transport->ctx,
-#else
-        0, (void *)0, (void *)0,
+    if (mode == RB_PROBE_CLOSE_GRACEFUL && transport->sock != RB_PROBE_INVALID_SOCKET &&
+        transport->ssl && transport->sslHandshakeDone && !rb_probe_transport_is_fatal(transport)) {
+        SSL_shutdown(transport->ssl);
+        shutdown_called = 1;
+        printf("radio-tls-order: category=%s session=%lu step=SSL_shutdown-complete\n",
+            transport->category ? transport->category : "probe", transport->session_id);
+        Radio_DebugCheckExecMem("after probe SSL_shutdown");
+    }
 #endif
-        (long)transport->sock, rb_probe_open_socket_count);)
     if (transport->sock != RB_PROBE_INVALID_SOCKET) {
+        long closing_fd = (long)transport->sock;
+        long before = rb_probe_open_socket_count;
+        Radio_DebugCheckExecMem("before probe CloseSocket");
+        printf("radio-tls-order: category=%s session=%lu step=CloseSocket-begin fd=%ld\n",
+            transport->category ? transport->category : "probe", transport->session_id, closing_fd);
+        rb_probe_close_socket(transport->sock);
+        printf("radio-tls-order: category=%s session=%lu step=CloseSocket-complete\n",
+            transport->category ? transport->category : "probe", transport->session_id);
+        Radio_DebugCheckExecMem("after probe CloseSocket");
+        transport->sock = RB_PROBE_INVALID_SOCKET;
+        if (rb_probe_open_socket_count > 0) rb_probe_open_socket_count--;
+        RADIO_DBG(printf("radio-socket: probe socket close session=%lu fd=%ld open_socket_count %ld->%ld probe_open_socket_count %ld->%ld\n", transport->session_id, closing_fd, before, rb_probe_open_socket_count, before, rb_probe_open_socket_count);)
+    }
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-        if (mode == RB_PROBE_CLOSE_GRACEFUL && transport->ssl && transport->sslHandshakeDone &&
-            !rb_probe_transport_is_fatal(transport)) {
-            SSL_shutdown(transport->ssl);
-            shutdown_called = 1;
-            Radio_DebugCheckExecMem("after probe SSL_shutdown");
-        }
-        RADIO_DBG(printf("radio-cleanup: probe ssl_shutdown session=%lu mode=%s %s\n",
-            transport->session_id, rb_probe_close_mode_name(mode), shutdown_called ? "called" : "skipped");)
-        if (transport->ssl && rb_probe_transport_is_fatal(transport)) {
-            RADIO_DBG(printf("radio-cleanup: probe SSL_free skipped (%s) session=%lu ssl=%p leaking to avoid crashing on AmiSSL close/free path\n",
-                transport->sslStatePoisoned ? "poisoned" : "tls-poisoned",
-                transport->session_id, (void *)transport->ssl);)
+    if (transport->ssl) {
+        if (rb_probe_transport_is_fatal(transport)) {
             rb_probe_ssl_free_skipped_poison_count++;
             Radio_MarkWorkerSslCtxPoisoned("probe close fatal SSL quarantined");
-            /* Production mode: hand the (now quarantined) worker SSL back so
-             * ownership state stays consistent -- retained, never freed;
-             * no-op in diagnostic leak mode (fresh object). */
-            Radio_ReleaseWorkerSsl(
-                transport->category ? transport->category : "probe",
-                transport->session_id, 1,
-                transport->sock != RB_PROBE_INVALID_SOCKET);
             ssl_quarantined = 1;
             if (transport->ctx) ctx_quarantined = 1;
-            transport->ssl = NULL;
-            transport->sslHandshakeDone = 0;
-            if (rb_probe_active_ssl_count > 0) rb_probe_active_ssl_count--;
-            transport->ctx = NULL;
-            transport->ctxOwnedByTransport = 0;
-        } else if (transport->ssl && radio_runtime_diag_leak_ssl_enabled()) {
-            /* MP3_DIAG_LEAK_SSL: healthy probe/artwork close. The one
-             * best-effort SSL_shutdown() above already ran (handshake done,
-             * socket still open); quarantine/leak the SSL * instead of
-             * SSL_free()ing it. No BIO detach/free replaces the free and the
-             * shared worker SSL_CTX stays retained and unpoisoned. Clearing
-             * transport->ssl and decrementing rb_probe_active_ssl_count
-             * keeps the leaked object unreachable and the connection
-             * accounting balanced so the next connection can start. */
+        } else if (radio_runtime_diag_leak_ssl_enabled()) {
             printf("radio-diag-leak: category=%s session=%lu ssl=%p action=quarantined-no-SSL_free\n",
-                transport->category ? transport->category : "probe",
-                transport->session_id, (void *)transport->ssl);
+                transport->category ? transport->category : "probe", transport->session_id, (void *)transport->ssl);
             ssl_diag_leaked = 1;
-            transport->ssl = NULL;
-            transport->sslHandshakeDone = 0;
-            if (rb_probe_active_ssl_count > 0) rb_probe_active_ssl_count--;
-            transport->ctx = NULL;
-            transport->ctxOwnedByTransport = 0;
-        } else if (transport->ssl) {
-            /* Production TLS lifecycle: hand the reusable worker SSL back --
-             * no per-connection SSL_free() exists on this path any more. The
-             * object stays retained (worker-retained in the close summary)
-             * for the next acquisition's SSL_clear(); the shared ctx also
-             * stays retained. The heap check keeps the per-close corruption
-             * bracketing the old free path provided. */
-            rb_probe_debug_mem_report(transport->session_id, "before close worker SSL release");
-            Radio_DebugCheckExecMem("before probe worker SSL release");
-            if (rb_probe_transport_is_fatal(transport)) {
-                Radio_MarkWorkerSslCtxPoisoned("probe close pre-release poison");
-                Radio_ReleaseWorkerSsl(
-                    transport->category ? transport->category : "probe",
-                    transport->session_id, 1,
-                    transport->sock != RB_PROBE_INVALID_SOCKET);
-                ssl_quarantined = 1;
-                if (transport->ctx) ctx_quarantined = 1;
-            } else {
-                if (transport->sslReadCloseSeen) {
-                RADIO_DBG(printf("radio-cleanup: probe worker SSL release after clean zero-return session=%lu ssl=%p\n",
-                    transport->session_id, (void *)transport->ssl);)
-                rb_probe_zero_return_ssl_free_count++;
-                }
-                Radio_ReleaseWorkerSsl(
-                    transport->category ? transport->category : "probe",
-                    transport->session_id, 0,
-                    transport->sock != RB_PROBE_INVALID_SOCKET);
-                ssl_worker_released = 1;
-            }
-            transport->ssl = NULL;
-            transport->sslHandshakeDone = 0;
-            if (rb_probe_active_ssl_count > 0) rb_probe_active_ssl_count--;
-            transport->ctx = NULL;
-            transport->ctxOwnedByTransport = 0;
+        } else {
+            SSL *ssl_to_free = transport->ssl;
+            Radio_DebugCheckExecMem("before probe SSL_free after socket close");
+            printf("radio-tls-order: category=%s session=%lu step=SSL_free-begin ssl=%p\n",
+                transport->category ? transport->category : "probe", transport->session_id, (void *)ssl_to_free);
+            SSL_free(ssl_to_free);
+            printf("radio-tls-order: category=%s session=%lu step=SSL_free-complete\n",
+                transport->category ? transport->category : "probe", transport->session_id);
+            Radio_DebugCheckExecMem("after probe SSL_free after socket close");
+            ssl_freed = 1;
         }
-        if (rb_probe_transport_is_fatal(transport) && transport->ctx) {
-            Radio_MarkWorkerSslCtxPoisoned("probe close fatal shared ctx retained");
-            ctx_quarantined = 1;
-        }
-        transport->ctx = NULL;
-        transport->ctxOwnedByTransport = 0;
-#endif
-         {
-            long closing_fd = (long)transport->sock;
-            long before = rb_probe_open_socket_count;
-            Radio_DebugCheckExecMem("before probe CloseSocket");
-            rb_probe_close_socket(transport->sock);
-            Radio_DebugCheckExecMem("after probe CloseSocket");
-#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-            /* Confirm to the worker-SSL lifecycle that the raw socket of a
-             * just released connection is now closed, so the next acquire's
-             * "previous socket still open" defensive check can pass. */
-            Radio_WorkerSslNoteSocketClosed();
-#endif
-            transport->sock = RB_PROBE_INVALID_SOCKET;
-            if (rb_probe_open_socket_count > 0) rb_probe_open_socket_count--;
-            RADIO_DBG(printf("radio-socket: probe socket close session=%lu fd=%ld open_socket_count %ld->%ld probe_open_socket_count %ld->%ld\n", transport->session_id, closing_fd, before, rb_probe_open_socket_count, before, rb_probe_open_socket_count);)
-        }
+        transport->ssl = NULL;
+        transport->sslHandshakeDone = 0;
+        if (rb_probe_active_ssl_count > 0) rb_probe_active_ssl_count--;
     }
-    printf("radio-tls-close: category=%s session=%lu health=%s shutdown=%s ssl=%s ctx=%s socket=closed\n",
+    if (rb_probe_transport_is_fatal(transport) && transport->ctx) ctx_quarantined = 1;
+    transport->ctx = NULL;
+    transport->ctxOwnedByTransport = 0;
+#endif
+    printf("radio-tls-close: category=%s session=%lu health=%s shutdown=%s socket=closed-before-SSL_free ssl=%s ctx=%s\n",
         transport->category ? transport->category : "probe", transport->session_id,
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
         rb_probe_transport_is_fatal(transport) ? "fatal" : "healthy",
         shutdown_called ? "called" : "skipped",
-        ssl_diag_leaked ? "diag-leaked" :
-            (ssl_worker_released ? "worker-retained" :
-            (ssl_freed ? "freed" : (ssl_quarantined ? "quarantined" : "freed"))),
+        ssl_diag_leaked ? "diag-leaked" : (ssl_freed ? "freed" : (ssl_quarantined ? "quarantined" : "freed")),
         ctx_quarantined ? "quarantined" : "shared-retained"
 #else
-        "healthy", "skipped", "freed", "freed"
+        "healthy", "skipped", "freed", "shared-retained"
 #endif
     );
-    RADIO_DBG(printf("radio-cleanup: probe close mode=%s session=%lu complete open_socket_count_after=%ld\n",
-        rb_probe_close_mode_name(mode), transport->session_id, rb_probe_open_socket_count);)
     Radio_DebugCheckExecMem("after probe transport close");
 }
 
