@@ -106,6 +106,47 @@ ifneq ($(filter 1 yes true on,$(DEBUG)),)
 DEBUG_CPPFLAGS := -DRADIO_DEBUG
 endif
 
+# Debug-only close-time FreeMem alert probe (crt_freeall_probe.c).  Surgically
+# replaces libnix's ___free_all via `-Wl,--wrap,___free_all` to record the exact
+# node/base/size each final FreeMem receives; nothing else is wrapped.  minimp3r
+# (guir) only.  OFF by default: a normal build never adds the object or the wrap
+# flag, so the RC1 known-good binary is byte-for-byte unchanged.
+#
+# The probe object is compiled IDENTICALLY for discovery and armed builds: the
+# three list-head addresses are supplied only as linker ABSOLUTE symbols via
+# --defsym, so their VALUES change without changing any section size or
+# instruction width.  Discovery therefore has the same layout as armed, and the
+# real head addresses read from the discovery binary remain valid when armed.
+#   Discovery (heads default to 0 -> wrapper calls the genuine ___free_all):
+#       make -f Makefile.amiga sslguir DEBUG=1 FREEALL_PROBE=1
+#   Armed (verified real heads; instrumented traversal):
+#       make -f Makefile.amiga sslguir DEBUG=1 FREEALL_PROBE=1 FREEALL_ARMED=1 \
+#           FREEALL_HEAD0=0xXXXXXXXX FREEALL_HEAD1=0xYYYYYYYY FREEALL_HEAD2=0xZZZZZZZZ
+FREEALL_HEAD0 ?= 0
+FREEALL_HEAD1 ?= 0
+FREEALL_HEAD2 ?= 0
+FREEALL_PROBE_CPPFLAGS :=
+FREEALL_PROBE_SOURCES :=
+FREEALL_PROBE_LDFLAGS :=
+ifneq ($(filter 1 yes true on,$(FREEALL_PROBE)),)
+# Fail the build if armed without three non-zero head addresses (req: no armed
+# binary may ever be produced with a zero/unspecified head).
+ifneq ($(filter 1 yes true on,$(FREEALL_ARMED)),)
+ifneq (,$(filter 0 0x0 0x00 0x000 0x0000 0x00000 0x000000 0x0000000 0x00000000,$(FREEALL_HEAD0) $(FREEALL_HEAD1) $(FREEALL_HEAD2)))
+$(error FREEALL_ARMED=1 requires non-zero FREEALL_HEAD0/1/2 (got '$(FREEALL_HEAD0)' '$(FREEALL_HEAD1)' '$(FREEALL_HEAD2)'))
+endif
+ifeq (,$(strip $(FREEALL_HEAD0))$(strip $(FREEALL_HEAD1))$(strip $(FREEALL_HEAD2)))
+$(error FREEALL_ARMED=1 requires FREEALL_HEAD0/1/2 to be set)
+endif
+endif
+FREEALL_PROBE_CPPFLAGS := -DFREEALL_PROBE
+FREEALL_PROBE_SOURCES := crt_freeall_probe.c
+FREEALL_PROBE_LDFLAGS := -Wl,--wrap,___free_all \
+	-Wl,--defsym,__freeall_head0=$(FREEALL_HEAD0) \
+	-Wl,--defsym,__freeall_head1=$(FREEALL_HEAD1) \
+	-Wl,--defsym,__freeall_head2=$(FREEALL_HEAD2)
+endif
+
 # Debug-only heap guard for MiniAMP3's own allocations (front/rear guard
 # bytes, double-free and leak detection -- see miniamp_memguard.c).
 # Independent of DEBUG=1 above; combine as e.g. `make ... DEBUG=1 HEAPGUARD=1`.
@@ -250,9 +291,9 @@ $(GUI_TARGET): $(GUI_SOURCES) amiga_mp3dec.c $(DECODER_SOURCES) $(FAST030_ASM_SO
 # minimp3r — ReAction/ClassAct frontend.  Built with the same fast030 ASM path
 # as the GadTools GUI since it targets 030+/3.5/3.9 machines.  minimp3r.c
 # #includes amiga_mp3dec.c, so only the shared decoder modules are linked.
-$(GUIR_TARGET): $(GUIR_SOURCES) amiga_mp3dec.c $(DECODER_SOURCES) $(FAST030_ASM_SOURCES)
-	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(PROBE_CPPFLAGS) $(SSL_CPPFLAGS) $(SSLCERTS_CPPFLAGS) $(PNG_CPPFLAGS) $(DEBUG_CPPFLAGS) $(EXTRA_CFLAGS) \
-		-o $@ $(GUIR_SOURCES) $(DECODER_SOURCES) $(FAST030_ASM_SOURCES)
+$(GUIR_TARGET): $(GUIR_SOURCES) amiga_mp3dec.c $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(FREEALL_PROBE_SOURCES)
+	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(PROBE_CPPFLAGS) $(SSL_CPPFLAGS) $(SSLCERTS_CPPFLAGS) $(PNG_CPPFLAGS) $(DEBUG_CPPFLAGS) $(FREEALL_PROBE_CPPFLAGS) $(EXTRA_CFLAGS) \
+		-o $@ $(GUIR_SOURCES) $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(FREEALL_PROBE_SOURCES) $(FREEALL_PROBE_LDFLAGS)
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
 
 $(FAST030_TARGET): $(SOURCES) $(FAST030_ASM_SOURCES)

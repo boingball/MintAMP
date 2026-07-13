@@ -13,6 +13,20 @@
 #include "radio_runtime_flags.h"
 
 #if defined(AMIGA_M68K)
+/* amiga_mp3dec.c InitSemaphore()s the shared cross-task stdout lock
+ * radio_console_lock inside its main() -- but only when
+ * RADIO_CONSOLE_LOCK_INIT_ELSEWHERE is NOT defined.  Here that main() is
+ * renamed to HelixAmp3CliMain and becomes the per-playback-child entry point,
+ * so letting it run the init would (a) leave the lock uninitialised until the
+ * first playback child is spawned, even though the GUI task and the radio net
+ * worker obtain it much earlier (the very first Internet Radio search prints
+ * through it), and (b) re-run InitSemaphore() on every child spawn, racing any
+ * task already holding it.  An ObtainSemaphore() on a still-zeroed
+ * SignalSemaphore blocks forever, which is exactly the "search hangs right
+ * after the filter status line appears" freeze.  Define the macro to skip that
+ * block and instead InitSemaphore() once in this file's own main() below,
+ * mirroring minimp3r.c. */
+#define RADIO_CONSOLE_LOCK_INIT_ELSEWHERE 1
 #define main HelixAmp3CliMain
 #include "amiga_mp3dec.c"
 #undef main
@@ -187,6 +201,52 @@ static char gSupportedExtPattern[512];
 #include "radio_browser_controller.h"
 #ifndef OBP_FailIfBad
 #define OBP_FailIfBad (TAG_USER + 0x01L)
+#endif
+
+/* ------------------------------------------------------------------------- */
+/* Recoverable-free diagnostics (GadTools main/GUI-task FreeMem alert hunt).   */
+/*                                                                            */
+/* Hardware runs of the GadTools front end raise recoverable Exec alerts on    */
+/* the second HTTPS stream:                                                    */
+/*     01000009  AN_FreeTwice    -- the same block handed to FreeMem twice     */
+/*     0100000F  AN_BadFreeAddr  -- FreeMem given an address Exec has no        */
+/*                                  memory header for                          */
+/* The free list stays intact (radio-memcheck reports OK), so this is a        */
+/* stale/double free of a single block -- freeing a pointer whose owner field  */
+/* was left non-NULL -- not general heap corruption.  minimp3r.c gained the    */
+/* same BEGIN/END free-audit and "clear the owner the instant you free it"     */
+/* discipline in commit a856b46 ("Finding the lost FreeMem closing alerts");   */
+/* it was never ported here.  These records log FindTask(NULL) at every        */
+/* GUI-task free site with the pointer, owner and generation, and bracket the  */
+/* exact call whose FreeMem raises the alert on the next run: the log's last    */
+/* un-paired BEGIN names the culprit.  RADIO_DEBUG-only, serialised through     */
+/* radio_console_lock like every other RADIO_DBG. */
+#ifdef RADIO_DEBUG
+static unsigned long gGuiFreeAuditSeq;
+
+static void GuiFreeAuditLog(const char *phase, const char *site,
+	const char *owner, const void *ptr, unsigned long generation)
+{
+	RADIO_DBG(printf("free-audit[%lu] %s site=%s owner=%s task=%p ptr=%p gen=%lu cleared=%d\n",
+		gGuiFreeAuditSeq, phase, site ? site : "?", owner ? owner : "?",
+		(void *)FindTask(NULL), ptr, generation, ptr ? 0 : 1);)
+}
+
+static void GuiTaskIdentityLog(const char *phase)
+{
+	RADIO_DBG(printf("free-audit-task: phase=%s task=%p\n",
+		phase ? phase : "?", (void *)FindTask(NULL));)
+}
+
+#define GUI_FREE_BEGIN(site, owner, ptr, gen) \
+	do { ++gGuiFreeAuditSeq; GuiFreeAuditLog("BEGIN", (site), (owner), (const void *)(ptr), (unsigned long)(gen)); } while (0)
+#define GUI_FREE_END(site, owner, ptr, gen) \
+	GuiFreeAuditLog("END", (site), (owner), (const void *)(ptr), (unsigned long)(gen))
+#define GUI_TASK_IDENTITY(phase) GuiTaskIdentityLog((phase))
+#else
+#define GUI_FREE_BEGIN(site, owner, ptr, gen) do { } while (0)
+#define GUI_FREE_END(site, owner, ptr, gen) do { } while (0)
+#define GUI_TASK_IDENTITY(phase) do { } while (0)
 #endif
 
 #define HELIXAMP3_MAX_PATH 256
@@ -990,9 +1050,15 @@ static void FreeTags(Mp3Tags *tags)
 	if (!tags)
 		return;
 	if (tags->artData) {
+		/* tags->artData is the only owner of this AllocMem() block; clear it
+		 * (and artBytes) the instant it is freed so a second FreeTags()/reload
+		 * cannot re-free the same pointer -- the stale-owner double free the
+		 * closing alerts describe. */
+		GUI_FREE_BEGIN("FreeTags", "tags-artData", tags->artData, tags->artBytes);
 		FreeMem(tags->artData, tags->artBytes);
 		tags->artData = NULL;
 		tags->artBytes = 0;
+		GUI_FREE_END("FreeTags", "tags-artData", tags->artData, 0);
 	}
 	tags->artIsPng = 0;
 }
@@ -1691,9 +1757,15 @@ static void TryFolderArt(const char *inputName, Mp3Tags *tags)
 						(size_t)sz) {
 						tags->artBytes = (unsigned long)sz;
 					} else {
+						/* Short read: free the just-allocated buffer and clear
+						 * artData so neither this loop's !tags->artData guard nor
+						 * a later FreeTags() can see and re-free this dead
+						 * pointer. */
+						GUI_FREE_BEGIN("TryFolderArt", "folder-artData(short-read)", tags->artData, (unsigned long)sz);
 						FreeMem(tags->artData, (unsigned long)sz);
 						tags->artData = NULL;
 						tags->artBytes = 0;
+						GUI_FREE_END("TryFolderArt", "folder-artData(short-read)", tags->artData, 0);
 					}
 				}
 			}
@@ -2867,12 +2939,23 @@ static int DecodeFaviconJpegToGrey(const unsigned char *jpegData, unsigned long 
 	memset(gAccum, 0, sizeof(gAccum));
 	memset(bAccum, 0, sizeof(bAccum));
 	memset(greyCount, 0, sizeof(greyCount));
+	/* pjpeg_decode_init() free()s any previous gJpegData and realloc()s a fresh
+	 * buffer for the whole JPEG -- the first heap operations of the decode.
+	 * Bracket them so the log shows whether the free list is still intact when
+	 * the decoder starts and after it has (re)allocated: if "before" is OK and
+	 * "after" reports CORRUPT, the fault is inside picojpeg, not upstream. */
+	Radio_CheckMiniMem("favicon-jpeg: before pjpeg_decode_init");
 	status = pjpeg_decode_init(&info, pjpeg_cb, &src, 0);
+	Radio_CheckMiniMem("favicon-jpeg: after pjpeg_decode_init");
 	if (status != 0 || info.m_width <= 0 || info.m_height <= 0 ||
 		info.m_width > MAX_JPEG_DIM || info.m_height > MAX_JPEG_DIM) {
 		pjpeg_decode_free();
 		return -1;
 	}
+	RADIO_DBG(printf("radio-art: favicon jpeg dims=%dx%d comps=%d MCU=%dx%d perRow=%d perCol=%d\n",
+		(int)info.m_width, (int)info.m_height, (int)info.m_comps,
+		(int)info.m_MCUWidth, (int)info.m_MCUHeight,
+		(int)info.m_MCUSPerRow, (int)info.m_MCUSPerCol);)
 	for (i = 0; i < info.m_width; i++)
 		xMap[i] = (unsigned char)((i * outW) / info.m_width);
 	for (i = 0; i < info.m_height; i++)
@@ -2911,6 +2994,7 @@ static int DecodeFaviconJpegToGrey(const unsigned char *jpegData, unsigned long 
 		}
 	}
 	pjpeg_decode_free();
+	Radio_CheckMiniMem("favicon-jpeg: after pjpeg_decode_free");
 	for (i = 0; i < outW * outH; i++) {
 		if (greyCount[i]) {
 			unsigned short c = greyCount[i];
@@ -3143,6 +3227,21 @@ static int LoadRadioFaviconImage(HelixAmp3Gui *gui)
 	if (bytes <= 8)
 		return 0;
 
+	/* Bisect the "AN_MemCorrupt at the favicon JPEG decode" dead-end guru: walk
+	 * the exec free list right after the fetch/SSL teardown and before the
+	 * decoder's first heap op (picojpeg realloc()s a buffer for the whole JPEG).
+	 * If the list is ALREADY corrupt here, the fault was planted upstream by the
+	 * station switch / SSL teardown, not the decoder.  Radio_CheckMiniMem() sets
+	 * the poison flag when it finds damage; when it does, skip the decode
+	 * entirely -- feeding a corrupt heap to picojpeg's realloc()/free() is what
+	 * turns the recoverable state into a dead-end guru that needs a reboot.
+	 * Degrade to "no artwork" instead. */
+	Radio_CheckMiniMem("favicon: after fetch, before decode");
+	if (Radio_IsMemoryPoisoned()) {
+		RADIO_DBG(printf("radio-art: heap already poisoned before favicon decode -- skipping decode to avoid a dead-end guru\n");)
+		return 0;
+	}
+
 	/* Dispatch purely on the actual bytes fetched, not the URL extension or
 	 * declared Content-Type -- plenty of real sites serve a different format
 	 * under a "favicon.ico" URL and/or a misleading Content-Type. */
@@ -3343,13 +3442,26 @@ static void DrawTransportIcons(HelixAmp3Gui *gui)
 
 static void ReleaseArtColorPens(HelixAmp3Gui *gui)
 {
+	GUI_TASK_IDENTITY("artwork-release-pens");
 	if (gui->artPensBuilt && gui->win) {
 		struct ColorMap *cm = gui->win->WScreen->ViewPort.ColorMap;
 		if (cm) {
 			int i;
 			for (i = 0; i < gui->artPenCacheUsed; i++)
-				if (gui->artPenCache[i].pen >= 0)
+				if (gui->artPenCache[i].pen >= 0) {
+					/* Invalidate the slot the instant the pen is handed back: a
+					 * released pen index is stale exactly like a freed pointer,
+					 * so a slot left holding its old index could be released a
+					 * second time (the pen-cache form of AN_FreeTwice) if this
+					 * cache were walked again before BuildArtColorPens()
+					 * repopulated it. */
+					GUI_FREE_BEGIN("ReleaseArtColorPens", "art-color-pen",
+						(void *)(long)gui->artPenCache[i].pen, (unsigned long)i);
 					ReleasePen(cm, gui->artPenCache[i].pen);
+					gui->artPenCache[i].pen = -1;
+					GUI_FREE_END("ReleaseArtColorPens", "art-color-pen",
+						(void *)(long)gui->artPenCache[i].pen, (unsigned long)i);
+				}
 		}
 	}
 	gui->artPensBuilt = 0;
@@ -3964,6 +4076,12 @@ static void FinalizePlayback(HelixAmp3Gui *gui)
 	int queuedHaveRadioHostAddr = gui->queuedHaveRadioHostAddr;
 	unsigned long queuedRadioHostAddrBe = gui->queuedRadioHostAddrBe;
 	int failedRadioStart;
+
+	/* Stream completion runs on the GUI/main task (the playback child has
+	 * already posted its done message and is being reaped).  Log the task so
+	 * any parent-side RadioStream/art/tag free here is attributed to the same
+	 * task as the recoverable close alerts. */
+	GUI_TASK_IDENTITY("stream-completion-handling");
 
 	failedRadioStart = (!stoppedByUser && IsRadioInputName(gui->inputName) &&
 		gGuiPlaybackStatus.radioStatus == RADIO_STATUS_ERROR &&
@@ -4893,10 +5011,17 @@ static void GuiClose(HelixAmp3Gui *gui);
 static void DrainWindowMessages(HelixAmp3Gui *gui)
 {
 	struct IntuiMessage *msg;
+	struct MsgPort *port;
 
 	if (!gui || !gui->win)
 		return;
-	while ((msg = GT_GetIMsg(gui->win->UserPort)) != NULL)
+	/* ModifyIDCMP(win, 0) frees an Intuition-allocated IDCMP port and clears
+	 * win->UserPort.  Guard against a NULL port so a drain call after IDCMP has
+	 * been turned off does not call GT_GetIMsg(NULL) and walk low memory. */
+	port = gui->win->UserPort;
+	if (!port)
+		return;
+	while ((msg = GT_GetIMsg(port)) != NULL)
 		GT_ReplyIMsg(msg);
 }
 
@@ -5239,20 +5364,26 @@ static int GuiOpen(HelixAmp3Gui *gui)
 
 static void GuiClose(HelixAmp3Gui *gui)
 {
+	RADIO_DBG(printf("gui-close: enter win=%p rbWin=%p plWin=%p playbackActive=%d\n",
+		(void *)gui->win, (void *)gui->rbWin, (void *)gui->plWin, gui->playbackActive);)
 	CancelArtDecode(gui);
+	RADIO_DBG(printf("gui-close: after CancelArtDecode\n");)
 	if (gui->playbackActive)
 		WaitForPlaybackShutdown(gui);
+	RADIO_DBG(printf("gui-close: after WaitForPlaybackShutdown\n");)
 	if (gui->rbWin)
 		CloseRadioWindow(gui);
+	RADIO_DBG(printf("gui-close: after CloseRadioWindow\n");)
 	if (gui->win) {
-		/* Stop Intuition from queuing new IDCMP traffic, then reply anything
-		 * already pending before the window and GadTools objects disappear.
-		 * Leaving stale IntuiMessages on an app window port is a classic source
-		 * of recoverable alerts on memory cleanup.
-		 */
-		ModifyIDCMP(gui->win, 0);
+		/* Reply anything already pending, THEN stop Intuition queuing new IDCMP
+		 * traffic.  Drain first: ModifyIDCMP(win, 0) frees an Intuition-allocated
+		 * IDCMP port and clears win->UserPort, so draining afterwards would read a
+		 * freed port.  Leaving stale IntuiMessages on the port is also a classic
+		 * source of recoverable alerts on memory cleanup. */
 		DrainWindowMessages(gui);
+		ModifyIDCMP(gui->win, 0);
 	}
+	RADIO_DBG(printf("gui-close: after main-window IDCMP drain/off, before timer teardown\n");)
 	if (gui->timerReq) {
 		if (gui->timerPending) {
 			AbortIO((struct IORequest *)gui->timerReq);
@@ -5280,22 +5411,29 @@ static void GuiClose(HelixAmp3Gui *gui)
 		DeleteMsgPort(gui->donePort);
 		gui->donePort = NULL;
 	}
+	RADIO_DBG(printf("gui-close: before ClosePlaylistWindow\n");)
 	ClosePlaylistWindow(gui);
+	RADIO_DBG(printf("gui-close: before ReleaseArtColorPens\n");)
 	ReleaseArtColorPens(gui);
+	RADIO_DBG(printf("gui-close: before FreeTags\n");)
 	FreeTags(&gui->tags);
+	RADIO_DBG(printf("gui-close: before ClearMenuStrip/FreeMenus\n");)
 	if (gui->win && gui->menuStrip)
 		ClearMenuStrip(gui->win);
 	if (gui->menuStrip) {
 		FreeMenus(gui->menuStrip);
 		gui->menuStrip = NULL;
 	}
+	RADIO_DBG(printf("gui-close: before RemoveGList main gadgets=%p\n", (void *)gui->gadgets);)
 	if (gui->win && gui->gadgets)
 		RemoveGList(gui->win, gui->gadgets, -1);
 	if (gui->win) {
 		DrainWindowMessages(gui);
+		RADIO_DBG(printf("gui-close: before CloseWindow main\n");)
 		CloseWindow(gui->win);
 		gui->win = NULL;
 	}
+	RADIO_DBG(printf("gui-close: before FreeGadgets main\n");)
 	if (gui->gadgets) {
 		FreeGadgets(gui->gadgets);
 		gui->gadgets = NULL;
@@ -5304,6 +5442,7 @@ static void GuiClose(HelixAmp3Gui *gui)
 		FreeVisualInfo(gui->visualInfo);
 		gui->visualInfo = NULL;
 	}
+	RADIO_DBG(printf("gui-close: before font/library closes\n");)
 	if (gui->smallFont) {
 		CloseFont(gui->smallFont);
 		gui->smallFont = NULL;
@@ -5328,7 +5467,9 @@ static void GuiClose(HelixAmp3Gui *gui)
 		CloseLibrary((struct Library *)IntuitionBase);
 		IntuitionBase = NULL;
 	}
+	RADIO_DBG(printf("gui-close: before Radio_NetworkShutdown\n");)
 	Radio_NetworkShutdown();
+	RADIO_DBG(printf("gui-close: after Radio_NetworkShutdown -- done\n");)
 }
 
 
@@ -5994,24 +6135,43 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 static void CloseRadioWindow(HelixAmp3Gui *app)
 {
 	struct IntuiMessage *msg;
+	struct MsgPort *port;
 	if (!app->rbWin) return;
+	RADIO_DBG(printf("radio-close: enter rbWin=%p gadgets=%p visualInfo=%p\n",
+		(void *)app->rbWin, (void *)app->rbGadgets, (void *)app->rbVisualInfo);)
+	/* Snapshot the UserPort BEFORE ModifyIDCMP(win, 0): with an
+	 * Intuition-allocated IDCMP port, ModifyIDCMP(win, 0) frees that port and
+	 * clears win->UserPort, so reading app->rbWin->UserPort afterwards to drain
+	 * messages would dereference a freed/NULL port -- GetMsg() on it then walks
+	 * low memory and can hard-lock the machine.  Drain through the saved pointer
+	 * before turning IDCMP off instead. */
+	port = app->rbWin->UserPort;
+	RADIO_DBG(printf("radio-close: draining UserPort=%p before ModifyIDCMP\n", (void *)port);)
+	if (port) {
+		while ((msg = GT_GetIMsg(port)) != NULL)
+			GT_ReplyIMsg(msg);
+	}
+	RADIO_DBG(printf("radio-close: before ModifyIDCMP(0)\n");)
 	ModifyIDCMP(app->rbWin, 0);
-	while ((msg = GT_GetIMsg(app->rbWin->UserPort)) != NULL)
-		GT_ReplyIMsg(msg);
+	RADIO_DBG(printf("radio-close: before RemoveGList gadgets=%p\n", (void *)app->rbGadgets);)
 	if (app->rbGadgets)
 		RemoveGList(app->rbWin, app->rbGadgets, -1);
+	RADIO_DBG(printf("radio-close: before CloseWindow\n");)
 	CloseWindow(app->rbWin);
 	app->rbWin = NULL;
+	RADIO_DBG(printf("radio-close: after CloseWindow, before FreeGadgets\n");)
 	if (app->rbGadgets) {
 		FreeGadgets(app->rbGadgets);
 		app->rbGadgets = NULL;
 		app->rbGadContext = NULL;
 		app->rbGadList = NULL;
 	}
+	RADIO_DBG(printf("radio-close: before FreeVisualInfo=%p\n", (void *)app->rbVisualInfo);)
 	if (app->rbVisualInfo) {
 		FreeVisualInfo(app->rbVisualInfo);
 		app->rbVisualInfo = NULL;
 	}
+	RADIO_DBG(printf("radio-close: done\n");)
 }
 
 static void OpenRadioWindow(HelixAmp3Gui *app)
@@ -7974,8 +8134,14 @@ static int GuiMainReal(int argc, char **argv)
 
 	(void)argc;
 	(void)argv;
+	/* GUI/main application task identity: every GUI_FREE_BEGIN/END below logs
+	 * FindTask(NULL), and this is the pointer they must match for the
+	 * recoverable AN_FreeTwice/AN_BadFreeAddr alerts to be pinned on the GUI
+	 * task rather than the net worker or a playback child. */
+	GUI_TASK_IDENTITY("application-startup-main-task");
 	if (GuiOpen(&gui) != 0)
 		return 1;
+	GUI_TASK_IDENTITY("gui-event-loop");
 	while (!gui.closeRequested) {
 		ULONG timerMask = gui.timerPort ? (1UL << gui.timerPort->mp_SigBit) : 0;
 		ULONG doneMask = gui.donePort ? (1UL << gui.donePort->mp_SigBit) : 0;
@@ -7995,6 +8161,26 @@ static int GuiMainReal(int argc, char **argv)
 	}
 	if (gui.playbackActive)
 		WaitForPlaybackShutdown(&gui);
+	/* Walk the exec heap once on the way out (all builds, not just
+	 * MINIAMP_DEBUG_ALLOC) so corruption that happened during a radio stream
+	 * stop/switch this session is flagged now, before the disposal below frees
+	 * anything through it.  Radio_CheckMiniMem() sets radioMemoryPoisoned when
+	 * it finds a damaged chunk list. */
+	Radio_CheckMiniMem("app-close before dispose");
+	if (Radio_IsMemoryPoisoned()) {
+		/* Corrupt exec heap (the AN_BadFreeAddr / MiniMem-detected corruption
+		 * this codebase hits during flaky radio stream stop/switch): every step
+		 * left in the normal close path -- SaveGuiSettings(), and GuiClose()'s
+		 * FreeGadgets()/FreeMenus()/FreeVisualInfo()/CloseWindow()/CloseLibrary()
+		 * and Radio_NetworkShutdown() -- frees memory or closes libraries through
+		 * the same damaged allocator state.  FreeMem() walks the broken free list
+		 * under Forbid(), so a second corrupting free hard-locks the machine
+		 * (frozen mouse) instead of alerting.  Skip all further disposal and exit
+		 * as directly as possible: the leak is recoverable with a reboot, another
+		 * corrupting free is not.  This mirrors minimp3r.c's app-close guard. */
+		RADIO_DBG(printf("app-close: memory corruption detected -- skipping SaveGuiSettings/GuiClose to avoid a corrupting free, exiting directly\n");)
+		return 0;
+	}
 	SaveGuiSettings(&gui);
 	GuiClose(&gui);
 	return 0;
@@ -8004,6 +8190,14 @@ int main(int argc, char **argv)
 {
 	struct Task *task = FindTask(NULL);
 	int rc;
+
+	/* One-time init of the cross-task stdout lock shared with amiga_mp3dec.c,
+	 * radio_stream.c and the Radio Browser modules.  Must run before the radio
+	 * net worker task or any playback child touches it: the first Internet
+	 * Radio search obtains it from the GUI and worker tasks, and an
+	 * uninitialised SignalSemaphore makes that ObtainSemaphore() block forever.
+	 * minimp3r.c does the same in its own main(). */
+	InitSemaphore(&radio_console_lock);
 
 	gGuiDetectedStackLower = (ULONG)task->tc_SPLower;
 	gGuiDetectedStackUpper = (ULONG)task->tc_SPUpper;
@@ -8038,8 +8232,11 @@ int main(int argc, char **argv)
 	rc = GuiMainReal(argc, argv);
 
 	StackSwap(&gGuiOldStack);
+	GUI_TASK_IDENTITY("shutdown-free-startup-stack");
+	GUI_FREE_BEGIN("main", "startup-stack", gGuiAllocatedStack, GUI_STARTUP_STACK_SIZE);
 	FreeMem(gGuiAllocatedStack, GUI_STARTUP_STACK_SIZE);
 	gGuiAllocatedStack = NULL;
+	GUI_FREE_END("main", "startup-stack", gGuiAllocatedStack, 0);
 	return rc;
 }
 
