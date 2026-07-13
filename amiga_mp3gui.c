@@ -501,6 +501,7 @@ typedef struct HelixAmp3Gui {
 	int             rbShowingFavourites;
 	int             rbFavouriteCount;
 	int             rbSelectedFavourite;
+	int             rbSearchInProgress;
 	char            rbFavouriteNames[HELIXAMP3_RADIO_FAV_MAX][RB_MAX_NAME];
 	char            rbFavouriteUrls[HELIXAMP3_RADIO_FAV_MAX][RB_MAX_URL];
 	char            rbStatusText[128];
@@ -5495,9 +5496,15 @@ static void RadioSetStatus(HelixAmp3Gui *app, const char *text)
 	if (!app->rbWin || !app->rbGadgets) return;
 	gad = app->rbGadgets;
 	while (gad && gad->GadgetID != RB_GID_STATUS) gad = gad->NextGadget;
-	if (gad)
+	if (gad) {
 		GT_SetGadgetAttrs(gad, app->rbWin, NULL,
 			GTST_String, (ULONG)app->rbStatusText, TAG_DONE);
+		/* GadTools does not always redraw a string gadget immediately when the
+		 * next step is a synchronous Radio Browser network request.  Force the
+		 * status line out before that request so the dialog does not look frozen
+		 * on search/probe like the button press was ignored. */
+		RefreshGList(gad, app->rbWin, NULL, 1);
+	}
 }
 
 static int RadioStationMatchesScheme(HelixAmp3Gui *app, const RadioBrowserStation *st)
@@ -5622,6 +5629,23 @@ static struct Gadget *FindRadioGadget(HelixAmp3Gui *app, UWORD id)
 	return NULL;
 }
 
+static void RadioSetSearchBusy(HelixAmp3Gui *app, int busy)
+{
+	struct Gadget *gad;
+	UWORD ids[] = { RB_GID_SEARCH, RB_GID_PROBE, RB_GID_ADD_FAV, RB_GID_FAVOURITES,
+		RB_GID_UP, RB_GID_DOWN, 0 };
+	int i;
+
+	if (!app) return;
+	app->rbSearchInProgress = busy ? 1 : 0;
+	if (!app->rbWin) return;
+	for (i = 0; ids[i]; i++) {
+		gad = FindRadioGadget(app, ids[i]);
+		if (gad)
+			GT_SetGadgetAttrs(gad, app->rbWin, NULL, GA_Disabled, busy ? TRUE : FALSE, TAG_DONE);
+	}
+}
+
 static void RadioDoSearch(HelixAmp3Gui *app)
 {
 	struct Gadget *nameGad = FindRadioGadget(app, RB_GID_SEARCH_TEXT);
@@ -5636,11 +5660,16 @@ static void RadioDoSearch(HelixAmp3Gui *app)
 	int rc;
 	char filterMsg[192];
 
+	if (app->rbSearchInProgress) {
+		RadioSetStatus(app, "Search already running.");
+		return;
+	}
 	if (Radio_PlaybackOwnsNetwork()) {
 		RADIO_DBG(printf("radio-browser: search skipped while radio playback child owns networking\n");)
 		RadioSetStatus(app, "Radio playback owns networking; search after stopping.");
 		return;
 	}
+	RadioSetSearchBusy(app, TRUE);
 	RadioSetStatus(app, "Searching Radio Browser...");
 	text = NULL;
 	GT_GetGadgetAttrs(nameGad, app->rbWin, NULL, GTST_String, (ULONG)(void *)&text, TAG_DONE);
@@ -5681,8 +5710,10 @@ static void RadioDoSearch(HelixAmp3Gui *app)
 	printf("%s\n", filterMsg);
 #endif
 	rc = rb_controller_search(&app->rbController);
+	Radio_CheckMiniMem("after GadTools radio browser JSON parse");
 	app->rbShowingFavourites = FALSE;
 	RadioRefreshResults(app);
+	RadioSetSearchBusy(app, FALSE);
 	if (rc < 0)
 		RadioSetStatus(app, app->rbController.last_error);
 	else {
@@ -5996,6 +6027,7 @@ static void OpenRadioWindow(HelixAmp3Gui *app)
 	app->rbCountryMode = RadioCountryToIndex(app->rbController.countrycode);
 	app->rbShowingFavourites = FALSE;
 	app->rbSelectedFavourite = -1;
+	app->rbSearchInProgress = 0;
 	app->rbVisibleCount = 0;
 	app->rbVisualInfo = GetVisualInfoA(app->win->WScreen, NULL);
 	if (!app->rbVisualInfo) return;
