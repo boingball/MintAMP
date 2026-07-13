@@ -99,7 +99,7 @@ static int rb_http_build_request(char *out, int out_size,
     if (rc < 0) return rc;
     rc = rb_http_append(out, out_size, &pos, path);
     if (rc < 0) return rc;
-    rc = rb_http_append(out, out_size, &pos, " HTTP/1.1\r\nHost: ");
+    rc = rb_http_append(out, out_size, &pos, " HTTP/1.0\r\nHost: ");
     if (rc < 0) return rc;
     rc = rb_http_append(out, out_size, &pos, host);
     if (rc < 0) return rc;
@@ -179,16 +179,43 @@ static void rb_http_extract_content_type(const char *headers, int header_len,
     }
 }
 
-/* Some Radio Browser mirrors switch to "Transfer-Encoding: chunked" once
- * the response is large enough that they don't buffer it to compute a
- * Content-Length up front -- observed in practice once the station search
- * "limit" grows past what fits in one small response (small limits like 10
- * stay under that threshold and use Content-Length, larger ones like 50
- * don't).  This client only ever did a raw byte-stream read with no
- * framing awareness, so a chunked response's hex chunk-size lines ended up
- * embedded as garbage in what was handed to the JSON parser -- which
- * correctly rejected it as malformed JSON ("Parse failed"), even though
- * every byte had actually arrived intact. */
+/* Pulls Content-Length out of the response headers so Radio Browser
+ * searches can stop once the advertised JSON body has arrived instead of
+ * blocking until a server closes the socket. */
+static int rb_http_extract_content_length(const char *headers, int header_len)
+{
+    const char *line = headers;
+    const char *end = headers + header_len;
+
+    if (!headers || header_len <= 0) return -1;
+    while (line < end) {
+        const char *nl = line;
+        int line_len;
+        while (nl < end && *nl != '\n') nl++;
+        line_len = (int)(nl - line);
+        if (line_len > 0 && line[line_len - 1] == '\r') line_len--;
+        if (line_len > 15 && rb_http_ascii_starts_nocase(line, line_len, "Content-Length:")) {
+            const char *v = line + 15;
+            int v_len = line_len - 15;
+            int value = 0;
+            int digits = 0;
+
+            while (v_len > 0 && (*v == ' ' || *v == '\t')) { v++; v_len--; }
+            while (v_len > 0 && *v >= '0' && *v <= '9') {
+                int digit = *v - '0';
+                if (value > (0x7fffffff - digit) / 10) return -1;
+                value = value * 10 + digit;
+                digits++;
+                v++;
+                v_len--;
+            }
+            return digits > 0 ? value : -1;
+        }
+        line = nl + 1;
+    }
+    return -1;
+}
+
 static int rb_http_is_chunked(const char *headers, int header_len)
 {
     const char *line = headers;
@@ -264,6 +291,8 @@ static int rb_http_get_binary_impl(const char *host, const char *path,
     int rc;
     int header_end;
     int body_len;
+    int content_length;
+    int is_chunked;
 
     if (out_content_type && out_content_type_size > 0) out_content_type[0] = '\0';
     if (!host || !path || !out_body || out_body_size <= 0) return RB_HTTP_ERR_BAD_ARG;
@@ -287,6 +316,9 @@ static int rb_http_get_binary_impl(const char *host, const char *path,
     }
 
     len = 0;
+    header_end = -1;
+    content_length = -1;
+    is_chunked = 0;
     while (len < out_body_size - 1) {
         int want;
         int n;
@@ -301,6 +333,18 @@ static int rb_http_get_binary_impl(const char *host, const char *path,
         }
         if (n == 0) break;
         len += n;
+        out_body[len] = '\0';
+
+        if (header_end < 0) {
+            header_end = rb_http_find_headers_end((const char *)out_body, len);
+            if (header_end >= 0) {
+                content_length = rb_http_extract_content_length((const char *)out_body, header_end);
+                is_chunked = rb_http_is_chunked((const char *)out_body, header_end);
+            }
+        }
+        if (header_end >= 0 && !is_chunked && content_length >= 0 &&
+            len - header_end >= content_length)
+            break;
     }
     if (len >= out_body_size - 1) {
         char tmp;
