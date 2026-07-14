@@ -293,15 +293,17 @@ typedef struct FreeAllExitEntry {
 } FreeAllExitEntry;
 
 #ifndef FREEALL_EXIT_SCAN_LIMIT
-#define FREEALL_EXIT_SCAN_LIMIT 1024UL
+#define FREEALL_EXIT_SCAN_LIMIT 256UL
 #endif
 
 void FreeAllProbe_Install(void)
 {
 	FreeAllExitEntry *entry;
-	FreeAllExitEntry *match = (FreeAllExitEntry *)0;
+	FreeAllExitEntry *matchingEntry = (FreeAllExitEntry *)0;
 	void (*func)(void);
-	unsigned long replacements = 0UL;
+	unsigned long entryCount = 0UL;
+	unsigned long terminatorFound = 0UL;
+	unsigned long matchCount = 0UL;
 	unsigned long i;
 
 	if (gFreeAllInstalled) {
@@ -315,43 +317,71 @@ void FreeAllProbe_Install(void)
 
 	entry = (FreeAllExitEntry *)((unsigned char *)LibnixExitList + sizeof(void *));
 
-	for (i = 0; i < FREEALL_EXIT_SCAN_LIMIT; i++) {
+	/* Read-only scan first.  The list layout is exactly the startup _callfuncs
+	 * layout: eight-byte records, callback at offset 0, NULL callback terminates. */
+	for (i = 0UL; i < FREEALL_EXIT_SCAN_LIMIT; i++) {
 		func = entry[i].func;
-		if (func == (void (*)(void))0)
+		if (func == (void (*)(void))0) {
+			terminatorFound = 1UL;
 			break;
+		}
+		entryCount++;
 		if (func == LibnixFreeAll) {
-			match = &entry[i];
-			replacements++;
+			matchingEntry = &entry[i];
+			matchCount++;
 		}
 	}
 
-	probe_str("FREEALL-INSTALL exitList=");
+	probe_str("FREEALL-SCAN exitList=");
 	probe_hex32((unsigned long)LibnixExitList);
 	probe_str(" scanBase=");
 	probe_hex32((unsigned long)entry);
-	probe_str(" entry=");
-	probe_hex32((unsigned long)match);
+	probe_str(" entryCount=");
+	probe_hex32(entryCount);
+	probe_str(" terminator=");
+	probe_hex32(terminatorFound);
+	probe_str(" matchCount=");
+	probe_hex32(matchCount);
+	probe_str(" matchingEntry=");
+	probe_hex32((unsigned long)matchingEntry);
 	probe_str(" original=");
 	probe_hex32((unsigned long)LibnixFreeAll);
 	probe_str(" replacement=");
 	probe_hex32((unsigned long)FreeAllProbe_Run);
-	probe_str(" replacements=");
-	probe_dec32(replacements);
 	probe_ch('\n');
 
-	if (replacements != 1UL) {
-		probe_str("FREEALL-INSTALL-FAILED replacements=");
-		probe_dec32(replacements);
+	if (!terminatorFound || matchCount != 1UL || matchingEntry == (FreeAllExitEntry *)0) {
+		probe_str("FREEALL-INSTALL-FAILED terminator=");
+		probe_hex32(terminatorFound);
+		probe_str(" matchCount=");
+		probe_hex32(matchCount);
 		probe_ch('\n');
-		gFreeAllInstallReplacements = replacements;
+		gFreeAllInstallReplacements = matchCount;
 		return;
 	}
 
-	gFreeAllOriginal = match->func;
-	gFreeAllInstallEntry = (void *)match;
-	match->func = FreeAllProbe_Run;
-	gFreeAllInstallReplacements = replacements;
+	gFreeAllOriginal = matchingEntry->func;
+	gFreeAllInstallEntry = (void *)matchingEntry;
+	matchingEntry->func = FreeAllProbe_Run;
+	gFreeAllInstallReplacements = matchCount;
+
+	if (matchingEntry->func != FreeAllProbe_Run) {
+		probe_str("FREEALL-INSTALL-VERIFY-FAILED entry=");
+		probe_hex32((unsigned long)matchingEntry);
+		probe_str(" value=");
+		probe_hex32((unsigned long)matchingEntry->func);
+		probe_ch('\n');
+		return;
+	}
+
 	gFreeAllInstalled = 1UL;
+	probe_str("FREEALL-INSTALL-SUCCESS entry=");
+	probe_hex32((unsigned long)matchingEntry);
+	probe_str(" original=");
+	probe_hex32((unsigned long)gFreeAllOriginal);
+	probe_str(" replacement=");
+	probe_hex32((unsigned long)FreeAllProbe_Run);
+	probe_ch('\n');
 }
 
 void FreeAllProbe_Run(void)
