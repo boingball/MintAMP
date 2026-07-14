@@ -74,7 +74,7 @@
 /* Non-empty translation unit even when the probe is compiled out. */
 typedef int crt_freeall_probe_unit;
 
-#if defined(AMIGA_M68K)
+#if defined(FREEALL_PROBE) && defined(AMIGA_M68K)
 
 #include <exec/types.h>
 #include <exec/tasks.h>
@@ -102,6 +102,9 @@ typedef int crt_freeall_probe_unit;
 extern void LibnixFreeAll(void) __asm__("___free_all");
 extern void *LibnixExitList[] __asm__("___EXIT_LIST__");
 extern char LibnixErrno[] __asm__("_errno");
+extern char __freeall_head0[] __asm__("___freeall_head0");
+extern char __freeall_head1[] __asm__("___freeall_head1");
+extern char __freeall_head2[] __asm__("___freeall_head2");
 
 void LibnixFreeAllCompat_Install(void);
 void LibnixFreeAllCompat_Run(void);
@@ -314,6 +317,37 @@ void LibnixFreeAllCompat_Install(void)
 
 	probe_hex_selftest();
 
+	{
+		ULONG errnoSymbol = (ULONG)LibnixErrno;
+		ULONG errnoHead0 = (ULONG)(LibnixErrno + LIBNIX_FREEALL_HEAD0_OFFSET);
+		ULONG errnoHead1 = (ULONG)(LibnixErrno + LIBNIX_FREEALL_HEAD1_OFFSET);
+		ULONG errnoHead2 = (ULONG)(LibnixErrno + LIBNIX_FREEALL_HEAD2_OFFSET);
+		ULONG linkedHead0 = (ULONG)&__freeall_head0;
+		ULONG linkedHead1 = (ULONG)&__freeall_head1;
+		ULONG linkedHead2 = (ULONG)&__freeall_head2;
+		probe_str("FREEALL-ADDRESS errnoSymbol=");
+		probe_hex32(errnoSymbol);
+		probe_str(" head0Address=");
+		probe_hex32(linkedHead0);
+		probe_str(" head1Address=");
+		probe_hex32(linkedHead1);
+		probe_str(" head2Address=");
+		probe_hex32(linkedHead2);
+		probe_str(" errnoHead0=");
+		probe_hex32(errnoHead0);
+		probe_str(" errnoHead1=");
+		probe_hex32(errnoHead1);
+		probe_str(" errnoHead2=");
+		probe_hex32(errnoHead2);
+		probe_ch('\n');
+#if defined(FREEALL_REQUIRE_ERRNO_HEAD_MATCH)
+		if (linkedHead0 != errnoHead0 || linkedHead1 != errnoHead1 || linkedHead2 != errnoHead2) {
+			probe_str("FREEALL-HEAD-ADDRESS-MISMATCH\n");
+			return;
+		}
+#endif
+	}
+
 	if (gFreeAllInstalled) {
 		matchingEntrySnapshot = (ULONG)gFreeAllInstallEntry;
 		originalSnapshot = (ULONG)gFreeAllOriginal;
@@ -421,12 +455,12 @@ void LibnixFreeAllCompat_Run(void)
 	struct Task *task;
 	unsigned long li;
 
-	headAddr[0] = (unsigned long)(LibnixErrno + LIBNIX_FREEALL_HEAD0_OFFSET);
-	headAddr[1] = (unsigned long)(LibnixErrno + LIBNIX_FREEALL_HEAD1_OFFSET);
-	headAddr[2] = (unsigned long)(LibnixErrno + LIBNIX_FREEALL_HEAD2_OFFSET);
+	headAddr[0] = (unsigned long)&__freeall_head0;
+	headAddr[1] = (unsigned long)&__freeall_head1;
+	headAddr[2] = (unsigned long)&__freeall_head2;
 
+	probe_str("FREEALL-RUN-PHASE crt-exit\n");
 	probe_str("FREEALL-WRAPPER-ENTER\n");
-
 
 #if defined(FREEALL_DANGEROUS_LEAK_CRT_ON_EXIT)
 	probe_str("FREEALL-PROBE DANGEROUS_LEAK_CRT_ON_EXIT: deliberately leaking all remaining CRT allocations\n");
@@ -549,4 +583,4 @@ void LibnixFreeAllCompat_Run(void)
 	probe_str("FREEALL-PROBE done\n");
 }
 
-#endif	/* AMIGA_M68K */
+#endif	/* FREEALL_PROBE && AMIGA_M68K */

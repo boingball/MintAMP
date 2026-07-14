@@ -106,17 +106,23 @@ ifneq ($(filter 1 yes true on,$(DEBUG)),)
 DEBUG_CPPFLAGS := -DRADIO_DEBUG
 endif
 
-# libnix ___free_all compatibility replacement (crt_freeall_probe.c).
-# Installs into libnix's exit-list at startup and treats libnix's NULL and
-# 0xffffffff empty-list heads as empty before final CRT cleanup.  This is linked
-# into the Amiga GUI frontends by default; FREEALL_PROBE=1 only enables verbose
-# raw diagnostics inside the same compatibility code.
-LIBNIX_FREEALL_COMPAT_SOURCES := crt_freeall_probe.c
+# Debug-only libnix ___free_all compatibility probe (crt_freeall_probe.c).
+# OFF by default.  FREEALL_PROBE=1 links the exit-list diagnostic replacement;
+# FREEALL_HEAD0/1/2 must come from the exact binary's ___free_all disassembly
+# before an armed/sentinel-safe traversal run.
+FREEALL_HEAD0 ?= 0
+FREEALL_HEAD1 ?= 0
+FREEALL_HEAD2 ?= 0
+LIBNIX_FREEALL_COMPAT_SOURCES :=
 FREEALL_PROBE_CPPFLAGS :=
 FREEALL_PROBE_SOURCES :=
 FREEALL_PROBE_LDFLAGS :=
 ifneq ($(filter 1 yes true on,$(FREEALL_PROBE)),)
 FREEALL_PROBE_CPPFLAGS := -DFREEALL_PROBE
+LIBNIX_FREEALL_COMPAT_SOURCES := crt_freeall_probe.c
+FREEALL_PROBE_LDFLAGS := -Wl,--defsym,___freeall_head0=$(FREEALL_HEAD0) \
+	-Wl,--defsym,___freeall_head1=$(FREEALL_HEAD1) \
+	-Wl,--defsym,___freeall_head2=$(FREEALL_HEAD2)
 endif
 
 # Debug-only heap guard for MiniAMP3's own allocations (front/rear guard

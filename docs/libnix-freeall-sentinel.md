@@ -1,26 +1,19 @@
 # libnix `___free_all` sentinel compatibility note
 
-The MiniAMP3 shutdown alerts were traced to libnix `___free_all` walking three
-internal allocation-list heads during CRT exit. Runtime evidence from the armed
-compatibility runner showed two heads containing `0xffffffff` at shutdown. The
-stock libnix routine treated that value as a real node, derived
-`base = 0xfffffffb`, read a zero size, and called `FreeMem(0xfffffffb, 0)`,
-which produced the recoverable alerts.
+The armed MiniAMP3 diagnostics traced the shutdown alerts to libnix
+`___free_all` walking three internal allocation-list heads during CRT exit. Two
+heads contained `0xffffffff` at shutdown. Stock `___free_all` only checked for
+`NULL`, so it treated `0xffffffff` as a node, derived `base = 0xfffffffb`, read a
+zero size, and called `FreeMem(0xfffffffb, 0)`, producing the recoverable alerts.
 
-The linked MiniAMP3 binary places the three heads at offsets from libnix's
-`_errno` data symbol:
+The known-good diagnostic run used the three head addresses taken from the exact
+binary's `___free_all` disassembly. The compatibility runner has therefore been
+returned to that diagnostic mode: it is not linked into normal GUI builds by
+default, and `FREEALL_PROBE=1` supplies the three head addresses with linker
+`--defsym` values from the exact binary under test.
 
-* `_errno + 0x0c`
-* `_errno + 0x10`
-* `_errno + 0x20`
-
-The compatibility replacement therefore addresses the heads relative to `_errno`
-instead of executable-absolute addresses. It treats both `NULL` and
-`0xffffffff` as empty heads, normalises sentinel heads to `NULL`, and preserves
-libnix traversal semantics for valid nodes.
-
-No project source file assigns `0xffffffff` to these heads. The linked libnix
-object/source used by the cross toolchain is external to this repository; the
-binary evidence proves the sentinel value is present in libnix allocator state at
-CRT shutdown, but this repository does not contain enough linked libnix source to
-classify the assignment site beyond the observed runtime behaviour.
+A later production version should avoid executable-absolute addresses. Current
+binary evidence suggests the heads are near libnix's `_errno` data symbol, but
+that address calculation must be proven against the linked toolchain's libnix
+headers/source and the current `___free_all` disassembly before becoming the
+production default.
