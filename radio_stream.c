@@ -290,7 +290,8 @@ static void radio_worker_breadcrumb(const char *stage, const char *op, unsigned 
     radio_net_worker_heartbeat++;
 }
 
-static void radio_amissl_lifecycle_diag(const char *op, unsigned long session, SSL *ssl, SSL_CTX *ctx)
+#ifdef RADIO_AMISSL_LIFECYCLE_DIAG
+static void radio_amissl_lifecycle_diag_impl(const char *op, unsigned long session, SSL *ssl, SSL_CTX *ctx)
 {
     struct Task *task = FindTask(NULL);
     const char *task_name = "(unnamed)";
@@ -301,6 +302,10 @@ static void radio_amissl_lifecycle_diag(const char *op, unsigned long session, S
         (void *)AmiSSLExtBase, (void *)AmiSSLMasterBase, (void *)SocketBase,
         (void *)ssl, (void *)ctx, session);
 }
+#define radio_amissl_lifecycle_diag(op, session, ssl, ctx) radio_amissl_lifecycle_diag_impl((op), (session), (ssl), (ctx))
+#else
+#define radio_amissl_lifecycle_diag(op, session, ssl, ctx) ((void)0)
+#endif
 
 static void radio_net_worker_entry(void)
 {
@@ -409,30 +414,23 @@ static void radio_net_worker_entry(void)
          * SSL_CTX. Per-connection SSL objects are closed/freed before this
          * worker shutdown point, after their raw sockets have been closed. */
         safe_to_close_amissl = radio_worker_shutdown_ssl_ctx();
-        if (!safe_to_close_amissl) {
-            RADIO_DBG(printf("radio-net-worker: shared SSL_CTX shutdown reported poison; continuing worker-owned CleanupAmiSSL/CloseAmiSSL/CloseLibrary so lifecycle is completed on the owning task\n"););
-            safe_to_close_amissl = 1;
-        }
         if (safe_to_close_amissl) {
             RADIO_DBG(printf("radio-worker-risk: before CloseAmiSSL workerTask=%p active_ssl=%ld active_ctx=%ld open_socket=%ld\n",
                 (void *)radio_net_worker_task, radio_active_ssl_count, radio_active_ssl_ctx_count, radio_open_socket_count););
             RADIO_DBG(printf("radio-net-worker: before CloseAmiSSL base=%p ext=%p\n", (void *)AmiSSLBase, (void *)AmiSSLExtBase););
-            radio_amissl_lifecycle_diag("CleanupAmiSSL-before", 0, NULL, NULL);
-            CleanupAmiSSL(TAG_DONE);
-            radio_amissl_cleanup_count++;
-            radio_amissl_initialized = 0;
-            radio_amissl_lifecycle_diag("CleanupAmiSSL-after", 0, NULL, NULL);
-            radio_amissl_lifecycle_diag("CloseAmiSSL-before", 0, NULL, NULL);
+            radio_amissl_lifecycle_diag("CloseAmiSSL-before-implicit-CleanupAmiSSL", 0, NULL, NULL);
             CloseAmiSSL();
             AmiSSLBase = NULL;
             AmiSSLExtBase = NULL;
+            radio_amissl_cleanup_count++;
             radio_closeamissl_count++;
+            radio_amissl_initialized = 0;
             radio_net_worker_shutdown_stage = "after CloseAmiSSL";
             radio_worker_breadcrumb("after CloseAmiSSL", "CloseAmiSSL", 0);
-            radio_amissl_lifecycle_diag("CloseAmiSSL-after", 0, NULL, NULL);
+            radio_amissl_lifecycle_diag("CloseAmiSSL-after-implicit-CleanupAmiSSL", 0, NULL, NULL);
             RADIO_DBG(printf("radio-net-worker: after CloseAmiSSL\n"););
         } else {
-            RADIO_DBG(printf("radio-net-worker: final CloseAmiSSL/AmiSSL library closes skipped because shared SSL_CTX shutdown found poison memory_poisoned=%d tls_poisoned=%d ctx_poisoned=%d\n",
+            RADIO_DBG(printf("radio-net-worker: final CloseAmiSSL/AmiSSL library closes quarantined because shared SSL_CTX shutdown found poison memory_poisoned=%d tls_poisoned=%d ctx_poisoned=%d\n",
                 Radio_IsMemoryPoisoned(), Radio_IsTlsPoisoned(), radio_worker_ssl_ctx_poisoned););
             AmiSSLBase = NULL;
             AmiSSLExtBase = NULL;
@@ -3936,8 +3934,10 @@ void Radio_NetworkShutdown(void)
             radio_amissl_task_poisoned, radio_active_ssl_count,
             radio_active_ssl_ctx_count, radio_open_socket_count););
     }
-    /* Ask the worker task to run CleanupAmiSSL()/CloseAmiSSL()/CloseLibrary()
-     * and exit; radio_net_worker_stop() waits, bounded, for it to finish. */
+    /* Ask the worker task to run CloseAmiSSL() (which performs the implicit
+     * CleanupAmiSSL because OpenAmiSSLTags() used AmiSSL_InitAmiSSL=TRUE),
+     * then CloseLibrary() and exit; radio_net_worker_stop() waits, bounded,
+     * for it to finish. */
     if (!radio_net_worker_stop()) {
         RADIO_DBG(printf("radio-netshutdown: net worker did not confirm shutdown within the timeout\n"););
     } else if (radio_runtime_diag_leak_ssl_enabled()) {
