@@ -3886,7 +3886,7 @@ static void DrawProgress(HelixAmp3Gui *gui)
 
 	SetAPen(rp, gui->win->DetailPen);
 	RectFill(rp, TIME_X, PROG_TOP_Y - 1,
-		TIME_X + TIME_W, PROG_TOP_Y + GUI_ROW_H);
+		TIME_X + TIME_W, PROG_TOP_Y + GUI_GAD_H);
 	SetAPen(rp, 1);
 	textWidth = TextLength(rp, timeBuf, strlen(timeBuf));
 	textX = TIME_X + TIME_W - textWidth;
