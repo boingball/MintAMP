@@ -106,24 +106,20 @@ ifneq ($(filter 1 yes true on,$(DEBUG)),)
 DEBUG_CPPFLAGS := -DRADIO_DEBUG
 endif
 
-# Debug-only libnix ___free_all compatibility probe (crt_freeall_probe.c).
-# OFF by default.  FREEALL_PROBE=1 links the exit-list diagnostic replacement;
-# FREEALL_HEAD0/1/2 must come from the exact binary's ___free_all disassembly
-# before an armed/sentinel-safe traversal run.
-FREEALL_HEAD0 ?= 0
-FREEALL_HEAD1 ?= 0
-FREEALL_HEAD2 ?= 0
-LIBNIX_FREEALL_COMPAT_SOURCES :=
+# libnix ___free_all compatibility replacement (crt_freeall_probe.c).
+# The GUI rules build a temporary discovery binary, extract the three list-head
+# addresses from that exact binary's stock ___free_all disassembly, then relink
+# the final binary with those addresses supplied as absolute --defsym symbols.
+# FREEALL_PROBE=1 enables verbose raw diagnostics in the same replacement.
+LIBNIX_FREEALL_COMPAT_SOURCES := crt_freeall_probe.c
 FREEALL_PROBE_CPPFLAGS :=
-FREEALL_PROBE_SOURCES :=
-FREEALL_PROBE_LDFLAGS :=
 ifneq ($(filter 1 yes true on,$(FREEALL_PROBE)),)
 FREEALL_PROBE_CPPFLAGS := -DFREEALL_PROBE
-LIBNIX_FREEALL_COMPAT_SOURCES := crt_freeall_probe.c
-FREEALL_PROBE_LDFLAGS := -Wl,--defsym,___freeall_head0=$(FREEALL_HEAD0) \
-	-Wl,--defsym,___freeall_head1=$(FREEALL_HEAD1) \
-	-Wl,--defsym,___freeall_head2=$(FREEALL_HEAD2)
 endif
+FREEALL_DISCOVERY_LDFLAGS := -Wl,--defsym,___freeall_head0=0 \
+	-Wl,--defsym,___freeall_head1=0 \
+	-Wl,--defsym,___freeall_head2=0
+FREEALL_HEAD_EXTRACT := python3 tools/libnix_freeall_heads.py
 
 # Debug-only heap guard for MiniAMP3's own allocations (front/rear guard
 # bytes, double-free and leak detection -- see miniamp_memguard.c).
@@ -261,17 +257,29 @@ fast030-halfasm-test: $(FAST030_HALFASM_TEST_TARGET)
 
 gui-halfasm-test: $(GUI_HALFASM_TEST_TARGET)
 
-$(GUI_TARGET): $(GUI_SOURCES) amiga_mp3dec.c $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(LIBNIX_FREEALL_COMPAT_SOURCES) $(FREEALL_PROBE_SOURCES)
+$(GUI_TARGET): $(GUI_SOURCES) amiga_mp3dec.c $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(LIBNIX_FREEALL_COMPAT_SOURCES)
+	set -e; \
 	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(PROBE_CPPFLAGS) $(SSL_CPPFLAGS) $(SSLCERTS_CPPFLAGS) $(DEBUG_CPPFLAGS) $(FREEALL_PROBE_CPPFLAGS) $(EXTRA_CFLAGS) \
-		-o $@ $(GUI_SOURCES) $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(LIBNIX_FREEALL_COMPAT_SOURCES) $(FREEALL_PROBE_SOURCES) $(FREEALL_PROBE_LDFLAGS)
+		-o $@.freeall-discovery $(GUI_SOURCES) $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(LIBNIX_FREEALL_COMPAT_SOURCES) $(FREEALL_DISCOVERY_LDFLAGS); \
+	$(FREEALL_HEAD_EXTRACT) --shell $@.freeall-discovery > $@.freeall-heads; \
+	. ./$@.freeall-heads; \
+	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(PROBE_CPPFLAGS) $(SSL_CPPFLAGS) $(SSLCERTS_CPPFLAGS) $(DEBUG_CPPFLAGS) $(FREEALL_PROBE_CPPFLAGS) $(EXTRA_CFLAGS) \
+		-o $@ $(GUI_SOURCES) $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(LIBNIX_FREEALL_COMPAT_SOURCES) $$FREEALL_LDFLAGS; \
+	$(FREEALL_HEAD_EXTRACT) --verify $@ $$FREEALL_HEAD0 $$FREEALL_HEAD1 $$FREEALL_HEAD2
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
 
 # minimp3r — ReAction/ClassAct frontend.  Built with the same fast030 ASM path
 # as the GadTools GUI since it targets 030+/3.5/3.9 machines.  minimp3r.c
 # #includes amiga_mp3dec.c, so only the shared decoder modules are linked.
-$(GUIR_TARGET): $(GUIR_SOURCES) amiga_mp3dec.c $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(LIBNIX_FREEALL_COMPAT_SOURCES) $(FREEALL_PROBE_SOURCES)
+$(GUIR_TARGET): $(GUIR_SOURCES) amiga_mp3dec.c $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(LIBNIX_FREEALL_COMPAT_SOURCES)
+	set -e; \
 	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(PROBE_CPPFLAGS) $(SSL_CPPFLAGS) $(SSLCERTS_CPPFLAGS) $(PNG_CPPFLAGS) $(DEBUG_CPPFLAGS) $(FREEALL_PROBE_CPPFLAGS) $(EXTRA_CFLAGS) \
-		-o $@ $(GUIR_SOURCES) $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(LIBNIX_FREEALL_COMPAT_SOURCES) $(FREEALL_PROBE_SOURCES) $(FREEALL_PROBE_LDFLAGS)
+		-o $@.freeall-discovery $(GUIR_SOURCES) $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(LIBNIX_FREEALL_COMPAT_SOURCES) $(FREEALL_DISCOVERY_LDFLAGS); \
+	$(FREEALL_HEAD_EXTRACT) --shell $@.freeall-discovery > $@.freeall-heads; \
+	. ./$@.freeall-heads; \
+	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(PROBE_CPPFLAGS) $(SSL_CPPFLAGS) $(SSLCERTS_CPPFLAGS) $(PNG_CPPFLAGS) $(DEBUG_CPPFLAGS) $(FREEALL_PROBE_CPPFLAGS) $(EXTRA_CFLAGS) \
+		-o $@ $(GUIR_SOURCES) $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(LIBNIX_FREEALL_COMPAT_SOURCES) $$FREEALL_LDFLAGS; \
+	$(FREEALL_HEAD_EXTRACT) --verify $@ $$FREEALL_HEAD0 $$FREEALL_HEAD1 $$FREEALL_HEAD2
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
 
 $(FAST030_TARGET): $(SOURCES) $(FAST030_ASM_SOURCES)
@@ -326,6 +334,6 @@ decoder-modules:
 		CPU="$(CPU)"
 
 clean:
-	rm -f $(TARGET) $(FAST030_TARGET) $(PROF030_TARGET) $(FAST030_HALFASM_TEST_TARGET) $(GUI_TARGET) $(GUIR_TARGET) $(GUI_HALFASM_TEST_TARGET) \
+	rm -f $(TARGET) $(FAST030_TARGET) $(PROF030_TARGET) $(FAST030_HALFASM_TEST_TARGET) $(GUI_TARGET) $(GUIR_TARGET) $(GUI_TARGET).freeall-discovery $(GUIR_TARGET).freeall-discovery $(GUI_TARGET).freeall-heads $(GUIR_TARGET).freeall-heads $(GUI_HALFASM_TEST_TARGET) \
 		amissl_https_get amissl_ssl_free_repro amissl_spawn_repro amissl_exec_repro amissl_child_worker_repro rb_stream_probe_test
 	$(MAKE) -C decoders clean

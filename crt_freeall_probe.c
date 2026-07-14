@@ -74,7 +74,7 @@
 /* Non-empty translation unit even when the probe is compiled out. */
 typedef int crt_freeall_probe_unit;
 
-#if defined(FREEALL_PROBE) && defined(AMIGA_M68K)
+#if defined(AMIGA_M68K)
 
 #include <exec/types.h>
 #include <exec/tasks.h>
@@ -583,4 +583,4 @@ void LibnixFreeAllCompat_Run(void)
 	probe_str("FREEALL-PROBE done\n");
 }
 
-#endif	/* FREEALL_PROBE && AMIGA_M68K */
+#endif	/* AMIGA_M68K */

@@ -8186,7 +8186,7 @@ static int GuiMainReal(int argc, char **argv)
 	return 0;
 }
 
-#if defined(FREEALL_PROBE) && defined(AMIGA_M68K)
+#if defined(AMIGA_M68K)
 extern void LibnixFreeAllCompat_Install(void);
 #endif
 
@@ -8202,7 +8202,7 @@ int main(int argc, char **argv)
 	 * uninitialised SignalSemaphore makes that ObtainSemaphore() block forever.
 	 * minimp3r.c does the same in its own main(). */
 	InitSemaphore(&radio_console_lock);
-#if defined(FREEALL_PROBE) && defined(AMIGA_M68K)
+#if defined(AMIGA_M68K)
 	LibnixFreeAllCompat_Install();
 #endif
 

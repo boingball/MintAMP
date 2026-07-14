@@ -6,14 +6,18 @@ heads contained `0xffffffff` at shutdown. Stock `___free_all` only checked for
 `NULL`, so it treated `0xffffffff` as a node, derived `base = 0xfffffffb`, read a
 zero size, and called `FreeMem(0xfffffffb, 0)`, producing the recoverable alerts.
 
-The known-good diagnostic run used the three head addresses taken from the exact
-binary's `___free_all` disassembly. The compatibility runner has therefore been
-returned to that diagnostic mode: it is not linked into normal GUI builds by
-default, and `FREEALL_PROBE=1` supplies the three head addresses with linker
-`--defsym` values from the exact binary under test.
+The accepted fix is the sentinel-safe replacement installed into libnix's exit
+list. It preserves stock traversal for valid nodes but treats both `NULL` and
+`0xffffffff` as empty list values, normalising sentinel heads/next pointers to
+`NULL` without dereferencing them.
 
-A later production version should avoid executable-absolute addresses. Current
-binary evidence suggests the heads are near libnix's `_errno` data symbol, but
-that address calculation must be proven against the linked toolchain's libnix
-headers/source and the current `___free_all` disassembly before becoming the
-production default.
+The build must not rely on manually maintained executable-absolute list-head
+addresses. `Makefile.amiga` first links a discovery binary with the replacement
+present and zero head symbols, extracts the three list-head operands from that
+binary's stock `___free_all` disassembly, then relinks the final binary with
+those exact addresses supplied as linker `--defsym` symbols. A post-link
+verification step disassembles the final binary and fails if the operands differ.
+
+The earlier `_errno`-relative experiment is not used as an ABI. Any future
+source-level explanation for why libnix stores `0xffffffff` in these heads should
+come from the exact linked toolchain source/objects, not from inferred offsets.
