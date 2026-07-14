@@ -4321,6 +4321,13 @@ static void UpdateArtwork(MrApp *app, MrMp3Info *info)
 {
 	ReleaseArtColorPens(app);
 	app->artValid = 0;
+	/* Corruptor bracket (ReAction-only path): the favicon decoders (picojpeg
+	 * incl. progressive/CMYK JPEG, lodepng, svgdec) write into fixed art
+	 * buffers; an overrun here corrupts an adjacent exec block that only trips
+	 * FreeMem() much later (e.g. inside a probe SSL_free during the next
+	 * station switch). Walk the exec free-list before and after the decode so a
+	 * decode-side corruptor is caught at its source instead of downstream. */
+	Radio_DebugCheckExecMem("before artwork decode");
 	if (app->artEnabled && LoadArtworkCache(app)) {
 		/* cache hit */
 	} else if (app->artEnabled && info && info->artData && info->artBytes > 4 &&
@@ -4334,6 +4341,7 @@ static void UpdateArtwork(MrApp *app, MrMp3Info *info)
 	}
 	if (app->artColorEnabled && app->artValid)
 		BuildArtColorPens(app);
+	Radio_DebugCheckExecMem("after artwork decode");
 	Radio_CheckMiniMem("after artwork fetch/decode");
 	/* The panel (frame + thumbnail or "No art") is hand-drawn over the
 	 * placeholder gadget rather than via the button's own text. */

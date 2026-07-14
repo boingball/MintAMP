@@ -6,3 +6,6 @@
 *.decoder
 *.fastexp
 *.exp
+
+# Generated diagnostic deliverable (regenerate with git diff --binary a856b46 -- )
+RC1-close-alerts.patch

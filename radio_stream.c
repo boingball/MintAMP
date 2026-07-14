@@ -2222,7 +2222,15 @@ static int radio_net_transport_tls_connect(RadioNetTransport *t, const char *hos
             t->session_id, tries + 1, r, (void *)t->ssl, (void *)t->ctx, (long)t->sock););
         radio_amissl_lifecycle_diag("SSL_connect-after", t->session_id, t->ssl, t->ctx);
         Radio_DebugCheckExecMem("after transport SSL_connect");
-        if (r == 1) { t->handshake_done = 1; return 0; }
+        if (r == 1) {
+            t->handshake_done = 1;
+            /* Corruptor bracket: heap state at a clean handshake. Pairs with the
+             * "transport teardown entry" checkpoint so a CORRUPT report can be
+             * bracketed to either the connect itself or the read/close that
+             * follows on this shared worker context. */
+            Radio_DebugCheckExecMem("after transport handshake ok");
+            return 0;
+        }
         Radio_DebugCheckExecMem("before transport SSL_get_error after SSL_connect");
         radio_tls_connect_marker("TLS-CONNECT-GETERROR-BEGIN", t->session_id, tries + 1, t->ssl, t->ctx, (long)t->sock, r);
         e = SSL_get_error(t->ssl, r);
@@ -2618,6 +2626,21 @@ static void radio_net_close_transport_worker(RadioNetTransport *t, int graceful)
 {
     if (!radio_net_worker_is_self()) { RADIO_DBG(printf("radio-net: close refused off worker\n");) return; }
     if (!t) return;
+    /* Corruptor bracket (diagnostic, not a mask): validate the exec heap on
+     * entry to the transport TLS teardown -- the exact spot the ReAction probe
+     * transport gurus with AN_MemCorrupt (81000005) inside FreeMem()/SSL_free()
+     * after a play/stop cycle. If this checkpoint reports "CORRUPT ... where=
+     * transport teardown entry", the heap was already damaged BEFORE the free
+     * (i.e. the corruptor is upstream: the connect/read on this same shared
+     * worker context, or the prior playback/artwork session); if it reports
+     * "OK" but SSL_free still gurus, the damaged block is an allocated one that
+     * only FreeMem walks -- pointing at the shared-worker AmiSSL context the
+     * baseline (7c8200d) used to keep isolated per probe/artwork.
+     * Radio_DebugCheckExecMem() also poisons on a detected fault, which lets the
+     * existing quarantine branches below skip the free so the run survives to
+     * log more -- but the real fix is upstream, restoring per-transport AmiSSL
+     * isolation, not this skip. */
+    Radio_DebugCheckExecMem("transport teardown entry");
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     if (graceful && t->ssl && t->handshake_done && !t->ssl_poisoned &&
         !Radio_IsMemoryPoisoned() && !Radio_IsTlsPoisoned()) {
@@ -2649,6 +2672,7 @@ static void radio_net_close_transport_worker(RadioNetTransport *t, int graceful)
             SSL_free(t->ssl);
             radio_amissl_lifecycle_diag("SSL_free-after", t->session_id, t->ssl, t->ctx);
             printf("radio-tls-order: category=%s session=%lu step=SSL_free-complete\n", t->category, t->session_id);
+            Radio_DebugCheckExecMem("after transport SSL_free");
             t->ssl = NULL;
             if (t->ssl_counted && radio_active_ssl_count > 0) radio_active_ssl_count--;
             t->ssl_counted = 0;
