@@ -290,6 +290,23 @@ static void radio_worker_breadcrumb(const char *stage, const char *op, unsigned 
     radio_net_worker_heartbeat++;
 }
 
+#ifdef RADIO_AMISSL_LIFECYCLE_DIAG
+static void radio_amissl_lifecycle_diag_impl(const char *op, unsigned long session, SSL *ssl, SSL_CTX *ctx)
+{
+    struct Task *task = FindTask(NULL);
+    const char *task_name = "(unnamed)";
+    if (task && task->tc_Node.ln_Name)
+        task_name = task->tc_Node.ln_Name;
+    printf("radio-amissl-life: op=%s task=%p taskName=\"%s\" AmiSSLBase=%p AmiSSLExtBase=%p AmiSSLMasterBase=%p SocketBase=%p ssl=%p ctx=%p session=%lu\n",
+        op ? op : "(null)", (void *)task, task_name, (void *)AmiSSLBase,
+        (void *)AmiSSLExtBase, (void *)AmiSSLMasterBase, (void *)SocketBase,
+        (void *)ssl, (void *)ctx, session);
+}
+#define radio_amissl_lifecycle_diag(op, session, ssl, ctx) radio_amissl_lifecycle_diag_impl((op), (session), (ssl), (ctx))
+#else
+#define radio_amissl_lifecycle_diag(op, session, ssl, ctx) ((void)0)
+#endif
+
 static void radio_net_worker_entry(void)
 {
     struct MsgPort *port;
@@ -301,12 +318,20 @@ static void radio_net_worker_entry(void)
     RADIO_DBG(printf("radio-net-worker: starting task=%p\n", (void *)FindTask(NULL)););
     radio_worker_breadcrumb("startup", "worker-entry", 0);
 
+    radio_amissl_lifecycle_diag("OpenLibrary(bsdsocket)-before", 0, NULL, NULL);
     SocketBase = OpenLibrary("bsdsocket.library", 4);
     if (SocketBase) radio_socket_library_open_count++;
+    radio_amissl_lifecycle_diag("OpenLibrary(bsdsocket)-after", 0, NULL, NULL);
+    if (SocketBase)
+        radio_amissl_lifecycle_diag("OpenLibrary(amisslmaster)-before", 0, NULL, NULL);
     if (SocketBase)
         AmiSSLMasterBase = OpenLibrary("amisslmaster.library", AMISSLMASTER_MIN_VERSION);
     if (AmiSSLMasterBase) radio_amisslmaster_open_count++;
+    radio_amissl_lifecycle_diag("OpenLibrary(amisslmaster)-after", 0, NULL, NULL);
     if (SocketBase && AmiSSLMasterBase) {
+        radio_amissl_lifecycle_diag("InitAmiSSLMaster-via-OpenAmiSSLTags-before", 0, NULL, NULL);
+        radio_amissl_lifecycle_diag("OpenAmiSSL-before", 0, NULL, NULL);
+        radio_amissl_lifecycle_diag("InitAmiSSL-before", 0, NULL, NULL);
         if (OpenAmiSSLTags(AMISSL_CURRENT_VERSION,
                            AmiSSL_UsesOpenSSLStructs, TRUE,
                            AmiSSL_InitAmiSSL, TRUE,
@@ -320,6 +345,9 @@ static void radio_net_worker_entry(void)
         } else {
             radio_openamissltags_count++;
             radio_amissl_init_count++;
+            radio_amissl_lifecycle_diag("OpenAmiSSL-after", 0, NULL, NULL);
+            radio_amissl_lifecycle_diag("InitAmiSSL-after", 0, NULL, NULL);
+            radio_amissl_lifecycle_diag("OPENSSL_init_ssl-implicit", 0, NULL, NULL);
         }
     }
     radio_amissl_initialized = (AmiSSLBase != NULL);
@@ -390,14 +418,19 @@ static void radio_net_worker_entry(void)
             RADIO_DBG(printf("radio-worker-risk: before CloseAmiSSL workerTask=%p active_ssl=%ld active_ctx=%ld open_socket=%ld\n",
                 (void *)radio_net_worker_task, radio_active_ssl_count, radio_active_ssl_ctx_count, radio_open_socket_count););
             RADIO_DBG(printf("radio-net-worker: before CloseAmiSSL base=%p ext=%p\n", (void *)AmiSSLBase, (void *)AmiSSLExtBase););
+            radio_amissl_lifecycle_diag("CloseAmiSSL-before-implicit-CleanupAmiSSL", 0, NULL, NULL);
             CloseAmiSSL();
             AmiSSLBase = NULL;
             AmiSSLExtBase = NULL;
+            radio_amissl_cleanup_count++;
+            radio_closeamissl_count++;
+            radio_amissl_initialized = 0;
             radio_net_worker_shutdown_stage = "after CloseAmiSSL";
             radio_worker_breadcrumb("after CloseAmiSSL", "CloseAmiSSL", 0);
+            radio_amissl_lifecycle_diag("CloseAmiSSL-after-implicit-CleanupAmiSSL", 0, NULL, NULL);
             RADIO_DBG(printf("radio-net-worker: after CloseAmiSSL\n"););
         } else {
-            RADIO_DBG(printf("radio-net-worker: final CloseAmiSSL/AmiSSL library closes skipped because shared SSL_CTX shutdown found poison memory_poisoned=%d tls_poisoned=%d ctx_poisoned=%d\n",
+            RADIO_DBG(printf("radio-net-worker: final CloseAmiSSL/AmiSSL library closes quarantined because shared SSL_CTX shutdown found poison memory_poisoned=%d tls_poisoned=%d ctx_poisoned=%d\n",
                 Radio_IsMemoryPoisoned(), Radio_IsTlsPoisoned(), radio_worker_ssl_ctx_poisoned););
             AmiSSLBase = NULL;
             AmiSSLExtBase = NULL;
@@ -407,20 +440,26 @@ static void radio_net_worker_entry(void)
         radio_net_worker_shutdown_stage = "before CloseLibrary AmiSSLMasterBase";
         radio_worker_breadcrumb("before CloseLibrary AmiSSLMasterBase", "CloseLibrary", 0);
         RADIO_DBG(printf("radio-net-worker: before CloseLibrary AmiSSLMasterBase=%p\n", (void *)AmiSSLMasterBase););
+        radio_amissl_lifecycle_diag("CloseLibrary(amisslmaster)-before", 0, NULL, NULL);
         CloseLibrary(AmiSSLMasterBase);
         AmiSSLMasterBase = NULL;
+        radio_amisslmaster_close_count++;
         radio_net_worker_shutdown_stage = "after CloseLibrary AmiSSLMasterBase";
         radio_worker_breadcrumb("after CloseLibrary AmiSSLMasterBase", "CloseLibrary", 0);
+        radio_amissl_lifecycle_diag("CloseLibrary(amisslmaster)-after", 0, NULL, NULL);
         RADIO_DBG(printf("radio-net-worker: after CloseLibrary AmiSSLMasterBase\n"););
     }
     if (SocketBase && safe_to_close_amissl && !diag_leak_abandon) {
         radio_net_worker_shutdown_stage = "before CloseLibrary SocketBase";
         radio_worker_breadcrumb("before CloseLibrary SocketBase", "CloseLibrary", 0);
         RADIO_DBG(printf("radio-net-worker: before CloseLibrary SocketBase=%p\n", (void *)SocketBase););
+        radio_amissl_lifecycle_diag("CloseLibrary(bsdsocket)-before", 0, NULL, NULL);
         CloseLibrary(SocketBase);
         SocketBase = NULL;
+        radio_socket_library_close_count++;
         radio_net_worker_shutdown_stage = "after CloseLibrary SocketBase";
         radio_worker_breadcrumb("after CloseLibrary SocketBase", "CloseLibrary", 0);
+        radio_amissl_lifecycle_diag("CloseLibrary(bsdsocket)-after", 0, NULL, NULL);
         RADIO_DBG(printf("radio-net-worker: after CloseLibrary SocketBase\n"););
     }
     radio_amissl_initialized = 0;
@@ -981,7 +1020,9 @@ static SSL_CTX *radio_worker_get_ssl_ctx(const char *category, unsigned long ses
     Radio_DebugCheckExecMem("before shared SSL_CTX_new");
     if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned())
         return NULL;
+    radio_amissl_lifecycle_diag("SSL_CTX_new-before", session_id, NULL, NULL);
     radio_worker_ssl_ctx = SSL_CTX_new(method);
+    radio_amissl_lifecycle_diag("SSL_CTX_new-after", session_id, NULL, radio_worker_ssl_ctx);
     Radio_DebugCheckExecMem("after shared SSL_CTX_new");
     if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
         radio_worker_ssl_ctx_poisoned = 1;
@@ -1042,7 +1083,9 @@ static int radio_worker_shutdown_ssl_ctx(void)
             radio_active_ssl_ctx_count--;
         return 0;
     }
+    radio_amissl_lifecycle_diag("SSL_CTX_free-before", 0, NULL, radio_worker_ssl_ctx);
     SSL_CTX_free(radio_worker_ssl_ctx);
+    radio_amissl_lifecycle_diag("SSL_CTX_free-after", 0, NULL, radio_worker_ssl_ctx);
     Radio_DebugCheckExecMem("after shared SSL_CTX_free");
     if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
         radio_worker_ssl_ctx_poisoned = 1;
@@ -1649,7 +1692,9 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
             Radio_DebugCheckExecMem("before playback SSL_free after socket close");
             printf("radio-tls-order: category=playback session=%lu step=SSL_free-begin ssl=%p\n",
                 rs->session_id, (void *)ssl_to_free);
+            radio_amissl_lifecycle_diag("SSL_free-before", rs->session_id, ssl_to_free, rs->ctx);
             SSL_free(ssl_to_free);
+            radio_amissl_lifecycle_diag("SSL_free-after", rs->session_id, ssl_to_free, rs->ctx);
             printf("radio-tls-order: category=playback session=%lu step=SSL_free-complete\n", rs->session_id);
             Radio_DebugCheckExecMem("after playback SSL_free after socket close");
             rs->sslFreed = 1;
@@ -1732,7 +1777,9 @@ static int radio_ssl_do_handshake(RadioStream *rs)
         RADIO_DBG(printf("BEFORE SSL_connect session=%lu attempt=%d ssl=%p ctx=%p fd=%ld\n",
             rs ? rs->session_id : 0, tries + 1, rs ? (void *)rs->ssl : 0,
             rs ? (void *)rs->ctx : 0, rs ? (long)rs->sock : -1L););
+        radio_amissl_lifecycle_diag("SSL_connect-before", rs->session_id, rs->ssl, rs->ctx);
         r = SSL_connect(rs->ssl);
+        radio_amissl_lifecycle_diag("SSL_connect-after", rs->session_id, rs->ssl, rs->ctx);
         Radio_DebugCheckExecMem("after SSL_connect");
         if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
             rs->sslStatePoisoned = 1; rs->fatalStop = 1; rs->noReconnect = 1;
@@ -1810,7 +1857,9 @@ static int radio_ssl_connect(RadioStream *rs)
         set_error(rs, "AmiSSL init failed");
         return -1;
     }
+    radio_amissl_lifecycle_diag("SSL_new-before", rs->session_id, NULL, rs->ctx);
     rs->ssl = SSL_new(rs->ctx);
+    radio_amissl_lifecycle_diag("SSL_new-after", rs->session_id, rs->ssl, rs->ctx);
     Radio_DebugCheckExecMem("after SSL_new");
     if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
         radio_worker_ssl_ctx_poisoned = 1;
@@ -1884,7 +1933,9 @@ static void radio_ssl_attempt_shutdown(RadioStream *rs)
         radio_tls_shutdown_quarantine = 1;
         return;
     }
+    radio_amissl_lifecycle_diag("SSL_shutdown-before", rs->session_id, rs->ssl, rs->ctx);
     SSL_shutdown(rs->ssl);
+    radio_amissl_lifecycle_diag("SSL_shutdown-after", rs->session_id, rs->ssl, rs->ctx);
     Radio_DebugCheckExecMem("after SSL_shutdown");
     if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
         rs->sslStatePoisoned = 1;
@@ -1967,7 +2018,9 @@ static int radio_send_all(RadioStream *rs, const char *buf, int len)
                 close_current_socket(rs);
                 return -1;
             }
+            radio_amissl_lifecycle_diag("SSL_write-before", rs->session_id, rs->ssl, rs->ctx);
             r = (int)SSL_write(rs->ssl, buf + sent, len - sent);
+            radio_amissl_lifecycle_diag("SSL_write-after", rs->session_id, rs->ssl, rs->ctx);
             if (r > 0) { sent += r; continue; }
             {
                 int e = SSL_get_error(rs->ssl, r);
@@ -2046,7 +2099,9 @@ static int radio_net_transport_tls_connect(RadioNetTransport *t, const char *hos
     method = SSLv23_client_method();
     if (!method) return -1;
     Radio_DebugCheckExecMem("before transport SSL_CTX_new");
+    radio_amissl_lifecycle_diag("SSL_CTX_new-before", t->session_id, NULL, NULL);
     t->ctx = SSL_CTX_new(method);
+    radio_amissl_lifecycle_diag("SSL_CTX_new-after", t->session_id, NULL, t->ctx);
     if (t->ctx) radio_net_transport_count_ctx(t);
     Radio_DebugCheckExecMem("after transport SSL_CTX_new");
     if (!t->ctx || Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) return -1;
@@ -2055,7 +2110,9 @@ static int radio_net_transport_tls_connect(RadioNetTransport *t, const char *hos
     SSL_CTX_set_options(t->ctx, SSL_OP_IGNORE_UNEXPECTED_EOF);
 #endif
     Radio_DebugCheckExecMem("before transport SSL_new");
+    radio_amissl_lifecycle_diag("SSL_new-before", t->session_id, NULL, t->ctx);
     t->ssl = SSL_new(t->ctx);
+    radio_amissl_lifecycle_diag("SSL_new-after", t->session_id, t->ssl, t->ctx);
     if (t->ssl) radio_net_transport_count_ssl(t);
     Radio_DebugCheckExecMem("after transport SSL_new");
     if (!t->ssl || Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) return -1;
@@ -2072,7 +2129,9 @@ static int radio_net_transport_tls_connect(RadioNetTransport *t, const char *hos
     ERR_clear_error();
     for (tries = 0; tries < 150; tries++) {
         int r, e;
+        radio_amissl_lifecycle_diag("SSL_connect-before", t->session_id, t->ssl, t->ctx);
         r = SSL_connect(t->ssl);
+        radio_amissl_lifecycle_diag("SSL_connect-after", t->session_id, t->ssl, t->ctx);
         if (r == 1) { t->handshake_done = 1; return 0; }
         e = SSL_get_error(t->ssl, r);
         if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
@@ -2340,7 +2399,9 @@ static void radio_net_write_worker(void *arg)
         int n;
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
         if (t->use_tls && t->ssl) {
+            radio_amissl_lifecycle_diag("SSL_write-before", t->session_id, t->ssl, t->ctx);
             n = (int)SSL_write(t->ssl, a->buffer + done, a->length - done);
+            radio_amissl_lifecycle_diag("SSL_write-after", t->session_id, t->ssl, t->ctx);
             if (n > 0) { done += n; continue; }
             n = SSL_get_error(t->ssl, n);
             if (n == SSL_ERROR_WANT_READ || n == SSL_ERROR_WANT_WRITE) { radio_backoff_sleep(); tries++; continue; }
@@ -2399,7 +2460,9 @@ static void radio_net_read_worker(void *arg)
         int n;
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
         if (t->use_tls && t->ssl) {
+            radio_amissl_lifecycle_diag("SSL_read-before", t->session_id, t->ssl, t->ctx);
             n = (int)SSL_read(t->ssl, a->buffer, a->length);
+            radio_amissl_lifecycle_diag("SSL_read-after", t->session_id, t->ssl, t->ctx);
             if (n > 0) { a->result = n; radio_net_io_complete(a); return; }
             n = SSL_get_error(t->ssl, n);
 #ifdef SSL_ERROR_ZERO_RETURN
@@ -2464,7 +2527,9 @@ static void radio_net_close_transport_worker(RadioNetTransport *t, int graceful)
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     if (graceful && t->ssl && t->handshake_done && !t->ssl_poisoned &&
         !Radio_IsMemoryPoisoned() && !Radio_IsTlsPoisoned()) {
+        radio_amissl_lifecycle_diag("SSL_shutdown-before", t->session_id, t->ssl, t->ctx);
         SSL_shutdown(t->ssl);
+        radio_amissl_lifecycle_diag("SSL_shutdown-after", t->session_id, t->ssl, t->ctx);
         printf("radio-tls-order: category=%s session=%lu step=SSL_shutdown-complete\n", t->category, t->session_id);
     }
 #endif
@@ -2486,7 +2551,9 @@ static void radio_net_close_transport_worker(RadioNetTransport *t, int graceful)
             t->ssl = NULL;
         } else {
             printf("radio-tls-order: category=%s session=%lu step=SSL_free-begin ssl=%p\n", t->category, t->session_id, (void *)t->ssl);
+            radio_amissl_lifecycle_diag("SSL_free-before", t->session_id, t->ssl, t->ctx);
             SSL_free(t->ssl);
+            radio_amissl_lifecycle_diag("SSL_free-after", t->session_id, t->ssl, t->ctx);
             printf("radio-tls-order: category=%s session=%lu step=SSL_free-complete\n", t->category, t->session_id);
             t->ssl = NULL;
             if (t->ssl_counted && radio_active_ssl_count > 0) radio_active_ssl_count--;
@@ -2497,7 +2564,9 @@ static void radio_net_close_transport_worker(RadioNetTransport *t, int graceful)
         if (t->ssl_poisoned || Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned() || radio_runtime_diag_leak_ssl_enabled()) {
             t->ctx = NULL;
         } else {
+            radio_amissl_lifecycle_diag("SSL_CTX_free-before", t->session_id, NULL, t->ctx);
             SSL_CTX_free(t->ctx);
+            radio_amissl_lifecycle_diag("SSL_CTX_free-after", t->session_id, NULL, t->ctx);
             t->ctx = NULL;
             if (t->ctx_counted && radio_active_ssl_ctx_count > 0) radio_active_ssl_ctx_count--;
             t->ctx_counted = 0;
@@ -3859,60 +3928,22 @@ void Radio_NetworkShutdown(void)
     }
     radio_network_shutdown_started = 1;
 #if defined(HAVE_AMISSL)
-    {
-        int abandon_worker = Radio_IsMemoryPoisoned();
-    if (abandon_worker) {
-        /* A fatal SSL fault or detected memory corruption already left the
-         * worker's per-task AmiSSL state (or the heap itself) suspect this
-         * run -- asking the same worker to run CleanupAmiSSL()-adjacent
-         * teardown (CloseAmiSSL()/CloseLibrary()) against damaged internals
-         * is exactly the class of "recoverable alert on app close" this
-         * quarantine exists to avoid. Abandon the worker task and its
-         * libraries instead: the OS reclaims the open library counts when
-         * the process exits, same as before. */
-        if (Radio_IsTlsPoisoned())
-            printf("APP_CLOSE: AmiSSL poisoned, skipping final AmiSSL shutdown\n");
-        else if (Radio_IsMemoryPoisoned())
-            printf("APP_CLOSE: memory poisoned, skipping final AmiSSL shutdown\n");
-        else if (radio_amissl_task_poisoned)
-            printf("APP_CLOSE: AmiSSL task poisoned, skipping final AmiSSL shutdown\n");
-        else
-            printf("APP_CLOSE: AmiSSL quarantined after TLS fault(s), skipping final AmiSSL shutdown\n");
-        RADIO_DBG(printf("radio-netshutdown: abandoning net worker task=%p without asking it to CloseAmiSSL/CloseLibrary tls_poisoned=%d memory_poisoned=%d task_poisoned=%d tls_fault_count=%ld shutdown_quarantine=%d reason=%s active_ssl_count=%ld active_ssl_ctx_count=%ld open_socket_count=%ld\n",
-            (void *)radio_net_worker_task, Radio_IsTlsPoisoned(), Radio_IsMemoryPoisoned(),
-            radio_amissl_task_poisoned, radio_tls_fault_count, radio_tls_shutdown_quarantine,
-            Radio_TlsPoisonReason(), radio_active_ssl_count, radio_active_ssl_ctx_count,
-            radio_open_socket_count););
-    } else {
-        if (radio_tls_shutdown_quarantine) {
-            RADIO_DBG(printf("radio-netshutdown: shutdown_quarantine=1 but no real fault/poison (tls_fault_count=%ld tls_poisoned=%d memory_poisoned=%d task_poisoned=%d active_ssl_count=%ld active_ssl_ctx_count=%ld open_socket_count=%ld), performing normal worker shutdown\n",
-                radio_tls_fault_count, Radio_IsTlsPoisoned(), Radio_IsMemoryPoisoned(),
-                radio_amissl_task_poisoned, radio_active_ssl_count,
-                radio_active_ssl_ctx_count, radio_open_socket_count););
-        }
-        /* Ask the worker task to CloseAmiSSL()/CloseLibrary() (in that
-         * order, exactly once, matching amissl_child_worker_repro.c) and
-         * exit; radio_net_worker_stop() waits, bounded, for it to finish. */
-        if (!radio_net_worker_stop()) {
-            RADIO_DBG(printf("radio-netshutdown: net worker did not confirm shutdown within the timeout\n"););
-        } else if (radio_runtime_diag_leak_ssl_enabled()) {
-            /* MP3_DIAG_LEAK_SSL: the worker exited cleanly but deliberately
-             * abandoned CloseAmiSSL()/CloseLibrary() (see its own
-             * radio-diag-leak log), so the close counters below must not
-             * pretend those closes happened. */
-            RADIO_DBG(printf("radio-netshutdown: worker exited with final AmiSSL/library teardown deliberately skipped (MP3_DIAG_LEAK_SSL)\n"););
-        } else {
-            if (radio_openamissltags_count > radio_closeamissl_count) {
-                radio_closeamissl_count++;
-                if (radio_amissl_init_count > radio_amissl_cleanup_count)
-                    radio_amissl_cleanup_count++;
-            }
-            if (radio_amisslmaster_open_count > radio_amisslmaster_close_count)
-                radio_amisslmaster_close_count++;
-            if (radio_socket_library_open_count > radio_socket_library_close_count)
-                radio_socket_library_close_count++;
-        }
+    if (radio_tls_shutdown_quarantine) {
+        RADIO_DBG(printf("radio-netshutdown: shutdown_quarantine=1 (tls_fault_count=%ld tls_poisoned=%d memory_poisoned=%d task_poisoned=%d active_ssl_count=%ld active_ssl_ctx_count=%ld open_socket_count=%ld), still asking worker to perform owner-task AmiSSL teardown\n",
+            radio_tls_fault_count, Radio_IsTlsPoisoned(), Radio_IsMemoryPoisoned(),
+            radio_amissl_task_poisoned, radio_active_ssl_count,
+            radio_active_ssl_ctx_count, radio_open_socket_count););
     }
+    /* Ask the worker task to run CloseAmiSSL() (which performs the implicit
+     * CleanupAmiSSL because OpenAmiSSLTags() used AmiSSL_InitAmiSSL=TRUE),
+     * then CloseLibrary() and exit; radio_net_worker_stop() waits, bounded,
+     * for it to finish. */
+    if (!radio_net_worker_stop()) {
+        RADIO_DBG(printf("radio-netshutdown: net worker did not confirm shutdown within the timeout\n"););
+    } else if (radio_runtime_diag_leak_ssl_enabled()) {
+        /* MP3_DIAG_LEAK_SSL is an explicit diagnostic mode; production
+         * shutdown always waits for the worker-owned lifecycle teardown. */
+        RADIO_DBG(printf("radio-netshutdown: worker exited with final AmiSSL/library teardown deliberately skipped (MP3_DIAG_LEAK_SSL)\n"););
     }
 #else
     if (SocketBase) {
@@ -4031,7 +4062,9 @@ static int radio_pump_body(RadioStream *rs)
 	        }
 	        radio_net_adopt_context(rs);
 	        rs->workerReadCalls++;
+            radio_amissl_lifecycle_diag("SSL_read-before", rs->session_id, rs->ssl, rs->ctx);
 	        n = (int)SSL_read(rs->ssl, (char *)b, requested);
+            radio_amissl_lifecycle_diag("SSL_read-after", rs->session_id, rs->ssl, rs->ctx);
             radio_worker_risk_log("after SSL_read", rs);
 	        RADIO_DBG(printf("radio-ssl-read: session=%lu ssl=%p ctx=%p fd=%ld dst=%p dst_cap=%d requested=%d returned=%d fill=%lu ring_free=%lu\n",
 	            rs->session_id, (void *)rs->ssl, (void *)rs->ctx, (long)rs->sock, (void *)b, (int)sizeof(b), requested, n, rs->used, rs->size > rs->used ? rs->size - rs->used : 0));
