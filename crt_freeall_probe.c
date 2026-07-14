@@ -67,12 +67,12 @@
  * ---------------------------------------------------------------------------
  * How it is linked in (see Makefile.amiga)
  * ---------------------------------------------------------------------------
- *   Discovery:  make -f Makefile.amiga sslguir DEBUG=1 FREEALL_PROBE=1
+ *   Discovery:  make -f Makefile.amiga sslgui DEBUG=1 FREEALL_PROBE=1
  *   Verify the real heads in that binary, e.g.
- *       m68k-amigaos-objdump -d minimp3r \
+ *       m68k-amigaos-objdump -d miniamp3 \
  *         | sed -n '/<__real____free_all>:/,/rts/p'
- *       m68k-amigaos-nm -n minimp3r        # locate the three list-head globals
- *   Armed:      make -f Makefile.amiga sslguir DEBUG=1 FREEALL_PROBE=1 \
+ *       m68k-amigaos-nm -n miniamp3        # locate the three list-head globals
+ *   Armed:      make -f Makefile.amiga sslgui DEBUG=1 FREEALL_PROBE=1 \
  *                 FREEALL_ARMED=1 FREEALL_HEAD0=0xXXXXXXXX \
  *                 FREEALL_HEAD1=0xYYYYYYYY FREEALL_HEAD2=0xZZZZZZZZ
  *
@@ -129,6 +129,14 @@ typedef int crt_freeall_probe_unit;
 #define FREEALL_MAX_NODES 1000000UL
 #endif
 
+#ifndef FREEALL_SEEN_LIMIT
+#define FREEALL_SEEN_LIMIT 256
+#endif
+
+#ifndef FREEALL_MAX_SENSIBLE_SIZE
+#define FREEALL_MAX_SENSIBLE_SIZE 0x10000000UL
+#endif
+
 /* The genuine libnix ___free_all, reachable through --wrap.  Called verbatim in
  * discovery (zero heads); referenced in every build so it -- and its symbol --
  * stay in the link for the required disassembly proof. */
@@ -142,6 +150,10 @@ void FreeAll_Wrap(void) __asm__("__wrap____free_all");
 extern char __freeall_head0[];
 extern char __freeall_head1[];
 extern char __freeall_head2[];
+
+#if defined(FREEALL_DANGEROUS_LEAK_CRT_ON_EXIT)
+/* Deliberately dangerous proof-only mode: never enable in production. */
+#endif
 
 /* ------------------------------------------------------------------------- */
 /* Fixed static record (no allocation, ever).                                */
@@ -162,6 +174,7 @@ typedef struct FreeAllProbeRecord {
 	unsigned long size;		/* *(ULONG *)(node - 4)  (size to FreeMem) */
 	void         *task;		/* FindTask(NULL) */
 	unsigned long state;		/* ABOUT_TO_FREE -> FREE_RETURNED */
+	unsigned long flags;		/* fixed-storage validation bits */
 	unsigned long endMagic;		/* FREEALL_MAGIC (brackets the struct) */
 } FreeAllProbeRecord;
 
@@ -169,12 +182,26 @@ typedef struct FreeAllProbeRecord {
 FreeAllProbeRecord gFreeAllProbe = {
 	FREEALL_MAGIC, 0UL, 0UL, 0UL,
 	(void *)0, (void *)0, (void *)0, 0UL, (void *)0,
-	FREEALL_STATE_IDLE, FREEALL_MAGIC
+	FREEALL_STATE_IDLE, 0UL, FREEALL_MAGIC
 };
 
 /* Force the genuine ___free_all object (and its list-head globals) to stay in
  * the link even in the armed build, where we do not call it. */
 void * volatile gFreeAllKeepReal;
+
+#define FREEALL_FLAG_NODE_MISALIGNED  0x00000001UL
+#define FREEALL_FLAG_BASE_NULL        0x00000002UL
+#define FREEALL_FLAG_BASE_MISALIGNED  0x00000004UL
+#define FREEALL_FLAG_SIZE_ZERO        0x00000008UL
+#define FREEALL_FLAG_SIZE_ODD         0x00000010UL
+#define FREEALL_FLAG_SIZE_HUGE        0x00000020UL
+#define FREEALL_FLAG_NEXT_SELF        0x00000040UL
+#define FREEALL_FLAG_NODE_REPEATED    0x00000080UL
+#define FREEALL_FLAG_BASE_REPEATED    0x00000100UL
+
+static void *gFreeAllSeenNodes[FREEALL_SEEN_LIMIT];
+static void *gFreeAllSeenBases[FREEALL_SEEN_LIMIT];
+static unsigned long gFreeAllSeenCount;
 
 /* ------------------------------------------------------------------------- */
 /* Non-allocating raw-debug output (Exec RawPutChar, LVO -516).              */
@@ -200,6 +227,41 @@ static void probe_hex32(unsigned long v)
 	probe_ch('x');
 	for (i = 28; i >= 0; i -= 4)
 		probe_ch(hexd[(v >> i) & 0xfUL]);
+}
+
+
+static unsigned long freeall_seen(void **seen, unsigned long count, void *value)
+{
+	unsigned long i;
+	for (i = 0; i < count; i++) {
+		if (seen[i] == value)
+			return 1UL;
+	}
+	return 0UL;
+}
+
+static unsigned long freeall_validation_flags(void *node, void *next, void *base, unsigned long size)
+{
+	unsigned long flags = 0UL;
+	if (((unsigned long)node & 1UL) != 0UL)
+		flags |= FREEALL_FLAG_NODE_MISALIGNED;
+	if (base == (void *)0)
+		flags |= FREEALL_FLAG_BASE_NULL;
+	if (((unsigned long)base & 1UL) != 0UL)
+		flags |= FREEALL_FLAG_BASE_MISALIGNED;
+	if (size == 0UL)
+		flags |= FREEALL_FLAG_SIZE_ZERO;
+	if ((size & 1UL) != 0UL)
+		flags |= FREEALL_FLAG_SIZE_ODD;
+	if (size > FREEALL_MAX_SENSIBLE_SIZE)
+		flags |= FREEALL_FLAG_SIZE_HUGE;
+	if (next == node)
+		flags |= FREEALL_FLAG_NEXT_SELF;
+	if (freeall_seen(gFreeAllSeenNodes, gFreeAllSeenCount, node))
+		flags |= FREEALL_FLAG_NODE_REPEATED;
+	if (freeall_seen(gFreeAllSeenBases, gFreeAllSeenCount, base))
+		flags |= FREEALL_FLAG_BASE_REPEATED;
+	return flags;
 }
 
 static void probe_dec32(unsigned long v)
@@ -249,6 +311,11 @@ void FreeAll_Wrap(void)
 		return;
 	}
 
+#if defined(FREEALL_DANGEROUS_LEAK_CRT_ON_EXIT)
+	probe_str("FREEALL-PROBE DANGEROUS_LEAK_CRT_ON_EXIT: deliberately leaking all remaining CRT allocations\n");
+	return;
+#endif
+
 	task = FindTask((STRPTR)0);
 	probe_str("FREEALL-PROBE armed task=");
 	probe_hex32((unsigned long)task);
@@ -263,6 +330,7 @@ void FreeAll_Wrap(void)
 			unsigned char *base = (unsigned char *)node - 4;
 			unsigned long  size = *(unsigned long *)base;
 			void          *next = *(void **)node;
+			unsigned long  flags = freeall_validation_flags(node, next, (void *)base, size);
 
 			/* --- store the fixed record FULLY before the free --- */
 			++gFreeAllProbe.seq;
@@ -274,12 +342,13 @@ void FreeAll_Wrap(void)
 			gFreeAllProbe.size     = size;
 			gFreeAllProbe.task     = (void *)task;
 			gFreeAllProbe.state    = FREEALL_STATE_ABOUT_TO_FREE;
+			gFreeAllProbe.flags    = flags;
 
 			probe_str("FREEALL seq=");
 			probe_dec32(gFreeAllProbe.seq);
 			probe_str(" list=");
 			probe_dec32(li);
-			probe_str("@");
+			probe_str(" head=");
 			probe_hex32(headA);
 			probe_str(" node=");
 			probe_hex32((unsigned long)node);
@@ -291,7 +360,15 @@ void FreeAll_Wrap(void)
 			probe_dec32(size);
 			probe_str(" task=");
 			probe_hex32((unsigned long)task);
-			probe_str(" ABOUT_TO_FREE\n");
+			probe_str(" flags=");
+			probe_hex32(flags);
+			probe_str(" state=ABOUT_TO_FREE\n");
+
+			if (gFreeAllSeenCount < (unsigned long)FREEALL_SEEN_LIMIT) {
+				gFreeAllSeenNodes[gFreeAllSeenCount] = node;
+				gFreeAllSeenBases[gFreeAllSeenCount] = (void *)base;
+				gFreeAllSeenCount++;
+			}
 
 			/* Identical base/size/order as the genuine ___free_all. */
 			FreeMem((APTR)base, size);
@@ -300,7 +377,7 @@ void FreeAll_Wrap(void)
 			gFreeAllProbe.state = FREEALL_STATE_FREE_RETURNED;
 			probe_str("FREEALL seq=");
 			probe_dec32(gFreeAllProbe.seq);
-			probe_str(" FREE_RETURNED\n");
+			probe_str(" state=FREE_RETURNED\n");
 
 			node = next;
 			if (++guard > FREEALL_MAX_NODES) {
