@@ -6339,6 +6339,10 @@ static int MrMainReal(int argc, char **argv)
 }
 
 
+#if defined(AMIGA_M68K)
+extern void LibnixFreeAllCompat_Install(void);
+#endif
+
 int main(int argc, char **argv)
 {
 	struct Task *task = FindTask(NULL);
@@ -6349,6 +6353,10 @@ int main(int argc, char **argv)
 	 * spawned. See amiga_mp3dec.c's radio_console_lock definition and
 	 * RADIO_CONSOLE_LOCK_INIT_ELSEWHERE above. */
 	InitSemaphore(&radio_console_lock);
+#if defined(AMIGA_M68K)
+	LibnixFreeAllCompat_Install();
+#endif
+
 
 	gMrDetectedStackLower = (ULONG)task->tc_SPLower;
 	gMrDetectedStackUpper = (ULONG)task->tc_SPUpper;

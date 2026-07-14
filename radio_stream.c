@@ -1761,6 +1761,72 @@ static int radio_ssl_error_is_fatal(int e)
         e != SSL_ERROR_ZERO_RETURN;
 }
 
+
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+static void radio_tls_raw_ch(char c)
+{
+    register unsigned long d0 __asm("d0") = (unsigned long)(unsigned char)c;
+    __asm volatile ("move.l 4.w,%%a6\n\tjsr -516(%%a6)"
+        : "+d"(d0) : : "d1", "a0", "a1", "a6", "cc", "memory");
+}
+
+static void radio_tls_raw_str(const char *s)
+{
+    while (s && *s) radio_tls_raw_ch(*s++);
+}
+
+static void radio_tls_raw_hex(unsigned long v)
+{
+    static const char h[] = "0123456789abcdef";
+    int shift;
+    radio_tls_raw_ch('0'); radio_tls_raw_ch('x');
+    for (shift = 28; shift >= 0; shift -= 4)
+        radio_tls_raw_ch(h[(v >> shift) & 0x0fUL]);
+}
+
+static void radio_tls_connect_marker(const char *tag, unsigned long session, int attempt,
+    SSL *ssl, SSL_CTX *ctx, long fd, int ret)
+{
+    radio_tls_raw_str(tag);
+    radio_tls_raw_str(" session="); radio_tls_raw_hex(session);
+    radio_tls_raw_str(" attempt="); radio_tls_raw_hex((unsigned long)attempt);
+    radio_tls_raw_str(" ssl="); radio_tls_raw_hex((unsigned long)ssl);
+    radio_tls_raw_str(" ctx="); radio_tls_raw_hex((unsigned long)ctx);
+    radio_tls_raw_str(" fd="); radio_tls_raw_hex((unsigned long)fd);
+    radio_tls_raw_str(" ret="); radio_tls_raw_hex((unsigned long)ret);
+    radio_tls_raw_ch('\n');
+}
+
+static void radio_tls_range_snapshot(RadioStream *rs, const char *where)
+{
+    if (!rs) return;
+    radio_tls_raw_str("TLS-RANGE where="); radio_tls_raw_str(where);
+    radio_tls_raw_str(" session="); radio_tls_raw_hex(rs->session_id);
+    radio_tls_raw_str(" rs="); radio_tls_raw_hex((unsigned long)rs);
+    radio_tls_raw_str(" rsEnd="); radio_tls_raw_hex((unsigned long)(rs + 1));
+    radio_tls_raw_str(" ring="); radio_tls_raw_hex((unsigned long)rs->ring);
+    radio_tls_raw_str(" ringEnd="); radio_tls_raw_hex((unsigned long)(rs->ring ? rs->ring + rs->size : 0));
+    radio_tls_raw_str(" ringAlloc="); radio_tls_raw_hex((unsigned long)rs->ringAlloc);
+    radio_tls_raw_str(" ssl="); radio_tls_raw_hex((unsigned long)rs->ssl);
+    radio_tls_raw_str(" ctx="); radio_tls_raw_hex((unsigned long)rs->ctx);
+    radio_tls_raw_str(" url="); radio_tls_raw_hex((unsigned long)rs->url);
+    radio_tls_raw_str(" host="); radio_tls_raw_hex((unsigned long)rs->host);
+    radio_tls_raw_str(" path="); radio_tls_raw_hex((unsigned long)rs->path);
+    radio_tls_raw_ch('\n');
+}
+#else
+static void radio_tls_connect_marker(const char *tag, unsigned long session, int attempt,
+    SSL *ssl, SSL_CTX *ctx, long fd, int ret)
+{
+    (void)tag; (void)session; (void)attempt; (void)ssl; (void)ctx; (void)fd; (void)ret;
+}
+
+static void radio_tls_range_snapshot(RadioStream *rs, const char *where)
+{
+    (void)rs; (void)where;
+}
+#endif
+
 /* Poll SSL_connect on the non-blocking socket — same budget as radio_wait_connected. */
 static int radio_ssl_do_handshake(RadioStream *rs)
 {
@@ -1777,8 +1843,17 @@ static int radio_ssl_do_handshake(RadioStream *rs)
         RADIO_DBG(printf("BEFORE SSL_connect session=%lu attempt=%d ssl=%p ctx=%p fd=%ld\n",
             rs ? rs->session_id : 0, tries + 1, rs ? (void *)rs->ssl : 0,
             rs ? (void *)rs->ctx : 0, rs ? (long)rs->sock : -1L););
+        radio_tls_range_snapshot(rs, "before-SSL_connect");
+        Radio_DebugCheckExecMem("before SSL_connect");
+        radio_tls_connect_marker("TLS-CONNECT-ENTER", rs ? rs->session_id : 0, tries + 1,
+            rs ? rs->ssl : NULL, rs ? rs->ctx : NULL, rs ? (long)rs->sock : -1L, 0);
         radio_amissl_lifecycle_diag("SSL_connect-before", rs->session_id, rs->ssl, rs->ctx);
         r = SSL_connect(rs->ssl);
+        radio_tls_connect_marker("TLS-CONNECT-RETURN", rs ? rs->session_id : 0, tries + 1,
+            rs ? rs->ssl : NULL, rs ? rs->ctx : NULL, rs ? (long)rs->sock : -1L, r);
+        RADIO_DBG(printf("SSL_CONNECT_RET session=%lu attempt=%d ret=%d ssl=%p ctx=%p fd=%ld\n",
+            rs ? rs->session_id : 0, tries + 1, r, rs ? (void *)rs->ssl : 0,
+            rs ? (void *)rs->ctx : 0, rs ? (long)rs->sock : -1L););
         radio_amissl_lifecycle_diag("SSL_connect-after", rs->session_id, rs->ssl, rs->ctx);
         Radio_DebugCheckExecMem("after SSL_connect");
         if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
@@ -1796,7 +1871,13 @@ static int radio_ssl_do_handshake(RadioStream *rs)
             RADIO_DBG(printf("SSL_CONNECT_DONE session=%lu\n", rs ? rs->session_id : 0););
             return 0;
         }
+        Radio_DebugCheckExecMem("before SSL_get_error after SSL_connect");
+        radio_tls_connect_marker("TLS-CONNECT-GETERROR-BEGIN", rs ? rs->session_id : 0, tries + 1,
+            rs ? rs->ssl : NULL, rs ? rs->ctx : NULL, rs ? (long)rs->sock : -1L, r);
         e = SSL_get_error(rs->ssl, r);
+        radio_tls_connect_marker("TLS-CONNECT-GETERROR-END", rs ? rs->session_id : 0, tries + 1,
+            rs ? rs->ssl : NULL, rs ? rs->ctx : NULL, rs ? (long)rs->sock : -1L, e);
+        Radio_DebugCheckExecMem("after SSL_get_error after SSL_connect");
         RADIO_DBG(printf("AFTER SSL_connect fail session=%lu attempt=%d ret=%d err=%d ssl=%p ctx=%p fd=%ld\n",
             rs ? rs->session_id : 0, tries + 1, r, e, rs ? (void *)rs->ssl : 0,
             rs ? (void *)rs->ctx : 0, rs ? (long)rs->sock : -1L););
@@ -1879,7 +1960,10 @@ static int radio_ssl_connect(RadioStream *rs)
     }
     if (!rs->ssl) { radio_ssl_close_stream(rs); set_error(rs, "AmiSSL init failed"); return -1; }
 #ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
+    radio_tls_range_snapshot(rs, "before-SSL_set_tlsext_host_name");
     SSL_set_tlsext_host_name(rs->ssl, rs->host);
+    radio_tls_range_snapshot(rs, "after-SSL_set_tlsext_host_name");
+    Radio_DebugCheckExecMem("after SSL_set_tlsext_host_name");
 #endif
 #ifdef RADIO_SSL_VERIFY_PEER
     {
@@ -2129,11 +2213,21 @@ static int radio_net_transport_tls_connect(RadioNetTransport *t, const char *hos
     ERR_clear_error();
     for (tries = 0; tries < 150; tries++) {
         int r, e;
+        Radio_DebugCheckExecMem("before transport SSL_connect");
+        radio_tls_connect_marker("TLS-CONNECT-ENTER", t->session_id, tries + 1, t->ssl, t->ctx, (long)t->sock, 0);
         radio_amissl_lifecycle_diag("SSL_connect-before", t->session_id, t->ssl, t->ctx);
         r = SSL_connect(t->ssl);
+        radio_tls_connect_marker("TLS-CONNECT-RETURN", t->session_id, tries + 1, t->ssl, t->ctx, (long)t->sock, r);
+        RADIO_DBG(printf("SSL_CONNECT_RET transport session=%lu attempt=%d ret=%d ssl=%p ctx=%p fd=%ld\n",
+            t->session_id, tries + 1, r, (void *)t->ssl, (void *)t->ctx, (long)t->sock););
         radio_amissl_lifecycle_diag("SSL_connect-after", t->session_id, t->ssl, t->ctx);
+        Radio_DebugCheckExecMem("after transport SSL_connect");
         if (r == 1) { t->handshake_done = 1; return 0; }
+        Radio_DebugCheckExecMem("before transport SSL_get_error after SSL_connect");
+        radio_tls_connect_marker("TLS-CONNECT-GETERROR-BEGIN", t->session_id, tries + 1, t->ssl, t->ctx, (long)t->sock, r);
         e = SSL_get_error(t->ssl, r);
+        radio_tls_connect_marker("TLS-CONNECT-GETERROR-END", t->session_id, tries + 1, t->ssl, t->ctx, (long)t->sock, e);
+        Radio_DebugCheckExecMem("after transport SSL_get_error after SSL_connect");
         if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
             radio_backoff_sleep();
             continue;
