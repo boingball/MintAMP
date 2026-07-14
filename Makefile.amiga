@@ -107,7 +107,7 @@ DEBUG_CPPFLAGS := -DRADIO_DEBUG
 endif
 
 # Debug-only close-time FreeMem alert probe (crt_freeall_probe.c).  Surgically
-# provides a diagnostic ___free_all replacement to record the exact
+# installs a diagnostic ___free_all exit-list replacement to record the exact
 # node/base/size each final FreeMem receives; nothing else is wrapped.  GadTools
 # miniamp3 (gui) and ReAction minimp3r (guir) only when explicitly enabled.
 # OFF by default: a normal build never adds the object or the wrap
@@ -126,7 +126,6 @@ endif
 FREEALL_HEAD0 ?= 0
 FREEALL_HEAD1 ?= 0
 FREEALL_HEAD2 ?= 0
-FREEALL_REAL ?= 0
 FREEALL_PROBE_CPPFLAGS :=
 FREEALL_PROBE_SOURCES :=
 FREEALL_PROBE_LDFLAGS :=
@@ -143,9 +142,7 @@ endif
 endif
 FREEALL_PROBE_CPPFLAGS := -DFREEALL_PROBE
 FREEALL_PROBE_SOURCES := crt_freeall_probe.c
-FREEALL_PROBE_LDFLAGS := -Wl,--allow-multiple-definition \
-	-Wl,--defsym,___freeall_real=$(FREEALL_REAL) \
-	-Wl,--defsym,___freeall_head0=$(FREEALL_HEAD0) \
+FREEALL_PROBE_LDFLAGS := -Wl,--defsym,___freeall_head0=$(FREEALL_HEAD0) \
 	-Wl,--defsym,___freeall_head1=$(FREEALL_HEAD1) \
 	-Wl,--defsym,___freeall_head2=$(FREEALL_HEAD2)
 endif

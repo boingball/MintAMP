@@ -77,21 +77,20 @@
  *                 FREEALL_ARMED=1 FREEALL_HEAD0=0xXXXXXXXX \
  *                 FREEALL_HEAD1=0xYYYYYYYY FREEALL_HEAD2=0xZZZZZZZZ
  *
- * The probe exports ___free_all itself because --wrap did not intercept this
- * libnix exit path reliably. Nothing else is wrapped: malloc, calloc, realloc,
- * free and Exec FreeMem keep their normal implementations.
+ * The probe leaves the genuine ___free_all linked normally, then patches the
+ * libnix ___EXIT_LIST__ entry for that function at application startup. Nothing
+ * else is wrapped: malloc, calloc, realloc, free and Exec FreeMem keep their
+ * normal implementations.
  *
  * ---------------------------------------------------------------------------
  * Required final-binary evidence (see the summary; not runnable without the
  * Bebbo m68k toolchain, which is absent in the environment that wrote this):
  * ---------------------------------------------------------------------------
- *   nm:       ___free_all, __wrap____free_all, gFreeAllProbe, __freeall_real
- *             and __freeall_head0/1/2
- *             all present (the head symbols and __freeall_real are absolute
- *             symbols whose values are supplied by Makefile.amiga).
- *   objdump:  the CRT exit-cleanup call site resolves to this replacement
- *             ___free_all, and the zero-head discovery path calls the absolute
- *             __freeall_real address supplied by FREEALL_REAL.
+ *   nm:       genuine ___free_all, FreeAllProbe_Run, FreeAllProbe_Install,
+ *             gFreeAllProbe and __freeall_head0/1/2 all present.
+ *   objdump:  main calls FreeAllProbe_Install; FreeAllProbe_Install scans and
+ *             writes ___EXIT_LIST__; FreeAllProbe_Run emits the raw entry
+ *             markers and discovery calls the saved original function pointer.
  *
  * ---------------------------------------------------------------------------
  * Reading the result while the recoverable requester is on screen
@@ -136,18 +135,12 @@ typedef int crt_freeall_probe_unit;
 #define FREEALL_MAX_SENSIBLE_SIZE 0x10000000UL
 #endif
 
-/* Our replacement intentionally exports the real CRT symbol name.  The
- * libnix exit path in this toolchain can hold an internally resolved reference
- * that --wrap does not intercept, so the diagnostic must provide ___free_all
- * itself rather than merely providing __wrap____free_all. */
-void FreeAll_Wrap(void) __asm__("___free_all");
+/* Genuine libnix ___free_all and its exit-list callback table. */
+extern void LibnixFreeAll(void) __asm__("___free_all");
+extern void *LibnixExitList[] __asm__("___EXIT_LIST__");
 
-/* Optional nm/objdump convenience alias.  CRT interception is proved by the
- * exit path targeting ___free_all, whose address is this function. */
-void FreeAll_WrapAlias(void) __asm__("___wrap____free_all");
-
-/* Linker-defined absolute address of the genuine original ___free_all. */
-extern char __freeall_real[] __asm__("___freeall_real");
+void FreeAllProbe_Install(void);
+void FreeAllProbe_Run(void);
 
 /* Linker-defined ABSOLUTE symbols (Makefile: -Wl,--defsym,__freeall_headN=..).
  * Their ADDRESS is the list-head address; only the value changes per build. */
@@ -202,6 +195,9 @@ FreeAllProbeRecord gFreeAllProbe = {
 static void *gFreeAllSeenNodes[FREEALL_SEEN_LIMIT];
 static void *gFreeAllSeenBases[FREEALL_SEEN_LIMIT];
 static unsigned long gFreeAllSeenCount;
+static void (*gFreeAllOriginal)(void);
+static unsigned long gFreeAllInstallReplacements;
+static void *gFreeAllInstallEntry;
 
 /* ------------------------------------------------------------------------- */
 /* Non-allocating raw-debug output (Exec RawPutChar, LVO -516).              */
@@ -287,37 +283,71 @@ static void probe_dec32(unsigned long v)
 }
 
 /* ------------------------------------------------------------------------- */
-/* The replacement.  Complete traversal, always compiled.                    */
+/* Exit-list installation and replacement runner.                             */
 /* ------------------------------------------------------------------------- */
-static void freeall_wrap_body(void);
 
-void FreeAll_WrapAlias(void)
+typedef struct FreeAllExitEntry {
+	void (*func)(void);
+	unsigned long meta;
+} FreeAllExitEntry;
+
+#ifndef FREEALL_EXIT_SCAN_LIMIT
+#define FREEALL_EXIT_SCAN_LIMIT 1024UL
+#endif
+
+void FreeAllProbe_Install(void)
 {
-	freeall_wrap_body();
+	FreeAllExitEntry *entry = (FreeAllExitEntry *)LibnixExitList;
+	FreeAllExitEntry *match = (FreeAllExitEntry *)0;
+	void (*func)(void);
+	unsigned long replacements = 0UL;
+	unsigned long i;
+
+	for (i = 0; i < FREEALL_EXIT_SCAN_LIMIT; i++) {
+		func = entry[i].func;
+		if (func == (void (*)(void))0)
+			break;
+		if (func == LibnixFreeAll) {
+			match = &entry[i];
+			replacements++;
+		}
+	}
+
+	probe_str("FREEALL-INSTALL exitList=");
+	probe_hex32((unsigned long)entry);
+	probe_str(" entry=");
+	probe_hex32((unsigned long)match);
+	probe_str(" original=");
+	probe_hex32((unsigned long)LibnixFreeAll);
+	probe_str(" replacement=");
+	probe_hex32((unsigned long)FreeAllProbe_Run);
+	probe_str(" replacements=");
+	probe_dec32(replacements);
+	probe_ch('\n');
+
+	if (replacements != 1UL) {
+		probe_str("FREEALL-INSTALL-FAILED replacements=");
+		probe_dec32(replacements);
+		probe_ch('\n');
+		gFreeAllInstallReplacements = replacements;
+		return;
+	}
+
+	gFreeAllOriginal = match->func;
+	gFreeAllInstallEntry = (void *)match;
+	match->func = FreeAllProbe_Run;
+	gFreeAllInstallReplacements = replacements;
 }
 
-void FreeAll_Wrap(void)
-{
-	freeall_wrap_body();
-}
-
-static void freeall_call_real(unsigned long realAddr)
-{
-	void (*realFreeAll)(void) = (void (*)(void))realAddr;
-	realFreeAll();
-}
-
-static void freeall_wrap_body(void)
+void FreeAllProbe_Run(void)
 {
 	/* volatile: __freeall_headN are ABSOLUTE symbols that legitimately take the
 	 * value 0 in a discovery build.  Without volatile, -O3 would fold
 	 * "&symbol == 0" to false (the address of a declared object is assumed
-	 * never NULL) and delete the discovery passthrough below.  Routing the
-	 * addresses through volatile storage forces a real load and a real compare
-	 * in every build, so the discovery/armed decision is made at run time from
-	 * the linked value -- and the codegen is identical either way. */
+	 * never NULL) and delete the discovery passthrough below. */
 	volatile unsigned long headAddr[FREEALL_HEAD_COUNT];
 	struct Task *task;
+	unsigned long realAddr;
 	unsigned long li;
 
 	headAddr[0] = (unsigned long)&__freeall_head0;
@@ -326,19 +356,18 @@ static void freeall_wrap_body(void)
 
 	probe_str("FREEALL-WRAPPER-ENTER\n");
 
-	/* Discovery build: heads are 0 (--defsym).  Delegate to the genuine
-	 * original ___free_all through FREEALL_REAL so discovery remains a normal
-	 * CRT cleanup run while still proving that the CRT exit path entered us. */
+	/* Discovery build: heads are 0 (--defsym).  Delegate to the exact function
+	 * pointer that FreeAllProbe_Install removed from ___EXIT_LIST__. */
 	if (headAddr[0] == 0UL || headAddr[1] == 0UL || headAddr[2] == 0UL) {
-		unsigned long realAddr = (unsigned long)&__freeall_real;
-		probe_str("FREEALL-DISCOVERY-CALLING-REAL real=");
+		realAddr = (unsigned long)gFreeAllOriginal;
+		probe_str("FREEALL-DISCOVERY-CALLING-REAL original=");
 		probe_hex32(realAddr);
 		probe_ch('\n');
-		if (realAddr != 0UL) {
-			freeall_call_real(realAddr);
+		if (gFreeAllOriginal != (void (*)(void))0) {
+			gFreeAllOriginal();
 			probe_str("FREEALL-REAL-RETURNED\n");
 		} else {
-			probe_str("FREEALL-DISCOVERY-NO-REAL-ADDRESS\n");
+			probe_str("FREEALL-DISCOVERY-NO-ORIGINAL\n");
 		}
 		return;
 	}
@@ -355,7 +384,7 @@ static void freeall_wrap_body(void)
 
 	for (li = 0; li < (unsigned long)FREEALL_HEAD_COUNT; li++) {
 		unsigned long headA = headAddr[li];
-		void *node = *(void **)headA;	/* first node of this list */
+		void *node = *(void **)headA;
 		unsigned long guard = 0UL;
 
 		while (node != (void *)0) {
@@ -364,7 +393,6 @@ static void freeall_wrap_body(void)
 			void          *next = *(void **)node;
 			unsigned long  flags = freeall_validation_flags(node, next, (void *)base, size);
 
-			/* --- store the fixed record FULLY before the free --- */
 			++gFreeAllProbe.seq;
 			gFreeAllProbe.list     = li;
 			gFreeAllProbe.headAddr = headA;
@@ -402,10 +430,8 @@ static void freeall_wrap_body(void)
 				gFreeAllSeenCount++;
 			}
 
-			/* Identical base/size/order as the genuine ___free_all. */
 			FreeMem((APTR)base, size);
 
-			/* --- after the free returns, update ONLY the state --- */
 			gFreeAllProbe.state = FREEALL_STATE_FREE_RETURNED;
 			probe_str("FREEALL seq=");
 			probe_dec32(gFreeAllProbe.seq);
@@ -420,7 +446,6 @@ static void freeall_wrap_body(void)
 			}
 		}
 
-		/* Drain the head exactly as a completed ___free_all leaves it. */
 		*(void **)headA = (void *)0;
 	}
 
