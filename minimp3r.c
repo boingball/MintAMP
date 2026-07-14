@@ -6339,8 +6339,8 @@ static int MrMainReal(int argc, char **argv)
 }
 
 
-#if defined(FREEALL_PROBE) && defined(AMIGA_M68K)
-extern void FreeAllProbe_Install(void);
+#if defined(AMIGA_M68K)
+extern void LibnixFreeAllCompat_Install(void);
 #endif
 
 int main(int argc, char **argv)
@@ -6353,8 +6353,8 @@ int main(int argc, char **argv)
 	 * spawned. See amiga_mp3dec.c's radio_console_lock definition and
 	 * RADIO_CONSOLE_LOCK_INIT_ELSEWHERE above. */
 	InitSemaphore(&radio_console_lock);
-#if defined(FREEALL_PROBE) && defined(AMIGA_M68K)
-	FreeAllProbe_Install();
+#if defined(AMIGA_M68K)
+	LibnixFreeAllCompat_Install();
 #endif
 
 

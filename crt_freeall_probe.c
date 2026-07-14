@@ -1,4 +1,4 @@
-/* crt_freeall_probe.c -- DEBUG-ONLY diagnostic replacement of libnix ___free_all
+/* crt_freeall_probe.c -- libnix ___free_all compatibility replacement
  * ===========================================================================
  *
  * Purpose
@@ -24,58 +24,29 @@
  *         allocationBytes = *(unsigned long *)(node - 4)
  *         FreeMem(allocationBase, allocationBytes)
  *
- * This file reproduces that traversal EXACTLY (same three heads, same order,
- * same node arithmetic, same FreeMem base/size, same head-drain cleanup) and,
- * for every node, before the FreeMem, stores the node/next/base/size/task into
- * a fixed static record (magic 'FREA', state ABOUT_TO_FREE) and echoes one line
- * over the non-allocating Exec RawPutChar raw-debug port, flipping the record
- * to FREE_RETURNED only after FreeMem returns.  The record left ABOUT_TO_FREE,
- * or the last raw-debug line before the requester, names the offending node,
- * base and size.  No malloc/calloc/realloc/free, stdio, buffered output, file
- * or requester is used inside the traversal.
- *
- * This is a DIAGNOSTIC ONLY.  It does not fix anything and does not claim to.
+ * This file installs a compatibility replacement for the exit-list callback.
+ * It preserves the valid-node traversal order, but treats both NULL and
+ * 0xffffffff as empty list-head values.  The latter is normalised to NULL
+ * before any dereference, preventing the stock libnix exit path from calling
+ * FreeMem(0xfffffffb, 0).  FREEALL_PROBE builds additionally store the latest
+ * attempted free in gFreeAllProbe and emit non-allocating RawPutChar diagnostics.
  *
  * ---------------------------------------------------------------------------
  * Layout stability (the whole point of this revision)
  * ---------------------------------------------------------------------------
- * The complete wrapper, the complete traversal and gFreeAllProbe are compiled
- * UNCONDITIONALLY.  There is NO FREEALL_PROBE_ARMED build variant and nothing
- * in this file is conditionally compiled on the head values.  So the object
- * produced for a "discovery" build and for an "armed" build is byte-identical.
+ * The three list heads are addressed symbolically as offsets from libnix's
+ * _errno data symbol, matching the linked binary layout observed for this
+ * libnix runtime.  No executable-absolute head addresses are required.
  *
- * The three head addresses are read from the linker-defined ABSOLUTE symbols
- * __freeall_head0/1/2, supplied at link time via --defsym (see Makefile.amiga).
- * Because those are absolute symbols, only their VALUES change between builds --
- * never a section size and never an instruction width (the loads that read
- * them are 32-bit absolute relocations, fixed-width regardless of the value).
- * Consequently libnix's own list heads sit at IDENTICAL addresses in the
- * discovery and armed binaries, so an address discovered by disassembling the
- * discovery binary is still valid in the armed binary.  (The classic pass-one/
- * pass-two hazard -- arming changing the text size and shifting the very
- * addresses discovered in pass one -- cannot occur here.)
- *
- * Discovery vs armed is therefore purely a LINK-time distinction:
- *   Discovery:  __freeall_head0/1/2 == 0.  At run time the wrapper sees a zero
- *               head and returns without walking unknown CRT lists.  This build
- *               exists only to be disassembled for the real heads; do not use it
- *               as a runtime cleanup/alert-capture build.
- *   Armed:      __freeall_head0/1/2 == the verified real head addresses.  The
- *               wrapper performs the instrumented traversal.
- * The Makefile refuses to arm (build error) unless all three head values are
- * given and non-zero.
+ * Production builds install the compatibility replacement without verbose raw
+ * diagnostics.  FREEALL_PROBE=1 keeps the same sentinel-safe traversal but also
+ * emits installer, sentinel, per-node and final-head diagnostics.
  *
  * ---------------------------------------------------------------------------
  * How it is linked in (see Makefile.amiga)
  * ---------------------------------------------------------------------------
- *   Discovery:  make -f Makefile.amiga sslgui DEBUG=1 FREEALL_PROBE=1
- *   Verify the real heads in that binary, e.g.
- *       m68k-amigaos-objdump -d miniamp3 \
- *         | sed -n '/<__wrap____free_all>:/,/rts/p'
- *       m68k-amigaos-nm -n miniamp3        # locate the three list-head globals
- *   Armed:      make -f Makefile.amiga sslgui DEBUG=1 FREEALL_PROBE=1 \
- *                 FREEALL_ARMED=1 FREEALL_HEAD0=0xXXXXXXXX \
- *                 FREEALL_HEAD1=0xYYYYYYYY FREEALL_HEAD2=0xZZZZZZZZ
+ *   Production: make -f Makefile.amiga sslgui DEBUG=1
+ *   Diagnostic: make -f Makefile.amiga sslgui DEBUG=1 FREEALL_PROBE=1
  *
  * The probe leaves the genuine ___free_all linked normally, then patches the
  * libnix ___EXIT_LIST__ entry for that function at application startup. Nothing
@@ -86,32 +57,24 @@
  * Required final-binary evidence (see the summary; not runnable without the
  * Bebbo m68k toolchain, which is absent in the environment that wrote this):
  * ---------------------------------------------------------------------------
- *   nm:       genuine ___free_all, FreeAllProbe_Run, FreeAllProbe_Install,
- *             gFreeAllProbe and __freeall_head0/1/2 all present.
- *   objdump:  main calls FreeAllProbe_Install; FreeAllProbe_Install scans and
- *             writes ___EXIT_LIST__; FreeAllProbe_Run emits the raw entry
- *             markers and discovery calls the saved original function pointer.
+ *   nm:       genuine ___free_all, LibnixFreeAllCompat_Run,
+ *             LibnixFreeAllCompat_Install and gFreeAllProbe all present.
+ *   objdump:  main calls LibnixFreeAllCompat_Install; LibnixFreeAllCompat_Install scans and
+ *             writes ___EXIT_LIST__; LibnixFreeAllCompat_Run emits the raw entry
+ *             markers in FREEALL_PROBE builds.
  *
  * ---------------------------------------------------------------------------
- * Reading the result while the recoverable requester is on screen
+ * FREEALL_PROBE diagnostics
  * ---------------------------------------------------------------------------
- * The requester is RECOVERABLE, so the process is still alive when it appears.
- *   * Serial/raw-debug (Sushi/Sashimi/serial capture/WinUAE debug console): the
- *     last "FREEALL seq=... ABOUT_TO_FREE" line with no following
- *     "FREEALL seq=... FREE_RETURNED" is the offending node (recoverable frees
- *     DO return, so for those the culprit is the last ABOUT_TO_FREE line before
- *     the guru).
- *   * Static record via a debugger/monitor: read the global symbol gFreeAllProbe
- *     (address from  m68k-amigaos-nm minimp3r | grep gFreeAllProbe ) while the
- *     requester is up; the 0x46524541 ('FREA') magic marks the struct and a
- *     state of 1 (ABOUT_TO_FREE) marks a free that did not return.
- * This does NOT rely on the static record surviving a reboot.
+ * Diagnostic builds keep installer, sentinel, per-node and final-head raw
+ * output. Production builds retain the compatibility traversal without verbose
+ * raw output.
  */
 
 /* Non-empty translation unit even when the probe is compiled out. */
 typedef int crt_freeall_probe_unit;
 
-#if defined(FREEALL_PROBE) && defined(AMIGA_M68K)
+#if defined(AMIGA_M68K)
 
 #include <exec/types.h>
 #include <exec/tasks.h>
@@ -138,15 +101,14 @@ typedef int crt_freeall_probe_unit;
 /* Genuine libnix ___free_all and its exit-list callback table. */
 extern void LibnixFreeAll(void) __asm__("___free_all");
 extern void *LibnixExitList[] __asm__("___EXIT_LIST__");
+extern char LibnixErrno[] __asm__("_errno");
 
-void FreeAllProbe_Install(void);
-void FreeAllProbe_Run(void);
+void LibnixFreeAllCompat_Install(void);
+void LibnixFreeAllCompat_Run(void);
 
-/* Linker-defined ABSOLUTE symbols (Makefile: -Wl,--defsym,__freeall_headN=..).
- * Their ADDRESS is the list-head address; only the value changes per build. */
-extern char __freeall_head0[] __asm__("___freeall_head0");
-extern char __freeall_head1[] __asm__("___freeall_head1");
-extern char __freeall_head2[] __asm__("___freeall_head2");
+#define LIBNIX_FREEALL_HEAD0_OFFSET 0x0cUL
+#define LIBNIX_FREEALL_HEAD1_OFFSET 0x10UL
+#define LIBNIX_FREEALL_HEAD2_OFFSET 0x20UL
 
 #if defined(FREEALL_DANGEROUS_LEAK_CRT_ON_EXIT)
 /* Deliberately dangerous proof-only mode: never enable in production. */
@@ -200,6 +162,12 @@ static unsigned long gFreeAllInstallReplacements;
 static void *gFreeAllInstallEntry;
 static unsigned long gFreeAllInstalled;
 
+#if defined(FREEALL_PROBE)
+#define FREEALL_DIAGNOSTICS 1
+#else
+#define FREEALL_DIAGNOSTICS 0
+#endif
+
 /* ------------------------------------------------------------------------- */
 /* Non-allocating raw-debug output (Exec RawPutChar, LVO -516).              */
 /* One byte to the serial/raw-debug port; allocates nothing.  Numbers are     */
@@ -207,6 +175,9 @@ static unsigned long gFreeAllInstalled;
 /* ------------------------------------------------------------------------- */
 static void probe_ch(char c)
 {
+#if !FREEALL_DIAGNOSTICS
+	(void)c;
+#else
 	/* proto/exec.h does not provide an out-of-line RawPutChar symbol in
 	 * every m68k-amigaos configuration, so call the Exec vector directly. */
 	register unsigned long d0 __asm("d0") = (unsigned long)(UBYTE)c;
@@ -214,12 +185,17 @@ static void probe_ch(char c)
 		: "+d"(d0)
 		:
 		: "d1", "a0", "a1", "a6", "cc", "memory");
+#endif
 }
 
 static void probe_str(const char *s)
 {
+#if !FREEALL_DIAGNOSTICS
+	(void)s;
+#else
 	while (*s)
 		probe_ch(*s++);
+#endif
 }
 
 static void probe_hex32(ULONG value)
@@ -318,7 +294,7 @@ typedef struct FreeAllExitEntry {
 #define FREEALL_EXIT_SCAN_LIMIT 256UL
 #endif
 
-void FreeAllProbe_Install(void)
+void LibnixFreeAllCompat_Install(void)
 {
 	FreeAllExitEntry *entry;
 	FreeAllExitEntry *matchingEntry = (FreeAllExitEntry *)0;
@@ -373,7 +349,7 @@ void FreeAllProbe_Install(void)
 	matchCountSnapshot = (ULONG)matchCount;
 	matchingEntrySnapshot = (ULONG)matchingEntry;
 	originalSnapshot = (ULONG)LibnixFreeAll;
-	replacementSnapshot = (ULONG)FreeAllProbe_Run;
+	replacementSnapshot = (ULONG)LibnixFreeAllCompat_Run;
 
 	probe_str("FREEALL-SCAN exitList=");
 	probe_hex32(exitListSnapshot);
@@ -407,10 +383,10 @@ void FreeAllProbe_Install(void)
 
 	gFreeAllOriginal = matchingEntry->func;
 	gFreeAllInstallEntry = (void *)matchingEntry;
-	matchingEntry->func = FreeAllProbe_Run;
+	matchingEntry->func = LibnixFreeAllCompat_Run;
 	gFreeAllInstallReplacements = matchCount;
 
-	if (matchingEntry->func != FreeAllProbe_Run) {
+	if (matchingEntry->func != LibnixFreeAllCompat_Run) {
 		matchingEntrySnapshot = (ULONG)matchingEntry;
 		replacementSnapshot = (ULONG)matchingEntry->func;
 		probe_str("FREEALL-INSTALL-VERIFY-FAILED entry=");
@@ -423,7 +399,7 @@ void FreeAllProbe_Install(void)
 
 	matchingEntrySnapshot = (ULONG)matchingEntry;
 	originalSnapshot = (ULONG)gFreeAllOriginal;
-	replacementSnapshot = (ULONG)FreeAllProbe_Run;
+	replacementSnapshot = (ULONG)LibnixFreeAllCompat_Run;
 	gFreeAllInstalled = 1UL;
 	probe_str("FREEALL-INSTALL-SUCCESS entry=");
 	probe_hex32(matchingEntrySnapshot);
@@ -436,38 +412,21 @@ void FreeAllProbe_Install(void)
 	probe_ch('\n');
 }
 
-void FreeAllProbe_Run(void)
+void LibnixFreeAllCompat_Run(void)
 {
-	/* volatile: __freeall_headN are ABSOLUTE symbols that legitimately take the
-	 * value 0 in a discovery build.  Without volatile, -O3 would fold
-	 * "&symbol == 0" to false (the address of a declared object is assumed
-	 * never NULL) and delete the discovery passthrough below. */
+	/* Volatile keeps the three symbolic head addresses materialised in the
+	 * generated code while preserving one traversal implementation for production
+	 * and FREEALL_PROBE diagnostic builds. */
 	volatile unsigned long headAddr[FREEALL_HEAD_COUNT];
 	struct Task *task;
-	ULONG realAddr;
 	unsigned long li;
 
-	headAddr[0] = (unsigned long)&__freeall_head0;
-	headAddr[1] = (unsigned long)&__freeall_head1;
-	headAddr[2] = (unsigned long)&__freeall_head2;
+	headAddr[0] = (unsigned long)(LibnixErrno + LIBNIX_FREEALL_HEAD0_OFFSET);
+	headAddr[1] = (unsigned long)(LibnixErrno + LIBNIX_FREEALL_HEAD1_OFFSET);
+	headAddr[2] = (unsigned long)(LibnixErrno + LIBNIX_FREEALL_HEAD2_OFFSET);
 
 	probe_str("FREEALL-WRAPPER-ENTER\n");
 
-	/* Discovery build: heads are 0 (--defsym).  Delegate to the exact function
-	 * pointer that FreeAllProbe_Install removed from ___EXIT_LIST__. */
-	if (headAddr[0] == 0UL || headAddr[1] == 0UL || headAddr[2] == 0UL) {
-		realAddr = (ULONG)gFreeAllOriginal;
-		probe_str("FREEALL-DISCOVERY-CALLING-REAL original=");
-		probe_hex32(realAddr);
-		probe_ch('\n');
-		if (gFreeAllOriginal != (void (*)(void))0) {
-			gFreeAllOriginal();
-			probe_str("FREEALL-REAL-RETURNED\n");
-		} else {
-			probe_str("FREEALL-DISCOVERY-NO-ORIGINAL\n");
-		}
-		return;
-	}
 
 #if defined(FREEALL_DANGEROUS_LEAK_CRT_ON_EXIT)
 	probe_str("FREEALL-PROBE DANGEROUS_LEAK_CRT_ON_EXIT: deliberately leaking all remaining CRT allocations\n");
@@ -590,4 +549,4 @@ void FreeAllProbe_Run(void)
 	probe_str("FREEALL-PROBE done\n");
 }
 
-#endif	/* FREEALL_PROBE && AMIGA_M68K */
+#endif	/* AMIGA_M68K */
