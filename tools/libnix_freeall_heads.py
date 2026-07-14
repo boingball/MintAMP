@@ -12,6 +12,11 @@ def heads(binary):
     text = disasm(binary)
     vals = []
     for line in text.splitlines():
+        # The allocator list heads are the absolute movea.l operands annotated
+        # as _errno+offset.  Ignore other absolute movea.l instructions in the
+        # routine, such as the SysBase load before FreeMem.
+        if '_errno+' not in line:
+            continue
         m = MOVEA_RE.search(line)
         if not m:
             continue
