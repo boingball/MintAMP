@@ -77,21 +77,21 @@
  *                 FREEALL_ARMED=1 FREEALL_HEAD0=0xXXXXXXXX \
  *                 FREEALL_HEAD1=0xYYYYYYYY FREEALL_HEAD2=0xZZZZZZZZ
  *
- * --wrap redirects the CRT exit-cleanup reference to ___free_all to the
- * __wrap____free_all defined here.  Nothing else is wrapped: malloc, calloc, realloc,
+ * The probe exports ___free_all itself because --wrap did not intercept this
+ * libnix exit path reliably. Nothing else is wrapped: malloc, calloc, realloc,
  * free and Exec FreeMem keep their normal implementations.
  *
  * ---------------------------------------------------------------------------
  * Required final-binary evidence (see the summary; not runnable without the
  * Bebbo m68k toolchain, which is absent in the environment that wrote this):
  * ---------------------------------------------------------------------------
- *   nm:       __wrap____free_all, gFreeAllProbe and __freeall_head0/1/2
- *             all present (the last three as absolute
- *             symbols whose values are the armed head addresses).
- *   objdump:  the CRT exit-cleanup call site resolves to __wrap____free_all
- *             (NOT ___free_all) -- prove the wrap actually intercepted it;
- *             the three head addresses read by __wrap____free_all equal the
- *             three --defsym values.
+ *   nm:       ___free_all, __wrap____free_all, gFreeAllProbe, __freeall_real
+ *             and __freeall_head0/1/2
+ *             all present (the head symbols and __freeall_real are absolute
+ *             symbols whose values are supplied by Makefile.amiga).
+ *   objdump:  the CRT exit-cleanup call site resolves to this replacement
+ *             ___free_all, and the zero-head discovery path calls the absolute
+ *             __freeall_real address supplied by FREEALL_REAL.
  *
  * ---------------------------------------------------------------------------
  * Reading the result while the recoverable requester is on screen
@@ -136,8 +136,18 @@ typedef int crt_freeall_probe_unit;
 #define FREEALL_MAX_SENSIBLE_SIZE 0x10000000UL
 #endif
 
-/* Our replacement; the linker substitutes it for every ___free_all reference. */
-void FreeAll_Wrap(void) __asm__("___wrap____free_all");
+/* Our replacement intentionally exports the real CRT symbol name.  The
+ * libnix exit path in this toolchain can hold an internally resolved reference
+ * that --wrap does not intercept, so the diagnostic must provide ___free_all
+ * itself rather than merely providing __wrap____free_all. */
+void FreeAll_Wrap(void) __asm__("___free_all");
+
+/* Optional nm/objdump convenience alias.  CRT interception is proved by the
+ * exit path targeting ___free_all, whose address is this function. */
+void FreeAll_WrapAlias(void) __asm__("___wrap____free_all");
+
+/* Linker-defined absolute address of the genuine original ___free_all. */
+extern char __freeall_real[] __asm__("___freeall_real");
 
 /* Linker-defined ABSOLUTE symbols (Makefile: -Wl,--defsym,__freeall_headN=..).
  * Their ADDRESS is the list-head address; only the value changes per build. */
@@ -279,7 +289,25 @@ static void probe_dec32(unsigned long v)
 /* ------------------------------------------------------------------------- */
 /* The replacement.  Complete traversal, always compiled.                    */
 /* ------------------------------------------------------------------------- */
+static void freeall_wrap_body(void);
+
+void FreeAll_WrapAlias(void)
+{
+	freeall_wrap_body();
+}
+
 void FreeAll_Wrap(void)
+{
+	freeall_wrap_body();
+}
+
+static void freeall_call_real(unsigned long realAddr)
+{
+	void (*realFreeAll)(void) = (void (*)(void))realAddr;
+	realFreeAll();
+}
+
+static void freeall_wrap_body(void)
 {
 	/* volatile: __freeall_headN are ABSOLUTE symbols that legitimately take the
 	 * value 0 in a discovery build.  Without volatile, -O3 would fold
@@ -296,12 +324,22 @@ void FreeAll_Wrap(void)
 	headAddr[1] = (unsigned long)&__freeall_head1;
 	headAddr[2] = (unsigned long)&__freeall_head2;
 
-	/* Discovery build: heads are 0 (--defsym).  Do not walk unknown heads.
-	 * This build is for nm/objdump discovery only; run an armed build for
-	 * runtime diagnostics.  Returning here intentionally avoids introducing a
-	 * fragile __real____free_all linker dependency on m68k-amigaos ld. */
+	probe_str("FREEALL-WRAPPER-ENTER\n");
+
+	/* Discovery build: heads are 0 (--defsym).  Delegate to the genuine
+	 * original ___free_all through FREEALL_REAL so discovery remains a normal
+	 * CRT cleanup run while still proving that the CRT exit path entered us. */
 	if (headAddr[0] == 0UL || headAddr[1] == 0UL || headAddr[2] == 0UL) {
-		probe_str("FREEALL-PROBE discovery build: zero head symbol, not walking CRT lists\n");
+		unsigned long realAddr = (unsigned long)&__freeall_real;
+		probe_str("FREEALL-DISCOVERY-CALLING-REAL real=");
+		probe_hex32(realAddr);
+		probe_ch('\n');
+		if (realAddr != 0UL) {
+			freeall_call_real(realAddr);
+			probe_str("FREEALL-REAL-RETURNED\n");
+		} else {
+			probe_str("FREEALL-DISCOVERY-NO-REAL-ADDRESS\n");
+		}
 		return;
 	}
 
