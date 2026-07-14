@@ -198,6 +198,7 @@ static unsigned long gFreeAllSeenCount;
 static void (*gFreeAllOriginal)(void);
 static unsigned long gFreeAllInstallReplacements;
 static void *gFreeAllInstallEntry;
+static unsigned long gFreeAllInstalled;
 
 /* ------------------------------------------------------------------------- */
 /* Non-allocating raw-debug output (Exec RawPutChar, LVO -516).              */
@@ -297,11 +298,22 @@ typedef struct FreeAllExitEntry {
 
 void FreeAllProbe_Install(void)
 {
-	FreeAllExitEntry *entry = (FreeAllExitEntry *)LibnixExitList;
+	FreeAllExitEntry *entry;
 	FreeAllExitEntry *match = (FreeAllExitEntry *)0;
 	void (*func)(void);
 	unsigned long replacements = 0UL;
 	unsigned long i;
+
+	if (gFreeAllInstalled) {
+		probe_str("FREEALL-INSTALL-ALREADY entry=");
+		probe_hex32((unsigned long)gFreeAllInstallEntry);
+		probe_str(" original=");
+		probe_hex32((unsigned long)gFreeAllOriginal);
+		probe_ch('\n');
+		return;
+	}
+
+	entry = (FreeAllExitEntry *)((unsigned char *)LibnixExitList + sizeof(void *));
 
 	for (i = 0; i < FREEALL_EXIT_SCAN_LIMIT; i++) {
 		func = entry[i].func;
@@ -314,6 +326,8 @@ void FreeAllProbe_Install(void)
 	}
 
 	probe_str("FREEALL-INSTALL exitList=");
+	probe_hex32((unsigned long)LibnixExitList);
+	probe_str(" scanBase=");
 	probe_hex32((unsigned long)entry);
 	probe_str(" entry=");
 	probe_hex32((unsigned long)match);
@@ -337,6 +351,7 @@ void FreeAllProbe_Install(void)
 	gFreeAllInstallEntry = (void *)match;
 	match->func = FreeAllProbe_Run;
 	gFreeAllInstallReplacements = replacements;
+	gFreeAllInstalled = 1UL;
 }
 
 void FreeAllProbe_Run(void)
