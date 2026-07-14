@@ -743,6 +743,7 @@ struct RadioStream {
     unsigned int ssl_free_count, ssl_ctx_free_count, socket_close_count, decoder_free_count;
     unsigned int stream_buffer_free_count, audio_buffer_free_count, amissl_cleanup_count;
     unsigned int sslFreed, ctxFreed, socketClosed, cleanupDone;
+    unsigned long generation;
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     /* Which task called Radio_OpenWithHostAddr()/owns this session's
      * Radio_Pump()/Radio_ReadAudio() calls -- the single net worker task
@@ -776,6 +777,7 @@ struct RadioStream {
     volatile int workerAbandoned;
     volatile int workerPumpInProgress;
     volatile int workerCloseRequested;
+    volatile unsigned long workerPumpGeneration;
 #endif
     /* Set once a read/write/connect fault is classified fatal (see
      * radio_ssl_error_is_fatal()): this session is done, permanently. No
@@ -799,6 +801,7 @@ struct RadioStream {
 };
 
 static unsigned long radio_next_session_id = 1;
+static unsigned long radio_current_generation = 0;
 static long radio_active_stream_sessions = 0;
 static long radio_active_stream_tasks = 0;
 static long radio_open_socket_count = 0;
@@ -1178,6 +1181,8 @@ static int radio_is_stopping(const RadioStream *rs)
 {
     if (!rs || rs->stopping || rs->status == RADIO_STATUS_STOPPING || rs->status == RADIO_STATUS_CLOSED)
         return 1;
+    if (rs->generation != radio_current_generation)
+        return 1;
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     if (rs->workerStopRequested || rs->workerClosing || rs->workerCloseRequested || rs->workerDetached)
         return 1;
@@ -1274,6 +1279,7 @@ static void radio_reset_session_state(RadioStream *rs)
     rs->workerAbandoned = 0;
     rs->workerPumpInProgress = 0;
     rs->workerCloseRequested = 0;
+    rs->workerPumpGeneration = 0;
 #endif
 }
 
@@ -1423,7 +1429,8 @@ static void radio_worker_pump_active_streams(void)
         RadioStream *next = rs->workerNext;
         int skip = 0;
         radio_stream_lock(rs);
-        skip = rs->workerStopRequested || rs->workerClosing || rs->workerCloseRequested ||
+        skip = (rs->generation != radio_current_generation) ||
+            rs->workerStopRequested || rs->workerClosing || rs->workerCloseRequested ||
             rs->workerDetached || rs->status == RADIO_STATUS_STOPPING ||
             rs->status == RADIO_STATUS_CLOSED || rs->status == RADIO_STATUS_ERROR;
         radio_stream_unlock(rs);
@@ -1435,7 +1442,8 @@ static void radio_worker_pump_active_streams(void)
             for (budget = 0; budget < 8 && rs->used < rs->size; budget++) {
                 radio_worker_breadcrumb("pump-session", "pump", rs->session_id);
                 radio_stream_lock(rs);
-                if (rs->workerStopRequested || rs->workerClosing || rs->workerCloseRequested ||
+                if (rs->generation != radio_current_generation ||
+                    rs->workerStopRequested || rs->workerClosing || rs->workerCloseRequested ||
                     rs->workerDetached || rs->status == RADIO_STATUS_STOPPING ||
                     rs->status == RADIO_STATUS_CLOSED || rs->status == RADIO_STATUS_ERROR) {
                     radio_stream_unlock(rs);
@@ -1443,18 +1451,21 @@ static void radio_worker_pump_active_streams(void)
                     break;
                 }
                 rs->workerPumpInProgress = 1;
+                rs->workerPumpGeneration = rs->generation;
                 radio_stream_unlock(rs);
                 RADIO_DBG(printf("radio-worker: pump enter session=%lu\n", rs->session_id););
                 if (radio_pump_body(rs) <= 0)
                 {
                     radio_stream_lock(rs);
                     rs->workerPumpInProgress = 0;
+                    rs->workerPumpGeneration = 0;
                     radio_stream_unlock(rs);
                     RADIO_DBG(printf("radio-worker: pump leave session=%lu\n", rs->session_id););
                     break;
                 }
                 radio_stream_lock(rs);
                 rs->workerPumpInProgress = 0;
+                rs->workerPumpGeneration = 0;
                 radio_stream_unlock(rs);
                 RADIO_DBG(printf("radio-worker: pump leave session=%lu\n", rs->session_id););
                 if (rs->status == RADIO_STATUS_ERROR || rs->status == RADIO_STATUS_CLOSED)
@@ -2611,44 +2622,89 @@ static void radio_copy_bytes(char *dst, size_t dstSize, const unsigned char *src
 static void set_error(RadioStream *rs, const char *msg) { if (rs) { radio_stream_lock(rs); radio_copy_string(rs->error,sizeof(rs->error),msg); rs->status = RADIO_STATUS_ERROR; radio_stream_unlock(rs); RADIO_OPEN_DEBUG_PRINTF(("radio-open: %s\n", msg ? msg : "error")); } }
 static void radio_ring_set_canary(RadioStream *rs);
 static int radio_ring_check_canary(RadioStream *rs, const char *where);
+static int radio_ring_validate_locked(RadioStream *rs, const char *where)
+{
+    if (!rs || !rs->ring || !rs->size) return -1;
+    if (rs->used > rs->size || rs->rpos >= rs->size || rs->wpos >= rs->size) {
+        RADIO_DBG(printf("radio-ring: INVALID state session=%lu generation=%lu where=%s fill=%lu capacity=%lu rpos=%lu wpos=%lu closing=%d status=%d url=\"%s\"\n",
+            rs->session_id, rs->generation, where ? where : "",
+            rs->used, rs->size, rs->rpos, rs->wpos, rs->stopping, (int)rs->status, rs->url););
+        rs->stopping = 1;
+        rs->fatalStop = 1;
+        rs->noReconnect = 1;
+        rs->status = RADIO_STATUS_ERROR;
+        radio_copy_string(rs->error, sizeof(rs->error), "Invalid radio ring state");
+        Radio_MarkMemoryPoisoned(where);
+        return -1;
+    }
+    return 0;
+}
+
+static int radio_session_current_locked(RadioStream *rs, const char *where)
+{
+    if (!rs) return 0;
+    if (rs->generation != radio_current_generation || rs->stopping ||
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+        rs->workerClosing || rs->workerCloseRequested || rs->workerDetached ||
+#endif
+        rs->status == RADIO_STATUS_STOPPING || rs->status == RADIO_STATUS_CLOSED ||
+        rs->status == RADIO_STATUS_ERROR) {
+        RADIO_DBG(printf("radio-session: stale/closing access refused session=%lu generation=%lu current=%lu where=%s closing=%d status=%d\n",
+            rs->session_id, rs->generation, radio_current_generation,
+            where ? where : "", rs->stopping, (int)rs->status););
+        return 0;
+    }
+    return 1;
+}
+
 static int ring_write(RadioStream *rs, const unsigned char *p, int n)
 {
-    int written = 0;
+    unsigned long bytes, freeBytes, first, second, beforeWpos, beforeUsed;
     if (!rs || !p || n <= 0 || !rs->ring || !rs->size) return 0;
     if (radio_ring_check_canary(rs, "before ring_write") < 0) return 0;
     radio_stream_lock(rs);
-    while (written < n && rs->used < rs->size) {
-        unsigned long freeBytes = rs->size - rs->used;
-        unsigned long endBytes = rs->size - rs->wpos;
-        unsigned long todo = (unsigned long)(n - written);
-        unsigned long beforeWpos = rs->wpos;
-        unsigned long beforeUsed = rs->used;
-        int wrapped;
-        if (todo > freeBytes) todo = freeBytes;
-        if (todo > endBytes) todo = endBytes;
-        if (todo == 0) break;
-        memcpy(rs->ring + rs->wpos, p + written, (size_t)todo);
-        rs->wpos += todo;
-        if (rs->wpos >= rs->size) rs->wpos = 0;
-        rs->used += todo;
-        written += (int)todo;
-        rs->ringLastWrite = todo;
-        wrapped = (rs->wpos <= beforeWpos && todo > 0) ? 1 : 0;
-        RADIO_DBG(printf("radio-ring: write session=%lu icy_state=%d metaint=%d bytes_to_ring=%lu wpos_before=%lu wpos_after=%lu fill_before=%lu fill_after=%lu free_before=%lu free_after=%lu wrapped=%d url=\"%s\"\n",
-            rs->session_id, (int)rs->parseState, rs->metaint, todo, beforeWpos, rs->wpos,
-            beforeUsed, rs->used, rs->size - beforeUsed, rs->size - rs->used, wrapped, rs->url););
+    if (!radio_session_current_locked(rs, "ring_write") ||
+        radio_ring_validate_locked(rs, "ring_write entry") < 0) {
+        radio_stream_unlock(rs);
+        return 0;
     }
-    if (written == 0) {
+    freeBytes = rs->size - rs->used;
+    bytes = (unsigned long)n;
+    if (bytes > freeBytes) bytes = freeBytes;
+    beforeWpos = rs->wpos;
+    beforeUsed = rs->used;
+    if (bytes == 0) {
         rs->ringLastWrite = 0;
         RADIO_DBG(printf("radio-ring: no write session=%lu icy_state=%d metaint=%d requested=%d fill=%lu ring_free=%lu wpos=%lu capacity=%lu url=\"%s\"\n",
             rs->session_id, (int)rs->parseState, rs->metaint, n, rs->used,
             rs->size > rs->used ? rs->size - rs->used : 0, rs->wpos, rs->size, rs->url););
+        radio_stream_unlock(rs);
+        return 0;
     }
+    first = bytes;
+    if (first > rs->size - rs->wpos) first = rs->size - rs->wpos;
+    second = bytes - first;
+    if (first > rs->size - beforeWpos || second > beforeWpos ||
+        first + second != bytes || bytes > freeBytes) {
+        RADIO_DBG(printf("radio-ring: INVALID write plan session=%lu generation=%lu bytes=%lu free=%lu first=%lu second=%lu wpos=%lu size=%lu\n",
+            rs->session_id, rs->generation, bytes, freeBytes, first, second, beforeWpos, rs->size););
+        rs->stopping = 1; rs->fatalStop = 1; rs->noReconnect = 1; rs->status = RADIO_STATUS_ERROR;
+        radio_stream_unlock(rs);
+        return 0;
+    }
+    memcpy(rs->ring + rs->wpos, p, (size_t)first);
+    if (second) memcpy(rs->ring, p + first, (size_t)second);
+    rs->wpos = (rs->wpos + bytes) % rs->size;
+    rs->used += bytes;
+    rs->ringLastWrite = bytes;
+    RADIO_DBG(printf("radio-ring: write session=%lu generation=%lu icy_state=%d metaint=%d bytes_to_ring=%lu first=%lu second=%lu wpos_before=%lu wpos_after=%lu fill_before=%lu fill_after=%lu free_before=%lu free_after=%lu wrapped=%d url=\"%s\"\n",
+        rs->session_id, rs->generation, (int)rs->parseState, rs->metaint, bytes, first, second,
+        beforeWpos, rs->wpos, beforeUsed, rs->used, freeBytes, rs->size - rs->used, second ? 1 : 0, rs->url););
     radio_stream_unlock(rs);
     radio_ring_check_canary(rs, "after ring_write");
-    return written;
+    return (int)bytes;
 }
-static int ring_read(RadioStream *rs, unsigned char *p, int n) { int i=0; if(!rs||!p||n<=0)return 0; radio_stream_lock(rs); if(!rs->headerDone||!rs->decoderStarted){ RADIO_DBG(printf("radio-guard: ring_read refused session=%lu headerDone=%d decoderStarted=%d firstData=%d status=%d used=%lu\n", rs->session_id, rs->headerDone, rs->decoderStarted, rs->firstDataLogged, (int)rs->status, rs->used);); radio_stream_unlock(rs); return 0; } radio_stream_unlock(rs); if (radio_ring_check_canary(rs, "before ring_read") < 0) return 0; radio_stream_lock(rs); while (i<n && rs->used) { p[i++]=rs->ring[rs->rpos++]; if(rs->rpos>=rs->size)rs->rpos=0; rs->used--; } radio_stream_unlock(rs); radio_ring_check_canary(rs, "after ring_read"); return i; }
+static int ring_read(RadioStream *rs, unsigned char *p, int n) { int i=0; if(!rs||!p||n<=0)return 0; radio_stream_lock(rs); if(!radio_session_current_locked(rs, "ring_read") || radio_ring_validate_locked(rs, "ring_read entry") < 0 || !rs->headerDone||!rs->decoderStarted){ RADIO_DBG(printf("radio-guard: ring_read refused session=%lu headerDone=%d decoderStarted=%d firstData=%d status=%d used=%lu\n", rs->session_id, rs->headerDone, rs->decoderStarted, rs->firstDataLogged, (int)rs->status, rs->used);); radio_stream_unlock(rs); return 0; } radio_stream_unlock(rs); if (radio_ring_check_canary(rs, "before ring_read") < 0) return 0; radio_stream_lock(rs); if (radio_ring_validate_locked(rs, "ring_read locked") < 0) { radio_stream_unlock(rs); return 0; } while (i<n && rs->used) { p[i++]=rs->ring[rs->rpos++]; if(rs->rpos>=rs->size)rs->rpos=0; rs->used--; } radio_stream_unlock(rs); radio_ring_check_canary(rs, "after ring_read"); return i; }
 static int ci_starts(const char *s,const char *p){ while(*p) { if(tolower((unsigned char)*s++)!=tolower((unsigned char)*p++)) return 0; } return 1; }
 static int ci_equals(const char *a,const char *b){ while(*a&&*b){ if(tolower((unsigned char)*a++)!=tolower((unsigned char)*b++)) return 0; } return *a==0&&*b==0; }
 static char *trim(char *s){ char *e; while(*s&&isspace((unsigned char)*s))s++; e=s+strlen(s); while(e>s&&isspace((unsigned char)e[-1]))*--e=0; return s; }
@@ -3340,6 +3396,7 @@ RadioStream *Radio_OpenWithHostAddr(const char *url, int haveHostAddr, unsigned 
     if (!radio_atexit_registered) { atexit(radio_app_exit_report); radio_atexit_registered = 1; }
     radio_reset_session_state(rs);
     rs->session_id = radio_next_session_id++;
+    rs->generation = ++radio_current_generation;
     if (radioMemoryPoisoned) {
         rs->status = RADIO_STATUS_ERROR;
         radio_copy_string(rs->url, sizeof(rs->url), url ? url : "");
@@ -3361,7 +3418,7 @@ RadioStream *Radio_OpenWithHostAddr(const char *url, int haveHostAddr, unsigned 
     radio_active_stream_sessions++;
     radio_active_stream_tasks++;
     rs->streamStateFlags |= STREAM_ALLOCATED;
-    RADIO_DBG(printf("radio-resource: session=%lu stream session/task allocated active_stream_sessions=%ld active_stream_tasks=%ld active_decoder_count=%ld\n", rs->session_id, radio_active_stream_sessions, radio_active_stream_tasks, radio_active_decoder_count););
+    RADIO_DBG(printf("radio-resource: session=%lu generation=%lu stream session/task allocated active_stream_sessions=%ld active_stream_tasks=%ld active_decoder_count=%ld\n", rs->session_id, rs->generation, radio_active_stream_sessions, radio_active_stream_tasks, radio_active_decoder_count););
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     RADIO_DBG(printf("radio-ssl-diag: Radio_Open session=%lu url=\"%s\" inherited AmiSSL state: initialized=%d base=%p ext=%p master=%p ssl_count=%ld ssl_ctx_count=%ld\n",
         rs->session_id, url ? url : "(null)", radio_amissl_initialized, (void *)AmiSSLBase, (void *)AmiSSLExtBase, (void *)AmiSSLMasterBase, radio_active_ssl_count, radio_active_ssl_ctx_count));
@@ -3499,6 +3556,8 @@ void Radio_RequestStop(RadioStream *rs)
     RADIO_DBG(printf("radio-cleanup: close mode=%s session=%lu status=%d (Radio_RequestStop)\n", radio_close_mode_name(mode), rs->session_id, (int)rs->status););
     radio_stream_lock(rs);
     rs->stopping = 1;
+    if (rs->generation == radio_current_generation)
+        radio_current_generation++;
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     rs->workerStopRequested = 1;
     rs->workerCloseRequested = 1;
@@ -3897,6 +3956,12 @@ static int radio_pump_body(RadioStream *rs)
     int headerDoneSnapshot, parseStateSnapshot, audioUntilMetaSnapshot, metaLeftSnapshot;
     if (!rs || rs->status == RADIO_STATUS_ERROR) return -1;
     radio_net_adopt_context(rs);
+    radio_stream_lock(rs);
+    if (!radio_session_current_locked(rs, "radio_pump_body entry")) {
+        radio_stream_unlock(rs);
+        return 0;
+    }
+    radio_stream_unlock(rs);
     if (rs->fatalStop) { set_error(rs, "TLS read failed"); return -1; }
     if (radio_is_stopping(rs)) {
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
@@ -3938,7 +4003,8 @@ static int radio_pump_body(RadioStream *rs)
     }
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     radio_stream_lock(rs);
-    if (rs->workerStopRequested || rs->workerClosing || rs->workerCloseRequested ||
+    if (rs->generation != radio_current_generation ||
+        rs->workerStopRequested || rs->workerClosing || rs->workerCloseRequested ||
         rs->workerDetached || !rs->workerRegistered ||
         rs->status == RADIO_STATUS_STOPPING || rs->status == RADIO_STATUS_CLOSED ||
         rs->status == RADIO_STATUS_ERROR) {
