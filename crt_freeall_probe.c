@@ -124,7 +124,7 @@ typedef int crt_freeall_probe_unit;
 /* Safety bound: only reachable on a corrupted/looping list (itself the fault
  * under investigation); set high enough never to clip a healthy heap. */
 #ifndef FREEALL_MAX_NODES
-#define FREEALL_MAX_NODES 1000000UL
+#define FREEALL_MAX_NODES 65536UL
 #endif
 
 #ifndef FREEALL_SEEN_LIMIT
@@ -484,11 +484,51 @@ void FreeAllProbe_Run(void)
 		void *node = *(void **)headA;
 		unsigned long guard = 0UL;
 
+		if (node == (void *)0) {
+			probe_str("FREEALL-LIST-EMPTY-NULL list=");
+			probe_dec32(li);
+			probe_str(" head=");
+			probe_hex32((ULONG)headA);
+			probe_ch('\n');
+			continue;
+		}
+
+		if (node == (void *)0xffffffffUL) {
+			probe_str("FREEALL-LIST-EMPTY-SENTINEL list=");
+			probe_dec32(li);
+			probe_str(" head=");
+			probe_hex32((ULONG)headA);
+			probe_str(" node=");
+			probe_hex32((ULONG)node);
+			probe_ch('\n');
+			*(void **)headA = (void *)0;
+			continue;
+		}
+
 		while (node != (void *)0) {
-			unsigned char *base = (unsigned char *)node - 4;
-			unsigned long  size = *(unsigned long *)base;
-			void          *next = *(void **)node;
-			unsigned long  flags = freeall_validation_flags(node, next, (void *)base, size);
+			unsigned char *base;
+			unsigned long  size;
+			void          *next;
+			unsigned long  flags;
+
+			if (guard >= FREEALL_MAX_NODES) {
+				probe_str("FREEALL-LIST-LIMIT list=");
+				probe_dec32(li);
+				probe_str(" head=");
+				probe_hex32((ULONG)headA);
+				probe_str(" node=");
+				probe_hex32((ULONG)node);
+				probe_ch('\n');
+				break;
+			}
+			guard++;
+
+			base = (unsigned char *)node - 4;
+			size = *(unsigned long *)base;
+			next = *(void **)node;
+			if (next == (void *)0xffffffffUL)
+				next = (void *)0;
+			flags = freeall_validation_flags(node, next, (void *)base, size);
 
 			++gFreeAllProbe.seq;
 			gFreeAllProbe.list     = li;
@@ -506,19 +546,19 @@ void FreeAllProbe_Run(void)
 			probe_str(" list=");
 			probe_dec32(li);
 			probe_str(" head=");
-			probe_hex32(headA);
+			probe_hex32((ULONG)headA);
 			probe_str(" node=");
-			probe_hex32((unsigned long)node);
+			probe_hex32((ULONG)node);
 			probe_str(" next=");
-			probe_hex32((unsigned long)next);
+			probe_hex32((ULONG)next);
 			probe_str(" base=");
-			probe_hex32((unsigned long)base);
+			probe_hex32((ULONG)base);
 			probe_str(" size=");
 			probe_dec32(size);
 			probe_str(" task=");
-			probe_hex32((unsigned long)task);
+			probe_hex32((ULONG)task);
 			probe_str(" flags=");
-			probe_hex32(flags);
+			probe_hex32((ULONG)flags);
 			probe_str(" state=ABOUT_TO_FREE\n");
 
 			if (gFreeAllSeenCount < (unsigned long)FREEALL_SEEN_LIMIT) {
@@ -527,6 +567,7 @@ void FreeAllProbe_Run(void)
 				gFreeAllSeenCount++;
 			}
 
+			*(void **)headA = next;
 			FreeMem((APTR)base, size);
 
 			gFreeAllProbe.state = FREEALL_STATE_FREE_RETURNED;
@@ -535,16 +576,16 @@ void FreeAllProbe_Run(void)
 			probe_str(" state=FREE_RETURNED\n");
 
 			node = next;
-			if (++guard > FREEALL_MAX_NODES) {
-				probe_str("FREEALL guard-stop list=");
-				probe_dec32(li);
-				probe_ch('\n');
-				break;
-			}
 		}
-
-		*(void **)headA = (void *)0;
 	}
+
+	probe_str("FREEALL-FINAL-HEADS head0=");
+	probe_hex32((ULONG)*(void **)headAddr[0]);
+	probe_str(" head1=");
+	probe_hex32((ULONG)*(void **)headAddr[1]);
+	probe_str(" head2=");
+	probe_hex32((ULONG)*(void **)headAddr[2]);
+	probe_ch('\n');
 
 	probe_str("FREEALL-PROBE done\n");
 }
