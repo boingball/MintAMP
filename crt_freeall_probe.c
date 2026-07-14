@@ -213,7 +213,7 @@ static void probe_ch(char c)
 	__asm volatile ("move.l 4.w,%%a6\n\tjsr -516(%%a6)"
 		: "+d"(d0)
 		:
-		: "a6", "cc", "memory");
+		: "d1", "a0", "a1", "a6", "cc", "memory");
 }
 
 static void probe_str(const char *s)
@@ -222,15 +222,37 @@ static void probe_str(const char *s)
 		probe_ch(*s++);
 }
 
-static void probe_hex32(unsigned long v)
+static void probe_hex32(ULONG value)
 {
 	static const char hexd[] = "0123456789abcdef";
-	int i;
+	ULONG v = value;
+	ULONG digit;
+	int shift;
+
 	probe_ch('0');
 	probe_ch('x');
-	for (i = 28; i >= 0; i -= 4)
-		probe_ch(hexd[(v >> i) & 0xfUL]);
+	for (shift = 28; shift >= 0; shift -= 4) {
+		digit = (v >> shift) & 0x0fUL;
+		probe_ch(hexd[digit]);
+	}
 }
+
+static void probe_hex_selftest(void)
+{
+	ULONG a = 0x12345678UL;
+	ULONG b = 0x89abcdefUL;
+	ULONG c = 0x00000001UL;
+	probe_str("FREEALL-HEX-TEST-A expected=0x12345678 actual=");
+	probe_hex32(a);
+	probe_ch('\n');
+	probe_str("FREEALL-HEX-TEST-B expected=0x89abcdef actual=");
+	probe_hex32(b);
+	probe_ch('\n');
+	probe_str("FREEALL-HEX-TEST-C expected=0x00000001 actual=");
+	probe_hex32(c);
+	probe_ch('\n');
+}
+
 
 
 static unsigned long freeall_seen(void **seen, unsigned long count, void *value)
@@ -304,13 +326,25 @@ void FreeAllProbe_Install(void)
 	unsigned long entryCount = 0UL;
 	unsigned long terminatorFound = 0UL;
 	unsigned long matchCount = 0UL;
+	ULONG exitListSnapshot;
+	ULONG scanBaseSnapshot;
+	ULONG entryCountSnapshot;
+	ULONG terminatorSnapshot;
+	ULONG matchCountSnapshot;
+	ULONG matchingEntrySnapshot;
+	ULONG originalSnapshot;
+	ULONG replacementSnapshot;
 	unsigned long i;
 
+	probe_hex_selftest();
+
 	if (gFreeAllInstalled) {
+		matchingEntrySnapshot = (ULONG)gFreeAllInstallEntry;
+		originalSnapshot = (ULONG)gFreeAllOriginal;
 		probe_str("FREEALL-INSTALL-ALREADY entry=");
-		probe_hex32((unsigned long)gFreeAllInstallEntry);
+		probe_hex32(matchingEntrySnapshot);
 		probe_str(" original=");
-		probe_hex32((unsigned long)gFreeAllOriginal);
+		probe_hex32(originalSnapshot);
 		probe_ch('\n');
 		return;
 	}
@@ -332,29 +366,40 @@ void FreeAllProbe_Install(void)
 		}
 	}
 
+	exitListSnapshot = (ULONG)LibnixExitList;
+	scanBaseSnapshot = (ULONG)entry;
+	entryCountSnapshot = (ULONG)entryCount;
+	terminatorSnapshot = (ULONG)terminatorFound;
+	matchCountSnapshot = (ULONG)matchCount;
+	matchingEntrySnapshot = (ULONG)matchingEntry;
+	originalSnapshot = (ULONG)LibnixFreeAll;
+	replacementSnapshot = (ULONG)FreeAllProbe_Run;
+
 	probe_str("FREEALL-SCAN exitList=");
-	probe_hex32((unsigned long)LibnixExitList);
+	probe_hex32(exitListSnapshot);
 	probe_str(" scanBase=");
-	probe_hex32((unsigned long)entry);
+	probe_hex32(scanBaseSnapshot);
 	probe_str(" entryCount=");
-	probe_hex32(entryCount);
+	probe_hex32(entryCountSnapshot);
 	probe_str(" terminator=");
-	probe_hex32(terminatorFound);
+	probe_hex32(terminatorSnapshot);
 	probe_str(" matchCount=");
-	probe_hex32(matchCount);
+	probe_hex32(matchCountSnapshot);
 	probe_str(" matchingEntry=");
-	probe_hex32((unsigned long)matchingEntry);
+	probe_hex32(matchingEntrySnapshot);
 	probe_str(" original=");
-	probe_hex32((unsigned long)LibnixFreeAll);
+	probe_hex32(originalSnapshot);
 	probe_str(" replacement=");
-	probe_hex32((unsigned long)FreeAllProbe_Run);
+	probe_hex32(replacementSnapshot);
 	probe_ch('\n');
 
 	if (!terminatorFound || matchCount != 1UL || matchingEntry == (FreeAllExitEntry *)0) {
+		terminatorSnapshot = (ULONG)terminatorFound;
+		matchCountSnapshot = (ULONG)matchCount;
 		probe_str("FREEALL-INSTALL-FAILED terminator=");
-		probe_hex32(terminatorFound);
+		probe_hex32(terminatorSnapshot);
 		probe_str(" matchCount=");
-		probe_hex32(matchCount);
+		probe_hex32(matchCountSnapshot);
 		probe_ch('\n');
 		gFreeAllInstallReplacements = matchCount;
 		return;
@@ -366,21 +411,28 @@ void FreeAllProbe_Install(void)
 	gFreeAllInstallReplacements = matchCount;
 
 	if (matchingEntry->func != FreeAllProbe_Run) {
+		matchingEntrySnapshot = (ULONG)matchingEntry;
+		replacementSnapshot = (ULONG)matchingEntry->func;
 		probe_str("FREEALL-INSTALL-VERIFY-FAILED entry=");
-		probe_hex32((unsigned long)matchingEntry);
+		probe_hex32(matchingEntrySnapshot);
 		probe_str(" value=");
-		probe_hex32((unsigned long)matchingEntry->func);
+		probe_hex32(replacementSnapshot);
 		probe_ch('\n');
 		return;
 	}
 
+	matchingEntrySnapshot = (ULONG)matchingEntry;
+	originalSnapshot = (ULONG)gFreeAllOriginal;
+	replacementSnapshot = (ULONG)FreeAllProbe_Run;
 	gFreeAllInstalled = 1UL;
 	probe_str("FREEALL-INSTALL-SUCCESS entry=");
-	probe_hex32((unsigned long)matchingEntry);
+	probe_hex32(matchingEntrySnapshot);
 	probe_str(" original=");
-	probe_hex32((unsigned long)gFreeAllOriginal);
+	probe_hex32(originalSnapshot);
+	probe_str(" originalAgain=");
+	probe_hex32(originalSnapshot);
 	probe_str(" replacement=");
-	probe_hex32((unsigned long)FreeAllProbe_Run);
+	probe_hex32(replacementSnapshot);
 	probe_ch('\n');
 }
 
@@ -392,7 +444,7 @@ void FreeAllProbe_Run(void)
 	 * never NULL) and delete the discovery passthrough below. */
 	volatile unsigned long headAddr[FREEALL_HEAD_COUNT];
 	struct Task *task;
-	unsigned long realAddr;
+	ULONG realAddr;
 	unsigned long li;
 
 	headAddr[0] = (unsigned long)&__freeall_head0;
@@ -404,7 +456,7 @@ void FreeAllProbe_Run(void)
 	/* Discovery build: heads are 0 (--defsym).  Delegate to the exact function
 	 * pointer that FreeAllProbe_Install removed from ___EXIT_LIST__. */
 	if (headAddr[0] == 0UL || headAddr[1] == 0UL || headAddr[2] == 0UL) {
-		realAddr = (unsigned long)gFreeAllOriginal;
+		realAddr = (ULONG)gFreeAllOriginal;
 		probe_str("FREEALL-DISCOVERY-CALLING-REAL original=");
 		probe_hex32(realAddr);
 		probe_ch('\n');
