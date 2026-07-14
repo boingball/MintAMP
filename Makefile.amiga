@@ -143,9 +143,9 @@ endif
 FREEALL_PROBE_CPPFLAGS := -DFREEALL_PROBE
 FREEALL_PROBE_SOURCES := crt_freeall_probe.c
 FREEALL_PROBE_LDFLAGS := -Wl,--wrap,___free_all \
-	-Wl,--defsym,__freeall_head0=$(FREEALL_HEAD0) \
-	-Wl,--defsym,__freeall_head1=$(FREEALL_HEAD1) \
-	-Wl,--defsym,__freeall_head2=$(FREEALL_HEAD2)
+	-Wl,--defsym,___freeall_head0=$(FREEALL_HEAD0) \
+	-Wl,--defsym,___freeall_head1=$(FREEALL_HEAD1) \
+	-Wl,--defsym,___freeall_head2=$(FREEALL_HEAD2)
 endif
 
 # Debug-only heap guard for MiniAMP3's own allocations (front/rear guard

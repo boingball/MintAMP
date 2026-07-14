@@ -140,16 +140,16 @@ typedef int crt_freeall_probe_unit;
 /* The genuine libnix ___free_all, reachable through --wrap.  Called verbatim in
  * discovery (zero heads); referenced in every build so it -- and its symbol --
  * stay in the link for the required disassembly proof. */
-extern void FreeAll_Real(void) __asm__("__real____free_all");
+extern void FreeAll_Real(void) __asm__("___real____free_all");
 
 /* Our replacement; the linker substitutes it for every ___free_all reference. */
-void FreeAll_Wrap(void) __asm__("__wrap____free_all");
+void FreeAll_Wrap(void) __asm__("___wrap____free_all");
 
 /* Linker-defined ABSOLUTE symbols (Makefile: -Wl,--defsym,__freeall_headN=..).
  * Their ADDRESS is the list-head address; only the value changes per build. */
-extern char __freeall_head0[];
-extern char __freeall_head1[];
-extern char __freeall_head2[];
+extern char __freeall_head0[] __asm__("___freeall_head0");
+extern char __freeall_head1[] __asm__("___freeall_head1");
+extern char __freeall_head2[] __asm__("___freeall_head2");
 
 #if defined(FREEALL_DANGEROUS_LEAK_CRT_ON_EXIT)
 /* Deliberately dangerous proof-only mode: never enable in production. */
@@ -210,7 +210,13 @@ static unsigned long gFreeAllSeenCount;
 /* ------------------------------------------------------------------------- */
 static void probe_ch(char c)
 {
-	RawPutChar((UBYTE)c);
+	/* proto/exec.h does not provide an out-of-line RawPutChar symbol in
+	 * every m68k-amigaos configuration, so call the Exec vector directly. */
+	register unsigned long d0 __asm("d0") = (unsigned long)(UBYTE)c;
+	__asm volatile ("move.l 4.w,%%a6\n\tjsr -516(%%a6)"
+		: "+d"(d0)
+		:
+		: "a6", "cc", "memory");
 }
 
 static void probe_str(const char *s)
