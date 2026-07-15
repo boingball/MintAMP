@@ -268,23 +268,25 @@ static void GuiTaskIdentityLog(const char *phase)
 #define GUI_STARTUP_STACK_SIZE 262144UL
 
 #define GUI_WIN_W       560    /* inner width; wide enough for all controls */
-#define GUI_WIN_H       318    /* inner height; compact enough for 640x480 */
+#define GUI_WIN_H       (ROW_FILEINFO + GUI_GADGET_HEIGHT + 3)  /* snug to the last row with a 3px bottom margin: no dead space (forward-refs the ROW_* block below; all resolved before first use) */
 
 #define GUI_MARGIN           6
 #define GUI_ROW_HEIGHT       16
-#define GUI_ROW_GAP          2
-#define GUI_SECTION_GAP      4
+#define GUI_ROW_GAP          1
+#define GUI_SECTION_GAP      2
 #define GUI_LABEL_HEIGHT     8
 #define GUI_GADGET_HEIGHT    14
 #define GUI_CHECKBOX_GAP     5
 #define GUI_CONTROL_GAP      7
 #define GUI_TOP_Y           18     /* leave breathing room below the title bar */
-#define GUI_LABEL_WIDTH     52
+#define GUI_LABEL_WIDTH     78     /* wide enough for the longest left label ("File info:") in topaz 8 */
 #define GUI_LABEL_GAP        6
 #define GUI_FIELD_X         (GUI_MARGIN + GUI_LABEL_WIDTH + GUI_LABEL_GAP)
 #define GUI_RIGHT_X         (GUI_WIN_W - GUI_MARGIN)
 #define GUI_FIELD_W         (GUI_RIGHT_X - GUI_FIELD_X)
 #define META_X              GUI_FIELD_X
+#define FILEINFO_X          (GUI_FIELD_X + 16)   /* nudge the File info row right so its long label clears the left border */
+#define FILEINFO_W          (GUI_RIGHT_X - FILEINFO_X)
 
 #define ART_W               64
 #define ART_H               64
@@ -314,25 +316,34 @@ static void GuiTaskIdentityLog(const char *phase)
 #define OPTION1_X           GUI_FIELD_X
 #define OPTION2_X           (OPTION1_X + CHECK_STEP)
 #define SPEED_X             GUI_FIELD_X
-#define SPEED_W             CYCLE_W_LARGE
-#define FASTMEM_X          (SPEED_X + SPEED_W + GUI_CONTROL_GAP + 72)
+#define SPEED_W             190    /* holds the longest cycle label "22050 Mono Ultrafast" plus the arrow image */
+#define FASTMEM_X          (SPEED_X + SPEED_W + GUI_CONTROL_GAP + 8)
 #define STEREO_X           GUI_FIELD_X
 #define FAKE_X             (STEREO_X + CYCLE_W_SMALL + GUI_CONTROL_GAP + 8)
-#define WIDTH_X            (FAKE_X + CHECK_STEP + 46)
-#define WIDTH_W            70
-#define DELAY_X            (WIDTH_X + WIDTH_W + GUI_CONTROL_GAP + 42)
-#define DELAY_W            62
+#define WIDTH_X            (FAKE_X + CHECK_STEP + 40)
+#define WIDTH_W            96     /* holds "Very wide" without spilling into the Delay label */
+#define DELAY_X            (WIDTH_X + WIDTH_W + GUI_CONTROL_GAP + 60)
+#define DELAY_W            56
 
 #define RATE_X              GUI_FIELD_X
-#define RATE_W              CYCLE_W_MED
-#define QUALITY_X           (RATE_X + RATE_W + GUI_CONTROL_GAP + 58)
-#define QUALITY_W           CYCLE_W_MED
-#define SUBBAND_X           (QUALITY_X + QUALITY_W + GUI_CONTROL_GAP + 66)
-#define SUBBAND_W           112
+#define RATE_W              72
+#define QUALITY_X           (RATE_X + RATE_W + GUI_CONTROL_GAP + 76)
+#define QUALITY_W           76
+#define SUBBAND_X           (QUALITY_X + QUALITY_W + GUI_CONTROL_GAP + 84)
+#define SUBBAND_W           84
 
-#define SLIDER_X            GUI_FIELD_X
-#define SLIDER_VALUE_W      52
-#define SLIDER_W            (GUI_RIGHT_X - SLIDER_X - SLIDER_VALUE_W - GUI_CONTROL_GAP)
+/* Buffer and Volume share one row as two half-width sliders. GadTools draws
+ * each slider's level string ("N sec" / "NNN%") just to the right of its box,
+ * so BUFFER_VALUE_W reserves room for the buffer readout before the Volume
+ * label, and VOLUME_VALUE_W keeps the volume readout inside the right border. */
+#define BUFFER_X            GUI_FIELD_X
+#define BUFFER_W            150
+#define BUFFER_VALUE_W      48      /* "10 sec" (6 chars) in topaz 8 */
+#define VOLUME_LABEL_W      56      /* "Volume:" in topaz 8 */
+#define BUFVOL_GAP          16
+#define VOLUME_X            (BUFFER_X + BUFFER_W + BUFFER_VALUE_W + BUFVOL_GAP + VOLUME_LABEL_W)
+#define VOLUME_W            150
+#define VOLUME_VALUE_W      32      /* "100%" (4 chars) */
 #define TRANSPORT_W         48
 #define TRANSPORT_H         20
 #define TRANSPORT_GAP       GUI_CONTROL_GAP
@@ -357,15 +368,14 @@ static void GuiTaskIdentityLog(const char *phase)
 #define ROW_PLAYBACK        (ROW_SPEED + GUI_ROW_HEIGHT + GUI_ROW_GAP)
 #define ROW_DECODER         (ROW_PLAYBACK + GUI_ROW_HEIGHT + GUI_ROW_GAP)
 #define ROW_CYCLES          (ROW_DECODER + GUI_ROW_HEIGHT + GUI_ROW_GAP)
-#define ROW_BUFFER          (ROW_CYCLES + GUI_ROW_HEIGHT + GUI_SECTION_GAP)
-#define ROW_VOLUME          (ROW_BUFFER + GUI_ROW_HEIGHT + GUI_ROW_GAP)
-#define ROW_PROGRESS        (ROW_VOLUME + GUI_ROW_HEIGHT + GUI_SECTION_GAP)
+#define ROW_BUFVOL          (ROW_CYCLES + GUI_ROW_HEIGHT + GUI_SECTION_GAP)
+#define ROW_PROGRESS        (ROW_BUFVOL + GUI_ROW_HEIGHT + GUI_SECTION_GAP)
 #define ROW_BUTTONS         (ROW_PROGRESS + 18)
 #define ROW_STATUS          (ROW_BUTTONS + TRANSPORT_H + GUI_SECTION_GAP)
 #define ROW_FILEINFO        (ROW_STATUS + GUI_ROW_HEIGHT + GUI_ROW_GAP)
 
-#define PROG_X              GUI_MARGIN
-#define TIME_W              100
+#define PROG_X              (GUI_MARGIN + 4)   /* keep the recessed frame (drawn at PROG_X-4) off the left border */
+#define TIME_W              120                /* fits "-MM:SS / MM:SS" without spilling past the right border */
 #define PROG_W              (GUI_WIN_W - PROG_X - TIME_W - GUI_CONTROL_GAP - GUI_MARGIN)
 #define PROG_H              8
 #define PROG_TOP_Y          (ROW_PROGRESS + 4)
@@ -3908,8 +3918,11 @@ static void DrawProgress(HelixAmp3Gui *gui)
 	}
 
 	SetAPen(rp, gui->win->DetailPen);
+	/* Clear only the time band, not down to the transport row: the old
+	 * height (PROG_TOP_Y + GUI_GADGET_HEIGHT) reached ROW_BUTTONS and wiped
+	 * the top edge of the FLT/Playlist buttons on every clock tick. */
 	RectFill(rp, TIME_X, PROG_TOP_Y - 1,
-		TIME_X + TIME_W, PROG_TOP_Y + GUI_GADGET_HEIGHT);
+		TIME_X + TIME_W, PROG_TOP_Y + PROG_H + 3);
 	SetAPen(rp, 1);
 	textWidth = TextLength(rp, timeBuf, strlen(timeBuf));
 	textX = TIME_X + TIME_W - textWidth;
@@ -4693,9 +4706,12 @@ static void UpdateChannelGadgetState(HelixAmp3Gui *gui)
 {
 	if (!gui->win)
 		return;
+	/* The Stereo/Mono cycle is locked (greyed) whenever the output channel
+	 * count is forced: fake-stereo overrides it, and 22050 Mono Ultrafast
+	 * (cd32Ultrafast) is mono-only, so neither may be switched to Stereo. */
 	if (gui->gadChannelMode)
 		GT_SetGadgetAttrs(gui->gadChannelMode, gui->win, NULL,
-			GA_Disabled, gui->fakeStereo, TAG_DONE);
+			GA_Disabled, (gui->fakeStereo || gui->cd32Ultrafast), TAG_DONE);
 	if (gui->gadFakeStereoWidth)
 		GT_SetGadgetAttrs(gui->gadFakeStereoWidth, gui->win, NULL,
 			GA_Disabled, !gui->fakeStereo, TAG_DONE);
@@ -4875,7 +4891,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		STEREO_X, ROW_PLAYBACK, CYCLE_W_SMALL, GUI_GADGET_HEIGHT, "Stereo:",
 		GTCY_Labels, (ULONG)kChannelModeLabels,
 		GTCY_Active, ChannelModeIndex(gui),
-		GA_Disabled, gui->fakeStereo,
+		GA_Disabled, (gui->fakeStereo || gui->cd32Ultrafast),
 		TAG_IGNORE, 0);
 	if (!gad)
 		return -1;
@@ -4938,13 +4954,13 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadBuffer = gad = MakeSliderGadget(gui, gad, GID_BUFFER,
-		SLIDER_X, ROW_BUFFER, SLIDER_W, "Buffer:",
+		BUFFER_X, ROW_BUFVOL, BUFFER_W, "Buffer:",
 		1, 10, gui->bufferSeconds, "%ld sec", 6, 2);
 	if (!gad)
 		return -1;
 
 	gui->gadVolume = gad = MakeSliderGadget(gui, gad, GID_VOLUME,
-		SLIDER_X, ROW_VOLUME, SLIDER_W, "Volume:",
+		VOLUME_X, ROW_BUFVOL, VOLUME_W, "Volume:",
 		0, 100, gui->volumePercent, "%ld%%", 4, 30);
 	if (!gad)
 		return -1;
@@ -5004,7 +5020,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadFileInfo = gad = MakeGadget(gui, gad, TEXT_KIND, GID_FILEINFO,
-		GUI_FIELD_X, ROW_FILEINFO, GUI_FIELD_W, GUI_GADGET_HEIGHT, "File info:",
+		FILEINFO_X, ROW_FILEINFO, FILEINFO_W, GUI_GADGET_HEIGHT, "File info:",
 		GTTX_Text, (ULONG)gui->fileInfoText,
 		GTTX_Border, TRUE,
 		TAG_IGNORE, 0,
@@ -5338,6 +5354,14 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	}
 	if (gui->smallFont)
 		SetFont(gui->win->RPort, gui->smallFont);
+
+	/* Every gadget is placed at a fixed offset, so a larger window only
+	 * exposes empty grey at the bottom/right (and a smaller one clips
+	 * controls). Pin the window to the size it opened at so the resize
+	 * gadget can't drag dead space into view. */
+	WindowLimits(gui->win,
+		gui->win->Width, gui->win->Height,
+		gui->win->Width, gui->win->Height);
 
 	gui->visualInfo = GetVisualInfo(gui->win->WScreen,
 		TAG_DONE);
@@ -7810,6 +7834,9 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 		if (gui->gadChannelMode)
 			GT_SetGadgetAttrs(gui->gadChannelMode, gui->win, NULL,
 				GTCY_Active, ChannelModeIndex(gui), TAG_DONE);
+		/* 22050 Mono Ultrafast forces mono, so grey the Stereo/Mono cycle
+		 * (and re-enable it when switching back to any other speed mode). */
+		UpdateChannelGadgetState(gui);
 		SetStatus(gui, code == 4 ?
 			"22050 mono ultrafast enabled (reduced taps, 12 subband cap)." :
 			code == 3 ?

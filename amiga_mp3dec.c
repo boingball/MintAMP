@@ -6059,9 +6059,13 @@ static void FakeStereoProcess(FakeStereo *fs, int mono, short *outL, short *outR
 	l = mono + (d >> fs->shift);
 	r = d + (mono >> fs->shift);
 	/* Pseudo-stereo sounds quieter than the real mono path because centre energy
-	 * is spread across channels.  Give it a modest fixed-point makeup gain. */
+	 * is spread across channels.  Give it a modest fixed-point makeup gain.
+	 * R additionally gets 7/4 instead of L's 3/2: it leads with the *delayed*
+	 * copy, and the precedence (Haas) effect makes the lagging side sound
+	 * quieter than the leading L even at equal energy, so the extra boost pulls
+	 * the perceived image back toward centre. */
 	l = (l * 3) / 2;
-	r = (r * 3) / 2;
+	r = (r * 7) / 4;
 	*outL = ClipToS16(l);
 	*outR = ClipToS16(r);
 	fs->hist[fs->pos] = (short)mono;
@@ -6088,12 +6092,14 @@ static int SelftestFakeStereo(void)
 	for (i = 0; i < 2048; i++)
 		FakeStereoProcess(&fs, mono[i], &L[i], &R[i]);
 
-	/* exact cross-delay formula: L = mono + (d>>shift), R = d + (mono>>shift),
-	 * with d = mono[i-delay] (0 during warm-up). */
+	/* exact cross-delay formula with makeup gain: L = (mono + (d>>shift))*3/2,
+	 * R = (d + (mono>>shift))*7/4, with d = mono[i-delay] (0 during warm-up). */
 	for (i = 0; i < 2048; i++) {
 		int d = (i >= delay) ? (int)mono[i - delay] : 0;
-		int el = mono[i] + (d >> shift);
-		int er = d + ((int)mono[i] >> shift);
+		int rawL = mono[i] + (d >> shift);
+		int rawR = d + ((int)mono[i] >> shift);
+		int el = ClipToS16((rawL * 3) / 2);
+		int er = ClipToS16((rawR * 7) / 4);
 		if ((int)L[i] != el || (int)R[i] != er) {
 			printf("fake-stereo formula fail %d: L=%d/%d R=%d/%d\n",
 				i, L[i], el, R[i], er);
@@ -6101,19 +6107,24 @@ static int SelftestFakeStereo(void)
 			break;
 		}
 	}
-	/* energy balance: neither channel is systematically louder.  Measured over
+	/* Energy balance: the raw cross-delay is energy-symmetric, but R carries a
+	 * deliberate makeup boost (7/4 vs L's 3/2) to offset the precedence effect,
+	 * so R should be louder than L by ~ (7/4 / (3/2))^2 = 49/36.  Measured over
 	 * the steady state (past the first `delay` warm-up samples, where R has not
 	 * yet seen any delayed history). */
 	for (i = delay; i < 2048; i++) {
 		sumL2 += (long)L[i] * (long)L[i];
 		sumR2 += (long)R[i] * (long)R[i];
 	}
-	diff = (sumL2 > sumR2) ? (sumL2 - sumR2) : (sumR2 - sumL2);
-	tol = sumL2 / 50;	/* within 2% */
-	if (diff > tol) {
-		printf("fake-stereo energy imbalance: sumL2=%ld sumR2=%ld diff=%ld tol=%ld\n",
-			sumL2, sumR2, diff, tol);
-		failures++;
+	{
+		long expectedR2 = sumL2 * 49 / 36;
+		diff = (sumR2 > expectedR2) ? (sumR2 - expectedR2) : (expectedR2 - sumR2);
+		tol = expectedR2 / 16;	/* within ~6% of the intended boost */
+		if (sumR2 <= sumL2 || diff > tol) {
+			printf("fake-stereo balance off: sumL2=%ld sumR2=%ld expectedR2=%ld diff=%ld tol=%ld\n",
+				sumL2, sumR2, expectedR2, diff, tol);
+			failures++;
+		}
 	}
 	/* width must actually be present (channels differ) */
 	{
