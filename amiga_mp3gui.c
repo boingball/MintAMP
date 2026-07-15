@@ -353,6 +353,18 @@ static void GuiTaskIdentityLog(const char *phase)
 #define PLAY_X              ((GUI_WIN_W - TRANSPORT_GROUP_W) / 2)
 #define NEXT_X              (PLAY_X + TRANSPORT_W + TRANSPORT_GAP)
 #define STOP_X              (NEXT_X + TRANSPORT_W + TRANSPORT_GAP)
+/* Rewind / fast-forward flank the centred Play/Next/Stop group.  They are
+ * narrower than the main transport buttons and sit in the otherwise-empty
+ * space either side of it. */
+#define SEEK_W              40
+#define REWIND_X            (PLAY_X - TRANSPORT_GAP - SEEK_W)
+#define FFWD_X              (STOP_X + TRANSPORT_W + TRANSPORT_GAP)
+/* Seconds jumped per FF/RW click. */
+#define SEEK_STEP_SECS      10
+/* Internet Radio button: sits in the empty left flank of the transport row,
+ * mirroring Filter/Playlist on the right. */
+#define RADIO_BTN_W         64
+#define RADIO_BTN_X         GUI_MARGIN
 #define FILTER_W            54
 #define PL_OPEN_W           70
 #define PL_OPEN_X           (GUI_RIGHT_X - PL_OPEN_W)
@@ -464,10 +476,13 @@ enum {
 	GID_VOLUME,
 	GID_QUALITY,
 	GID_SUBBAND_CAP,
+	GID_REWIND,
 	GID_PLAY,
 	GID_NEXT,
 	GID_STOP,
+	GID_FFWD,
 	GID_HARDWARE_FILTER,
+	GID_RADIO,
 	GID_PLAYLIST,
 	GID_STATUS,
 	GID_RATING_LABEL,
@@ -601,10 +616,13 @@ typedef struct HelixAmp3Gui {
 	struct Gadget  *gadFakeStereo;
 	struct Gadget  *gadFakeStereoWidth;
 	struct Gadget  *gadFakeStereoDelay;
+	struct Gadget  *gadRewind;
 	struct Gadget  *gadPlay;
 	struct Gadget  *gadNext;
 	struct Gadget  *gadStop;
+	struct Gadget  *gadFfwd;
 	struct Gadget  *gadHardwareFilter;
+	struct Gadget  *gadRadio;
 	struct Gadget  *gadPlaylist;
 	struct VisualInfo *visualInfo;
 	struct Window  *plWin;
@@ -3627,9 +3645,39 @@ static void DrawTransportIcons(HelixAmp3Gui *gui)
 	stopX = gui->gadStop->LeftEdge + (gui->gadStop->Width / 2) - 5;
 	stopY = gui->gadStop->TopEdge + (gui->gadStop->Height / 2) - 5;
 	RectFill(rp, stopX, stopY, stopX + 9, stopY + 9);
-	/* Next: two small right-pointing triangles (skip-forward) */
+	/* Rewind: two left-pointing triangles (seek back). */
+	if (gui->gadRewind) {
+		int rwX = gui->gadRewind->LeftEdge + (gui->gadRewind->Width / 2) - 7;
+		int rwY = gui->gadRewind->TopEdge + (gui->gadRewind->Height / 2) - 4;
+		int t;
+		for (t = 0; t < 2; t++) {
+			int ox = rwX + t * 8;
+			for (i = 0; i < 7; i++) {
+				int half = i / 2;
+				RectFill(rp, ox + i, rwY + 3 - half,
+					ox + i, rwY + 3 + half);
+			}
+		}
+	}
+	/* Fast-forward: two right-pointing triangles (seek ahead). */
+	if (gui->gadFfwd) {
+		int ffX = gui->gadFfwd->LeftEdge + (gui->gadFfwd->Width / 2) - 7;
+		int ffY = gui->gadFfwd->TopEdge + (gui->gadFfwd->Height / 2) - 4;
+		int t;
+		for (t = 0; t < 2; t++) {
+			int ox = ffX + t * 8;
+			for (i = 0; i < 7; i++) {
+				int half = (6 - i) / 2;
+				RectFill(rp, ox + i, ffY + 3 - half,
+					ox + i, ffY + 3 + half);
+			}
+		}
+	}
+	/* Next: two right-pointing triangles plus a bar (>>|), the skip-to-next
+	 * glyph.  The trailing bar is what distinguishes it from the fast-forward
+	 * seek button above, which is a plain >> with no bar. */
 	if (gui->gadNext) {
-		nextX = gui->gadNext->LeftEdge + (gui->gadNext->Width / 2) - 7;
+		nextX = gui->gadNext->LeftEdge + (gui->gadNext->Width / 2) - 8;
 		nextY = gui->gadNext->TopEdge + (gui->gadNext->Height / 2) - 4;
 		for (i = 0; i < 7; i++) {
 			int half = (6 - i) / 2;
@@ -3642,6 +3690,8 @@ static void DrawTransportIcons(HelixAmp3Gui *gui)
 			RectFill(rp, nextX + i, nextY + 3 - half,
 				nextX + i, nextY + 3 + half);
 		}
+		nextX += 8;
+		RectFill(rp, nextX, nextY, nextX + 1, nextY + 6);
 	}
 }
 
@@ -4093,6 +4143,50 @@ static void DrawProgressIfChanged(HelixAmp3Gui *gui)
 	DrawProgress(gui);
 	gui->lastDrawnElapsedSecs = gui->elapsedSecs;
 	gui->lastDrawnTotalSecs = gui->totalSecs;
+}
+
+/*
+ * Fast-forward / rewind: hand a target position to the playback child via the
+ * shared gSeek* channel.  Only meaningful for a local track of known length --
+ * live radio and unknown-duration inputs are rejected.  The read-out is nudged
+ * optimistically so the UI responds at once; the next timer tick re-derives the
+ * exact position from the decoder's frame count.
+ */
+static void GuiSeekRelative(HelixAmp3Gui *gui, int deltaSecs)
+{
+	int target;
+	char buf[48];
+
+	if (!gui->playbackActive || gui->playbackDonePending) {
+		SetStatus(gui, "Nothing playing to seek.");
+		return;
+	}
+	if (IsRadioInputName(gui->inputName)) {
+		SetStatus(gui, "Cannot seek a live radio stream.");
+		return;
+	}
+	if (gui->totalSecs <= 0) {
+		SetStatus(gui, "Track length unknown - cannot seek.");
+		return;
+	}
+
+	target = (gui->elapsedSecs - gui->launchBufferSecs) + deltaSecs;
+	if (target < 0)
+		target = 0;
+	if (target > gui->totalSecs)
+		target = gui->totalSecs;
+
+	gSeekTargetSecs = target;
+	gSeekRequest = 1;
+
+	gui->elapsedSecs = target + gui->launchBufferSecs;
+	DrawProgress(gui);
+	gui->lastDrawnElapsedSecs = gui->elapsedSecs;
+	gui->lastDrawnTotalSecs = gui->totalSecs;
+
+	sprintf(buf, "%s to %02d:%02d",
+		deltaSecs < 0 ? "Rewind" : "Fast-forward", target / 60, target % 60);
+	SetStatus(gui, buf);
 }
 
 static void SendTimerRequest(HelixAmp3Gui *gui, ULONG micros)
@@ -5117,6 +5211,15 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 	if (!gad)
 		return -1;
 
+	gui->gadRewind = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_REWIND,
+		REWIND_X, ROW_BUTTONS, SEEK_W, TRANSPORT_H, "",
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
 	gui->gadPlay = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_PLAY,
 		PLAY_X, ROW_BUTTONS, TRANSPORT_W, TRANSPORT_H, "",
 		TAG_IGNORE, 0,
@@ -5144,9 +5247,27 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 	if (!gad)
 		return -1;
 
+	gui->gadFfwd = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_FFWD,
+		FFWD_X, ROW_BUTTONS, SEEK_W, TRANSPORT_H, "",
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
 	gui->gadHardwareFilter = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_HARDWARE_FILTER,
 		FILTER_X, ROW_BUTTONS, FILTER_W, TRANSPORT_H, "",
 		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gui->gadRadio = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_RADIO,
+		RADIO_BTN_X, ROW_BUTTONS, RADIO_BTN_W, TRANSPORT_H, "Radio",
+		GA_Disabled, (ULONG)(gui->hasNetwork ? FALSE : TRUE),
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0);
@@ -6349,6 +6470,70 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 	sprintf(msg, "Buffering - %.140s", app->currentRadioStationName[0] ? app->currentRadioStationName : "Internet Radio");
 	RadioSetStatus(app, msg);
 	StartPlayback(app);
+}
+
+/*
+ * Play the internet stream currently held in gui->inputName straight from the
+ * main window's Play button.  Radio URLs need the same DNS/redirect/codec probe
+ * the radio browser performs before launching the decoder child -- launching
+ * StartPlayback() directly on a bare URL is what produced "stream failed" when
+ * replaying a stopped stream.  This mirrors RadioDoProbeAndPlay()'s tail but
+ * probes an arbitrary URL (rb_probe_stream_url) rather than a browser
+ * selection.  The caller guarantees no playback is currently active.
+ */
+static void RadioReplayCurrentUrl(HelixAmp3Gui *gui)
+{
+	static unsigned char peek[512];
+	RbStreamInfo info;
+	int peekLen = 0;
+	int rc;
+	char msg[256];
+	char url[HELIXAMP3_MAX_PATH];
+	const char *err;
+
+	SafeCopy(url, sizeof(url), gui->inputName);
+	if (Radio_IsMemoryPoisoned()) {
+		SetStatus(gui, "Memory corruption detected; restart MiniAMP3 before playing radio.");
+		return;
+	}
+	if (Radio_PlaybackOwnsNetwork()) {
+		SetStatus(gui, "Radio playback owns networking; stop before probing another stream.");
+		return;
+	}
+	if (!gui->hasHttps && strncmp(url, "https://", 8) == 0) {
+		SetStatus(gui, "HTTPS/TLS streams are not supported yet");
+		return;
+	}
+	if (rb_probe_url_looks_hls(url)) {
+		SetStatus(gui, "HLS stream not supported");
+		return;
+	}
+	memset(&info, 0, sizeof(info));
+	SetStatus(gui, "Checking stream...");
+	rc = rb_probe_stream_url(url, &info, peek, (int)sizeof(peek), &peekLen);
+	if (rc < 0) {
+		err = rb_probe_error_text(rc);
+		SetRadioFailureStatus(gui, (err && err[0]) ? err : "radio stream failed");
+		return;
+	}
+	if (info.codec != RB_STREAM_CODEC_MP3 && info.codec != RB_STREAM_CODEC_AAC &&
+		info.codec != RB_STREAM_CODEC_OGG) {
+		sprintf(msg, "Unsupported stream codec: %s (%.48s)",
+			ProbeCodecName(info.codec), info.content_type);
+		SetStatus(gui, msg);
+		return;
+	}
+	if (!info.final_url[0]) {
+		SetStatus(gui, "Stream probe did not return a playable URL.");
+		return;
+	}
+	SelectInternetStream(gui, info.final_url);
+	gui->haveRadioHostAddr = info.have_host_addr;
+	gui->radioHostAddrBe = info.host_addr_be;
+	sprintf(msg, "Buffering - %.140s",
+		gui->currentRadioStationName[0] ? gui->currentRadioStationName : "Internet Radio");
+	SetStatus(gui, msg);
+	StartPlayback(gui);
 }
 
 static void CloseRadioWindow(HelixAmp3Gui *app)
@@ -8179,7 +8364,14 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 			gui->artRestartPending = 1;
 			gui->artLoading = 1;
 		}
-		StartPlayback(gui);
+		/* Internet streams must be probed (DNS/redirect/codec) before the
+		 * decoder child is launched; launching StartPlayback() directly on a
+		 * bare URL fails with "stream failed".  Route radio inputs through the
+		 * same probe the radio browser uses. */
+		if (IsRadioInputName(gui->inputName))
+			RadioReplayCurrentUrl(gui);
+		else
+			StartPlayback(gui);
 		break;
 	case GID_NEXT:
 		if (gui->playlist.count == 0 || gui->playlist.current < 0) {
@@ -8204,6 +8396,12 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 	case GID_STOP:
 		StopPlayback(gui);
 		break;
+	case GID_REWIND:
+		GuiSeekRelative(gui, -SEEK_STEP_SECS);
+		break;
+	case GID_FFWD:
+		GuiSeekRelative(gui, SEEK_STEP_SECS);
+		break;
 	case GID_HARDWARE_FILTER:
 		gui->hardwareFilter = !gui->hardwareFilter;
 		ApplyHardwareAudioFilter(gui);
@@ -8211,6 +8409,12 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 		SetStatus(gui, gui->hardwareFilter ?
 			"Hardware filter enabled." : "Hardware filter disabled.");
 		SaveGuiSettings(gui);
+		break;
+	case GID_RADIO:
+		if (!gui->hasNetwork)
+			SetStatus(gui, "No TCP/IP stack found - internet radio unavailable.");
+		else
+			OpenRadioWindow(gui);
 		break;
 	case GID_PLAYLIST:
 		if (gui->plWin)

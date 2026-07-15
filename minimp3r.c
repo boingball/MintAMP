@@ -264,6 +264,8 @@ enum {
 	GID_PLAY,
 	GID_NEXT,
 	GID_STOP,
+	GID_REW,
+	GID_FFWD,
 	GID_FILTER,
 	GID_PLAYLIST,
 	GID_RADIO,
@@ -565,6 +567,8 @@ typedef struct MrApp {
 	Object         *playGad;
 	Object         *nextGad;
 	Object         *stopGad;
+	Object         *rewGad;
+	Object         *ffwdGad;
 	Object         *filterGad;
 	Object         *playlistGad;
 	Object         *radioGad;
@@ -2689,12 +2693,16 @@ static int MrOpenWindow(MrApp *app)
 
 	app->nextGad = (Object *)NewObject(BUTTON_GetClass(), NULL,
 	                GA_ID, GID_NEXT, GA_RelVerify, TRUE, GA_Disabled, TRUE, GA_Text, (ULONG)"_Next", TAG_DONE);
+	app->rewGad = (Object *)NewObject(BUTTON_GetClass(), NULL,
+	                GA_ID, GID_REW, GA_RelVerify, TRUE, GA_Text, (ULONG)"<<", TAG_DONE);
+	app->ffwdGad = (Object *)NewObject(BUTTON_GetClass(), NULL,
+	                GA_ID, GID_FFWD, GA_RelVerify, TRUE, GA_Text, (ULONG)">>", TAG_DONE);
 	app->filterGad = (Object *)NewObject(BUTTON_GetClass(), NULL,
 	                GA_ID, GID_FILTER, GA_RelVerify, TRUE, GA_Text, (ULONG)"FLT", TAG_DONE);
 	app->playlistGad = (Object *)NewObject(BUTTON_GetClass(), NULL,
 	                GA_ID, GID_PLAYLIST, GA_RelVerify, TRUE, GA_Text, (ULONG)"Playlist", TAG_DONE);
 	app->radioGad = (Object *)NewObject(BUTTON_GetClass(), NULL,
-	                GA_ID, GID_RADIO, GA_RelVerify, TRUE, GA_Disabled, !app->hasNetwork, GA_Text, (ULONG)"Internet Radio", TAG_DONE);
+	                GA_ID, GID_RADIO, GA_RelVerify, TRUE, GA_Disabled, !app->hasNetwork, GA_Text, (ULONG)"Radio", TAG_DONE);
 
 	app->gaugeGad = (Object *)NewObject(FUELGAUGE_GetClass(), NULL,
 	                FUELGAUGE_Min, 0,
@@ -2738,6 +2746,7 @@ static int MrOpenWindow(MrApp *app)
 		!CheckGadget(app->speedGad, "speed") || !CheckGadget(app->widthGad, "width") ||
 		!CheckGadget(app->delayGad, "delay") || !CheckGadget(app->playGad, "play") ||
 		!CheckGadget(app->nextGad, "next") || !CheckGadget(app->stopGad, "stop") ||
+		!CheckGadget(app->rewGad, "rewind") || !CheckGadget(app->ffwdGad, "fast-forward") ||
 		!CheckGadget(app->filterGad, "filter") || !CheckGadget(app->playlistGad, "playlist") ||
 		!CheckGadget(app->radioGad, "internet radio") ||
 		!CheckGadget(app->gaugeGad, "progress") || !CheckGadget(app->statusGad, "status") ||
@@ -2903,7 +2912,17 @@ static int MrOpenWindow(MrApp *app)
 			TAG_DONE),
 		CHILD_WeightedHeight, 0,
 
-		LAYOUT_AddChild, (ULONG)app->gaugeGad,
+		/* Seek controls flank the progress gauge: [<<] [====gauge====] [>>].
+		 * Kept out of the even-size transport row below so they stay narrow
+		 * and the button row does not grow past the screen edge. */
+		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
+			LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
+			LAYOUT_AddChild, (ULONG)app->rewGad,
+			CHILD_MinWidth, 32, CHILD_MaxWidth, 40, CHILD_WeightedWidth, 0,
+			LAYOUT_AddChild, (ULONG)app->gaugeGad,
+			LAYOUT_AddChild, (ULONG)app->ffwdGad,
+			CHILD_MinWidth, 32, CHILD_MaxWidth, 40, CHILD_WeightedWidth, 0,
+			TAG_DONE),
 		CHILD_WeightedHeight, 0,
 		LAYOUT_AddChild, (ULONG)app->statusGad,
 		CHILD_WeightedHeight, 0,
@@ -4473,6 +4492,53 @@ static void UpdateTimeDisplay(MrApp *app)
 		sprintf(buf, "%s / %s", e, t);
 	}
 	if (app->timeGad && app->win) SetGadgetAttrs((struct Gadget *)app->timeGad, app->win, NULL, STRINGA_TextVal, (ULONG)buf, TAG_DONE);
+}
+
+#define MR_SEEK_STEP_SECS 10
+
+/*
+ * Fast-forward / rewind for the ReAction frontend.  Hands a target position to
+ * the playback child through the shared gSeek* channel (defined in
+ * amiga_mp3dec.c, which this file #includes).  Only local tracks of known
+ * length can seek; live radio and unknown-duration inputs are rejected.  The
+ * read-out is nudged at once and the next status tick re-derives the exact
+ * position from the decoder's frame count.
+ */
+static void MrSeekRelative(MrApp *app, int deltaSecs)
+{
+	int target;
+	char buf[48];
+
+	if (!app->playbackActive || app->playbackDonePending) {
+		SetStatus(app, "Nothing playing to seek.");
+		return;
+	}
+	if (MrIsRadioInput(app->inputName)) {
+		SetStatus(app, "Cannot seek a live radio stream.");
+		return;
+	}
+	if (app->totalSecs <= 0) {
+		SetStatus(app, "Track length unknown - cannot seek.");
+		return;
+	}
+
+	target = app->elapsedSecs + deltaSecs;
+	if (target < 0)
+		target = 0;
+	if (target > app->totalSecs)
+		target = app->totalSecs;
+
+	gSeekTargetSecs = target;
+	gSeekRequest = 1;
+
+	app->elapsedSecs = target;
+	UpdateTimeDisplay(app);
+	SetGauge(app, (app->progressEnabled && app->totalSecs > 0) ?
+		(target * 100) / app->totalSecs : 0);
+
+	sprintf(buf, "%s to %02d:%02d",
+		deltaSecs < 0 ? "Rewind" : "Fast-forward", target / 60, target % 60);
+	SetStatus(app, buf);
 }
 
 static void UpdateRatingDisplay(MrApp *app)
@@ -6249,6 +6315,12 @@ static int MrMainReal(int argc, char **argv)
 						break;
 					case GID_STOP:
 						StopPlayback(&app);
+						break;
+					case GID_REW:
+						MrSeekRelative(&app, -MR_SEEK_STEP_SECS);
+						break;
+					case GID_FFWD:
+						MrSeekRelative(&app, MR_SEEK_STEP_SECS);
 						break;
 					case GID_FILTER:
 						app.hardwareFilter = !app.hardwareFilter;

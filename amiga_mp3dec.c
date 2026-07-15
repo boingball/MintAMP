@@ -6596,7 +6596,7 @@ typedef struct GuiPlaybackStatus {
 	volatile long          spareMs;          /* last measured spare ms before buf end */
 	volatile unsigned long underruns;        /* running total underrun count */
 	volatile unsigned long decodedFrames;    /* MP3 frames decoded so far */
-	volatile int           sampleRate;       /* effective output sample rate (Hz) */
+	volatile int           sampleRate;       /* source/decoder-input rate (Hz) for the progress clock */
 	volatile unsigned long halfBufferMs;     /* selected playback half-buffer duration */
 	volatile unsigned long runId;          /* playback generation that owns this status */
 	volatile int           cleanupComplete;/* audio.device and buffers fully released */
@@ -6623,6 +6623,15 @@ typedef struct GuiPlaybackStatus {
 } GuiPlaybackStatus;
 
 GuiPlaybackStatus gGuiPlaybackStatus;
+
+/* Seek (fast-forward / rewind) request channel.  Both GUI frontends run in the
+ * same AmigaOS address space as the playback child, so a plain volatile pair is
+ * enough: the GUI sets gSeekTargetSecs then raises gSeekRequest, and the decode
+ * loop consumes it on its next buffer fill (see DecodeStreamApplySeek).  Only
+ * seekable local input (file or fast-RAM copy) honours it; radio streams and
+ * the non-MP3 generic path ignore it.  Reset per playback in MP3ResetStatics. */
+volatile int  gSeekRequest;
+volatile long gSeekTargetSecs;
 
 static void GuiCopyVolatileString(volatile char *dst, unsigned long dstSize, const char *src)
 {
@@ -6891,6 +6900,8 @@ int MP3ResetStatics(void)
 	 * MP3DecInfo by MP3InitDecoder(), so they are already fresh per decode.
 	 */
 	gPlaybackInterrupted = 0;
+	gSeekRequest = 0;
+	gSeekTargetSecs = 0;
 	memset((void *)&gGuiPlaybackStatus, 0, sizeof(gGuiPlaybackStatus));
 	gTiming = NULL;
 	MP3SetExperimentalHuffman(0);
@@ -8405,12 +8416,79 @@ static int PlaybackBufferPeakS8(const signed char *buf, unsigned long len)
 	return peak;
 }
 
+/*
+ * Honour a pending GUI seek request.  Estimates the byte offset of the target
+ * second from the source bitrate (exact for CBR, close enough for VBR) and
+ * repositions the input there, then flushes all decode-side buffers so the loop
+ * re-syncs to the next frame.  The progress counter is re-anchored to the new
+ * position (plus the pipeline half-buffer the GUI subtracts back off) so the
+ * time read-out jumps immediately.  A couple of ERR_MP3_MAINDATA_UNDERFLOW
+ * frames right after the jump are expected and handled by the decode loop.
+ */
+static void DecodeStreamApplySeek(DecodeStream *stream, const DecodeOptions *opt)
+{
+	InputSource *input = stream->input;
+	long targetSecs;
+	int sourceRate;
+	int bitrate;
+	unsigned long bytesPerSec;
+	unsigned long baseOffset;
+	unsigned long byteOffset;
+	unsigned long frames;
+	unsigned long halfMs;
+	unsigned long compSecs;
+
+	gSeekRequest = 0;
+	if (!input || input->radio)
+		return;
+	sourceRate = stream->stats ? stream->stats->sampleRate : 0;
+	bitrate    = stream->stats ? stream->stats->bitrate : 0;
+	if (sourceRate <= 0 || bitrate <= 0)
+		return;                 /* nothing decoded yet -- can't place the seek */
+
+	targetSecs = gSeekTargetSecs;
+	if (targetSecs < 0)
+		targetSecs = 0;
+
+	bytesPerSec = (unsigned long)bitrate / 8UL;
+	baseOffset = input->info.firstFrameFound ?
+		input->info.firstFrameOffset : input->info.id3v2SkipBytes;
+	byteOffset = baseOffset + (unsigned long)targetSecs * bytesPerSec;
+	if (input->memory && byteOffset > input->memorySize)
+		byteOffset = input->memorySize;
+
+	InputSourceSeek(input, byteOffset);
+	/* The prefix buffer holds the first bytes of the file; after a seek those
+	 * bytes are at the wrong position, so mark it fully consumed. */
+	input->prefixPos = input->prefixSize;
+
+	stream->readPtr = stream->readBuf;
+	stream->bytesLeft = 0;
+	stream->eofReached = 0;
+	stream->outOfData = 0;
+	stream->decodeError = 0;
+	stream->spillPos = 0;
+	stream->spillCount = 0;
+	stream->planarSpillPos = 0;
+	stream->planarSpillCount = 0;
+	stream->rateState.phase = 0;
+
+	frames = (unsigned long)targetSecs * (unsigned long)sourceRate / 1152UL;
+	halfMs = gGuiPlaybackStatus.halfBufferMs;
+	compSecs = halfMs ? (halfMs + 999UL) / 1000UL : (unsigned long)opt->bufferSeconds;
+	frames += compSecs * (unsigned long)sourceRate / 1152UL;
+	stream->stats->decodedFrames = frames;
+	gGuiPlaybackStatus.decodedFrames = frames;
+}
+
 static unsigned long DecodeStreamFillPlaybackBuffer(DecodeStream *stream,
 	const DecodeOptions *opt, AmigaAudioPlayer *player, int index,
 	signed char *buf, unsigned long maxBytes)
 {
 	if (gPlaybackInterrupted)
 		return 0;
+	if (gSeekRequest)
+		DecodeStreamApplySeek(stream, opt);
 	if (opt->stereo) {
 		signed char *left = player->splitWorkBuf[index][0] ?
 			player->splitWorkBuf[index][0] : player->splitBuf[index][0];
@@ -10247,7 +10325,12 @@ static int AmigaPlayStreamingGeneric(InputSource *input,
 	stats->sampleRate      = (int)sinfo->sampleRate;
 	stats->channels        = (int)sinfo->channels;
 	stats->outputSampleRate = playbackRate;
-	gGuiPlaybackStatus.sampleRate  = playbackRate;
+	/* Publish the SOURCE sample rate for the progress clock: decodedFrames
+	 * counts source frames of 1152 samples each, so the GUI computes elapsed
+	 * as frames*1152/sampleRate.  Using the (possibly downsampled) Paula output
+	 * rate here made the progress bar run fast -- effectiveRate carries the
+	 * output rate for anything that needs it. */
+	gGuiPlaybackStatus.sampleRate  = (int)sinfo->sampleRate;
 	gGuiPlaybackStatus.effectiveRate = playbackRate;
 	gGuiPlaybackStatus.requestedRate = opt->outputRate;
 
@@ -10852,7 +10935,10 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 	if (playbackRate <= 0)
 		playbackRate = opt->outputRate > 0 ? opt->outputRate : 8287;
 	stats->outputSampleRate = playbackRate;
-	gGuiPlaybackStatus.sampleRate = playbackRate;
+	/* Publish the SOURCE (decoder input) rate for the progress clock, not the
+	 * downsampled Paula output rate -- see note in the generic path above.
+	 * effectiveRate keeps the actual output rate. */
+	gGuiPlaybackStatus.sampleRate = inputSampleRate > 0 ? inputSampleRate : playbackRate;
 	gGuiPlaybackStatus.effectiveRate = playbackRate;
 	GuiPublishStartupStage(GUISTART_STREAM_INIT);
 	if (AmigaPlaybackStopRequested(opt, "before stream init"))
@@ -11123,7 +11209,12 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 		gGuiPlaybackStatus.spareMs = spareMilliseconds;
 		gGuiPlaybackStatus.underruns = stats->underruns;
 		gGuiPlaybackStatus.decodedFrames = stats->decodedFrames;
-		if (stream.effectiveRate)
+		/* Progress clock wants the source rate (frames*1152 are source
+		 * samples); fall back to the effective output rate until the first
+		 * frame reports the stream's real rate. */
+		if (stream.stats && stream.stats->sampleRate)
+			gGuiPlaybackStatus.sampleRate = stream.stats->sampleRate;
+		else if (stream.effectiveRate)
 			gGuiPlaybackStatus.sampleRate = stream.effectiveRate;
 		if (underrun)
 			GuiSetPlaybackPhase(GUIPLAY_PHASE_UNDERRUN);
