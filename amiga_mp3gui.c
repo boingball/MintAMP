@@ -197,6 +197,7 @@ static char gSupportedExtPattern[512];
 #include <proto/timer.h>
 /* #include <graphics/colormap.h> */
 #include "picojpeg.h"
+#include "lodepng.h"
 #include "radio_stream.h"
 #include "radio_browser_controller.h"
 #ifndef OBP_FailIfBad
@@ -404,14 +405,28 @@ static void GuiTaskIdentityLog(const char *phase)
 #endif
 
 /* Radio Browser station-favicon artwork, ported from minimp3r's
- * ReAction frontend.  JPEG and ICO favicons are decoded (dispatched on
- * magic bytes, never URL extension or Content-Type); PNG is intentionally
- * not supported here since GadTools does not link lodepng (see
- * Makefile.amiga) and this frontend targets lower-spec/lower-memory
- * systems than minimp3r.  Disable entirely with -DENABLE_RADIO_ARTWORK=0.
- * Never touches the MP3/ICY stream either way. */
+ * ReAction frontend.  PNG, JPEG and ICO favicons are decoded (dispatched
+ * on magic bytes, never URL extension or Content-Type).  PNG is the most
+ * common real-world favicon format, so it is decoded here too via lodepng
+ * (the same decoder minimp3r uses -- lodepng.c must be listed in the
+ * GadTools frontend's GUI_SOURCES, see Makefile.amiga).  Disable the
+ * whole artwork feature with -DENABLE_RADIO_ARTWORK=0, or just the PNG
+ * path with -DENABLE_PNG_ARTWORK=0 (and drop lodepng.c from GUI_SOURCES
+ * to also shrink the binary).  Never touches the MP3/ICY stream either
+ * way. */
 #ifndef ENABLE_RADIO_ARTWORK
 #define ENABLE_RADIO_ARTWORK 1
+#endif
+/* PNG favicon decode is only meaningful when the artwork feature is on;
+ * force it off when artwork is compiled out so the guard below never pulls
+ * in lodepng calls for a disabled feature. */
+#if ENABLE_RADIO_ARTWORK
+#ifndef ENABLE_PNG_ARTWORK
+#define ENABLE_PNG_ARTWORK 1
+#endif
+#else
+#undef ENABLE_PNG_ARTWORK
+#define ENABLE_PNG_ARTWORK 0
 #endif
 #define HELIXAMP3_FAVICON_MAX_BYTES (256L * 1024L)
 
@@ -2925,9 +2940,10 @@ static int GuiIsJpegMagic(const unsigned char *data, int bytes)
 	return bytes >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF;
 }
 
-/* Detected only to skip a PNG-encoded ICO entry gracefully (GadTools does
- * not link a PNG decoder -- see the ENABLE_RADIO_ARTWORK comment above);
- * never decoded. */
+/* Detects the 8-byte PNG signature.  Used both to dispatch a standalone
+ * PNG favicon to DecodeFaviconPngToGrey() and to recognise a PNG-encoded
+ * ICO entry so it can be decoded (or, if ENABLE_PNG_ARTWORK is off,
+ * skipped) rather than mis-fed to the DIB decoder. */
 static int GuiIsPngMagic(const unsigned char *data, int bytes)
 {
 	static const unsigned char sig[8] = { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
@@ -3064,6 +3080,121 @@ static int DecodeFaviconJpegToGrey(const unsigned char *jpegData, unsigned long 
 	return 0;
 }
 
+#if ENABLE_PNG_ARTWORK
+/* Decodes a PNG favicon via lodepng into the same downsampled grey/RGB
+ * thumbnail buffers DecodeFaviconJpegToGrey() produces, so the rest of the
+ * artwork pipeline (cache, dithered/colour rendering) doesn't need to know
+ * which decoder ran.  Ported from minimp3r's DecodePngToGrey().
+ *
+ * lodepng_inspect() reads just the IHDR header first so an oversized PNG is
+ * rejected before lodepng_decode32() would malloc width*height*4 bytes for
+ * it -- the 256KB download cap bounds the compressed input, but a small PNG
+ * can still declare huge dimensions.  lodepng_decode32() normalises every
+ * PNG colour type / bit depth (palette, greyscale, RGB, 16-bit, alpha) to
+ * 8-bit RGBA, so all the favicon variants seen in the wild decode through
+ * this one path; alpha is then ignored (treated as opaque), matching the
+ * JPEG path -- favicons are rarely meaningfully transparent. */
+static int DecodeFaviconPngToGrey(const unsigned char *pngData, unsigned long pngBytes,
+	unsigned char *greyOut, unsigned char *rgbOut, int outW, int outH)
+{
+	LodePNGState state;
+	unsigned pw = 0, ph = 0, err;
+	unsigned char *image;
+	unsigned char xMap[MAX_JPEG_DIM];
+	unsigned char yMap[MAX_JPEG_DIM];
+	static unsigned long greyAccum[ART_W * ART_H];
+	static unsigned long rAccum[ART_W * ART_H];
+	static unsigned long gAccum[ART_W * ART_H];
+	static unsigned long bAccum[ART_W * ART_H];
+	static unsigned short greyCount[ART_W * ART_H];
+	unsigned x, y;
+	int i;
+
+	if (!pngData || pngBytes <= 8 || !greyOut ||
+		outW <= 0 || outW > ART_W || outH <= 0 || outH > ART_H)
+		return -1;
+
+	lodepng_state_init(&state);
+	err = lodepng_inspect(&pw, &ph, &state, pngData, (size_t)pngBytes);
+	lodepng_state_cleanup(&state);
+	if (err) {
+		RADIO_DBG(printf("radio-art: lodepng_inspect failed err=%u (%s)\n",
+			err, lodepng_error_text(err));)
+		return -1;
+	}
+	if (pw == 0 || ph == 0 || pw > MAX_JPEG_DIM || ph > MAX_JPEG_DIM) {
+		RADIO_DBG(printf("radio-art: png dimensions out of range %ux%u (max %d)\n",
+			pw, ph, MAX_JPEG_DIM);)
+		return -1;
+	}
+
+	Radio_CheckMiniMem("favicon-png: before lodepng_decode32");
+	image = NULL;
+	err = lodepng_decode32(&image, &pw, &ph, pngData, (size_t)pngBytes);
+	Radio_CheckMiniMem("favicon-png: after lodepng_decode32");
+	if (err || !image) {
+		RADIO_DBG(printf("radio-art: lodepng_decode32 failed err=%u (%s)\n",
+			err, lodepng_error_text(err));)
+		if (image) {
+			/* image is malloc()'d inside lodepng.c (a separate translation
+			 * unit) and released with the matching free(); it is a private
+			 * decode buffer owned only here. */
+			free(image);
+			image = NULL;
+		}
+		return -1;
+	}
+	RADIO_DBG(printf("radio-art: png %ux%u decoded ok\n", pw, ph);)
+
+	memset(greyOut, 0x80, (size_t)(outW * outH));
+	if (rgbOut)
+		memset(rgbOut, 0x80, (size_t)(outW * outH * 3));
+	memset(greyAccum, 0, sizeof(greyAccum));
+	memset(rAccum, 0, sizeof(rAccum));
+	memset(gAccum, 0, sizeof(gAccum));
+	memset(bAccum, 0, sizeof(bAccum));
+	memset(greyCount, 0, sizeof(greyCount));
+
+	for (x = 0; x < pw; x++)
+		xMap[x] = (unsigned char)(((unsigned long)x * (unsigned long)outW) / pw);
+	for (y = 0; y < ph; y++)
+		yMap[y] = (unsigned char)(((unsigned long)y * (unsigned long)outH) / ph);
+
+	for (y = 0; y < ph; y++) {
+		const unsigned char *row = image + 4UL * (unsigned long)y * (unsigned long)pw;
+		int dstY = yMap[y];
+
+		for (x = 0; x < pw; x++) {
+			const unsigned char *px = row + 4 * x;
+			unsigned char r = px[0], g = px[1], b = px[2];
+			int dst = dstY * outW + xMap[x];
+
+			greyAccum[dst] += (77UL * r + 150UL * g + 29UL * b + 128UL) >> 8;
+			rAccum[dst] += r; gAccum[dst] += g; bAccum[dst] += b;
+			if (greyCount[dst] != 0xffff) greyCount[dst]++;
+		}
+	}
+	free(image);
+	image = NULL;
+	Radio_CheckMiniMem("favicon-png: after free");
+
+	for (i = 0; i < outW * outH; i++) {
+		if (greyCount[i]) {
+			unsigned short c = greyCount[i];
+			unsigned long half = (unsigned long)c >> 1;
+
+			greyOut[i] = (unsigned char)((greyAccum[i] + half) / c);
+			if (rgbOut) {
+				rgbOut[i * 3    ] = (unsigned char)((rAccum[i] + half) / c);
+				rgbOut[i * 3 + 1] = (unsigned char)((gAccum[i] + half) / c);
+				rgbOut[i * 3 + 2] = (unsigned char)((bAccum[i] + half) / c);
+			}
+		}
+	}
+	return 0;
+}
+#endif /* ENABLE_PNG_ARTWORK */
+
 /* Decodes the raw BITMAPINFOHEADER-style DIB embedded in a legacy
  * (non-PNG) ICO entry.  Only the depths real-world icon tools actually
  * emit are supported (32/24/8bpp, uncompressed); 4bpp/1bpp and
@@ -3183,8 +3314,9 @@ static int GuiIcoEntryCompare(const void *pa, const void *pb)
  * sizes/depths.  Entries are tried largest-first for the best quality once
  * downsampled to the ART_W x ART_H thumbnail, falling through to a
  * smaller/other entry if the chosen one can't be decoded -- e.g. a
- * PNG-encoded entry (no PNG decoder in this frontend) or a legacy
- * 4bpp/1bpp DIB.  Ported from minimp3r's DecodeIcoToGrey(). */
+ * PNG-encoded entry (decoded via lodepng when ENABLE_PNG_ARTWORK is on,
+ * otherwise skipped) or a legacy 4bpp/1bpp DIB.  Ported from minimp3r's
+ * DecodeIcoToGrey(). */
 static int DecodeIcoToGrey(const unsigned char *icoData, unsigned long icoBytes,
 	unsigned char *greyOut, unsigned char *rgbOut, int outW, int outH)
 {
@@ -3226,8 +3358,17 @@ static int DecodeIcoToGrey(const unsigned char *icoData, unsigned long icoBytes,
 		const unsigned char *payload = icoData + entries[i].offset;
 		unsigned long payloadBytes = entries[i].size;
 
-		if (GuiIsPngMagic(payload, (int)payloadBytes))
+		if (GuiIsPngMagic(payload, (int)payloadBytes)) {
+#if ENABLE_PNG_ARTWORK
+			if (DecodeFaviconPngToGrey(payload, payloadBytes, greyOut,
+				rgbOut, outW, outH) == 0)
+				return 0;
+#endif
+			/* PNG entry we can't (or won't) decode -- fall through to a
+			 * smaller/legacy-DIB entry rather than mis-feeding PNG bytes
+			 * to the DIB decoder. */
 			continue;
+		}
 		if (DecodeIcoDibToGrey(payload, payloadBytes, greyOut, rgbOut,
 			outW, outH) == 0)
 			return 0;
@@ -3316,6 +3457,17 @@ static int LoadRadioFaviconImage(HelixAmp3Gui *gui)
 		gui->artValid = 1;
 		return 1;
 	}
+#if ENABLE_PNG_ARTWORK
+	if (GuiIsPngMagic(response, bytes)) {
+		if (DecodeFaviconPngToGrey(response, (unsigned long)bytes, gui->artGreyBuf,
+			gui->artRGBBuf, ART_W, ART_H) != 0) {
+			RADIO_DBG(printf("radio-art: png decode failed\n");)
+			return 0;
+		}
+		gui->artValid = 1;
+		return 1;
+	}
+#endif
 	RADIO_DBG(printf("radio-art: rejected, unsupported favicon format (first bytes %02X %02X %02X %02X)\n",
 		response[0], response[1], response[2], response[3]);)
 	return 0;

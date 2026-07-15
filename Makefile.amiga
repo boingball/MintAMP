@@ -130,12 +130,14 @@ ifneq ($(filter 1 yes true on,$(HEAPGUARD)),)
 DEBUG_CPPFLAGS += -DMINIAMP_DEBUG_ALLOC
 endif
 
-# PNG favicon decoding for minimp3r's radio artwork (lvandeve/lodepng,
-# vendored as lodepng.c/.h).  Decoder-only, no encoder/disk-IO/ancillary
-# chunk support compiled in -- minimp3r feeds it an in-memory buffer
-# directly, same as the JPEG path.  Disable with -DENABLE_PNG_ARTWORK=0 in
-# EXTRA_CFLAGS and drop lodepng.c from GUIR_SOURCES below to also shrink
-# the binary; the C-level guard alone only skips the decode calls.
+# PNG favicon decoding for the radio artwork feature (lvandeve/lodepng,
+# vendored as lodepng.c/.h).  Used by both the minimp3r (ReAction) and the
+# amiga_mp3gui (GadTools) frontends.  Decoder-only, no encoder/disk-IO/
+# ancillary chunk support compiled in -- both frontends feed it an
+# in-memory buffer directly, same as the JPEG path.  Disable with
+# -DENABLE_PNG_ARTWORK=0 in EXTRA_CFLAGS and drop lodepng.c from the
+# relevant *_SOURCES below to also shrink the binary; the C-level guard
+# alone only skips the decode calls.
 PNG_CPPFLAGS := -DENABLE_PNG_ARTWORK -DLODEPNG_NO_COMPILE_ENCODER \
 	-DLODEPNG_NO_COMPILE_DISK -DLODEPNG_NO_COMPILE_ANCILLARY_CHUNKS
 
@@ -148,16 +150,16 @@ PNG_CPPFLAGS := -DENABLE_PNG_ARTWORK -DLODEPNG_NO_COMPILE_ENCODER \
 SOURCES := amiga_mp3dec.c miniamp_memguard.c radio_runtime_flags.c $(RADIO_SOURCES) $(DECODER_SOURCES)
 # miniamp_memguard.c compiles to nothing unless HEAPGUARD=1 (see
 # MINIAMP_DEBUG_ALLOC above), so it's harmless to always list it.
-GUI_SOURCES := amiga_mp3gui.c picojpeg.c miniamp_memguard.c radio_runtime_flags.c $(RADIO_SOURCES) \
+GUI_SOURCES := amiga_mp3gui.c picojpeg.c lodepng.c miniamp_memguard.c radio_runtime_flags.c $(RADIO_SOURCES) \
 	radio_browser_controller.c radio_browser.c radio_browser_url.c \
 	radio_browser_http.c radio_browser_json.c radio_stream_probe.c
 # miniamp3 uses gadtools.library via proto/gadtools.h; no linker flag is needed.
 # minimp3r is the ReAction/ClassAct frontend; it pulls amiga_mp3dec.c in itself
 # (like amiga_mp3gui.c) so only the shared decoder modules are listed here.  The
 # ReAction classes are opened at runtime, so no extra linker flag is needed.
-# lodepng.c/svgdec.c are only needed here -- the radio favicon artwork
-# feature (and its PNG/SVG support) is minimp3r-only, not wired into the
-# GadTools frontend above.
+# lodepng.c is now linked into the GadTools frontend too (PNG is the most
+# common favicon format); svgdec.c remains minimp3r-only, so SVG favicon
+# support is not wired into the GadTools frontend above.
 GUIR_SOURCES := minimp3r.c picojpeg.c lodepng.c svgdec.c miniamp_memguard.c radio_runtime_flags.c $(RADIO_SOURCES) \
 	radio_browser_controller.c radio_browser.c radio_browser_url.c \
 	radio_browser_http.c radio_browser_json.c radio_stream_probe.c
@@ -259,11 +261,11 @@ gui-halfasm-test: $(GUI_HALFASM_TEST_TARGET)
 
 $(GUI_TARGET): $(GUI_SOURCES) amiga_mp3dec.c $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(LIBNIX_FREEALL_COMPAT_SOURCES)
 	set -e; \
-	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(PROBE_CPPFLAGS) $(SSL_CPPFLAGS) $(SSLCERTS_CPPFLAGS) $(DEBUG_CPPFLAGS) $(FREEALL_PROBE_CPPFLAGS) $(EXTRA_CFLAGS) \
+	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(PROBE_CPPFLAGS) $(SSL_CPPFLAGS) $(SSLCERTS_CPPFLAGS) $(PNG_CPPFLAGS) $(DEBUG_CPPFLAGS) $(FREEALL_PROBE_CPPFLAGS) $(EXTRA_CFLAGS) \
 		-o $@.freeall-discovery $(GUI_SOURCES) $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(LIBNIX_FREEALL_COMPAT_SOURCES) $(FREEALL_DISCOVERY_LDFLAGS); \
 	$(FREEALL_HEAD_EXTRACT) --shell $@.freeall-discovery > $@.freeall-heads; \
 	. ./$@.freeall-heads; \
-	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(PROBE_CPPFLAGS) $(SSL_CPPFLAGS) $(SSLCERTS_CPPFLAGS) $(DEBUG_CPPFLAGS) $(FREEALL_PROBE_CPPFLAGS) $(EXTRA_CFLAGS) \
+	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(PROBE_CPPFLAGS) $(SSL_CPPFLAGS) $(SSLCERTS_CPPFLAGS) $(PNG_CPPFLAGS) $(DEBUG_CPPFLAGS) $(FREEALL_PROBE_CPPFLAGS) $(EXTRA_CFLAGS) \
 		-o $@ $(GUI_SOURCES) $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(LIBNIX_FREEALL_COMPAT_SOURCES) $$FREEALL_LDFLAGS; \
 	$(FREEALL_HEAD_EXTRACT) $@ --verify $$FREEALL_HEAD0 $$FREEALL_HEAD1 $$FREEALL_HEAD2
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
@@ -299,7 +301,7 @@ $(FAST030_HALFASM_TEST_TARGET): $(SOURCES) $(FAST030_ASM_SOURCES)
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
 
 $(GUI_HALFASM_TEST_TARGET): $(GUI_SOURCES) amiga_mp3dec.c $(DECODER_SOURCES) $(FAST030_ASM_SOURCES)
-	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(HALFASM_TEST_CPPFLAGS) $(EXTRA_CFLAGS) \
+	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(HALFASM_TEST_CPPFLAGS) $(PNG_CPPFLAGS) $(EXTRA_CFLAGS) \
 		-o $@ $(GUI_SOURCES) $(DECODER_SOURCES) $(FAST030_ASM_SOURCES)
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
 
@@ -308,7 +310,7 @@ print-command:
 	@printf '%s\n' '$(AMIGA_HUNK_FAST_PREFERRED) $(TARGET)'
 
 print-gui-command:
-	@printf '%s\n' '$(CC) $(CFLAGS_COMMON) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(EXTRA_CFLAGS) -o $(GUI_TARGET) $(GUI_SOURCES)'
+	@printf '%s\n' '$(CC) $(CFLAGS_COMMON) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(PNG_CPPFLAGS) $(EXTRA_CFLAGS) -o $(GUI_TARGET) $(GUI_SOURCES)'
 	@printf '%s\n' '$(AMIGA_HUNK_FAST_PREFERRED) $(GUI_TARGET)'
 
 print-guir-command:

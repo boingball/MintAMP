@@ -41,20 +41,92 @@ static int RadioBrowserControllerLockedPrintf(const char *fmt, ...)
 
 /* Radio Browser is a mirror network and clients are expected to fail over:
  * a single hardcoded mirror meant one slow/dead mirror turned every search
- * into "Search failed" for the rest of the app's life.  Each search tries
- * the last mirror that worked first, then rotates through the others;
- * whichever answers becomes the preferred mirror for the next search.
- * "all.api.radio-browser.info" is the project's round-robin DNS record and
- * doubles as a catch-all for mirrors this list doesn't know about. */
+ * into "Search failed" for the rest of the app's life.
+ *
+ * Per the Radio Browser API guide, the client is supposed to randomize the
+ * mirror list and, on failure, retry with the next entry.  Each search here
+ * tries the last mirror that answered first (a fast path when the network
+ * is healthy), then falls through the REMAINING mirrors in a fresh random
+ * order -- so a persistently slow/dead mirror can't wedge every cold start
+ * at the front of a fixed list, and load is spread across the network.
+ * Whichever mirror answers becomes the preferred mirror for the next search.
+ *
+ * The named mirrors are long-standing servers; "all.api.radio-browser.info"
+ * is the project's round-robin DNS record and doubles as a catch-all for
+ * mirrors this list doesn't know about (and for when the named ones are
+ * down). */
 static const char *rb_controller_hosts[] = {
     RB_CONTROLLER_DEFAULT_HOST,
     "de2.api.radio-browser.info",
+    "at1.api.radio-browser.info",
+    "nl1.api.radio-browser.info",
     "fi1.api.radio-browser.info",
     "all.api.radio-browser.info"
 };
 #define RB_CONTROLLER_HOST_COUNT \
     ((int)(sizeof(rb_controller_hosts) / sizeof(rb_controller_hosts[0])))
 static int rb_controller_preferred_host = 0;
+
+/* Weak PRNG used only to shuffle the mirror order -- no cryptographic or
+ * statistical quality needed, just enough variation that consecutive
+ * searches (and cold starts across launches) don't always probe the mirrors
+ * in the same order.  State is static so it advances across searches; it is
+ * lazily seeded once from a stack address so different runs start from a
+ * different sequence without needing a clock/time() call on AmigaOS. */
+static unsigned long rb_controller_rng_state = 0;
+
+static unsigned long rb_controller_rand(void)
+{
+    unsigned long x;
+
+    if (rb_controller_rng_state == 0) {
+        unsigned long seed;
+        /* Mix a stack address in for a little per-run entropy; OR in a
+         * constant so the state can never latch back to 0 (which would
+         * re-trigger seeding and pin the sequence). */
+        seed = (unsigned long)(unsigned long)&x;
+        rb_controller_rng_state = seed | 1UL;
+    }
+    x = rb_controller_rng_state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    if (x == 0) x = 1UL;
+    rb_controller_rng_state = x;
+    return x;
+}
+
+/* Builds order[] as a search sequence over the mirror indices: the preferred
+ * (last-good) mirror first, then every other mirror in a fresh random order.
+ * Returns the number of entries written (== RB_CONTROLLER_HOST_COUNT). */
+static int rb_controller_build_host_order(int *order, int preferred)
+{
+    int n = RB_CONTROLLER_HOST_COUNT;
+    int i, j, tmp;
+
+    for (i = 0; i < n; i++)
+        order[i] = i;
+    /* Fisher-Yates shuffle of the whole list. */
+    for (i = n - 1; i > 0; i--) {
+        j = (int)(rb_controller_rand() % (unsigned long)(i + 1));
+        tmp = order[i];
+        order[i] = order[j];
+        order[j] = tmp;
+    }
+    /* Pull the preferred (last mirror that worked) to the front so a healthy
+     * network still answers on the first attempt. */
+    if (preferred >= 0 && preferred < n) {
+        for (i = 0; i < n; i++) {
+            if (order[i] == preferred) {
+                tmp = order[0];
+                order[0] = order[i];
+                order[i] = tmp;
+                break;
+            }
+        }
+    }
+    return n;
+}
 
 static int rb_controller_starts_with(const char *s, const char *prefix)
 {
@@ -145,9 +217,12 @@ int rb_controller_search(RadioBrowserController *controller)
                                  controller->max_bitrate, limit, controller->offset);
     {
         int attempt;
+        int host_order[RB_CONTROLLER_HOST_COUNT];
+
+        rb_controller_build_host_order(host_order, rb_controller_preferred_host);
         count = RB_HTTP_ERR_CONNECT;
         for (attempt = 0; attempt < RB_CONTROLLER_HOST_COUNT; attempt++) {
-            int host_index = (rb_controller_preferred_host + attempt) % RB_CONTROLLER_HOST_COUNT;
+            int host_index = host_order[attempt];
             const char *host = rb_controller_hosts[host_index];
             count = rb_search_stations(host,
                                        rb_controller_optional_string(controller->name),
