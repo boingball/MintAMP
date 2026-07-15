@@ -268,65 +268,108 @@ static void GuiTaskIdentityLog(const char *phase)
 #define GUI_STARTUP_STACK_SIZE 262144UL
 
 #define GUI_WIN_W       560    /* inner width; wide enough for all controls */
-#define GUI_WIN_H       358    /* inner height */
+#define GUI_WIN_H       318    /* inner height; compact enough for 640x480 */
 
-#define GUI_MARGIN_L     8     /* left margin */
-#define GUI_MARGIN_R     8     /* right margin */
-#define GUI_TOP_Y       20     /* leave breathing room below the title bar */
-#define GUI_ROW_H       18     /* row pitch - enough for Topaz 8 + padding */
+#define GUI_MARGIN           6
+#define GUI_ROW_HEIGHT       16
+#define GUI_ROW_GAP          2
+#define GUI_SECTION_GAP      4
+#define GUI_LABEL_HEIGHT     8
+#define GUI_GADGET_HEIGHT    14
+#define GUI_CHECKBOX_GAP     5
+#define GUI_CONTROL_GAP      7
+#define GUI_TOP_Y           18     /* leave breathing room below the title bar */
+#define GUI_LABEL_WIDTH     52
+#define GUI_LABEL_GAP        6
+#define GUI_FIELD_X         (GUI_MARGIN + GUI_LABEL_WIDTH + GUI_LABEL_GAP)
+#define GUI_RIGHT_X         (GUI_WIN_W - GUI_MARGIN)
+#define GUI_FIELD_W         (GUI_RIGHT_X - GUI_FIELD_X)
+#define META_X              GUI_FIELD_X
 
-#define ART_W           64
-#define ART_H           64
-#define MAX_JPEG_DIM    1024
-#define ART_X           (GUI_WIN_W - ART_W - GUI_MARGIN_R)
-#define ART_Y           GUI_TOP_Y
+#define ART_W               64
+#define ART_H               64
+#define ART_PAD              1
+#define MAX_JPEG_DIM        1024
+#define ART_FRAME_W         (ART_W + (ART_PAD * 2) + 4)
+#define ART_FRAME_H         (ART_H + (ART_PAD * 2) + 4)
+#define ART_FRAME_X         (GUI_RIGHT_X - ART_FRAME_W)
+#define ART_FRAME_Y         GUI_TOP_Y
+#define ART_X               (ART_FRAME_X + ART_PAD + 2)
+#define ART_Y               (ART_FRAME_Y + ART_PAD + 2)
 
-#define TEXT_COL_W      (ART_X - GUI_MARGIN_L - 8)
-#define META_X          (GUI_MARGIN_L + 60)
-#define META_RIGHT      (ART_X - 8)
-#define META_W          (META_RIGHT - META_X)
-#define BROWSE_W        56
-#define BROWSE_X        (ART_X - BROWSE_W - 6)
-#define FILE_W          (BROWSE_X - META_X - 4)
-#define SLIDER_X        (GUI_MARGIN_L + 60)
-#define BUFFER_SLIDER_W 300
-#define VOLUME_SLIDER_W BUFFER_SLIDER_W
-#define TRANSPORT_W     48
-#define TRANSPORT_H     20
-#define PLAY_X          (GUI_MARGIN_L + 154)
-#define NEXT_X          (PLAY_X + TRANSPORT_W + 4)
-#define STOP_X          (GUI_MARGIN_L + 306)
-#define FILTER_X         (GUI_MARGIN_L + 390)
-#define FILTER_W         54
-#define PL_OPEN_X        (FILTER_X + FILTER_W + 8)
-#define PL_OPEN_W        (GUI_WIN_W - PL_OPEN_X - GUI_MARGIN_R)
-#define FILEINFO_X      (GUI_MARGIN_L + 84)
-#define FILEINFO_W      (GUI_WIN_W - FILEINFO_X - GUI_MARGIN_R)
+#define META_RIGHT          (ART_FRAME_X - GUI_SECTION_GAP)
+#define META_W              (META_RIGHT - GUI_FIELD_X)
+#define BROWSE_W            56
+#define BROWSE_X            (META_RIGHT - BROWSE_W)
+#define FILE_W              (BROWSE_X - GUI_FIELD_X - GUI_CONTROL_GAP)
 
-#define ROW_FILE        (GUI_TOP_Y)
-#define ROW_TITLE       (GUI_TOP_Y + 1 * GUI_ROW_H)
-#define ROW_ARTIST      (GUI_TOP_Y + 2 * GUI_ROW_H)
-#define ROW_ALBUM       (GUI_TOP_Y + 3 * GUI_ROW_H)
-#define ROW_RATING      (GUI_TOP_Y + 4 * GUI_ROW_H)
-#define ROW_TRACK       (GUI_TOP_Y + 5 * GUI_ROW_H)
-#define ROW_GENRE       (GUI_TOP_Y + 6 * GUI_ROW_H)
-#define ROW_CHECKS      (GUI_TOP_Y + 7 * GUI_ROW_H + 4)
-#define ROW_CHANNELS    (GUI_TOP_Y + 8 * GUI_ROW_H + 4)
-#define ROW_EXPERIMENTAL (GUI_TOP_Y + 9 * GUI_ROW_H + 4)
-#define ROW_CYCLES      (GUI_TOP_Y + 10 * GUI_ROW_H + 4)
-#define ROW_BUFFER      (GUI_TOP_Y + 11 * GUI_ROW_H + 4)
-#define ROW_VOLUME      (GUI_TOP_Y + 12 * GUI_ROW_H + 4)
-#define ROW_PROGRESS    (GUI_TOP_Y + 13 * GUI_ROW_H + 8)
-#define ROW_BUTTONS     (GUI_TOP_Y + 14 * GUI_ROW_H + 12)
-#define ROW_STATUS      (ROW_BUTTONS + TRANSPORT_H + 4)
-#define ROW_FILEINFO    (ROW_STATUS + GUI_ROW_H + 4)
+#define CYCLE_H             GUI_GADGET_HEIGHT
+#define CYCLE_W_SMALL       74
+#define CYCLE_W_MED         92
+#define CYCLE_W_LARGE       122
+#define CHECK_W             20
+#define CHECK_H             12
+#define CHECK_TEXT_W        82
+#define CHECK_STEP          (CHECK_W + CHECK_TEXT_W + GUI_CHECKBOX_GAP)
+#define OPTION1_X           GUI_FIELD_X
+#define OPTION2_X           (OPTION1_X + CHECK_STEP)
+#define SPEED_X             GUI_FIELD_X
+#define SPEED_W             CYCLE_W_LARGE
+#define FASTMEM_X          (SPEED_X + SPEED_W + GUI_CONTROL_GAP + 72)
+#define STEREO_X           GUI_FIELD_X
+#define FAKE_X             (STEREO_X + CYCLE_W_SMALL + GUI_CONTROL_GAP + 8)
+#define WIDTH_X            (FAKE_X + CHECK_STEP + 46)
+#define WIDTH_W            70
+#define DELAY_X            (WIDTH_X + WIDTH_W + GUI_CONTROL_GAP + 42)
+#define DELAY_W            62
 
-#define PROG_X          (GUI_MARGIN_L + 8)
-#define PROG_W          (GUI_WIN_W - PROG_X - 90 - GUI_MARGIN_R)
-#define PROG_H          8
-#define PROG_TOP_Y      (ROW_PROGRESS + 4)
-#define TIME_X          (PROG_X + PROG_W + 6)
-#define TIME_W          80
+#define RATE_X              GUI_FIELD_X
+#define RATE_W              CYCLE_W_MED
+#define QUALITY_X           (RATE_X + RATE_W + GUI_CONTROL_GAP + 58)
+#define QUALITY_W           CYCLE_W_MED
+#define SUBBAND_X           (QUALITY_X + QUALITY_W + GUI_CONTROL_GAP + 66)
+#define SUBBAND_W           112
+
+#define SLIDER_X            GUI_FIELD_X
+#define SLIDER_VALUE_W      52
+#define SLIDER_W            (GUI_RIGHT_X - SLIDER_X - SLIDER_VALUE_W - GUI_CONTROL_GAP)
+#define TRANSPORT_W         48
+#define TRANSPORT_H         20
+#define TRANSPORT_GAP       GUI_CONTROL_GAP
+#define TRANSPORT_COUNT     3
+#define TRANSPORT_GROUP_W   ((TRANSPORT_COUNT * TRANSPORT_W) + ((TRANSPORT_COUNT - 1) * TRANSPORT_GAP))
+#define PLAY_X              ((GUI_WIN_W - TRANSPORT_GROUP_W) / 2)
+#define NEXT_X              (PLAY_X + TRANSPORT_W + TRANSPORT_GAP)
+#define STOP_X              (NEXT_X + TRANSPORT_W + TRANSPORT_GAP)
+#define FILTER_W            54
+#define PL_OPEN_W           70
+#define PL_OPEN_X           (GUI_RIGHT_X - PL_OPEN_W)
+#define FILTER_X            (PL_OPEN_X - GUI_CONTROL_GAP - FILTER_W)
+
+#define ROW_FILE            GUI_TOP_Y
+#define ROW_TITLE           (ROW_FILE + 14)
+#define ROW_ARTIST          (ROW_TITLE + 14)
+#define ROW_ALBUM           (ROW_ARTIST + 14)
+#define ROW_RATING          (ROW_ALBUM + 14)
+#define ROW_TRACK           (ROW_RATING + 14)
+#define ROW_GENRE           (ROW_TRACK + 14)
+#define ROW_SPEED           (ROW_GENRE + GUI_ROW_HEIGHT + GUI_SECTION_GAP)
+#define ROW_PLAYBACK        (ROW_SPEED + GUI_ROW_HEIGHT + GUI_ROW_GAP)
+#define ROW_DECODER         (ROW_PLAYBACK + GUI_ROW_HEIGHT + GUI_ROW_GAP)
+#define ROW_CYCLES          (ROW_DECODER + GUI_ROW_HEIGHT + GUI_ROW_GAP)
+#define ROW_BUFFER          (ROW_CYCLES + GUI_ROW_HEIGHT + GUI_SECTION_GAP)
+#define ROW_VOLUME          (ROW_BUFFER + GUI_ROW_HEIGHT + GUI_ROW_GAP)
+#define ROW_PROGRESS        (ROW_VOLUME + GUI_ROW_HEIGHT + GUI_SECTION_GAP)
+#define ROW_BUTTONS         (ROW_PROGRESS + 18)
+#define ROW_STATUS          (ROW_BUTTONS + TRANSPORT_H + GUI_SECTION_GAP)
+#define ROW_FILEINFO        (ROW_STATUS + GUI_ROW_HEIGHT + GUI_ROW_GAP)
+
+#define PROG_X              GUI_MARGIN
+#define TIME_W              100
+#define PROG_W              (GUI_WIN_W - PROG_X - TIME_W - GUI_CONTROL_GAP - GUI_MARGIN)
+#define PROG_H              8
+#define PROG_TOP_Y          (ROW_PROGRESS + 4)
+#define TIME_X              (PROG_X + PROG_W + GUI_CONTROL_GAP)
 #define TIMER_TICK_MICROS 1000000UL
 #define ART_TIMER_MICROS 20000UL
 /* How long Stop is allowed to sit outstanding (child signalled but never
@@ -3702,7 +3745,7 @@ static void DrawArtPanel(HelixAmp3Gui *gui)
 	if (!gui->win)
 		return;
 	rp = gui->win->RPort;
-	DrawBevelBox(rp, ART_X - 2, ART_Y - 2, ART_W + 4, ART_H + 4,
+	DrawBevelBox(rp, ART_FRAME_X, ART_FRAME_Y, ART_FRAME_W, ART_FRAME_H,
 		GT_VisualInfo, (ULONG)gui->visualInfo,
 		GTBB_Recessed, TRUE,
 		TAG_DONE);
@@ -3866,7 +3909,7 @@ static void DrawProgress(HelixAmp3Gui *gui)
 
 	SetAPen(rp, gui->win->DetailPen);
 	RectFill(rp, TIME_X, PROG_TOP_Y - 1,
-		TIME_X + TIME_W, PROG_TOP_Y + GUI_ROW_H);
+		TIME_X + TIME_W, PROG_TOP_Y + GUI_GADGET_HEIGHT);
 	SetAPen(rp, 1);
 	textWidth = TextLength(rp, timeBuf, strlen(timeBuf));
 	textX = TIME_X + TIME_W - textWidth;
@@ -4581,8 +4624,7 @@ static struct Gadget *MakeGadgetWithTextAttr(HelixAmp3Gui *gui, struct Gadget *p
 	ng.ng_Height = height;
 	ng.ng_GadgetText = (UBYTE *)label;
 	ng.ng_GadgetID = id;
-	ng.ng_TextAttr = textAttr ? textAttr :
-		(kind == TEXT_KIND ? &gTopaz8Attr : NULL);
+	ng.ng_TextAttr = textAttr ? textAttr : &gTopaz8Attr;
 	if (kind == BUTTON_KIND)
 		ng.ng_Flags = PLACETEXT_IN;
 	else if (kind == CHECKBOX_KIND)
@@ -4628,9 +4670,10 @@ static struct Gadget *MakeSliderGadget(HelixAmp3Gui *gui, struct Gadget *prev,
 	ng.ng_LeftEdge = left;
 	ng.ng_TopEdge = top;
 	ng.ng_Width = width;
-	ng.ng_Height = 16;
+	ng.ng_Height = GUI_GADGET_HEIGHT;
 	ng.ng_GadgetText = (UBYTE *)label;
 	ng.ng_GadgetID = id;
+	ng.ng_TextAttr = &gTopaz8Attr;
 	ng.ng_Flags = PLACETEXT_LEFT;
 	ng.ng_VisualInfo = gui->visualInfo;
 	return CreateGadget(SLIDER_KIND, prev, &ng,
@@ -4640,7 +4683,7 @@ static struct Gadget *MakeSliderGadget(HelixAmp3Gui *gui, struct Gadget *prev,
 		GTSL_Max, maxValue,
 		GTSL_Level, level,
 		GTSL_LevelFormat, (ULONG)format,
-		GTSL_LevelPlace, PLACETEXT_IN,
+		GTSL_LevelPlace, PLACETEXT_RIGHT,
 		GTSL_MaxLevelLen, maxLevelLen,
 		PGA_Visible, visible,
 		TAG_DONE);
@@ -4671,7 +4714,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 	gad = gui->gadContext;
 
 	gui->gadFile = gad = MakeGadget(gui, gad, TEXT_KIND, GID_FILE,
-		META_X, ROW_FILE, FILE_W, 16, "File:",
+		META_X, ROW_FILE, FILE_W, GUI_GADGET_HEIGHT, "File:",
 		GTTX_Text, (ULONG)gui->fileText,
 		GTTX_Border, TRUE,
 		TAG_IGNORE, 0,
@@ -4680,7 +4723,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gad = MakeGadget(gui, gad, BUTTON_KIND, GID_BROWSE,
-		BROWSE_X, ROW_FILE - 1, BROWSE_W, 16, "Browse",
+		BROWSE_X, ROW_FILE - 1, BROWSE_W, GUI_GADGET_HEIGHT, "Browse",
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
@@ -4689,7 +4732,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadTitle = gad = MakeGadget(gui, gad, TEXT_KIND, GID_TITLE,
-		META_X, ROW_TITLE, META_W, 16, "Title:",
+		META_X, ROW_TITLE, META_W, GUI_GADGET_HEIGHT, "Title:",
 		GTTX_Text, (ULONG)"-",
 		GTTX_Border, TRUE,
 		TAG_IGNORE, 0,
@@ -4698,7 +4741,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadArtist = gad = MakeGadget(gui, gad, TEXT_KIND, GID_ARTIST,
-		META_X, ROW_ARTIST, META_W, 16, "Artist:",
+		META_X, ROW_ARTIST, META_W, GUI_GADGET_HEIGHT, "Artist:",
 		GTTX_Text, (ULONG)"-",
 		GTTX_Border, TRUE,
 		TAG_IGNORE, 0,
@@ -4707,7 +4750,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadAlbum = gad = MakeGadget(gui, gad, TEXT_KIND, GID_ALBUM,
-		META_X, ROW_ALBUM, META_W, 16, "Album:",
+		META_X, ROW_ALBUM, META_W, GUI_GADGET_HEIGHT, "Album:",
 		GTTX_Text, (ULONG)"-",
 		GTTX_Border, TRUE,
 		TAG_IGNORE, 0,
@@ -4716,7 +4759,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gad = MakeGadget(gui, gad, TEXT_KIND, GID_RATING_LABEL,
-		GUI_MARGIN_L + 60, ROW_RATING, 1, 16, "Rating:",
+		GUI_FIELD_X, ROW_RATING, 1, GUI_GADGET_HEIGHT, "Rating:",
 		GTTX_Text, (ULONG)"",
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
@@ -4725,32 +4768,32 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadStars[0] = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_STAR1,
-		GUI_MARGIN_L + 78, ROW_RATING - 1, 22, 16, "-",
+		GUI_FIELD_X, ROW_RATING - 1, 22, GUI_GADGET_HEIGHT, "-",
 		TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0);
 	if (!gad) return -1;
 	gui->gadStars[1] = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_STAR2,
-		GUI_MARGIN_L + 102, ROW_RATING - 1, 22, 16, "-",
+		(GUI_FIELD_X + 26), ROW_RATING - 1, 22, GUI_GADGET_HEIGHT, "-",
 		TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0);
 	if (!gad) return -1;
 	gui->gadStars[2] = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_STAR3,
-		GUI_MARGIN_L + 126, ROW_RATING - 1, 22, 16, "-",
+		(GUI_FIELD_X + 52), ROW_RATING - 1, 22, GUI_GADGET_HEIGHT, "-",
 		TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0);
 	if (!gad) return -1;
 	gui->gadStars[3] = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_STAR4,
-		GUI_MARGIN_L + 150, ROW_RATING - 1, 22, 16, "-",
+		(GUI_FIELD_X + 78), ROW_RATING - 1, 22, GUI_GADGET_HEIGHT, "-",
 		TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0);
 	if (!gad) return -1;
 	gui->gadStars[4] = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_STAR5,
-		GUI_MARGIN_L + 174, ROW_RATING - 1, 22, 16, "-",
+		(GUI_FIELD_X + 104), ROW_RATING - 1, 22, GUI_GADGET_HEIGHT, "-",
 		TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0);
 	if (!gad) return -1;
 	gui->gadRatingValue = gad = MakeGadget(gui, gad, TEXT_KIND, GID_RATING_VALUE,
-		GUI_MARGIN_L + 206, ROW_RATING, 80, 16, "",
+		(GUI_FIELD_X + 132), ROW_RATING, 80, 16, "",
 		GTTX_Text, (ULONG)gui->ratingText,
 		TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0);
 	if (!gad) return -1;
 	gui->gadTrack = gad = MakeGadget(gui, gad, TEXT_KIND, GID_TRACK,
-		META_X, ROW_TRACK, META_W, 16, "Track:",
+		META_X, ROW_TRACK, META_W, GUI_GADGET_HEIGHT, "Track:",
 		GTTX_Text, (ULONG)"-",
 		GTTX_Border, TRUE,
 		TAG_IGNORE, 0,
@@ -4759,7 +4802,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadGenre = gad = MakeGadget(gui, gad, TEXT_KIND, GID_GENRE,
-		META_X, ROW_GENRE, META_W, 16, "Genre:",
+		META_X, ROW_GENRE, META_W, GUI_GADGET_HEIGHT, "Genre:",
 		GTTX_Text, (ULONG)"-",
 		GTTX_Border, TRUE,
 		TAG_IGNORE, 0,
@@ -4768,8 +4811,8 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gad = MakeGadget(gui, gad, TEXT_KIND, GID_COUNT,
-		GUI_MARGIN_L + 14, ROW_CHECKS - 1, 60, 16, "",
-		GTTX_Text, (ULONG)"Speed:",
+		GUI_MARGIN, ROW_SPEED, GUI_LABEL_WIDTH, GUI_GADGET_HEIGHT, "",
+		GTTX_Text, (ULONG)"",
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0);
@@ -4777,7 +4820,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadSpeedMode = gad = MakeGadget(gui, gad, CYCLE_KIND, GID_SPEED_MODE,
-		GUI_MARGIN_L + 86, ROW_CHECKS - 2, 130, 16, "",
+		SPEED_X, ROW_SPEED, SPEED_W, GUI_GADGET_HEIGHT, "Speed:",
 		GTCY_Labels, (ULONG)kSpeedModeLabels,
 		GTCY_Active, SpeedModeIndex(gui),
 		TAG_IGNORE, 0,
@@ -4786,7 +4829,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadFastMem = gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_FAST_MEM,
-		GUI_MARGIN_L + 314, ROW_CHECKS, 20, 12, "Fast-mem",
+		FASTMEM_X, ROW_SPEED + 1, CHECK_W, CHECK_H, "Fast-mem",
 		GTCB_Checked, gui->fastMem,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
@@ -4795,8 +4838,8 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gad = MakeGadget(gui, gad, TEXT_KIND, GID_COUNT,
-		GUI_MARGIN_L + 14, ROW_EXPERIMENTAL - 1, 90, 16, "",
-		GTTX_Text, (ULONG)"Experimental:",
+		GUI_MARGIN, ROW_DECODER, GUI_LABEL_WIDTH, GUI_GADGET_HEIGHT, "",
+		GTTX_Text, (ULONG)"",
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0);
@@ -4811,7 +4854,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 	 * as two separate checkboxes rather than folded into Speed Mode so either
 	 * can be soak-tested independently of which speed preset is active. */
 	gui->gadExpPoly = gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_EXP_POLY,
-		GUI_MARGIN_L + 108, ROW_EXPERIMENTAL, 20, 12, "Poly ASM",
+		OPTION1_X, ROW_DECODER + 1, CHECK_W, CHECK_H, "Poly ASM",
 		GTCB_Checked, gui->expPoly,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
@@ -4820,7 +4863,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadExpReducedTaps = gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_EXP_REDUCED_TAPS,
-		GUI_MARGIN_L + 220, ROW_EXPERIMENTAL, 20, 12, "Reduced taps (lossy)",
+		OPTION2_X, ROW_DECODER + 1, CHECK_W, CHECK_H, "Reduced taps",
 		GTCB_Checked, gui->expReducedTaps,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
@@ -4829,7 +4872,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadChannelMode = gad = MakeGadget(gui, gad, CYCLE_KIND, GID_CHANNEL_MODE,
-		GUI_MARGIN_L + 14, ROW_CHANNELS - 2, 74, 16, "",
+		STEREO_X, ROW_PLAYBACK, CYCLE_W_SMALL, GUI_GADGET_HEIGHT, "Stereo:",
 		GTCY_Labels, (ULONG)kChannelModeLabels,
 		GTCY_Active, ChannelModeIndex(gui),
 		GA_Disabled, gui->fakeStereo,
@@ -4839,7 +4882,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 
 	gui->gadFakeStereo = gad = MakeGadget(gui, gad,
 		CHECKBOX_KIND, GID_FAKE_STEREO,
-		GUI_MARGIN_L + 92, ROW_CHANNELS, 20, 12, "Fake-st",
+		FAKE_X, ROW_PLAYBACK + 1, CHECK_W, CHECK_H, "Fake-st",
 		GTCB_Checked, gui->fakeStereo,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
@@ -4849,7 +4892,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 
 	gui->gadFakeStereoWidth = gad = MakeGadget(gui, gad,
 		CYCLE_KIND, GID_FAKE_STEREO_WIDTH,
-		GUI_MARGIN_L + 232, ROW_CHANNELS - 2, 92, 16, "Width:",
+		WIDTH_X, ROW_PLAYBACK, WIDTH_W, GUI_GADGET_HEIGHT, "Width:",
 		GTCY_Labels, (ULONG)kFakeStereoWidthLabels,
 		GTCY_Active, gui->fakeStereoWidthIndex,
 		GA_Disabled, !gui->fakeStereo,
@@ -4859,7 +4902,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 
 	gui->gadFakeStereoDelay = gad = MakeGadget(gui, gad,
 		CYCLE_KIND, GID_FAKE_STEREO_DELAY,
-		GUI_MARGIN_L + 414, ROW_CHANNELS - 2, 70, 16, "Delay:",
+		DELAY_X, ROW_PLAYBACK, DELAY_W, GUI_GADGET_HEIGHT, "Delay:",
 		GTCY_Labels, (ULONG)kFakeStereoDelayLabels,
 		GTCY_Active, gui->fakeStereoDelayIndex,
 		GA_Disabled, !gui->fakeStereo,
@@ -4868,7 +4911,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadRate = gad = MakeGadget(gui, gad, CYCLE_KIND, GID_RATE,
-		GUI_MARGIN_L + 48, ROW_CYCLES, 80, 16, "Rate:",
+		RATE_X, ROW_CYCLES, RATE_W, GUI_GADGET_HEIGHT, "Rate:",
 		GTCY_Labels, (ULONG)kRateLabels,
 		GTCY_Active, gui->rateIndex,
 		TAG_IGNORE, 0,
@@ -4877,7 +4920,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gad = MakeGadget(gui, gad, CYCLE_KIND, GID_QUALITY,
-		GUI_MARGIN_L + 230, ROW_CYCLES, 100, 16, "Quality:",
+		QUALITY_X, ROW_CYCLES, QUALITY_W, GUI_GADGET_HEIGHT, "Quality:",
 		GTCY_Labels, (ULONG)kQualityLabels,
 		GTCY_Active, gui->qualityIndex,
 		TAG_IGNORE, 0,
@@ -4886,7 +4929,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gad = MakeGadget(gui, gad, CYCLE_KIND, GID_SUBBAND_CAP,
-		GUI_MARGIN_L + 350, ROW_CYCLES, 130, 16, "Subbands:",
+		SUBBAND_X, ROW_CYCLES, SUBBAND_W, GUI_GADGET_HEIGHT, "Subbands:",
 		GTCY_Labels, (ULONG)kSubbandCapLabels,
 		GTCY_Active, gui->subbandCapIndex,
 		TAG_IGNORE, 0,
@@ -4895,13 +4938,13 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadBuffer = gad = MakeSliderGadget(gui, gad, GID_BUFFER,
-		SLIDER_X, ROW_BUFFER, BUFFER_SLIDER_W, "Buffer:",
+		SLIDER_X, ROW_BUFFER, SLIDER_W, "Buffer:",
 		1, 10, gui->bufferSeconds, "%ld sec", 6, 2);
 	if (!gad)
 		return -1;
 
 	gui->gadVolume = gad = MakeSliderGadget(gui, gad, GID_VOLUME,
-		SLIDER_X, ROW_VOLUME, VOLUME_SLIDER_W, "Volume:",
+		SLIDER_X, ROW_VOLUME, SLIDER_W, "Volume:",
 		0, 100, gui->volumePercent, "%ld%%", 4, 30);
 	if (!gad)
 		return -1;
@@ -4952,7 +4995,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadStatus = gad = MakeGadget(gui, gad, TEXT_KIND, GID_STATUS,
-		META_X, ROW_STATUS, GUI_WIN_W - META_X - GUI_MARGIN_R, 16, "Status:",
+		META_X, ROW_STATUS, GUI_FIELD_W, GUI_GADGET_HEIGHT, "Status:",
 		GTTX_Text, (ULONG)gui->statusText,
 		GTTX_Border, TRUE,
 		TAG_IGNORE, 0,
@@ -4961,7 +5004,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadFileInfo = gad = MakeGadget(gui, gad, TEXT_KIND, GID_FILEINFO,
-		FILEINFO_X, ROW_FILEINFO, FILEINFO_W, 16, "File info:",
+		GUI_FIELD_X, ROW_FILEINFO, GUI_FIELD_W, GUI_GADGET_HEIGHT, "File info:",
 		GTTX_Text, (ULONG)gui->fileInfoText,
 		GTTX_Border, TRUE,
 		TAG_IGNORE, 0,
