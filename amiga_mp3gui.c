@@ -13,6 +13,20 @@
 #include "radio_runtime_flags.h"
 
 #if defined(AMIGA_M68K)
+/* amiga_mp3dec.c InitSemaphore()s the shared cross-task stdout lock
+ * radio_console_lock inside its main() -- but only when
+ * RADIO_CONSOLE_LOCK_INIT_ELSEWHERE is NOT defined.  Here that main() is
+ * renamed to HelixAmp3CliMain and becomes the per-playback-child entry point,
+ * so letting it run the init would (a) leave the lock uninitialised until the
+ * first playback child is spawned, even though the GUI task and the radio net
+ * worker obtain it much earlier (the very first Internet Radio search prints
+ * through it), and (b) re-run InitSemaphore() on every child spawn, racing any
+ * task already holding it.  An ObtainSemaphore() on a still-zeroed
+ * SignalSemaphore blocks forever, which is exactly the "search hangs right
+ * after the filter status line appears" freeze.  Define the macro to skip that
+ * block and instead InitSemaphore() once in this file's own main() below,
+ * mirroring minimp3r.c. */
+#define RADIO_CONSOLE_LOCK_INIT_ELSEWHERE 1
 #define main HelixAmp3CliMain
 #include "amiga_mp3dec.c"
 #undef main
@@ -189,6 +203,52 @@ static char gSupportedExtPattern[512];
 #define OBP_FailIfBad (TAG_USER + 0x01L)
 #endif
 
+/* ------------------------------------------------------------------------- */
+/* Recoverable-free diagnostics (GadTools main/GUI-task FreeMem alert hunt).   */
+/*                                                                            */
+/* Hardware runs of the GadTools front end raise recoverable Exec alerts on    */
+/* the second HTTPS stream:                                                    */
+/*     01000009  AN_FreeTwice    -- the same block handed to FreeMem twice     */
+/*     0100000F  AN_BadFreeAddr  -- FreeMem given an address Exec has no        */
+/*                                  memory header for                          */
+/* The free list stays intact (radio-memcheck reports OK), so this is a        */
+/* stale/double free of a single block -- freeing a pointer whose owner field  */
+/* was left non-NULL -- not general heap corruption.  minimp3r.c gained the    */
+/* same BEGIN/END free-audit and "clear the owner the instant you free it"     */
+/* discipline in commit a856b46 ("Finding the lost FreeMem closing alerts");   */
+/* it was never ported here.  These records log FindTask(NULL) at every        */
+/* GUI-task free site with the pointer, owner and generation, and bracket the  */
+/* exact call whose FreeMem raises the alert on the next run: the log's last    */
+/* un-paired BEGIN names the culprit.  RADIO_DEBUG-only, serialised through     */
+/* radio_console_lock like every other RADIO_DBG. */
+#ifdef RADIO_DEBUG
+static unsigned long gGuiFreeAuditSeq;
+
+static void GuiFreeAuditLog(const char *phase, const char *site,
+	const char *owner, const void *ptr, unsigned long generation)
+{
+	RADIO_DBG(printf("free-audit[%lu] %s site=%s owner=%s task=%p ptr=%p gen=%lu cleared=%d\n",
+		gGuiFreeAuditSeq, phase, site ? site : "?", owner ? owner : "?",
+		(void *)FindTask(NULL), ptr, generation, ptr ? 0 : 1);)
+}
+
+static void GuiTaskIdentityLog(const char *phase)
+{
+	RADIO_DBG(printf("free-audit-task: phase=%s task=%p\n",
+		phase ? phase : "?", (void *)FindTask(NULL));)
+}
+
+#define GUI_FREE_BEGIN(site, owner, ptr, gen) \
+	do { ++gGuiFreeAuditSeq; GuiFreeAuditLog("BEGIN", (site), (owner), (const void *)(ptr), (unsigned long)(gen)); } while (0)
+#define GUI_FREE_END(site, owner, ptr, gen) \
+	GuiFreeAuditLog("END", (site), (owner), (const void *)(ptr), (unsigned long)(gen))
+#define GUI_TASK_IDENTITY(phase) GuiTaskIdentityLog((phase))
+#else
+#define GUI_FREE_BEGIN(site, owner, ptr, gen) do { } while (0)
+#define GUI_FREE_END(site, owner, ptr, gen) do { } while (0)
+#define GUI_TASK_IDENTITY(phase) do { } while (0)
+#endif
+
 #define HELIXAMP3_MAX_PATH 256
 #define HELIXAMP3_ARGC_MAX 28
 #define HELIXAMP3_SETTINGS_VERSION 2
@@ -208,65 +268,118 @@ static char gSupportedExtPattern[512];
 #define GUI_STARTUP_STACK_SIZE 262144UL
 
 #define GUI_WIN_W       560    /* inner width; wide enough for all controls */
-#define GUI_WIN_H       358    /* inner height */
+#define GUI_WIN_H       (ROW_FILEINFO + GUI_GADGET_HEIGHT + 3)  /* snug to the last row with a 3px bottom margin: no dead space (forward-refs the ROW_* block below; all resolved before first use) */
 
-#define GUI_MARGIN_L     8     /* left margin */
-#define GUI_MARGIN_R     8     /* right margin */
-#define GUI_TOP_Y       20     /* leave breathing room below the title bar */
-#define GUI_ROW_H       18     /* row pitch - enough for Topaz 8 + padding */
+#define GUI_MARGIN           6
+#define GUI_ROW_HEIGHT       16
+#define GUI_ROW_GAP          1
+#define GUI_SECTION_GAP      2
+#define GUI_LABEL_HEIGHT     8
+#define GUI_GADGET_HEIGHT    14
+#define GUI_CHECKBOX_GAP     5
+#define GUI_CONTROL_GAP      7
+#define GUI_TOP_Y           18     /* leave breathing room below the title bar */
+#define GUI_LABEL_WIDTH     78     /* wide enough for the longest left label ("File info:") in topaz 8 */
+#define GUI_LABEL_GAP        6
+#define GUI_FIELD_X         (GUI_MARGIN + GUI_LABEL_WIDTH + GUI_LABEL_GAP)
+#define GUI_RIGHT_X         (GUI_WIN_W - GUI_MARGIN)
+#define GUI_FIELD_W         (GUI_RIGHT_X - GUI_FIELD_X)
+#define META_X              GUI_FIELD_X
+#define FILEINFO_X          (GUI_FIELD_X + 16)   /* nudge the File info row right so its long label clears the left border */
+#define FILEINFO_W          (GUI_RIGHT_X - FILEINFO_X)
 
-#define ART_W           64
-#define ART_H           64
-#define MAX_JPEG_DIM    1024
-#define ART_X           (GUI_WIN_W - ART_W - GUI_MARGIN_R)
-#define ART_Y           GUI_TOP_Y
+#define ART_W               64
+#define ART_H               64
+#define ART_PAD              1
+#define MAX_JPEG_DIM        1024
+#define ART_FRAME_W         (ART_W + (ART_PAD * 2) + 4)
+#define ART_FRAME_H         (ART_H + (ART_PAD * 2) + 4)
+#define ART_FRAME_X         (GUI_RIGHT_X - ART_FRAME_W)
+#define ART_FRAME_Y         GUI_TOP_Y
+#define ART_X               (ART_FRAME_X + ART_PAD + 2)
+#define ART_Y               (ART_FRAME_Y + ART_PAD + 2)
 
-#define TEXT_COL_W      (ART_X - GUI_MARGIN_L - 8)
-#define META_X          (GUI_MARGIN_L + 60)
-#define META_RIGHT      (ART_X - 8)
-#define META_W          (META_RIGHT - META_X)
-#define BROWSE_W        56
-#define BROWSE_X        (ART_X - BROWSE_W - 6)
-#define FILE_W          (BROWSE_X - META_X - 4)
-#define SLIDER_X        (GUI_MARGIN_L + 60)
-#define BUFFER_SLIDER_W 300
-#define VOLUME_SLIDER_W BUFFER_SLIDER_W
-#define TRANSPORT_W     48
-#define TRANSPORT_H     20
-#define PLAY_X          (GUI_MARGIN_L + 154)
-#define NEXT_X          (PLAY_X + TRANSPORT_W + 4)
-#define STOP_X          (GUI_MARGIN_L + 306)
-#define FILTER_X         (GUI_MARGIN_L + 390)
-#define FILTER_W         54
-#define PL_OPEN_X        (FILTER_X + FILTER_W + 8)
-#define PL_OPEN_W        (GUI_WIN_W - PL_OPEN_X - GUI_MARGIN_R)
-#define FILEINFO_X      (GUI_MARGIN_L + 84)
-#define FILEINFO_W      (GUI_WIN_W - FILEINFO_X - GUI_MARGIN_R)
+#define META_RIGHT          (ART_FRAME_X - GUI_SECTION_GAP)
+#define META_W              (META_RIGHT - GUI_FIELD_X)
+#define BROWSE_W            56
+#define BROWSE_X            (META_RIGHT - BROWSE_W)
+#define FILE_W              (BROWSE_X - GUI_FIELD_X - GUI_CONTROL_GAP)
 
-#define ROW_FILE        (GUI_TOP_Y)
-#define ROW_TITLE       (GUI_TOP_Y + 1 * GUI_ROW_H)
-#define ROW_ARTIST      (GUI_TOP_Y + 2 * GUI_ROW_H)
-#define ROW_ALBUM       (GUI_TOP_Y + 3 * GUI_ROW_H)
-#define ROW_RATING      (GUI_TOP_Y + 4 * GUI_ROW_H)
-#define ROW_TRACK       (GUI_TOP_Y + 5 * GUI_ROW_H)
-#define ROW_GENRE       (GUI_TOP_Y + 6 * GUI_ROW_H)
-#define ROW_CHECKS      (GUI_TOP_Y + 7 * GUI_ROW_H + 4)
-#define ROW_CHANNELS    (GUI_TOP_Y + 8 * GUI_ROW_H + 4)
-#define ROW_EXPERIMENTAL (GUI_TOP_Y + 9 * GUI_ROW_H + 4)
-#define ROW_CYCLES      (GUI_TOP_Y + 10 * GUI_ROW_H + 4)
-#define ROW_BUFFER      (GUI_TOP_Y + 11 * GUI_ROW_H + 4)
-#define ROW_VOLUME      (GUI_TOP_Y + 12 * GUI_ROW_H + 4)
-#define ROW_PROGRESS    (GUI_TOP_Y + 13 * GUI_ROW_H + 8)
-#define ROW_BUTTONS     (GUI_TOP_Y + 14 * GUI_ROW_H + 12)
-#define ROW_STATUS      (ROW_BUTTONS + TRANSPORT_H + 4)
-#define ROW_FILEINFO    (ROW_STATUS + GUI_ROW_H + 4)
+#define CYCLE_H             GUI_GADGET_HEIGHT
+#define CYCLE_W_SMALL       74
+#define CYCLE_W_MED         92
+#define CYCLE_W_LARGE       122
+#define CHECK_W             20
+#define CHECK_H             12
+#define CHECK_TEXT_W        82
+#define CHECK_STEP          (CHECK_W + CHECK_TEXT_W + GUI_CHECKBOX_GAP)
+#define OPTION1_X           GUI_FIELD_X
+#define OPTION2_X           (OPTION1_X + CHECK_STEP)
+#define SPEED_X             GUI_FIELD_X
+#define SPEED_W             190    /* holds the longest cycle label "22050 Mono Ultrafast" plus the arrow image */
+#define FASTMEM_X          (SPEED_X + SPEED_W + GUI_CONTROL_GAP + 8)
+#define STEREO_X           GUI_FIELD_X
+#define FAKE_X             (STEREO_X + CYCLE_W_SMALL + GUI_CONTROL_GAP + 8)
+#define WIDTH_X            (FAKE_X + CHECK_STEP + 40)
+#define WIDTH_W            96     /* holds "Very wide" without spilling into the Delay label */
+#define DELAY_X            (WIDTH_X + WIDTH_W + GUI_CONTROL_GAP + 60)
+#define DELAY_W            56
 
-#define PROG_X          (GUI_MARGIN_L + 8)
-#define PROG_W          (GUI_WIN_W - PROG_X - 90 - GUI_MARGIN_R)
-#define PROG_H          8
-#define PROG_TOP_Y      (ROW_PROGRESS + 4)
-#define TIME_X          (PROG_X + PROG_W + 6)
-#define TIME_W          80
+#define RATE_X              GUI_FIELD_X
+#define RATE_W              72
+#define QUALITY_X           (RATE_X + RATE_W + GUI_CONTROL_GAP + 76)
+#define QUALITY_W           76
+#define SUBBAND_X           (QUALITY_X + QUALITY_W + GUI_CONTROL_GAP + 84)
+#define SUBBAND_W           84
+
+/* Buffer and Volume share one row as two half-width sliders. GadTools draws
+ * each slider's level string ("N sec" / "NNN%") just to the right of its box,
+ * so BUFFER_VALUE_W reserves room for the buffer readout before the Volume
+ * label, and VOLUME_VALUE_W keeps the volume readout inside the right border. */
+#define BUFFER_X            GUI_FIELD_X
+#define BUFFER_W            150
+#define BUFFER_VALUE_W      48      /* "10 sec" (6 chars) in topaz 8 */
+#define VOLUME_LABEL_W      56      /* "Volume:" in topaz 8 */
+#define BUFVOL_GAP          16
+#define VOLUME_X            (BUFFER_X + BUFFER_W + BUFFER_VALUE_W + BUFVOL_GAP + VOLUME_LABEL_W)
+#define VOLUME_W            150
+#define VOLUME_VALUE_W      32      /* "100%" (4 chars) */
+#define TRANSPORT_W         48
+#define TRANSPORT_H         20
+#define TRANSPORT_GAP       GUI_CONTROL_GAP
+#define TRANSPORT_COUNT     3
+#define TRANSPORT_GROUP_W   ((TRANSPORT_COUNT * TRANSPORT_W) + ((TRANSPORT_COUNT - 1) * TRANSPORT_GAP))
+#define PLAY_X              ((GUI_WIN_W - TRANSPORT_GROUP_W) / 2)
+#define NEXT_X              (PLAY_X + TRANSPORT_W + TRANSPORT_GAP)
+#define STOP_X              (NEXT_X + TRANSPORT_W + TRANSPORT_GAP)
+#define FILTER_W            54
+#define PL_OPEN_W           70
+#define PL_OPEN_X           (GUI_RIGHT_X - PL_OPEN_W)
+#define FILTER_X            (PL_OPEN_X - GUI_CONTROL_GAP - FILTER_W)
+
+#define ROW_FILE            GUI_TOP_Y
+#define ROW_TITLE           (ROW_FILE + 14)
+#define ROW_ARTIST          (ROW_TITLE + 14)
+#define ROW_ALBUM           (ROW_ARTIST + 14)
+#define ROW_RATING          (ROW_ALBUM + 14)
+#define ROW_TRACK           (ROW_RATING + 14)
+#define ROW_GENRE           (ROW_TRACK + 14)
+#define ROW_SPEED           (ROW_GENRE + GUI_ROW_HEIGHT + GUI_SECTION_GAP)
+#define ROW_PLAYBACK        (ROW_SPEED + GUI_ROW_HEIGHT + GUI_ROW_GAP)
+#define ROW_DECODER         (ROW_PLAYBACK + GUI_ROW_HEIGHT + GUI_ROW_GAP)
+#define ROW_CYCLES          (ROW_DECODER + GUI_ROW_HEIGHT + GUI_ROW_GAP)
+#define ROW_BUFVOL          (ROW_CYCLES + GUI_ROW_HEIGHT + GUI_SECTION_GAP)
+#define ROW_PROGRESS        (ROW_BUFVOL + GUI_ROW_HEIGHT + GUI_SECTION_GAP)
+#define ROW_BUTTONS         (ROW_PROGRESS + 18)
+#define ROW_STATUS          (ROW_BUTTONS + TRANSPORT_H + GUI_SECTION_GAP)
+#define ROW_FILEINFO        (ROW_STATUS + GUI_ROW_HEIGHT + GUI_ROW_GAP)
+
+#define PROG_X              (GUI_MARGIN + 4)   /* keep the recessed frame (drawn at PROG_X-4) off the left border */
+#define TIME_W              120                /* fits "-MM:SS / MM:SS" without spilling past the right border */
+#define PROG_W              (GUI_WIN_W - PROG_X - TIME_W - GUI_CONTROL_GAP - GUI_MARGIN)
+#define PROG_H              8
+#define PROG_TOP_Y          (ROW_PROGRESS + 4)
+#define TIME_X              (PROG_X + PROG_W + GUI_CONTROL_GAP)
 #define TIMER_TICK_MICROS 1000000UL
 #define ART_TIMER_MICROS 20000UL
 /* How long Stop is allowed to sit outstanding (child signalled but never
@@ -501,6 +614,7 @@ typedef struct HelixAmp3Gui {
 	int             rbShowingFavourites;
 	int             rbFavouriteCount;
 	int             rbSelectedFavourite;
+	int             rbSearchInProgress;
 	char            rbFavouriteNames[HELIXAMP3_RADIO_FAV_MAX][RB_MAX_NAME];
 	char            rbFavouriteUrls[HELIXAMP3_RADIO_FAV_MAX][RB_MAX_URL];
 	char            rbStatusText[128];
@@ -989,9 +1103,15 @@ static void FreeTags(Mp3Tags *tags)
 	if (!tags)
 		return;
 	if (tags->artData) {
+		/* tags->artData is the only owner of this AllocMem() block; clear it
+		 * (and artBytes) the instant it is freed so a second FreeTags()/reload
+		 * cannot re-free the same pointer -- the stale-owner double free the
+		 * closing alerts describe. */
+		GUI_FREE_BEGIN("FreeTags", "tags-artData", tags->artData, tags->artBytes);
 		FreeMem(tags->artData, tags->artBytes);
 		tags->artData = NULL;
 		tags->artBytes = 0;
+		GUI_FREE_END("FreeTags", "tags-artData", tags->artData, 0);
 	}
 	tags->artIsPng = 0;
 }
@@ -1690,9 +1810,15 @@ static void TryFolderArt(const char *inputName, Mp3Tags *tags)
 						(size_t)sz) {
 						tags->artBytes = (unsigned long)sz;
 					} else {
+						/* Short read: free the just-allocated buffer and clear
+						 * artData so neither this loop's !tags->artData guard nor
+						 * a later FreeTags() can see and re-free this dead
+						 * pointer. */
+						GUI_FREE_BEGIN("TryFolderArt", "folder-artData(short-read)", tags->artData, (unsigned long)sz);
 						FreeMem(tags->artData, (unsigned long)sz);
 						tags->artData = NULL;
 						tags->artBytes = 0;
+						GUI_FREE_END("TryFolderArt", "folder-artData(short-read)", tags->artData, 0);
 					}
 				}
 			}
@@ -2866,12 +2992,23 @@ static int DecodeFaviconJpegToGrey(const unsigned char *jpegData, unsigned long 
 	memset(gAccum, 0, sizeof(gAccum));
 	memset(bAccum, 0, sizeof(bAccum));
 	memset(greyCount, 0, sizeof(greyCount));
+	/* pjpeg_decode_init() free()s any previous gJpegData and realloc()s a fresh
+	 * buffer for the whole JPEG -- the first heap operations of the decode.
+	 * Bracket them so the log shows whether the free list is still intact when
+	 * the decoder starts and after it has (re)allocated: if "before" is OK and
+	 * "after" reports CORRUPT, the fault is inside picojpeg, not upstream. */
+	Radio_CheckMiniMem("favicon-jpeg: before pjpeg_decode_init");
 	status = pjpeg_decode_init(&info, pjpeg_cb, &src, 0);
+	Radio_CheckMiniMem("favicon-jpeg: after pjpeg_decode_init");
 	if (status != 0 || info.m_width <= 0 || info.m_height <= 0 ||
 		info.m_width > MAX_JPEG_DIM || info.m_height > MAX_JPEG_DIM) {
 		pjpeg_decode_free();
 		return -1;
 	}
+	RADIO_DBG(printf("radio-art: favicon jpeg dims=%dx%d comps=%d MCU=%dx%d perRow=%d perCol=%d\n",
+		(int)info.m_width, (int)info.m_height, (int)info.m_comps,
+		(int)info.m_MCUWidth, (int)info.m_MCUHeight,
+		(int)info.m_MCUSPerRow, (int)info.m_MCUSPerCol);)
 	for (i = 0; i < info.m_width; i++)
 		xMap[i] = (unsigned char)((i * outW) / info.m_width);
 	for (i = 0; i < info.m_height; i++)
@@ -2910,6 +3047,7 @@ static int DecodeFaviconJpegToGrey(const unsigned char *jpegData, unsigned long 
 		}
 	}
 	pjpeg_decode_free();
+	Radio_CheckMiniMem("favicon-jpeg: after pjpeg_decode_free");
 	for (i = 0; i < outW * outH; i++) {
 		if (greyCount[i]) {
 			unsigned short c = greyCount[i];
@@ -3142,6 +3280,21 @@ static int LoadRadioFaviconImage(HelixAmp3Gui *gui)
 	if (bytes <= 8)
 		return 0;
 
+	/* Bisect the "AN_MemCorrupt at the favicon JPEG decode" dead-end guru: walk
+	 * the exec free list right after the fetch/SSL teardown and before the
+	 * decoder's first heap op (picojpeg realloc()s a buffer for the whole JPEG).
+	 * If the list is ALREADY corrupt here, the fault was planted upstream by the
+	 * station switch / SSL teardown, not the decoder.  Radio_CheckMiniMem() sets
+	 * the poison flag when it finds damage; when it does, skip the decode
+	 * entirely -- feeding a corrupt heap to picojpeg's realloc()/free() is what
+	 * turns the recoverable state into a dead-end guru that needs a reboot.
+	 * Degrade to "no artwork" instead. */
+	Radio_CheckMiniMem("favicon: after fetch, before decode");
+	if (Radio_IsMemoryPoisoned()) {
+		RADIO_DBG(printf("radio-art: heap already poisoned before favicon decode -- skipping decode to avoid a dead-end guru\n");)
+		return 0;
+	}
+
 	/* Dispatch purely on the actual bytes fetched, not the URL extension or
 	 * declared Content-Type -- plenty of real sites serve a different format
 	 * under a "favicon.ico" URL and/or a misleading Content-Type. */
@@ -3342,13 +3495,26 @@ static void DrawTransportIcons(HelixAmp3Gui *gui)
 
 static void ReleaseArtColorPens(HelixAmp3Gui *gui)
 {
+	GUI_TASK_IDENTITY("artwork-release-pens");
 	if (gui->artPensBuilt && gui->win) {
 		struct ColorMap *cm = gui->win->WScreen->ViewPort.ColorMap;
 		if (cm) {
 			int i;
 			for (i = 0; i < gui->artPenCacheUsed; i++)
-				if (gui->artPenCache[i].pen >= 0)
+				if (gui->artPenCache[i].pen >= 0) {
+					/* Invalidate the slot the instant the pen is handed back: a
+					 * released pen index is stale exactly like a freed pointer,
+					 * so a slot left holding its old index could be released a
+					 * second time (the pen-cache form of AN_FreeTwice) if this
+					 * cache were walked again before BuildArtColorPens()
+					 * repopulated it. */
+					GUI_FREE_BEGIN("ReleaseArtColorPens", "art-color-pen",
+						(void *)(long)gui->artPenCache[i].pen, (unsigned long)i);
 					ReleasePen(cm, gui->artPenCache[i].pen);
+					gui->artPenCache[i].pen = -1;
+					GUI_FREE_END("ReleaseArtColorPens", "art-color-pen",
+						(void *)(long)gui->artPenCache[i].pen, (unsigned long)i);
+				}
 		}
 	}
 	gui->artPensBuilt = 0;
@@ -3589,7 +3755,7 @@ static void DrawArtPanel(HelixAmp3Gui *gui)
 	if (!gui->win)
 		return;
 	rp = gui->win->RPort;
-	DrawBevelBox(rp, ART_X - 2, ART_Y - 2, ART_W + 4, ART_H + 4,
+	DrawBevelBox(rp, ART_FRAME_X, ART_FRAME_Y, ART_FRAME_W, ART_FRAME_H,
 		GT_VisualInfo, (ULONG)gui->visualInfo,
 		GTBB_Recessed, TRUE,
 		TAG_DONE);
@@ -3752,8 +3918,11 @@ static void DrawProgress(HelixAmp3Gui *gui)
 	}
 
 	SetAPen(rp, gui->win->DetailPen);
+	/* Clear only the time band, not down to the transport row: the old
+	 * height (PROG_TOP_Y + GUI_GADGET_HEIGHT) reached ROW_BUTTONS and wiped
+	 * the top edge of the FLT/Playlist buttons on every clock tick. */
 	RectFill(rp, TIME_X, PROG_TOP_Y - 1,
-		TIME_X + TIME_W, PROG_TOP_Y + GUI_ROW_H);
+		TIME_X + TIME_W, PROG_TOP_Y + PROG_H + 3);
 	SetAPen(rp, 1);
 	textWidth = TextLength(rp, timeBuf, strlen(timeBuf));
 	textX = TIME_X + TIME_W - textWidth;
@@ -3963,6 +4132,12 @@ static void FinalizePlayback(HelixAmp3Gui *gui)
 	int queuedHaveRadioHostAddr = gui->queuedHaveRadioHostAddr;
 	unsigned long queuedRadioHostAddrBe = gui->queuedRadioHostAddrBe;
 	int failedRadioStart;
+
+	/* Stream completion runs on the GUI/main task (the playback child has
+	 * already posted its done message and is being reaped).  Log the task so
+	 * any parent-side RadioStream/art/tag free here is attributed to the same
+	 * task as the recoverable close alerts. */
+	GUI_TASK_IDENTITY("stream-completion-handling");
 
 	failedRadioStart = (!stoppedByUser && IsRadioInputName(gui->inputName) &&
 		gGuiPlaybackStatus.radioStatus == RADIO_STATUS_ERROR &&
@@ -4462,8 +4637,7 @@ static struct Gadget *MakeGadgetWithTextAttr(HelixAmp3Gui *gui, struct Gadget *p
 	ng.ng_Height = height;
 	ng.ng_GadgetText = (UBYTE *)label;
 	ng.ng_GadgetID = id;
-	ng.ng_TextAttr = textAttr ? textAttr :
-		(kind == TEXT_KIND ? &gTopaz8Attr : NULL);
+	ng.ng_TextAttr = textAttr ? textAttr : &gTopaz8Attr;
 	if (kind == BUTTON_KIND)
 		ng.ng_Flags = PLACETEXT_IN;
 	else if (kind == CHECKBOX_KIND)
@@ -4509,9 +4683,10 @@ static struct Gadget *MakeSliderGadget(HelixAmp3Gui *gui, struct Gadget *prev,
 	ng.ng_LeftEdge = left;
 	ng.ng_TopEdge = top;
 	ng.ng_Width = width;
-	ng.ng_Height = 16;
+	ng.ng_Height = GUI_GADGET_HEIGHT;
 	ng.ng_GadgetText = (UBYTE *)label;
 	ng.ng_GadgetID = id;
+	ng.ng_TextAttr = &gTopaz8Attr;
 	ng.ng_Flags = PLACETEXT_LEFT;
 	ng.ng_VisualInfo = gui->visualInfo;
 	return CreateGadget(SLIDER_KIND, prev, &ng,
@@ -4521,7 +4696,7 @@ static struct Gadget *MakeSliderGadget(HelixAmp3Gui *gui, struct Gadget *prev,
 		GTSL_Max, maxValue,
 		GTSL_Level, level,
 		GTSL_LevelFormat, (ULONG)format,
-		GTSL_LevelPlace, PLACETEXT_IN,
+		GTSL_LevelPlace, PLACETEXT_RIGHT,
 		GTSL_MaxLevelLen, maxLevelLen,
 		PGA_Visible, visible,
 		TAG_DONE);
@@ -4531,9 +4706,12 @@ static void UpdateChannelGadgetState(HelixAmp3Gui *gui)
 {
 	if (!gui->win)
 		return;
+	/* The Stereo/Mono cycle is locked (greyed) whenever the output channel
+	 * count is forced: fake-stereo overrides it, and 22050 Mono Ultrafast
+	 * (cd32Ultrafast) is mono-only, so neither may be switched to Stereo. */
 	if (gui->gadChannelMode)
 		GT_SetGadgetAttrs(gui->gadChannelMode, gui->win, NULL,
-			GA_Disabled, gui->fakeStereo, TAG_DONE);
+			GA_Disabled, (gui->fakeStereo || gui->cd32Ultrafast), TAG_DONE);
 	if (gui->gadFakeStereoWidth)
 		GT_SetGadgetAttrs(gui->gadFakeStereoWidth, gui->win, NULL,
 			GA_Disabled, !gui->fakeStereo, TAG_DONE);
@@ -4552,7 +4730,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 	gad = gui->gadContext;
 
 	gui->gadFile = gad = MakeGadget(gui, gad, TEXT_KIND, GID_FILE,
-		META_X, ROW_FILE, FILE_W, 16, "File:",
+		META_X, ROW_FILE, FILE_W, GUI_GADGET_HEIGHT, "File:",
 		GTTX_Text, (ULONG)gui->fileText,
 		GTTX_Border, TRUE,
 		TAG_IGNORE, 0,
@@ -4561,7 +4739,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gad = MakeGadget(gui, gad, BUTTON_KIND, GID_BROWSE,
-		BROWSE_X, ROW_FILE - 1, BROWSE_W, 16, "Browse",
+		BROWSE_X, ROW_FILE - 1, BROWSE_W, GUI_GADGET_HEIGHT, "Browse",
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
@@ -4570,7 +4748,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadTitle = gad = MakeGadget(gui, gad, TEXT_KIND, GID_TITLE,
-		META_X, ROW_TITLE, META_W, 16, "Title:",
+		META_X, ROW_TITLE, META_W, GUI_GADGET_HEIGHT, "Title:",
 		GTTX_Text, (ULONG)"-",
 		GTTX_Border, TRUE,
 		TAG_IGNORE, 0,
@@ -4579,7 +4757,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadArtist = gad = MakeGadget(gui, gad, TEXT_KIND, GID_ARTIST,
-		META_X, ROW_ARTIST, META_W, 16, "Artist:",
+		META_X, ROW_ARTIST, META_W, GUI_GADGET_HEIGHT, "Artist:",
 		GTTX_Text, (ULONG)"-",
 		GTTX_Border, TRUE,
 		TAG_IGNORE, 0,
@@ -4588,7 +4766,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadAlbum = gad = MakeGadget(gui, gad, TEXT_KIND, GID_ALBUM,
-		META_X, ROW_ALBUM, META_W, 16, "Album:",
+		META_X, ROW_ALBUM, META_W, GUI_GADGET_HEIGHT, "Album:",
 		GTTX_Text, (ULONG)"-",
 		GTTX_Border, TRUE,
 		TAG_IGNORE, 0,
@@ -4597,7 +4775,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gad = MakeGadget(gui, gad, TEXT_KIND, GID_RATING_LABEL,
-		GUI_MARGIN_L + 60, ROW_RATING, 1, 16, "Rating:",
+		GUI_FIELD_X, ROW_RATING, 1, GUI_GADGET_HEIGHT, "Rating:",
 		GTTX_Text, (ULONG)"",
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
@@ -4606,32 +4784,32 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadStars[0] = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_STAR1,
-		GUI_MARGIN_L + 78, ROW_RATING - 1, 22, 16, "-",
+		GUI_FIELD_X, ROW_RATING - 1, 22, GUI_GADGET_HEIGHT, "-",
 		TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0);
 	if (!gad) return -1;
 	gui->gadStars[1] = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_STAR2,
-		GUI_MARGIN_L + 102, ROW_RATING - 1, 22, 16, "-",
+		(GUI_FIELD_X + 26), ROW_RATING - 1, 22, GUI_GADGET_HEIGHT, "-",
 		TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0);
 	if (!gad) return -1;
 	gui->gadStars[2] = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_STAR3,
-		GUI_MARGIN_L + 126, ROW_RATING - 1, 22, 16, "-",
+		(GUI_FIELD_X + 52), ROW_RATING - 1, 22, GUI_GADGET_HEIGHT, "-",
 		TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0);
 	if (!gad) return -1;
 	gui->gadStars[3] = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_STAR4,
-		GUI_MARGIN_L + 150, ROW_RATING - 1, 22, 16, "-",
+		(GUI_FIELD_X + 78), ROW_RATING - 1, 22, GUI_GADGET_HEIGHT, "-",
 		TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0);
 	if (!gad) return -1;
 	gui->gadStars[4] = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_STAR5,
-		GUI_MARGIN_L + 174, ROW_RATING - 1, 22, 16, "-",
+		(GUI_FIELD_X + 104), ROW_RATING - 1, 22, GUI_GADGET_HEIGHT, "-",
 		TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0);
 	if (!gad) return -1;
 	gui->gadRatingValue = gad = MakeGadget(gui, gad, TEXT_KIND, GID_RATING_VALUE,
-		GUI_MARGIN_L + 206, ROW_RATING, 80, 16, "",
+		(GUI_FIELD_X + 132), ROW_RATING, 80, 16, "",
 		GTTX_Text, (ULONG)gui->ratingText,
 		TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0);
 	if (!gad) return -1;
 	gui->gadTrack = gad = MakeGadget(gui, gad, TEXT_KIND, GID_TRACK,
-		META_X, ROW_TRACK, META_W, 16, "Track:",
+		META_X, ROW_TRACK, META_W, GUI_GADGET_HEIGHT, "Track:",
 		GTTX_Text, (ULONG)"-",
 		GTTX_Border, TRUE,
 		TAG_IGNORE, 0,
@@ -4640,7 +4818,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadGenre = gad = MakeGadget(gui, gad, TEXT_KIND, GID_GENRE,
-		META_X, ROW_GENRE, META_W, 16, "Genre:",
+		META_X, ROW_GENRE, META_W, GUI_GADGET_HEIGHT, "Genre:",
 		GTTX_Text, (ULONG)"-",
 		GTTX_Border, TRUE,
 		TAG_IGNORE, 0,
@@ -4649,8 +4827,8 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gad = MakeGadget(gui, gad, TEXT_KIND, GID_COUNT,
-		GUI_MARGIN_L + 14, ROW_CHECKS - 1, 60, 16, "",
-		GTTX_Text, (ULONG)"Speed:",
+		GUI_MARGIN, ROW_SPEED, GUI_LABEL_WIDTH, GUI_GADGET_HEIGHT, "",
+		GTTX_Text, (ULONG)"",
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0);
@@ -4658,7 +4836,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadSpeedMode = gad = MakeGadget(gui, gad, CYCLE_KIND, GID_SPEED_MODE,
-		GUI_MARGIN_L + 86, ROW_CHECKS - 2, 130, 16, "",
+		SPEED_X, ROW_SPEED, SPEED_W, GUI_GADGET_HEIGHT, "Speed:",
 		GTCY_Labels, (ULONG)kSpeedModeLabels,
 		GTCY_Active, SpeedModeIndex(gui),
 		TAG_IGNORE, 0,
@@ -4667,7 +4845,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadFastMem = gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_FAST_MEM,
-		GUI_MARGIN_L + 314, ROW_CHECKS, 20, 12, "Fast-mem",
+		FASTMEM_X, ROW_SPEED + 1, CHECK_W, CHECK_H, "Fast-mem",
 		GTCB_Checked, gui->fastMem,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
@@ -4676,8 +4854,8 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gad = MakeGadget(gui, gad, TEXT_KIND, GID_COUNT,
-		GUI_MARGIN_L + 14, ROW_EXPERIMENTAL - 1, 90, 16, "",
-		GTTX_Text, (ULONG)"Experimental:",
+		GUI_MARGIN, ROW_DECODER, GUI_LABEL_WIDTH, GUI_GADGET_HEIGHT, "",
+		GTTX_Text, (ULONG)"",
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0);
@@ -4692,7 +4870,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 	 * as two separate checkboxes rather than folded into Speed Mode so either
 	 * can be soak-tested independently of which speed preset is active. */
 	gui->gadExpPoly = gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_EXP_POLY,
-		GUI_MARGIN_L + 108, ROW_EXPERIMENTAL, 20, 12, "Poly ASM",
+		OPTION1_X, ROW_DECODER + 1, CHECK_W, CHECK_H, "Poly ASM",
 		GTCB_Checked, gui->expPoly,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
@@ -4701,7 +4879,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadExpReducedTaps = gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_EXP_REDUCED_TAPS,
-		GUI_MARGIN_L + 220, ROW_EXPERIMENTAL, 20, 12, "Reduced taps (lossy)",
+		OPTION2_X, ROW_DECODER + 1, CHECK_W, CHECK_H, "Reduced taps",
 		GTCB_Checked, gui->expReducedTaps,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
@@ -4710,17 +4888,17 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadChannelMode = gad = MakeGadget(gui, gad, CYCLE_KIND, GID_CHANNEL_MODE,
-		GUI_MARGIN_L + 14, ROW_CHANNELS - 2, 74, 16, "",
+		STEREO_X, ROW_PLAYBACK, CYCLE_W_SMALL, GUI_GADGET_HEIGHT, "Stereo:",
 		GTCY_Labels, (ULONG)kChannelModeLabels,
 		GTCY_Active, ChannelModeIndex(gui),
-		GA_Disabled, gui->fakeStereo,
+		GA_Disabled, (gui->fakeStereo || gui->cd32Ultrafast),
 		TAG_IGNORE, 0);
 	if (!gad)
 		return -1;
 
 	gui->gadFakeStereo = gad = MakeGadget(gui, gad,
 		CHECKBOX_KIND, GID_FAKE_STEREO,
-		GUI_MARGIN_L + 92, ROW_CHANNELS, 20, 12, "Fake-st",
+		FAKE_X, ROW_PLAYBACK + 1, CHECK_W, CHECK_H, "Fake-st",
 		GTCB_Checked, gui->fakeStereo,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
@@ -4730,7 +4908,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 
 	gui->gadFakeStereoWidth = gad = MakeGadget(gui, gad,
 		CYCLE_KIND, GID_FAKE_STEREO_WIDTH,
-		GUI_MARGIN_L + 232, ROW_CHANNELS - 2, 92, 16, "Width:",
+		WIDTH_X, ROW_PLAYBACK, WIDTH_W, GUI_GADGET_HEIGHT, "Width:",
 		GTCY_Labels, (ULONG)kFakeStereoWidthLabels,
 		GTCY_Active, gui->fakeStereoWidthIndex,
 		GA_Disabled, !gui->fakeStereo,
@@ -4740,7 +4918,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 
 	gui->gadFakeStereoDelay = gad = MakeGadget(gui, gad,
 		CYCLE_KIND, GID_FAKE_STEREO_DELAY,
-		GUI_MARGIN_L + 414, ROW_CHANNELS - 2, 70, 16, "Delay:",
+		DELAY_X, ROW_PLAYBACK, DELAY_W, GUI_GADGET_HEIGHT, "Delay:",
 		GTCY_Labels, (ULONG)kFakeStereoDelayLabels,
 		GTCY_Active, gui->fakeStereoDelayIndex,
 		GA_Disabled, !gui->fakeStereo,
@@ -4749,7 +4927,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadRate = gad = MakeGadget(gui, gad, CYCLE_KIND, GID_RATE,
-		GUI_MARGIN_L + 48, ROW_CYCLES, 80, 16, "Rate:",
+		RATE_X, ROW_CYCLES, RATE_W, GUI_GADGET_HEIGHT, "Rate:",
 		GTCY_Labels, (ULONG)kRateLabels,
 		GTCY_Active, gui->rateIndex,
 		TAG_IGNORE, 0,
@@ -4758,7 +4936,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gad = MakeGadget(gui, gad, CYCLE_KIND, GID_QUALITY,
-		GUI_MARGIN_L + 230, ROW_CYCLES, 100, 16, "Quality:",
+		QUALITY_X, ROW_CYCLES, QUALITY_W, GUI_GADGET_HEIGHT, "Quality:",
 		GTCY_Labels, (ULONG)kQualityLabels,
 		GTCY_Active, gui->qualityIndex,
 		TAG_IGNORE, 0,
@@ -4767,7 +4945,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gad = MakeGadget(gui, gad, CYCLE_KIND, GID_SUBBAND_CAP,
-		GUI_MARGIN_L + 350, ROW_CYCLES, 130, 16, "Subbands:",
+		SUBBAND_X, ROW_CYCLES, SUBBAND_W, GUI_GADGET_HEIGHT, "Subbands:",
 		GTCY_Labels, (ULONG)kSubbandCapLabels,
 		GTCY_Active, gui->subbandCapIndex,
 		TAG_IGNORE, 0,
@@ -4776,13 +4954,13 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadBuffer = gad = MakeSliderGadget(gui, gad, GID_BUFFER,
-		SLIDER_X, ROW_BUFFER, BUFFER_SLIDER_W, "Buffer:",
+		BUFFER_X, ROW_BUFVOL, BUFFER_W, "Buffer:",
 		1, 10, gui->bufferSeconds, "%ld sec", 6, 2);
 	if (!gad)
 		return -1;
 
 	gui->gadVolume = gad = MakeSliderGadget(gui, gad, GID_VOLUME,
-		SLIDER_X, ROW_VOLUME, VOLUME_SLIDER_W, "Volume:",
+		VOLUME_X, ROW_BUFVOL, VOLUME_W, "Volume:",
 		0, 100, gui->volumePercent, "%ld%%", 4, 30);
 	if (!gad)
 		return -1;
@@ -4833,7 +5011,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadStatus = gad = MakeGadget(gui, gad, TEXT_KIND, GID_STATUS,
-		META_X, ROW_STATUS, GUI_WIN_W - META_X - GUI_MARGIN_R, 16, "Status:",
+		META_X, ROW_STATUS, GUI_FIELD_W, GUI_GADGET_HEIGHT, "Status:",
 		GTTX_Text, (ULONG)gui->statusText,
 		GTTX_Border, TRUE,
 		TAG_IGNORE, 0,
@@ -4842,7 +5020,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadFileInfo = gad = MakeGadget(gui, gad, TEXT_KIND, GID_FILEINFO,
-		FILEINFO_X, ROW_FILEINFO, FILEINFO_W, 16, "File info:",
+		FILEINFO_X, ROW_FILEINFO, FILEINFO_W, GUI_GADGET_HEIGHT, "File info:",
 		GTTX_Text, (ULONG)gui->fileInfoText,
 		GTTX_Border, TRUE,
 		TAG_IGNORE, 0,
@@ -4892,10 +5070,17 @@ static void GuiClose(HelixAmp3Gui *gui);
 static void DrainWindowMessages(HelixAmp3Gui *gui)
 {
 	struct IntuiMessage *msg;
+	struct MsgPort *port;
 
 	if (!gui || !gui->win)
 		return;
-	while ((msg = GT_GetIMsg(gui->win->UserPort)) != NULL)
+	/* ModifyIDCMP(win, 0) frees an Intuition-allocated IDCMP port and clears
+	 * win->UserPort.  Guard against a NULL port so a drain call after IDCMP has
+	 * been turned off does not call GT_GetIMsg(NULL) and walk low memory. */
+	port = gui->win->UserPort;
+	if (!port)
+		return;
+	while ((msg = GT_GetIMsg(port)) != NULL)
 		GT_ReplyIMsg(msg);
 }
 
@@ -5170,6 +5355,14 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	if (gui->smallFont)
 		SetFont(gui->win->RPort, gui->smallFont);
 
+	/* Every gadget is placed at a fixed offset, so a larger window only
+	 * exposes empty grey at the bottom/right (and a smaller one clips
+	 * controls). Pin the window to the size it opened at so the resize
+	 * gadget can't drag dead space into view. */
+	WindowLimits(gui->win,
+		gui->win->Width, gui->win->Height,
+		gui->win->Width, gui->win->Height);
+
 	gui->visualInfo = GetVisualInfo(gui->win->WScreen,
 		TAG_DONE);
 	if (!gui->visualInfo) {
@@ -5238,20 +5431,26 @@ static int GuiOpen(HelixAmp3Gui *gui)
 
 static void GuiClose(HelixAmp3Gui *gui)
 {
+	RADIO_DBG(printf("gui-close: enter win=%p rbWin=%p plWin=%p playbackActive=%d\n",
+		(void *)gui->win, (void *)gui->rbWin, (void *)gui->plWin, gui->playbackActive);)
 	CancelArtDecode(gui);
+	RADIO_DBG(printf("gui-close: after CancelArtDecode\n");)
 	if (gui->playbackActive)
 		WaitForPlaybackShutdown(gui);
+	RADIO_DBG(printf("gui-close: after WaitForPlaybackShutdown\n");)
 	if (gui->rbWin)
 		CloseRadioWindow(gui);
+	RADIO_DBG(printf("gui-close: after CloseRadioWindow\n");)
 	if (gui->win) {
-		/* Stop Intuition from queuing new IDCMP traffic, then reply anything
-		 * already pending before the window and GadTools objects disappear.
-		 * Leaving stale IntuiMessages on an app window port is a classic source
-		 * of recoverable alerts on memory cleanup.
-		 */
-		ModifyIDCMP(gui->win, 0);
+		/* Reply anything already pending, THEN stop Intuition queuing new IDCMP
+		 * traffic.  Drain first: ModifyIDCMP(win, 0) frees an Intuition-allocated
+		 * IDCMP port and clears win->UserPort, so draining afterwards would read a
+		 * freed port.  Leaving stale IntuiMessages on the port is also a classic
+		 * source of recoverable alerts on memory cleanup. */
 		DrainWindowMessages(gui);
+		ModifyIDCMP(gui->win, 0);
 	}
+	RADIO_DBG(printf("gui-close: after main-window IDCMP drain/off, before timer teardown\n");)
 	if (gui->timerReq) {
 		if (gui->timerPending) {
 			AbortIO((struct IORequest *)gui->timerReq);
@@ -5279,22 +5478,29 @@ static void GuiClose(HelixAmp3Gui *gui)
 		DeleteMsgPort(gui->donePort);
 		gui->donePort = NULL;
 	}
+	RADIO_DBG(printf("gui-close: before ClosePlaylistWindow\n");)
 	ClosePlaylistWindow(gui);
+	RADIO_DBG(printf("gui-close: before ReleaseArtColorPens\n");)
 	ReleaseArtColorPens(gui);
+	RADIO_DBG(printf("gui-close: before FreeTags\n");)
 	FreeTags(&gui->tags);
+	RADIO_DBG(printf("gui-close: before ClearMenuStrip/FreeMenus\n");)
 	if (gui->win && gui->menuStrip)
 		ClearMenuStrip(gui->win);
 	if (gui->menuStrip) {
 		FreeMenus(gui->menuStrip);
 		gui->menuStrip = NULL;
 	}
+	RADIO_DBG(printf("gui-close: before RemoveGList main gadgets=%p\n", (void *)gui->gadgets);)
 	if (gui->win && gui->gadgets)
 		RemoveGList(gui->win, gui->gadgets, -1);
 	if (gui->win) {
 		DrainWindowMessages(gui);
+		RADIO_DBG(printf("gui-close: before CloseWindow main\n");)
 		CloseWindow(gui->win);
 		gui->win = NULL;
 	}
+	RADIO_DBG(printf("gui-close: before FreeGadgets main\n");)
 	if (gui->gadgets) {
 		FreeGadgets(gui->gadgets);
 		gui->gadgets = NULL;
@@ -5303,6 +5509,7 @@ static void GuiClose(HelixAmp3Gui *gui)
 		FreeVisualInfo(gui->visualInfo);
 		gui->visualInfo = NULL;
 	}
+	RADIO_DBG(printf("gui-close: before font/library closes\n");)
 	if (gui->smallFont) {
 		CloseFont(gui->smallFont);
 		gui->smallFont = NULL;
@@ -5327,7 +5534,9 @@ static void GuiClose(HelixAmp3Gui *gui)
 		CloseLibrary((struct Library *)IntuitionBase);
 		IntuitionBase = NULL;
 	}
+	RADIO_DBG(printf("gui-close: before Radio_NetworkShutdown\n");)
 	Radio_NetworkShutdown();
+	RADIO_DBG(printf("gui-close: after Radio_NetworkShutdown -- done\n");)
 }
 
 
@@ -5495,9 +5704,15 @@ static void RadioSetStatus(HelixAmp3Gui *app, const char *text)
 	if (!app->rbWin || !app->rbGadgets) return;
 	gad = app->rbGadgets;
 	while (gad && gad->GadgetID != RB_GID_STATUS) gad = gad->NextGadget;
-	if (gad)
+	if (gad) {
 		GT_SetGadgetAttrs(gad, app->rbWin, NULL,
 			GTST_String, (ULONG)app->rbStatusText, TAG_DONE);
+		/* GadTools does not always redraw a string gadget immediately when the
+		 * next step is a synchronous Radio Browser network request.  Force the
+		 * status line out before that request so the dialog does not look frozen
+		 * on search/probe like the button press was ignored. */
+		RefreshGList(gad, app->rbWin, NULL, 1);
+	}
 }
 
 static int RadioStationMatchesScheme(HelixAmp3Gui *app, const RadioBrowserStation *st)
@@ -5622,6 +5837,23 @@ static struct Gadget *FindRadioGadget(HelixAmp3Gui *app, UWORD id)
 	return NULL;
 }
 
+static void RadioSetSearchBusy(HelixAmp3Gui *app, int busy)
+{
+	struct Gadget *gad;
+	UWORD ids[] = { RB_GID_SEARCH, RB_GID_PROBE, RB_GID_ADD_FAV, RB_GID_FAVOURITES,
+		RB_GID_UP, RB_GID_DOWN, 0 };
+	int i;
+
+	if (!app) return;
+	app->rbSearchInProgress = busy ? 1 : 0;
+	if (!app->rbWin) return;
+	for (i = 0; ids[i]; i++) {
+		gad = FindRadioGadget(app, ids[i]);
+		if (gad)
+			GT_SetGadgetAttrs(gad, app->rbWin, NULL, GA_Disabled, busy ? TRUE : FALSE, TAG_DONE);
+	}
+}
+
 static void RadioDoSearch(HelixAmp3Gui *app)
 {
 	struct Gadget *nameGad = FindRadioGadget(app, RB_GID_SEARCH_TEXT);
@@ -5636,11 +5868,16 @@ static void RadioDoSearch(HelixAmp3Gui *app)
 	int rc;
 	char filterMsg[192];
 
+	if (app->rbSearchInProgress) {
+		RadioSetStatus(app, "Search already running.");
+		return;
+	}
 	if (Radio_PlaybackOwnsNetwork()) {
 		RADIO_DBG(printf("radio-browser: search skipped while radio playback child owns networking\n");)
 		RadioSetStatus(app, "Radio playback owns networking; search after stopping.");
 		return;
 	}
+	RadioSetSearchBusy(app, TRUE);
 	RadioSetStatus(app, "Searching Radio Browser...");
 	text = NULL;
 	GT_GetGadgetAttrs(nameGad, app->rbWin, NULL, GTST_String, (ULONG)(void *)&text, TAG_DONE);
@@ -5681,8 +5918,10 @@ static void RadioDoSearch(HelixAmp3Gui *app)
 	printf("%s\n", filterMsg);
 #endif
 	rc = rb_controller_search(&app->rbController);
+	Radio_CheckMiniMem("after GadTools radio browser JSON parse");
 	app->rbShowingFavourites = FALSE;
 	RadioRefreshResults(app);
+	RadioSetSearchBusy(app, FALSE);
 	if (rc < 0)
 		RadioSetStatus(app, app->rbController.last_error);
 	else {
@@ -5963,24 +6202,43 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 static void CloseRadioWindow(HelixAmp3Gui *app)
 {
 	struct IntuiMessage *msg;
+	struct MsgPort *port;
 	if (!app->rbWin) return;
+	RADIO_DBG(printf("radio-close: enter rbWin=%p gadgets=%p visualInfo=%p\n",
+		(void *)app->rbWin, (void *)app->rbGadgets, (void *)app->rbVisualInfo);)
+	/* Snapshot the UserPort BEFORE ModifyIDCMP(win, 0): with an
+	 * Intuition-allocated IDCMP port, ModifyIDCMP(win, 0) frees that port and
+	 * clears win->UserPort, so reading app->rbWin->UserPort afterwards to drain
+	 * messages would dereference a freed/NULL port -- GetMsg() on it then walks
+	 * low memory and can hard-lock the machine.  Drain through the saved pointer
+	 * before turning IDCMP off instead. */
+	port = app->rbWin->UserPort;
+	RADIO_DBG(printf("radio-close: draining UserPort=%p before ModifyIDCMP\n", (void *)port);)
+	if (port) {
+		while ((msg = GT_GetIMsg(port)) != NULL)
+			GT_ReplyIMsg(msg);
+	}
+	RADIO_DBG(printf("radio-close: before ModifyIDCMP(0)\n");)
 	ModifyIDCMP(app->rbWin, 0);
-	while ((msg = GT_GetIMsg(app->rbWin->UserPort)) != NULL)
-		GT_ReplyIMsg(msg);
+	RADIO_DBG(printf("radio-close: before RemoveGList gadgets=%p\n", (void *)app->rbGadgets);)
 	if (app->rbGadgets)
 		RemoveGList(app->rbWin, app->rbGadgets, -1);
+	RADIO_DBG(printf("radio-close: before CloseWindow\n");)
 	CloseWindow(app->rbWin);
 	app->rbWin = NULL;
+	RADIO_DBG(printf("radio-close: after CloseWindow, before FreeGadgets\n");)
 	if (app->rbGadgets) {
 		FreeGadgets(app->rbGadgets);
 		app->rbGadgets = NULL;
 		app->rbGadContext = NULL;
 		app->rbGadList = NULL;
 	}
+	RADIO_DBG(printf("radio-close: before FreeVisualInfo=%p\n", (void *)app->rbVisualInfo);)
 	if (app->rbVisualInfo) {
 		FreeVisualInfo(app->rbVisualInfo);
 		app->rbVisualInfo = NULL;
 	}
+	RADIO_DBG(printf("radio-close: done\n");)
 }
 
 static void OpenRadioWindow(HelixAmp3Gui *app)
@@ -5996,6 +6254,7 @@ static void OpenRadioWindow(HelixAmp3Gui *app)
 	app->rbCountryMode = RadioCountryToIndex(app->rbController.countrycode);
 	app->rbShowingFavourites = FALSE;
 	app->rbSelectedFavourite = -1;
+	app->rbSearchInProgress = 0;
 	app->rbVisibleCount = 0;
 	app->rbVisualInfo = GetVisualInfoA(app->win->WScreen, NULL);
 	if (!app->rbVisualInfo) return;
@@ -7575,6 +7834,9 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 		if (gui->gadChannelMode)
 			GT_SetGadgetAttrs(gui->gadChannelMode, gui->win, NULL,
 				GTCY_Active, ChannelModeIndex(gui), TAG_DONE);
+		/* 22050 Mono Ultrafast forces mono, so grey the Stereo/Mono cycle
+		 * (and re-enable it when switching back to any other speed mode). */
+		UpdateChannelGadgetState(gui);
 		SetStatus(gui, code == 4 ?
 			"22050 mono ultrafast enabled (reduced taps, 12 subband cap)." :
 			code == 3 ?
@@ -7942,8 +8204,14 @@ static int GuiMainReal(int argc, char **argv)
 
 	(void)argc;
 	(void)argv;
+	/* GUI/main application task identity: every GUI_FREE_BEGIN/END below logs
+	 * FindTask(NULL), and this is the pointer they must match for the
+	 * recoverable AN_FreeTwice/AN_BadFreeAddr alerts to be pinned on the GUI
+	 * task rather than the net worker or a playback child. */
+	GUI_TASK_IDENTITY("application-startup-main-task");
 	if (GuiOpen(&gui) != 0)
 		return 1;
+	GUI_TASK_IDENTITY("gui-event-loop");
 	while (!gui.closeRequested) {
 		ULONG timerMask = gui.timerPort ? (1UL << gui.timerPort->mp_SigBit) : 0;
 		ULONG doneMask = gui.donePort ? (1UL << gui.donePort->mp_SigBit) : 0;
@@ -7963,15 +8231,51 @@ static int GuiMainReal(int argc, char **argv)
 	}
 	if (gui.playbackActive)
 		WaitForPlaybackShutdown(&gui);
+	/* Walk the exec heap once on the way out (all builds, not just
+	 * MINIAMP_DEBUG_ALLOC) so corruption that happened during a radio stream
+	 * stop/switch this session is flagged now, before the disposal below frees
+	 * anything through it.  Radio_CheckMiniMem() sets radioMemoryPoisoned when
+	 * it finds a damaged chunk list. */
+	Radio_CheckMiniMem("app-close before dispose");
+	if (Radio_IsMemoryPoisoned()) {
+		/* Corrupt exec heap (the AN_BadFreeAddr / MiniMem-detected corruption
+		 * this codebase hits during flaky radio stream stop/switch): every step
+		 * left in the normal close path -- SaveGuiSettings(), and GuiClose()'s
+		 * FreeGadgets()/FreeMenus()/FreeVisualInfo()/CloseWindow()/CloseLibrary()
+		 * and Radio_NetworkShutdown() -- frees memory or closes libraries through
+		 * the same damaged allocator state.  FreeMem() walks the broken free list
+		 * under Forbid(), so a second corrupting free hard-locks the machine
+		 * (frozen mouse) instead of alerting.  Skip all further disposal and exit
+		 * as directly as possible: the leak is recoverable with a reboot, another
+		 * corrupting free is not.  This mirrors minimp3r.c's app-close guard. */
+		RADIO_DBG(printf("app-close: memory corruption detected -- skipping SaveGuiSettings/GuiClose to avoid a corrupting free, exiting directly\n");)
+		return 0;
+	}
 	SaveGuiSettings(&gui);
 	GuiClose(&gui);
 	return 0;
 }
 
+#if defined(AMIGA_M68K)
+extern void LibnixFreeAllCompat_Install(void);
+#endif
+
 int main(int argc, char **argv)
 {
 	struct Task *task = FindTask(NULL);
 	int rc;
+
+	/* One-time init of the cross-task stdout lock shared with amiga_mp3dec.c,
+	 * radio_stream.c and the Radio Browser modules.  Must run before the radio
+	 * net worker task or any playback child touches it: the first Internet
+	 * Radio search obtains it from the GUI and worker tasks, and an
+	 * uninitialised SignalSemaphore makes that ObtainSemaphore() block forever.
+	 * minimp3r.c does the same in its own main(). */
+	InitSemaphore(&radio_console_lock);
+#if defined(AMIGA_M68K)
+	LibnixFreeAllCompat_Install();
+#endif
+
 
 	gGuiDetectedStackLower = (ULONG)task->tc_SPLower;
 	gGuiDetectedStackUpper = (ULONG)task->tc_SPUpper;
@@ -8006,8 +8310,11 @@ int main(int argc, char **argv)
 	rc = GuiMainReal(argc, argv);
 
 	StackSwap(&gGuiOldStack);
+	GUI_TASK_IDENTITY("shutdown-free-startup-stack");
+	GUI_FREE_BEGIN("main", "startup-stack", gGuiAllocatedStack, GUI_STARTUP_STACK_SIZE);
 	FreeMem(gGuiAllocatedStack, GUI_STARTUP_STACK_SIZE);
 	gGuiAllocatedStack = NULL;
+	GUI_FREE_END("main", "startup-stack", gGuiAllocatedStack, 0);
 	return rc;
 }
 

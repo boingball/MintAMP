@@ -92,6 +92,25 @@ int radio_runtime_flag_enabled(const char *name)
     return 0;
 }
 
+/* MP3_DIAG_LEAK_SSL: diagnostic-only runtime mode. When enabled, every
+ * per-connection SSL * (playback, probe, artwork -- healthy or failed) is
+ * quarantined/leaked instead of ever being passed to TLS free(), and the
+ * final AmiSSL/SSL_CTX/library teardown at app exit is deliberately
+ * abandoned, so a real-hardware run can answer one question: does the Exec
+ * heap corruption still occur when no SSL object is ever freed or reused
+ * after free? Intentionally leaky -- suitable only for a short run from a
+ * fresh reboot. Cached on first query so per-connection close decisions and
+ * the final teardown can never disagree if the environment variable changes
+ * mid-run. Defaults to disabled: with the flag absent, TLS free()/teardown
+ * behaviour is completely unchanged. */
+int radio_runtime_diag_leak_ssl_enabled(void)
+{
+    static int cached = -1;
+    if (cached < 0)
+        cached = radio_runtime_flag_enabled("MP3_DIAG_LEAK_SSL") ? 1 : 0;
+    return cached;
+}
+
 #ifdef RADIO_DEBUG
 static const char *radio_runtime_flag_printable(const char *value)
 {
@@ -153,11 +172,12 @@ void Radio_LogTestModeSummary(void)
     (void)probeTest;
     (void)artworkTest;
 #ifdef RADIO_DEBUG
-    printf("radio-runtime: probe=%s artwork=%s abortSslFreePolicy=%s source=%s\n",
+    printf("radio-runtime: probe=%s artwork=%s abortSslFreePolicy=%s source=%s diagLeakSsl=%s\n",
         radio_runtime_effective_probe_text(),
         radio_runtime_effective_artwork_text(),
         skipAbortSslFree ? "skip-on-abort" : "free-on-abort",
-        source);
+        source,
+        radio_runtime_diag_leak_ssl_enabled() ? "enabled" : "disabled");
 #else
     (void)skipAbortSslFree;
     (void)source;
@@ -169,7 +189,7 @@ void Radio_LogTestModeSummary(void)
 void Radio_LogRuntimeFlagsOnce(void)
 {
     static int logged = 0;
-    const char *names[6];
+    const char *names[7];
     int i;
 
     if (logged) return;
@@ -180,8 +200,9 @@ void Radio_LogRuntimeFlagsOnce(void)
     names[3] = "MP3_TEST_ENABLE_STREAM_PROBE";
     names[4] = "MP3_TEST_ENABLE_ARTWORK";
     names[5] = "MP3_ALLOW_ABORT_SSL_FREE";
+    names[6] = "MP3_DIAG_LEAK_SSL";
 #ifdef RADIO_DEBUG
-    for (i = 0; i < 6; i++) {
+    for (i = 0; i < 7; i++) {
         const char *env_value = radio_runtime_flag_raw_getenv(names[i]);
         const char *getvar_value = radio_runtime_flag_raw_getvar(names[i]);
         int enabled = radio_runtime_flag_enabled(names[i]);

@@ -8,6 +8,7 @@ extern "C" {
 const char *radio_runtime_flag_raw_getenv(const char *name);
 const char *radio_runtime_flag_raw_getvar(const char *name);
 int radio_runtime_flag_enabled(const char *name);
+int radio_runtime_diag_leak_ssl_enabled(void);
 void Radio_LogRuntimeFlagsOnce(void);
 void Radio_LogTestModeSummary(void);
 

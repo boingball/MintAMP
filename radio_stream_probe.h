@@ -1,6 +1,46 @@
 #ifndef RADIO_STREAM_PROBE_H
 #define RADIO_STREAM_PROBE_H
 
+/* radio_stream.c includes radio_stream.h before this header, while the probe
+ * implementation includes this header first.  That lets the persistent
+ * network-owner translation unit install the DNS wrapper below without
+ * putting bsdsocket calls into radio_stream_probe.c or any other module.
+ *
+ * A Stop/station-switch signals the persistent network worker with
+ * SIGBREAKF_CTRL_C.  If that signal arrives after the previous blocking DNS
+ * call has returned, it can remain pending and poison the next station's
+ * resolver call.  Clear the stale bit before each DNS lookup and make only
+ * that lookup interruptible; remove the break mask immediately afterwards so
+ * it cannot affect a later AmiSSL operation on the same worker task. */
+#if defined(RADIO_STREAM_H) && defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+#include <exec/types.h>
+#include <dos/dos.h>
+#include <dos/dostags.h>
+#include <utility/tagitem.h>
+#include <proto/exec.h>
+#include <proto/bsdsocket.h>
+#include <netdb.h>
+
+#define RADIO_DNS_JOIN_INNER(a, b) a##b
+#define RADIO_DNS_JOIN(a, b) RADIO_DNS_JOIN_INNER(a, b)
+#define RADIO_DNS_SOCKET_TAGS RADIO_DNS_JOIN(Socket, BaseTags)
+
+static struct hostent *radio_gethostbyname_scoped(const char *host)
+{
+    struct hostent *result;
+
+    SetSignal(0, SIGBREAKF_CTRL_C);
+    RADIO_DNS_SOCKET_TAGS(SBTM_SETVAL(SBTC_BREAKMASK),
+                          (ULONG)SIGBREAKF_CTRL_C,
+                          TAG_DONE);
+    result = gethostbyname((char *)host);
+    RADIO_DNS_SOCKET_TAGS(SBTM_SETVAL(SBTC_BREAKMASK), 0UL, TAG_DONE);
+    return result;
+}
+
+#define gethostbyname(host) radio_gethostbyname_scoped((host))
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif

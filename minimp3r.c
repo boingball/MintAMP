@@ -155,6 +155,59 @@
 #endif
 #define MR_FAVICON_MAX_BYTES (256L * 1024L)
 
+/* ------------------------------------------------------------------------- */
+/* Recoverable-free diagnostics (main/GUI-task FreeMem alert hunt).           */
+/*                                                                            */
+/* The last hardware run finished without heap corruption or a crash, but     */
+/* AmigaOS still raised two recoverable Exec alerts, both from ONE task:       */
+/*     01000009  AN_FreeTwice    -- the same block handed to FreeMem twice     */
+/*     0100000F  AN_BadFreeAddr  -- FreeMem given an address Exec's allocator  */
+/*                                  has no memory header for                   */
+/* The alerting task was NOT the radio net worker (that task's pointer is      */
+/* logged separately by radio_stream.c), so the GUI/main application task is   */
+/* the prime suspect.  A stale-but-non-NULL owner pointer freed a second time  */
+/* looks identical to these two alerts, which is why guarding a free with      */
+/* "if (ptr) FreeMem(ptr)" is not enough: the pointer has to be proven live.   */
+/*                                                                            */
+/* These numbered BEGIN/END records log FindTask(NULL) at every main-task      */
+/* free site together with the pointer, its owner/type, the session or         */
+/* generation it belongs to, and whether the owner field was already cleared   */
+/* (cleared=1 on a BEGIN is exactly the stale-owner double-free the alert       */
+/* describes).  Pairing every FreeMem/free with a BEGIN before and an END      */
+/* after also brackets the exact call whose FreeMem raises the alert on the    */
+/* next run, so the log's last un-paired BEGIN names the culprit.  RADIO_DEBUG- */
+/* only and serialized through radio_console_lock like every other RADIO_DBG.  */
+#ifdef RADIO_DEBUG
+static unsigned long gMrFreeAuditSeq;
+
+static void MrFreeAuditLog(const char *phase, const char *site,
+	const char *owner, const void *ptr, unsigned long generation)
+{
+	RADIO_DBG_PRINTF(("free-audit[%lu] %s site=%s owner=%s task=%p ptr=%p gen=%lu cleared=%d\n",
+		gMrFreeAuditSeq, phase, site ? site : "?", owner ? owner : "?",
+		(void *)FindTask(NULL), ptr, generation, ptr ? 0 : 1));
+}
+
+/* Log the identity of the running task at a life-cycle checkpoint, so the log
+ * ties the FindTask(NULL) pointer in the free records above to a named phase
+ * (startup, event loop, artwork, stream-done, audio cleanup, shutdown). */
+static void MrTaskIdentityLog(const char *phase)
+{
+	RADIO_DBG_PRINTF(("free-audit-task: phase=%s task=%p\n",
+		phase ? phase : "?", (void *)FindTask(NULL)));
+}
+
+#define MR_FREE_BEGIN(site, owner, ptr, gen) \
+	do { ++gMrFreeAuditSeq; MrFreeAuditLog("BEGIN", (site), (owner), (const void *)(ptr), (unsigned long)(gen)); } while (0)
+#define MR_FREE_END(site, owner, ptr, gen) \
+	MrFreeAuditLog("END", (site), (owner), (const void *)(ptr), (unsigned long)(gen))
+#define MR_TASK_IDENTITY(phase) MrTaskIdentityLog((phase))
+#else
+#define MR_FREE_BEGIN(site, owner, ptr, gen) do { } while (0)
+#define MR_FREE_END(site, owner, ptr, gen) do { } while (0)
+#define MR_TASK_IDENTITY(phase) do { } while (0)
+#endif
+
 /* How often we poll the shared playback status block while a track plays.
  * Keep the heartbeat responsive, but throttle expensive text redraws below. */
 #define MR_TICK_MICROS   250000UL
@@ -757,7 +810,7 @@ static void AppCloseDebug(const char *stage, const MrApp *app)
 	Radio_GetNetworkStats(&active_stream_sessions, &active_stream_tasks,
 		&open_socket_count, &active_ssl_count, &active_ssl_ctx_count);
 	Radio_GetNetworkBases(&socket_base, &amissl_base, &amissl_master_base);
-	printf("APP_CLOSE: %s streamState=%s playbackActive=%d playbackDonePending=%d activeChildCount=%lu gPlayer.process=%p gPlayer.task=%p gPlayer.stopRequested=%d active_stream_sessions=%ld active_stream_tasks=%ld open_socket_count=%ld active_ssl_count=%ld active_ssl_ctx_count=%ld browser_probe_socket_counts=unavailable SocketBase=%p AmiSSLBase=%p AmiSSLMasterBase=%p\n",
+	printf("APP_CLOSE: %s streamState=%s playbackActive=%d playbackDonePending=%d activeChildCount=%lu gPlayer.process=%p gPlayer.task=%p gPlayer.stopRequested=%d active_stream_sessions=%ld active_stream_tasks=%ld open_socket_count=%ld active_ssl_count=%ld active_ssl_ctx_count=%ld browser_probe_socket_counts=unavailable net_base=%p tls_base=%p tls_master=%p\n",
 		stage ? stage : "stage",
 		app ? MrStreamStateName(app->streamState) : "(no-app)",
 		app ? app->playbackActive : 0,
@@ -793,6 +846,7 @@ static int AppCloseShutdown(MrApp *app)
 	if (!app)
 		return 1;
 	app->shuttingDown = 1;
+	MR_TASK_IDENTITY("final-application-shutdown");
 	AppCloseDebug("begin", app);
 	AppCloseDebug("playback state", app);
 	if (AppHasActivePlaybackChild(app)) {
@@ -1878,6 +1932,11 @@ static void FinalizePlayback(MrApp *app)
 	if (!MrVerifyAppMagic(app, "FinalizePlayback"))
 		return;
 	RADIO_DBG(printf("radio-guard: before FinalizePlayback\n");)
+	/* Stream completion handling runs on the GUI/main task (the playback
+	 * child has already posted its done message and is being reaped): confirm
+	 * the task identity so any parent-side RadioStream/message cleanup that
+	 * frees here is attributed to the same task as the alerts. */
+	MR_TASK_IDENTITY("stream-completion-handling");
 	MrCopyVolatileString(radioError, sizeof(radioError), gGuiPlaybackStatus.radioError);
 	failedStart = (!stoppedByUser && MrIsRadioInput(gPlayer.url) && gGuiPlaybackStatus.decodedFrames == 0 &&
 		(gGuiPlaybackStatus.radioStatus == RADIO_STATUS_ERROR ||
@@ -3052,9 +3111,17 @@ static void DetectPictureMime(const unsigned char *payload,
 static void FreeMp3Info(MrMp3Info *info)
 {
 	if (info && info->artData) {
+		/* info->artData is AllocMem()'d by ReadId3v2()'s APIC branch or by
+		 * TryFolderArt(); it lives only on this stack-local MrMp3Info, is
+		 * never published to another task, and is decoded (not adopted) by
+		 * UpdateArtwork().  So the single owner is this struct and the single
+		 * free is here -- clearing artData/artBytes immediately below makes a
+		 * repeat call a proven no-op instead of a stale double free. */
+		MR_FREE_BEGIN("FreeMp3Info", "id3/folder-artData", info->artData, info->artBytes);
 		FreeMem(info->artData, info->artBytes);
 		info->artData = NULL;
 		info->artBytes = 0;
+		MR_FREE_END("FreeMp3Info", "id3/folder-artData", info->artData, 0);
 	}
 }
 
@@ -3180,8 +3247,14 @@ static void TryFolderArt(const char *inputName, MrMp3Info *info)
 						info->artBytes = (unsigned long)sz;
 						info->artIsPng = 0;
 					} else {
+						/* Short read: free the just-allocated buffer and
+						 * clear artData so neither the loop's own
+						 * !info->artData guard nor a later FreeMp3Info() can
+						 * see (and re-free) this now-dead pointer. */
+						MR_FREE_BEGIN("TryFolderArt", "folder-artData(short-read)", info->artData, (unsigned long)sz);
 						FreeMem(info->artData, (unsigned long)sz);
 						info->artData = NULL;
+						MR_FREE_END("TryFolderArt", "folder-artData(short-read)", info->artData, 0);
 					}
 				}
 			}
@@ -3582,10 +3655,25 @@ static void ReleaseArtColorPens(MrApp *app)
 	if (app && app->artPensBuilt && app->win) {
 		struct ColorMap *cm = app->win->WScreen->ViewPort.ColorMap;
 		int i;
+		MR_TASK_IDENTITY("artwork-release-pens");
 		if (cm)
 			for (i = 0; i < app->artPenCacheUsed; i++)
-				if (app->artPenCache[i].pen >= 0)
+				if (app->artPenCache[i].pen >= 0) {
+					/* Ownership field invalidation: a released pen index is
+					 * stale exactly like a freed pointer, so mark the slot -1
+					 * the instant we hand it back.  Without this, a slot left
+					 * holding its old (now-released) index could be released a
+					 * second time -- the pen equivalent of the AN_FreeTwice
+					 * double free this build is chasing -- if this cache were
+					 * ever walked again before BuildArtColorPens() repopulated
+					 * it.  Clearing it makes the guard above self-correct. */
+					MR_FREE_BEGIN("ReleaseArtColorPens", "art-color-pen",
+						(void *)(long)app->artPenCache[i].pen, (unsigned long)i);
 					ReleasePen(cm, app->artPenCache[i].pen);
+					app->artPenCache[i].pen = -1;
+					MR_FREE_END("ReleaseArtColorPens", "art-color-pen",
+						(void *)(long)app->artPenCache[i].pen, (unsigned long)i);
+				}
 	}
 	if (app) {
 		app->artPensBuilt = 0;
@@ -3875,7 +3963,16 @@ static int DecodePngToGrey(const unsigned char *pngData, unsigned long pngBytes,
 	if (err || !image) {
 		RADIO_DBG(printf("radio-art: lodepng_decode32 failed err=%u (%s)\n",
 			err, lodepng_error_text(err));)
-		if (image) free(image);
+		if (image) {
+			/* image is malloc()'d inside lodepng.c (a separate translation
+			 * unit) and released with the matching free(); it is a private
+			 * decode buffer owned only here.  Clear it after the free so the
+			 * pointer cannot be reused on any later edit of this path. */
+			MR_FREE_BEGIN("DecodePngToGrey", "lodepng-image(err)", image, (unsigned long)pngBytes);
+			free(image);
+			image = NULL;
+			MR_FREE_END("DecodePngToGrey", "lodepng-image(err)", image, 0);
+		}
 		return -1;
 	}
 	RADIO_DBG(printf("radio-art: png %ux%u decoded ok\n", pw, ph);)
@@ -3906,7 +4003,10 @@ static int DecodePngToGrey(const unsigned char *pngData, unsigned long pngBytes,
 			if (greyCount[dst] != 0xffff) greyCount[dst]++;
 		}
 	}
+	MR_FREE_BEGIN("DecodePngToGrey", "lodepng-image", image, (unsigned long)pngBytes);
 	free(image);
+	image = NULL;
+	MR_FREE_END("DecodePngToGrey", "lodepng-image", image, 0);
 
 	for (i = 0; i < outW * outH; i++)
 		if (greyCount[i]) {
@@ -4858,8 +4958,18 @@ static void RadioRefreshResults(MrApp *app)
 			LISTBROWSER_Labels, (ULONG)~0,
 			LISTBROWSER_Selected, (ULONG)~0,
 			TAG_DONE);
-	if (app->rbList.lh_Head)
+	if (app->rbList.lh_Head) {
+		/* The list must be detached from the gadget (LISTBROWSER_Labels ~0,
+		 * done just above) before its nodes are freed here, then rebuilt.
+		 * rbNodes[] is the only other reference to these nodes, so it is
+		 * memset to 0 immediately after the free below -- a stale rbNodes
+		 * entry pointing at a freed node is precisely the dangling owner that
+		 * turns the next AddTail()/free into an AN_BadFreeAddr. */
+		MR_FREE_BEGIN("RadioRefreshResults", "listbrowser-nodes",
+			app->rbList.lh_Head, (unsigned long)app->rbVisibleCount);
 		FreeListBrowserList(&app->rbList);
+		MR_FREE_END("RadioRefreshResults", "listbrowser-nodes", (void *)0, 0);
+	}
 	NewList(&app->rbList);
 	memset(app->rbNodes, 0, sizeof(app->rbNodes));
 	app->rbVisibleCount = 0;
@@ -5990,6 +6100,13 @@ static int MrMainReal(int argc, char **argv)
 	(void)argc;
 	(void)argv;
 
+	/* Record the GUI/main application task identity up front: every free
+	 * bracketed by MR_FREE_BEGIN/END below logs FindTask(NULL), and this is
+	 * the pointer they must match for the recoverable AN_FreeTwice/
+	 * AN_BadFreeAddr alerts to be pinned on the GUI task rather than the net
+	 * worker or a playback child. */
+	MR_TASK_IDENTITY("application-startup-main-task");
+
 	/* Defaults that match a typical 030 setup. */
 	app.magic = MR_APP_MAGIC;
 	app.rateIndex = 1;		/* 11025 Hz */
@@ -6069,6 +6186,7 @@ static int MrMainReal(int argc, char **argv)
 	 * placeholder, so the recessed box is shown before the first file loads. */
 	DrawArtPanel(&app);
 
+	MR_TASK_IDENTITY("gui-event-loop");
 	while (!done) {
 		ULONG plSig = 0;
 		ULONG rbSig = 0;
@@ -6206,7 +6324,7 @@ static int MrMainReal(int argc, char **argv)
 	 * that the probe/search/streams opened.  Without this the app left
 	 * bsdsocket.library open on exit and the next launch could not open a working
 	 * socket ("Search failed" with the network otherwise up). */
-	AppCloseDebug("close SocketBase fallback", &app);
+	AppCloseDebug("close network base fallback", &app);
 	AppCloseDebug("AmiSSL shutdown fallback", &app);
 	Radio_NetworkShutdown();
 	RADIO_DBG(printf("app-close: Radio_NetworkShutdown done\n");)
@@ -6221,6 +6339,10 @@ static int MrMainReal(int argc, char **argv)
 }
 
 
+#if defined(AMIGA_M68K)
+extern void LibnixFreeAllCompat_Install(void);
+#endif
+
 int main(int argc, char **argv)
 {
 	struct Task *task = FindTask(NULL);
@@ -6231,6 +6353,10 @@ int main(int argc, char **argv)
 	 * spawned. See amiga_mp3dec.c's radio_console_lock definition and
 	 * RADIO_CONSOLE_LOCK_INIT_ELSEWHERE above. */
 	InitSemaphore(&radio_console_lock);
+#if defined(AMIGA_M68K)
+	LibnixFreeAllCompat_Install();
+#endif
+
 
 	gMrDetectedStackLower = (ULONG)task->tc_SPLower;
 	gMrDetectedStackUpper = (ULONG)task->tc_SPUpper;
@@ -6265,8 +6391,11 @@ int main(int argc, char **argv)
 	rc = MrMainReal(argc, argv);
 
 	StackSwap(&gMrOldStack);
+	MR_TASK_IDENTITY("shutdown-free-startup-stack");
+	MR_FREE_BEGIN("MrMain", "startup-stack", gMrAllocatedStack, MR_STARTUP_STACK_SIZE);
 	FreeMem(gMrAllocatedStack, MR_STARTUP_STACK_SIZE);
 	gMrAllocatedStack = NULL;
+	MR_FREE_END("MrMain", "startup-stack", gMrAllocatedStack, 0);
 	return rc;
 }
 

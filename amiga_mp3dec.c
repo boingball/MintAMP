@@ -40,9 +40,6 @@ struct SignalSemaphore radio_console_lock;
 #include <dos/dos.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
-#ifdef HAVE_AMISSL
-extern struct Library *AmiSSLMasterBase;
-#endif
 #ifndef AUDIONAME
 #define AUDIONAME "audio.device"
 #endif
@@ -6062,9 +6059,13 @@ static void FakeStereoProcess(FakeStereo *fs, int mono, short *outL, short *outR
 	l = mono + (d >> fs->shift);
 	r = d + (mono >> fs->shift);
 	/* Pseudo-stereo sounds quieter than the real mono path because centre energy
-	 * is spread across channels.  Give it a modest fixed-point makeup gain. */
+	 * is spread across channels.  Give it a modest fixed-point makeup gain.
+	 * R additionally gets 7/4 instead of L's 3/2: it leads with the *delayed*
+	 * copy, and the precedence (Haas) effect makes the lagging side sound
+	 * quieter than the leading L even at equal energy, so the extra boost pulls
+	 * the perceived image back toward centre. */
 	l = (l * 3) / 2;
-	r = (r * 3) / 2;
+	r = (r * 7) / 4;
 	*outL = ClipToS16(l);
 	*outR = ClipToS16(r);
 	fs->hist[fs->pos] = (short)mono;
@@ -6091,12 +6092,14 @@ static int SelftestFakeStereo(void)
 	for (i = 0; i < 2048; i++)
 		FakeStereoProcess(&fs, mono[i], &L[i], &R[i]);
 
-	/* exact cross-delay formula: L = mono + (d>>shift), R = d + (mono>>shift),
-	 * with d = mono[i-delay] (0 during warm-up). */
+	/* exact cross-delay formula with makeup gain: L = (mono + (d>>shift))*3/2,
+	 * R = (d + (mono>>shift))*7/4, with d = mono[i-delay] (0 during warm-up). */
 	for (i = 0; i < 2048; i++) {
 		int d = (i >= delay) ? (int)mono[i - delay] : 0;
-		int el = mono[i] + (d >> shift);
-		int er = d + ((int)mono[i] >> shift);
+		int rawL = mono[i] + (d >> shift);
+		int rawR = d + ((int)mono[i] >> shift);
+		int el = ClipToS16((rawL * 3) / 2);
+		int er = ClipToS16((rawR * 7) / 4);
 		if ((int)L[i] != el || (int)R[i] != er) {
 			printf("fake-stereo formula fail %d: L=%d/%d R=%d/%d\n",
 				i, L[i], el, R[i], er);
@@ -6104,19 +6107,24 @@ static int SelftestFakeStereo(void)
 			break;
 		}
 	}
-	/* energy balance: neither channel is systematically louder.  Measured over
+	/* Energy balance: the raw cross-delay is energy-symmetric, but R carries a
+	 * deliberate makeup boost (7/4 vs L's 3/2) to offset the precedence effect,
+	 * so R should be louder than L by ~ (7/4 / (3/2))^2 = 49/36.  Measured over
 	 * the steady state (past the first `delay` warm-up samples, where R has not
 	 * yet seen any delayed history). */
 	for (i = delay; i < 2048; i++) {
 		sumL2 += (long)L[i] * (long)L[i];
 		sumR2 += (long)R[i] * (long)R[i];
 	}
-	diff = (sumL2 > sumR2) ? (sumL2 - sumR2) : (sumR2 - sumL2);
-	tol = sumL2 / 50;	/* within 2% */
-	if (diff > tol) {
-		printf("fake-stereo energy imbalance: sumL2=%ld sumR2=%ld diff=%ld tol=%ld\n",
-			sumL2, sumR2, diff, tol);
-		failures++;
+	{
+		long expectedR2 = sumL2 * 49 / 36;
+		diff = (sumR2 > expectedR2) ? (sumR2 - expectedR2) : (expectedR2 - sumR2);
+		tol = expectedR2 / 16;	/* within ~6% of the intended boost */
+		if (sumR2 <= sumL2 || diff > tol) {
+			printf("fake-stereo balance off: sumL2=%ld sumR2=%ld expectedR2=%ld diff=%ld tol=%ld\n",
+				sumL2, sumR2, expectedR2, diff, tol);
+			failures++;
+		}
 	}
 	/* width must actually be present (channels differ) */
 	{
@@ -7013,12 +7021,15 @@ typedef struct AmigaAudioPlayer {
 	unsigned int period;
 	signed char *splitBuf[3][2];
 	void *splitBase[3][2];
+	unsigned long splitTotalBytes[3][2];
 	unsigned long splitBytes;
 	signed char *splitWorkBuf[3][2];
 	void *splitWorkBase[3][2];
+	unsigned long splitWorkTotalBytes[3][2];
 	unsigned long splitWorkBytes;
 	signed char *workBuf[3];
 	void *workBase[3];
+	unsigned long workTotalBytes[3];
 	unsigned long workBytes;
 	int workChip;
 	volatile int cleanupStarted;
@@ -7093,38 +7104,82 @@ static void AmigaAudioCheckWorkBufferCanary(AmigaAudioPlayer *player, int slot,
 }
 #endif
 
-static signed char *AmigaAllocGuarded(unsigned long bytes, int chip, void **baseOut)
+static unsigned long AmigaGuardedTotalBytes(unsigned long requestedBytes)
 {
 	unsigned long total;
-	unsigned char *base;
 
-	total = bytes + 2UL * PLAYBACK_GUARD_BYTES;
-	base = (unsigned char *)AllocMem(total,
-		(chip ? MEMF_CHIP : MEMF_FAST) | MEMF_CLEAR);
-	if (!base)
-		return NULL;
-#ifndef NDEBUG
-	memset(base, PLAYBACK_GUARD_VALUE, PLAYBACK_GUARD_BYTES);
-	memset(base + PLAYBACK_GUARD_BYTES + bytes, PLAYBACK_GUARD_VALUE,
-		PLAYBACK_GUARD_BYTES);
-#endif
-	*baseOut = base;
-	return (signed char *)(base + PLAYBACK_GUARD_BYTES);
+	total = requestedBytes + 2UL * PLAYBACK_GUARD_BYTES;
+	return (total + 7UL) & ~7UL;
 }
 
-static void AmigaFreeGuarded(void **basePtr, unsigned long bytes, int chip,
+static signed char *AmigaAllocGuarded(unsigned long requestedBytes, int chip,
+	void **allocationBaseOut, unsigned long *totalAllocationBytesOut)
+{
+	unsigned long totalAllocationBytes;
+	unsigned char *allocationBase;
+	signed char *userPointer;
+
+	totalAllocationBytes = AmigaGuardedTotalBytes(requestedBytes);
+	allocationBase = (unsigned char *)AllocMem(totalAllocationBytes,
+		(chip ? MEMF_CHIP : MEMF_FAST) | MEMF_CLEAR);
+	if (!allocationBase)
+		return NULL;
+	userPointer = (signed char *)(allocationBase + PLAYBACK_GUARD_BYTES);
+#ifndef NDEBUG
+	memset(allocationBase, PLAYBACK_GUARD_VALUE, PLAYBACK_GUARD_BYTES);
+	memset(allocationBase + PLAYBACK_GUARD_BYTES + requestedBytes,
+		PLAYBACK_GUARD_VALUE, PLAYBACK_GUARD_BYTES);
+#endif
+	*allocationBaseOut = allocationBase;
+	if (totalAllocationBytesOut)
+		*totalAllocationBytesOut = totalAllocationBytes;
+#ifdef RADIO_DEBUG
+	RadioDebugUnsuppressedPrintf("audio-guard-alloc: base=%p user=%p requested=%lu total=%lu\n",
+		(void *)allocationBase, (void *)userPointer, requestedBytes,
+		totalAllocationBytes);
+#else
+	printf("audio-guard-alloc: base=%p user=%p requested=%lu total=%lu\n",
+		(void *)allocationBase, (void *)userPointer, requestedBytes,
+		totalAllocationBytes);
+	fflush(stdout);
+#endif
+	return userPointer;
+}
+
+static void AmigaFreeGuarded(void **allocationBasePtr, void **userPointerPtr,
+	unsigned long requestedBytes, unsigned long totalAllocationBytes, int chip,
 	PlaybackCleanupStatus *status)
 {
-	void *base;
+	void *allocationBase;
+	void *userPointer;
 
 	(void)chip;
-	base = *basePtr;
-	if (!base)
+	allocationBase = *allocationBasePtr;
+	if (!allocationBase)
 		return;
-	if (!PlaybackBufferCanaryOk(base, bytes) && status)
+	userPointer = userPointerPtr ? *userPointerPtr :
+		(void *)((unsigned char *)allocationBase + PLAYBACK_GUARD_BYTES);
+	if (totalAllocationBytes == 0)
+		totalAllocationBytes = AmigaGuardedTotalBytes(requestedBytes);
+#ifdef RADIO_DEBUG
+	RadioDebugUnsuppressedPrintf("audio-guard-free: task=%p base=%p user=%p requested=%lu total=%lu\n",
+		(void *)FindTask(NULL), allocationBase, userPointer, requestedBytes, totalAllocationBytes);
+#else
+	printf("audio-guard-free: task=%p base=%p user=%p requested=%lu total=%lu\n",
+		(void *)FindTask(NULL), allocationBase, userPointer, requestedBytes, totalAllocationBytes);
+	fflush(stdout);
+#endif
+	if (!PlaybackBufferCanaryOk(allocationBase, requestedBytes) && status)
 		status->canaryErrors++;
-	FreeMem(base, bytes + 2UL * PLAYBACK_GUARD_BYTES);
-	*basePtr = NULL;
+	FreeMem(allocationBase, totalAllocationBytes);
+	Radio_DebugCheckExecMem("audio-guard-free: after FreeMem");
+	/* Base and user pointers cleared immediately: the caller's
+	 * player->splitBase[]/splitBuf[] (etc.) are the only owners, and leaving
+	 * either non-NULL after this FreeMem is what a later cleanup pass would
+	 * re-free as AN_FreeTwice. */
+	*allocationBasePtr = NULL;
+	if (userPointerPtr)
+		*userPointerPtr = NULL;
 }
 
 static void AmigaAudioCleanupTrace(const AmigaAudioPlayer *player, const char *msg)
@@ -7203,17 +7258,23 @@ static void AmigaAudioLogBufferEvent(const AmigaAudioPlayer *player,
 	const char *event, const char *owner, const char *site,
 	long slot, long ch, const void *ptr, unsigned long size)
 {
+	/* task=FindTask(NULL) ties every audio buffer/IORequest free to the task
+	 * that actually runs it.  The audio player is torn down by the playback
+	 * child, not the GUI/main task, so a recoverable AN_FreeTwice/
+	 * AN_BadFreeAddr whose task pointer matches this line is a child-task
+	 * defect, and one that does NOT match points the hunt back at the GUI
+	 * task's own frees instead. */
 #ifndef RADIO_DEBUG
 	if (!player || !player->debugCleanup)
 		return;
-	printf("debug-cleanup: %s owner=%s site=%s session=%lu slot=%ld ch=%ld ptr=%p size=%lu cleanup#=%lu\n",
-		event, owner, site, player->sessionId, slot, ch, ptr, size,
+	printf("debug-cleanup: %s owner=%s site=%s task=%p session=%lu slot=%ld ch=%ld ptr=%p size=%lu cleanup#=%lu\n",
+		event, owner, site, (void *)FindTask(NULL), player->sessionId, slot, ch, ptr, size,
 		player->cleanupInvocationCount);
 #else
 	if (!player)
 		return;
-	RadioDebugUnsuppressedPrintf("debug-cleanup: %s owner=%s site=%s session=%lu slot=%ld ch=%ld ptr=%p size=%lu cleanup#=%lu\n",
-		event, owner, site, player->sessionId, slot, ch, ptr, size,
+	RadioDebugUnsuppressedPrintf("debug-cleanup: %s owner=%s site=%s task=%p session=%lu slot=%ld ch=%ld ptr=%p size=%lu cleanup#=%lu\n",
+		event, owner, site, (void *)FindTask(NULL), player->sessionId, slot, ch, ptr, size,
 		player->cleanupInvocationCount);
 #endif
 }
@@ -7425,6 +7486,7 @@ static void AmigaAudioClose(AmigaAudioPlayer *player,
 						"AmigaAudioClose", i, ch, player->splitBase[i][ch], size);
 					player->splitBase[i][ch] = NULL;
 					player->splitBuf[i][ch] = NULL;
+					player->splitTotalBytes[i][ch] = 0;
 					if (player->stereo && ch == 0)
 						player->splitBuf[i][1] = NULL;
 					if (status)
@@ -7432,7 +7494,10 @@ static void AmigaAudioClose(AmigaAudioPlayer *player,
 				} else {
 					AmigaAudioLogBufferEvent(player, "free", "chip-buffer",
 						"AmigaAudioClose", i, ch, player->splitBase[i][ch], size);
-					AmigaFreeGuarded(&player->splitBase[i][ch], size, 1, status);
+					AmigaFreeGuarded(&player->splitBase[i][ch],
+						(void **)&player->splitBuf[i][ch], size,
+						player->splitTotalBytes[i][ch], 1, status);
+					player->splitTotalBytes[i][ch] = 0;
 					player->splitBuf[i][ch] = NULL;
 					if (player->stereo && ch == 0)
 						player->splitBuf[i][1] = NULL;
@@ -7450,6 +7515,7 @@ static void AmigaAudioClose(AmigaAudioPlayer *player,
 						player->splitWorkBytes);
 					player->splitWorkBase[i][ch] = NULL;
 					player->splitWorkBuf[i][ch] = NULL;
+					player->splitWorkTotalBytes[i][ch] = 0;
 					if (status)
 						status->quarantinedBuffers++;
 				} else {
@@ -7457,8 +7523,10 @@ static void AmigaAudioClose(AmigaAudioPlayer *player,
 						"AmigaAudioClose", i, ch, player->splitWorkBase[i][ch],
 						player->splitWorkBytes);
 					AmigaFreeGuarded(&player->splitWorkBase[i][ch],
-						player->splitWorkBytes, 0, status);
-					player->splitWorkBuf[i][ch] = NULL;
+						(void **)&player->splitWorkBuf[i][ch],
+						player->splitWorkBytes,
+						player->splitWorkTotalBytes[i][ch], 0, status);
+					player->splitWorkTotalBytes[i][ch] = 0;
 					if (status)
 						status->workBuffersFreed++;
 				}
@@ -7476,14 +7544,16 @@ static void AmigaAudioClose(AmigaAudioPlayer *player,
 					"AmigaAudioClose", i, -1, player->workBase[i], player->workBytes);
 				player->workBase[i] = NULL;
 				player->workBuf[i] = NULL;
+				player->workTotalBytes[i] = 0;
 				if (status)
 					status->quarantinedBuffers++;
 			} else {
 				AmigaAudioLogBufferEvent(player, "free", "work-buffer-mono",
 					"AmigaAudioClose", i, -1, player->workBase[i], player->workBytes);
-				AmigaFreeGuarded(&player->workBase[i], player->workBytes,
-					player->workChip, status);
-				player->workBuf[i] = NULL;
+				AmigaFreeGuarded(&player->workBase[i],
+					(void **)&player->workBuf[i], player->workBytes,
+					player->workTotalBytes[i], player->workChip, status);
+				player->workTotalBytes[i] = 0;
 				if (status) {
 					if (player->workChip)
 						status->chipBuffersFreed++;
@@ -7700,7 +7770,8 @@ static int AmigaAudioOpen(AmigaAudioPlayer *player, unsigned int period,
 			/* Allocate one contiguous chip buffer per stereo slot so Paula sees
 			 * left at base and right immediately after the per-channel span. */
 			player->splitBuf[i][0] = AmigaAllocGuarded(player->splitBytes * 2UL, 1,
-				&player->splitBase[i][0]);
+				&player->splitBase[i][0],
+				&player->splitTotalBytes[i][0]);
 			if (!player->splitBuf[i][0]) {
 				int wasInterrupted = gPlaybackInterrupted;
 				AmigaAudioClose(player, NULL);
@@ -7713,6 +7784,7 @@ static int AmigaAudioOpen(AmigaAudioPlayer *player, unsigned int period,
 				player->splitBytes * 2UL);
 			player->splitBuf[i][1] = player->splitBuf[i][0] + player->splitBytes;
 			player->splitBase[i][1] = NULL;
+			player->splitTotalBytes[i][1] = 0;
 		}
 		if (AmigaAudioOpenOne(player, 0, leftChannels, sizeof(leftChannels)) != 0 ||
 			AmigaAudioOpenOne(player, 1, rightChannels, sizeof(rightChannels)) != 0) {
@@ -7727,7 +7799,8 @@ static int AmigaAudioOpen(AmigaAudioPlayer *player, unsigned int period,
 		for (i = 0; i < AMIGA_AUDIO_PLAYBACK_SLOTS; i++) {
 			GuiPublishStartupStage(GUISTART_ALLOC_CHIP_BUFFERS);
 			player->splitBuf[i][0] = AmigaAllocGuarded(player->splitBytes, 1,
-				&player->splitBase[i][0]);
+				&player->splitBase[i][0],
+				&player->splitTotalBytes[i][0]);
 			if (!player->splitBuf[i][0]) {
 				int wasInterrupted = gPlaybackInterrupted;
 				AmigaAudioClose(player, NULL);
@@ -8101,7 +8174,8 @@ static int AmigaAudioAllocWorkBuffers(AmigaAudioPlayer *player, int stereo,
 			for (ch = 0; ch < 2; ch++) {
 				player->splitWorkBuf[i][ch] =
 					AmigaAllocGuarded(player->splitWorkBytes, 0,
-						&player->splitWorkBase[i][ch]);
+						&player->splitWorkBase[i][ch],
+						&player->splitWorkTotalBytes[i][ch]);
 				if (!player->splitWorkBuf[i][ch])
 					return -1;
 				AmigaAudioLogBufferEvent(player, "alloc", "work-buffer-split",
@@ -8114,7 +8188,7 @@ static int AmigaAudioAllocWorkBuffers(AmigaAudioPlayer *player, int stereo,
 		player->workChip = 0;
 		for (i = 0; i < AMIGA_AUDIO_PLAYBACK_SLOTS; i++) {
 			player->workBuf[i] = AmigaAllocGuarded(bytes, player->workChip,
-				&player->workBase[i]);
+				&player->workBase[i], &player->workTotalBytes[i]);
 			if (!player->workBuf[i])
 				return -1;
 			AmigaAudioLogBufferEvent(player, "alloc", "work-buffer-mono",
@@ -9038,7 +9112,7 @@ static const char *GenericCodecName(const GenericDecodeStream *gs)
 #ifdef HAVE_AMISSL
 static void *GenericAmiSSLMasterSnapshot(void)
 {
-	return (void *)AmiSSLMasterBase;
+	{ void *socket_base = 0, *amissl_base = 0, *amissl_master_base = 0; Radio_GetNetworkBases(&socket_base, &amissl_base, &amissl_master_base); (void)socket_base; (void)amissl_base; return amissl_master_base; }
 }
 #else
 static void *GenericAmiSSLMasterSnapshot(void)
@@ -9083,7 +9157,7 @@ static int GenericValidateDecodedPcm(GenericDecodeStream *gs,
 	}
 	if (masterBefore != masterAfter) {
 		fprintf(stderr,
-			"MEMORY CORRUPTION: AmiSSLMasterBase changed during AAC output handling section=%s before=%p after=%p\n",
+			"MEMORY CORRUPTION: TLS master base changed during AAC output handling section=%s before=%p after=%p\n",
 			where ? where : "decode", masterBefore, masterAfter);
 		return 0;
 	}

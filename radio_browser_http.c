@@ -39,33 +39,6 @@ static int RadioBrowserHttpLockedPrintf(const char *fmt, ...)
 #undef printf
 #endif
 #define printf RadioBrowserHttpLockedPrintf
-#include <exec/types.h>
-#include <exec/libraries.h>
-#include <proto/bsdsocket.h>
-#include <sys/socket.h>
-#include <sys/time.h>
-#include <netinet/in.h>
-#include <netdb.h>
-#include <sys/ioctl.h>
-#ifndef RB_HTTP_EXTERNAL_SOCKETBASE
-/* Weak so this module can link either standalone or beside radio_stream.c,
- * which also provides SocketBase for bsdsocket.library builds. */
-struct Library *SocketBase __attribute__((weak));
-#endif
-#define RB_HTTP_SOCKET long
-#define RB_HTTP_INVALID_SOCKET (-1)
-#define rb_http_close_socket(s) CloseSocket(s)
-#else
-#include <unistd.h>
-#include <netdb.h>
-#include <netinet/in.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/select.h>
-#include <fcntl.h>
-#define RB_HTTP_SOCKET int
-#define RB_HTTP_INVALID_SOCKET (-1)
-#define rb_http_close_socket(s) close(s)
 #endif
 
 #define RB_HTTP_PORT 80
@@ -75,60 +48,28 @@ struct Library *SocketBase __attribute__((weak));
 #define RB_HTTP_IO_TIMEOUT_SEC 8
 
 typedef struct RbHttpTransport {
-    RB_HTTP_SOCKET sock;
+    RadioNetTransport *net;
 } RbHttpTransport;
 
-#if defined(AMIGA_M68K) && !defined(RB_HTTP_EXTERNAL_SOCKETBASE)
-/* bsdsocket.library is now opened once by Radio_NetworkInit() at app startup
- * and closed once by Radio_NetworkShutdown() at app exit (see radio_stream.c)
- * instead of per-request -- this is now a deliberate no-op, kept so its call
- * sites below don't all need to be removed individually. */
-static void rb_http_release_socketbase(void)
+static int rb_http_transport_open(RbHttpTransport *transport, const char *host, int port)
 {
-}
-#endif
-
-
-static int rb_http_set_nonblocking(RB_HTTP_SOCKET sock, int enabled)
-{
-#if defined(AMIGA_M68K)
-    long mode = enabled ? 1 : 0;
-    return IoctlSocket(sock, FIONBIO, (char *)&mode);
-#else
-    int flags = fcntl(sock, F_GETFL, 0);
-    if (flags < 0) return -1;
-    if (enabled) flags |= O_NONBLOCK;
-    else flags &= ~O_NONBLOCK;
-    return fcntl(sock, F_SETFL, flags);
-#endif
+    if (!transport || !host) return RB_HTTP_ERR_BAD_ARG;
+    transport->net = RadioNet_Open(NULL, host, port, 0, "browser", 0);
+    return transport->net ? 0 : RB_HTTP_ERR_CONNECT;
 }
 
-static int rb_http_wait_socket(RB_HTTP_SOCKET sock, int for_write, int timeout_sec)
+static void rb_http_transport_close(RbHttpTransport *transport)
 {
-    fd_set rfds;
-    fd_set wfds;
-    struct timeval tv;
-    int rc;
+    if (transport && transport->net) {
+        RadioNet_Close(transport->net, 0);
+        transport->net = NULL;
+    }
+}
 
-    FD_ZERO(&rfds);
-    FD_ZERO(&wfds);
-    if (for_write) FD_SET(sock, &wfds);
-    else FD_SET(sock, &rfds);
-    tv.tv_sec = timeout_sec;
-    tv.tv_usec = 0;
-#if defined(AMIGA_M68K)
-    rc = WaitSelect((int)sock + 1,
-        for_write ? NULL : &rfds,
-        for_write ? &wfds : NULL,
-        NULL,
-        &tv,
-        NULL);
-#else
-    rc = select((int)sock + 1, for_write ? NULL : &rfds, for_write ? &wfds : NULL, NULL, &tv);
-#endif
-    if (rc == 0) return RB_HTTP_ERR_TIMEOUT;
-    if (rc < 0) return for_write ? RB_HTTP_ERR_CONNECT : RB_HTTP_ERR_READ;
-    return 0;
+static int rb_http_transport_send_all(RbHttpTransport *transport, const char *buf, int len)
+{
+    if (!transport || !transport->net || !buf || len < 0) return RB_HTTP_ERR_BAD_ARG;
+    return RadioNet_Write(transport->net, buf, len) == 0 ? 0 : RB_HTTP_ERR_SEND;
 }
 
 static int rb_http_append(char *out, int out_size, int *pos, const char *text)
@@ -158,7 +99,7 @@ static int rb_http_build_request(char *out, int out_size,
     if (rc < 0) return rc;
     rc = rb_http_append(out, out_size, &pos, path);
     if (rc < 0) return rc;
-    rc = rb_http_append(out, out_size, &pos, " HTTP/1.1\r\nHost: ");
+    rc = rb_http_append(out, out_size, &pos, " HTTP/1.0\r\nHost: ");
     if (rc < 0) return rc;
     rc = rb_http_append(out, out_size, &pos, host);
     if (rc < 0) return rc;
@@ -166,103 +107,6 @@ static int rb_http_build_request(char *out, int out_size,
         "\r\nUser-Agent: BoingPlayer/0.1 AmigaOS\r\n"
         "Accept: application/json\r\n"
         "Connection: close\r\n\r\n");
-}
-
-static int rb_http_transport_open(RbHttpTransport *transport, const char *host, int port)
-{
-    const struct hostent *he;
-    struct sockaddr_in sa;
-    int rc;
-
-    if (!transport || !host) return RB_HTTP_ERR_BAD_ARG;
-    transport->sock = RB_HTTP_INVALID_SOCKET;
-
-#if defined(AMIGA_M68K) && !defined(RB_HTTP_EXTERNAL_SOCKETBASE)
-    if (!SocketBase) {
-        /* Adopt the app-wide bsdsocket.library opened by Radio_NetworkInit()
-         * first: this file's weak SocketBase does not reliably merge with
-         * radio_stream.c's strong definition under the m68k hunk linker (see
-         * the matching fix in radio_stream_probe.c), so without this the
-         * search path silently ran on its own second bsdsocket instance. */
-        void *shared_socket = NULL;
-        Radio_GetNetworkBases(&shared_socket, NULL, NULL);
-        if (shared_socket) SocketBase = (struct Library *)shared_socket;
-    }
-    if (!SocketBase) {
-        SocketBase = OpenLibrary("bsdsocket.library", 4);
-        if (!SocketBase) return RB_HTTP_ERR_CONNECT;
-    }
-#endif
-
-    /* Amiga bsdsocket headers declare gethostbyname() with a mutable
-     * name argument even though the call only reads it. Cast at the call
-     * site so const-correct callers do not trigger -Wdiscarded-qualifiers. */
-    he = gethostbyname((char *)host);
-    if (!he || !he->h_addr_list || !he->h_addr_list[0]) {
-#if defined(AMIGA_M68K) && !defined(RB_HTTP_EXTERNAL_SOCKETBASE)
-        rb_http_release_socketbase();
-#endif
-        return RB_HTTP_ERR_DNS;
-    }
-
-    transport->sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (transport->sock == RB_HTTP_INVALID_SOCKET) {
-#if defined(AMIGA_M68K) && !defined(RB_HTTP_EXTERNAL_SOCKETBASE)
-        rb_http_release_socketbase();
-#endif
-        return RB_HTTP_ERR_CONNECT;
-    }
-
-    memset(&sa, 0, sizeof(sa));
-    sa.sin_family = AF_INET;
-    sa.sin_port = htons((unsigned short)port);
-    memcpy(&sa.sin_addr, he->h_addr_list[0], (size_t)he->h_length);
-
-    rb_http_set_nonblocking(transport->sock, 1);
-    if (connect(transport->sock, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
-        rc = rb_http_wait_socket(transport->sock, 1, RB_HTTP_CONNECT_TIMEOUT_SEC);
-        if (rc < 0) {
-            rb_http_close_socket(transport->sock);
-            transport->sock = RB_HTTP_INVALID_SOCKET;
-#if defined(AMIGA_M68K) && !defined(RB_HTTP_EXTERNAL_SOCKETBASE)
-            rb_http_release_socketbase();
-#endif
-            return rc;
-        }
-    }
-    return 0;
-}
-
-static void rb_http_transport_close(RbHttpTransport *transport)
-{
-    if (transport && transport->sock != RB_HTTP_INVALID_SOCKET) {
-        rb_http_close_socket(transport->sock);
-        transport->sock = RB_HTTP_INVALID_SOCKET;
-    }
-#if defined(AMIGA_M68K) && !defined(RB_HTTP_EXTERNAL_SOCKETBASE)
-    rb_http_release_socketbase();
-#endif
-}
-
-static int rb_http_transport_send_all(RbHttpTransport *transport,
-                                      const char *buf, int len)
-{
-    int sent;
-
-    if (!transport || transport->sock == RB_HTTP_INVALID_SOCKET || !buf || len < 0)
-        return RB_HTTP_ERR_BAD_ARG;
-    sent = 0;
-    while (sent < len) {
-        int n;
-        {
-            int wrc = rb_http_wait_socket(transport->sock, 1, RB_HTTP_IO_TIMEOUT_SEC);
-            if (wrc < 0) return wrc;
-        }
-        n = (int)send(transport->sock, (char *)buf + sent, len - sent, 0);
-        if (n <= 0) return RB_HTTP_ERR_SEND;
-        sent += n;
-    }
-    return 0;
 }
 
 static int rb_http_find_headers_end(const char *buf, int len)
@@ -335,16 +179,43 @@ static void rb_http_extract_content_type(const char *headers, int header_len,
     }
 }
 
-/* Some Radio Browser mirrors switch to "Transfer-Encoding: chunked" once
- * the response is large enough that they don't buffer it to compute a
- * Content-Length up front -- observed in practice once the station search
- * "limit" grows past what fits in one small response (small limits like 10
- * stay under that threshold and use Content-Length, larger ones like 50
- * don't).  This client only ever did a raw byte-stream read with no
- * framing awareness, so a chunked response's hex chunk-size lines ended up
- * embedded as garbage in what was handed to the JSON parser -- which
- * correctly rejected it as malformed JSON ("Parse failed"), even though
- * every byte had actually arrived intact. */
+/* Pulls Content-Length out of the response headers so Radio Browser
+ * searches can stop once the advertised JSON body has arrived instead of
+ * blocking until a server closes the socket. */
+static int rb_http_extract_content_length(const char *headers, int header_len)
+{
+    const char *line = headers;
+    const char *end = headers + header_len;
+
+    if (!headers || header_len <= 0) return -1;
+    while (line < end) {
+        const char *nl = line;
+        int line_len;
+        while (nl < end && *nl != '\n') nl++;
+        line_len = (int)(nl - line);
+        if (line_len > 0 && line[line_len - 1] == '\r') line_len--;
+        if (line_len > 15 && rb_http_ascii_starts_nocase(line, line_len, "Content-Length:")) {
+            const char *v = line + 15;
+            int v_len = line_len - 15;
+            int value = 0;
+            int digits = 0;
+
+            while (v_len > 0 && (*v == ' ' || *v == '\t')) { v++; v_len--; }
+            while (v_len > 0 && *v >= '0' && *v <= '9') {
+                int digit = *v - '0';
+                if (value > (0x7fffffff - digit) / 10) return -1;
+                value = value * 10 + digit;
+                digits++;
+                v++;
+                v_len--;
+            }
+            return digits > 0 ? value : -1;
+        }
+        line = nl + 1;
+    }
+    return -1;
+}
+
 static int rb_http_is_chunked(const char *headers, int header_len)
 {
     const char *line = headers;
@@ -420,6 +291,8 @@ static int rb_http_get_binary_impl(const char *host, const char *path,
     int rc;
     int header_end;
     int body_len;
+    int content_length;
+    int is_chunked;
 
     if (out_content_type && out_content_type_size > 0) out_content_type[0] = '\0';
     if (!host || !path || !out_body || out_body_size <= 0) return RB_HTTP_ERR_BAD_ARG;
@@ -443,19 +316,16 @@ static int rb_http_get_binary_impl(const char *host, const char *path,
     }
 
     len = 0;
+    header_end = -1;
+    content_length = -1;
+    is_chunked = 0;
     while (len < out_body_size - 1) {
         int want;
         int n;
 
         want = out_body_size - 1 - len;
         if (want > RB_HTTP_READ_CHUNK) want = RB_HTTP_READ_CHUNK;
-        rc = rb_http_wait_socket(transport.sock, 0, RB_HTTP_IO_TIMEOUT_SEC);
-        if (rc < 0) {
-            rb_http_transport_close(&transport);
-            out_body[0] = '\0';
-            return rc;
-        }
-        n = (int)recv(transport.sock, (char *)out_body + len, want, 0);
+        n = RadioNet_Read(transport.net, (char *)out_body + len, want);
         if (n < 0) {
             rb_http_transport_close(&transport);
             out_body[0] = '\0';
@@ -463,12 +333,24 @@ static int rb_http_get_binary_impl(const char *host, const char *path,
         }
         if (n == 0) break;
         len += n;
+        out_body[len] = '\0';
+
+        if (header_end < 0) {
+            header_end = rb_http_find_headers_end((const char *)out_body, len);
+            if (header_end >= 0) {
+                content_length = rb_http_extract_content_length((const char *)out_body, header_end);
+                is_chunked = rb_http_is_chunked((const char *)out_body, header_end);
+            }
+        }
+        if (header_end >= 0 && !is_chunked && content_length >= 0 &&
+            len - header_end >= content_length)
+            break;
     }
     if (len >= out_body_size - 1) {
         char tmp;
         int n;
 
-        n = (int)recv(transport.sock, &tmp, 1, 0);
+        n = RadioNet_Read(transport.net, &tmp, 1);
         if (n > 0) {
             rb_http_transport_close(&transport);
             out_body[0] = '\0';
