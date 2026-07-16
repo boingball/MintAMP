@@ -60,6 +60,7 @@
 #include <hardware/cia.h>
 #include "picojpeg.h"
 #include "lodepng.h"
+#include "webpdec.h"
 #include "svgdec.h"
 #include "radio_stream.h"
 #include "radio_browser_controller.h"
@@ -152,6 +153,12 @@
  * source list to shrink the binary. */
 #ifndef ENABLE_SVG_ARTWORK
 #define ENABLE_SVG_ARTWORK 1
+#endif
+/* WebP favicon support via webpdec.c (a small from-scratch VP8/VP8L decoder).
+ * Disable by building with -DENABLE_WEBP_ARTWORK=0 and dropping webpdec.c from
+ * the Makefile's source list to shrink the binary. */
+#ifndef ENABLE_WEBP_ARTWORK
+#define ENABLE_WEBP_ARTWORK 1
 #endif
 #define MR_FAVICON_MAX_BYTES (256L * 1024L)
 
@@ -4041,6 +4048,94 @@ static int DecodePngToGrey(const unsigned char *pngData, unsigned long pngBytes,
 }
 #endif /* ENABLE_PNG_ARTWORK */
 
+#if ENABLE_WEBP_ARTWORK
+/* Decodes a WebP favicon via webpdec into the same downsampled grey/RGB
+ * thumbnail buffers DecodeJpegToGrey()/DecodePngToGrey() produce.
+ * webp_get_info() bounds the declared dimensions before webp_decode_rgb()
+ * allocates width*height*3; both the lossless (VP8L) and lossy (VP8)
+ * bitstreams are handled, returning a packed 24-bit RGB buffer we free(). */
+static int DecodeWebpToGrey(const unsigned char *webpData, unsigned long webpBytes,
+	unsigned char *greyOut, unsigned char *rgbOut, int outW, int outH)
+{
+	unsigned char *image = NULL;
+	unsigned pw = 0, ph = 0;
+	unsigned char *xMap = sArtXMap, *yMap = sArtYMap;
+	unsigned long *greyAccum = sArtGreyAccum;
+	unsigned long *rAccum = sArtRAccum;
+	unsigned long *gAccum = sArtGAccum;
+	unsigned long *bAccum = sArtBAccum;
+	unsigned short *greyCount = sArtGreyCount;
+	unsigned x, y;
+	int i, rc;
+
+	if (!webpData || webpBytes <= 12 || !greyOut ||
+		outW <= 0 || outW > MR_ART_W || outH <= 0 || outH > MR_ART_H)
+		return -1;
+
+	if (webp_get_info(webpData, webpBytes, &pw, &ph) != WEBP_OK)
+		return -1;
+	if (pw == 0 || ph == 0 || pw > MR_MAX_JPEG_DIM || ph > MR_MAX_JPEG_DIM) {
+		RADIO_DBG(printf("radio-art: webp dimensions out of range %ux%u (max %d)\n",
+			pw, ph, MR_MAX_JPEG_DIM);)
+		return -1;
+	}
+
+	rc = webp_decode_rgb(webpData, webpBytes, MR_MAX_JPEG_DIM, &image, &pw, &ph);
+	if (rc != WEBP_OK || !image) {
+		RADIO_DBG(printf("radio-art: webp decode failed rc=%d\n", rc);)
+		if (image) {
+			MR_FREE_BEGIN("DecodeWebpToGrey", "webp-image(err)", image, (unsigned long)webpBytes);
+			free(image);
+			image = NULL;
+			MR_FREE_END("DecodeWebpToGrey", "webp-image(err)", image, 0);
+		}
+		return -1;
+	}
+	RADIO_DBG(printf("radio-art: webp %ux%u decoded ok\n", pw, ph);)
+
+	memset(greyOut, 0x80, (size_t)(outW * outH));
+	if (rgbOut)
+		memset(rgbOut, 0x80, (size_t)(outW * outH * 3));
+	memset(greyAccum, 0, sizeof(sArtGreyAccum));
+	memset(rAccum, 0, sizeof(sArtRAccum));
+	memset(gAccum, 0, sizeof(sArtGAccum));
+	memset(bAccum, 0, sizeof(sArtBAccum));
+	memset(greyCount, 0, sizeof(sArtGreyCount));
+
+	for (x = 0; x < pw; x++) xMap[x] = (unsigned char)(((unsigned long)x * (unsigned long)outW) / pw);
+	for (y = 0; y < ph; y++) yMap[y] = (unsigned char)(((unsigned long)y * (unsigned long)outH) / ph);
+
+	for (y = 0; y < ph; y++) {
+		const unsigned char *row = image + 3UL * (unsigned long)y * (unsigned long)pw;
+		int dstY = yMap[y];
+		for (x = 0; x < pw; x++) {
+			const unsigned char *px = row + 3 * x;
+			unsigned char r = px[0], g = px[1], b = px[2];
+			int dst = dstY * outW + xMap[x];
+			greyAccum[dst] += (77UL * r + 150UL * g + 29UL * b + 128UL) >> 8;
+			rAccum[dst] += r; gAccum[dst] += g; bAccum[dst] += b;
+			if (greyCount[dst] != 0xffff) greyCount[dst]++;
+		}
+	}
+	MR_FREE_BEGIN("DecodeWebpToGrey", "webp-image", image, (unsigned long)webpBytes);
+	free(image);
+	image = NULL;
+	MR_FREE_END("DecodeWebpToGrey", "webp-image", image, 0);
+
+	for (i = 0; i < outW * outH; i++)
+		if (greyCount[i]) {
+			unsigned short c = greyCount[i];
+			greyOut[i] = (unsigned char)((greyAccum[i] + (c / 2)) / c);
+			if (rgbOut) {
+				rgbOut[i * 3    ] = (unsigned char)((rAccum[i] + (c / 2)) / c);
+				rgbOut[i * 3 + 1] = (unsigned char)((gAccum[i] + (c / 2)) / c);
+				rgbOut[i * 3 + 2] = (unsigned char)((bAccum[i] + (c / 2)) / c);
+			}
+		}
+	return 0;
+}
+#endif /* ENABLE_WEBP_ARTWORK */
+
 static int MrIsIcoMagic(const unsigned char *data, int bytes)
 {
 	/* ICONDIR: 2 bytes reserved (0), 2 bytes type (1 = icon, 2 = cursor). */
@@ -4319,6 +4414,17 @@ static int LoadRadioFaviconImage(MrApp *app)
 		app->artValid = 1;
 		return 1;
 	}
+#if ENABLE_WEBP_ARTWORK
+	if (webp_is_webp(response, (unsigned long)bytes)) {
+		if (DecodeWebpToGrey(response, (unsigned long)bytes, app->artGreyBuf, app->artRGBBuf,
+			MR_ART_W, MR_ART_H) != 0) {
+			RADIO_DBG(printf("radio-art: webp decode failed\n");)
+			return 0;
+		}
+		app->artValid = 1;
+		return 1;
+	}
+#endif
 #if ENABLE_SVG_ARTWORK
 	if (SvgLooksLikeSvg(response, bytes)) {
 		if (SvgDecodeToGrey(response, (unsigned long)bytes, app->artGreyBuf, app->artRGBBuf,

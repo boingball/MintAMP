@@ -198,6 +198,8 @@ static char gSupportedExtPattern[512];
 /* #include <graphics/colormap.h> */
 #include "picojpeg.h"
 #include "lodepng.h"
+#include "webpdec.h"
+#include "svgdec.h"
 #include "radio_stream.h"
 #include "radio_browser_controller.h"
 #ifndef OBP_FailIfBad
@@ -439,6 +441,29 @@ static void GuiTaskIdentityLog(const char *phase)
 #else
 #undef ENABLE_PNG_ARTWORK
 #define ENABLE_PNG_ARTWORK 0
+#endif
+/* WebP favicon decode via webpdec.c (a small from-scratch VP8/VP8L decoder);
+ * WebP is now the second most common favicon format after PNG.  Disable with
+ * -DENABLE_WEBP_ARTWORK=0 (and drop webpdec.c from GUI_SOURCES to shrink the
+ * binary).  Gated on ENABLE_RADIO_ARTWORK like the PNG path above. */
+#if ENABLE_RADIO_ARTWORK
+#ifndef ENABLE_WEBP_ARTWORK
+#define ENABLE_WEBP_ARTWORK 1
+#endif
+#else
+#undef ENABLE_WEBP_ARTWORK
+#define ENABLE_WEBP_ARTWORK 0
+#endif
+/* SVG favicon decode via svgdec.c (fixed-point subset renderer, see svgdec.h).
+ * Brings the GadTools frontend to format parity with minimp3r.  Disable with
+ * -DENABLE_SVG_ARTWORK=0 (and drop svgdec.c from GUI_SOURCES). */
+#if ENABLE_RADIO_ARTWORK
+#ifndef ENABLE_SVG_ARTWORK
+#define ENABLE_SVG_ARTWORK 1
+#endif
+#else
+#undef ENABLE_SVG_ARTWORK
+#define ENABLE_SVG_ARTWORK 0
 #endif
 #define HELIXAMP3_FAVICON_MAX_BYTES (256L * 1024L)
 
@@ -3213,6 +3238,100 @@ static int DecodeFaviconPngToGrey(const unsigned char *pngData, unsigned long pn
 }
 #endif /* ENABLE_PNG_ARTWORK */
 
+#if ENABLE_WEBP_ARTWORK
+/* Decodes a WebP favicon via webpdec into the same downsampled grey/RGB
+ * thumbnail buffers the PNG/JPEG paths produce.  webp_get_info() reads only
+ * the container header so an oversized image is rejected before
+ * webp_decode_rgb() allocates width*height*3 for it (the 256KB download cap
+ * bounds the compressed input, not the declared canvas).  webp_decode_rgb()
+ * handles both the lossless (VP8L) and lossy (VP8) bitstreams and returns a
+ * packed 24-bit RGB buffer we own and free(). */
+static int DecodeFaviconWebpToGrey(const unsigned char *webpData, unsigned long webpBytes,
+	unsigned char *greyOut, unsigned char *rgbOut, int outW, int outH)
+{
+	unsigned char *image = NULL;
+	unsigned pw = 0, ph = 0;
+	unsigned x, y;
+	int i, rc;
+	static unsigned long greyAccum[ART_W * ART_H];
+	static unsigned long rAccum[ART_W * ART_H];
+	static unsigned long gAccum[ART_W * ART_H];
+	static unsigned long bAccum[ART_W * ART_H];
+	static unsigned short greyCount[ART_W * ART_H];
+	unsigned char xMap[MAX_JPEG_DIM];
+	unsigned char yMap[MAX_JPEG_DIM];
+
+	if (!webpData || webpBytes <= 12 || !greyOut ||
+		outW <= 0 || outW > ART_W || outH <= 0 || outH > ART_H)
+		return -1;
+
+	if (webp_get_info(webpData, webpBytes, &pw, &ph) != WEBP_OK)
+		return -1;
+	if (pw == 0 || ph == 0 || pw > MAX_JPEG_DIM || ph > MAX_JPEG_DIM) {
+		RADIO_DBG(printf("radio-art: webp dimensions out of range %ux%u (max %d)\n",
+			pw, ph, MAX_JPEG_DIM);)
+		return -1;
+	}
+
+	Radio_CheckMiniMem("favicon-webp: before webp_decode_rgb");
+	rc = webp_decode_rgb(webpData, webpBytes, MAX_JPEG_DIM, &image, &pw, &ph);
+	Radio_CheckMiniMem("favicon-webp: after webp_decode_rgb");
+	if (rc != WEBP_OK || !image) {
+		RADIO_DBG(printf("radio-art: webp decode failed rc=%d\n", rc);)
+		if (image) free(image);
+		return -1;
+	}
+	RADIO_DBG(printf("radio-art: webp %ux%u decoded ok\n", pw, ph);)
+
+	memset(greyOut, 0x80, (size_t)(outW * outH));
+	if (rgbOut)
+		memset(rgbOut, 0x80, (size_t)(outW * outH * 3));
+	memset(greyAccum, 0, sizeof(greyAccum));
+	memset(rAccum, 0, sizeof(rAccum));
+	memset(gAccum, 0, sizeof(gAccum));
+	memset(bAccum, 0, sizeof(bAccum));
+	memset(greyCount, 0, sizeof(greyCount));
+
+	for (x = 0; x < pw; x++)
+		xMap[x] = (unsigned char)(((unsigned long)x * (unsigned long)outW) / pw);
+	for (y = 0; y < ph; y++)
+		yMap[y] = (unsigned char)(((unsigned long)y * (unsigned long)outH) / ph);
+
+	for (y = 0; y < ph; y++) {
+		const unsigned char *row = image + 3UL * (unsigned long)y * (unsigned long)pw;
+		int dstY = yMap[y];
+
+		for (x = 0; x < pw; x++) {
+			const unsigned char *px = row + 3 * x;
+			unsigned char r = px[0], g = px[1], b = px[2];
+			int dst = dstY * outW + xMap[x];
+
+			greyAccum[dst] += (77UL * r + 150UL * g + 29UL * b + 128UL) >> 8;
+			rAccum[dst] += r; gAccum[dst] += g; bAccum[dst] += b;
+			if (greyCount[dst] != 0xffff) greyCount[dst]++;
+		}
+	}
+	free(image);
+	image = NULL;
+	Radio_CheckMiniMem("favicon-webp: after free");
+
+	for (i = 0; i < outW * outH; i++) {
+		if (greyCount[i]) {
+			unsigned short c = greyCount[i];
+			unsigned long half = (unsigned long)c >> 1;
+
+			greyOut[i] = (unsigned char)((greyAccum[i] + half) / c);
+			if (rgbOut) {
+				rgbOut[i * 3    ] = (unsigned char)((rAccum[i] + half) / c);
+				rgbOut[i * 3 + 1] = (unsigned char)((gAccum[i] + half) / c);
+				rgbOut[i * 3 + 2] = (unsigned char)((bAccum[i] + half) / c);
+			}
+		}
+	}
+	return 0;
+}
+#endif /* ENABLE_WEBP_ARTWORK */
+
 /* Decodes the raw BITMAPINFOHEADER-style DIB embedded in a legacy
  * (non-PNG) ICO entry.  Only the depths real-world icon tools actually
  * emit are supported (32/24/8bpp, uncompressed); 4bpp/1bpp and
@@ -3480,6 +3599,28 @@ static int LoadRadioFaviconImage(HelixAmp3Gui *gui)
 		if (DecodeFaviconPngToGrey(response, (unsigned long)bytes, gui->artGreyBuf,
 			gui->artRGBBuf, ART_W, ART_H) != 0) {
 			RADIO_DBG(printf("radio-art: png decode failed\n");)
+			return 0;
+		}
+		gui->artValid = 1;
+		return 1;
+	}
+#endif
+#if ENABLE_WEBP_ARTWORK
+	if (webp_is_webp(response, (unsigned long)bytes)) {
+		if (DecodeFaviconWebpToGrey(response, (unsigned long)bytes, gui->artGreyBuf,
+			gui->artRGBBuf, ART_W, ART_H) != 0) {
+			RADIO_DBG(printf("radio-art: webp decode failed\n");)
+			return 0;
+		}
+		gui->artValid = 1;
+		return 1;
+	}
+#endif
+#if ENABLE_SVG_ARTWORK
+	if (SvgLooksLikeSvg(response, bytes)) {
+		if (SvgDecodeToGrey(response, (unsigned long)bytes, gui->artGreyBuf,
+			gui->artRGBBuf, ART_W, ART_H) != 0) {
+			RADIO_DBG(printf("radio-art: svg decode failed\n");)
 			return 0;
 		}
 		gui->artValid = 1;
