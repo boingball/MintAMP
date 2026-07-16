@@ -158,26 +158,32 @@ endif
 PNG_CPPFLAGS := -DENABLE_PNG_ARTWORK -DLODEPNG_NO_COMPILE_ENCODER \
 	-DLODEPNG_NO_COMPILE_DISK -DLODEPNG_NO_COMPILE_ANCILLARY_CHUNKS
 
-# SVG favicon decoding for minimp3r's radio artwork (svgdec.c, a small
-# from-scratch fixed-point subset decoder -- no floating point, no third-
-# party library, see svgdec.h).  Disable with -DENABLE_SVG_ARTWORK=0 in
-# EXTRA_CFLAGS and drop svgdec.c from GUIR_SOURCES below to also shrink
+# SVG favicon decoding (svgdec.c, a small from-scratch fixed-point subset
+# decoder -- no floating point, no third-party library, see svgdec.h).  Now
+# linked into both frontends.  Disable with -DENABLE_SVG_ARTWORK=0 in
+# EXTRA_CFLAGS and drop svgdec.c from the *_SOURCES below to also shrink
 # the binary; the C-level guard alone only skips the decode calls.
+#
+# WebP favicon decoding (webpdec.c, a small from-scratch VP8 lossy + VP8L
+# lossless decoder -- no third-party library, see webpdec.h).  Linked into
+# both frontends.  Disable with -DENABLE_WEBP_ARTWORK=0 in EXTRA_CFLAGS and
+# drop webpdec.c from the *_SOURCES below; the C-level guard alone only skips
+# the decode calls.  WebP is the second most common real-world favicon format.
 
 SOURCES := amiga_mp3dec.c miniamp_memguard.c $(TASKSAFE_MALLOC_SOURCE) radio_runtime_flags.c $(RADIO_SOURCES) $(DECODER_SOURCES)
 # miniamp_memguard.c compiles to nothing unless HEAPGUARD=1 (see
 # MINIAMP_DEBUG_ALLOC above), so it's harmless to always list it.
-GUI_SOURCES := amiga_mp3gui.c picojpeg.c lodepng.c miniamp_memguard.c $(TASKSAFE_MALLOC_SOURCE) radio_runtime_flags.c $(RADIO_SOURCES) \
+GUI_SOURCES := amiga_mp3gui.c picojpeg.c lodepng.c webpdec.c svgdec.c miniamp_memguard.c $(TASKSAFE_MALLOC_SOURCE) radio_runtime_flags.c $(RADIO_SOURCES) \
 	radio_browser_controller.c radio_browser.c radio_browser_url.c \
 	radio_browser_http.c radio_browser_json.c radio_stream_probe.c
 # miniamp3 uses gadtools.library via proto/gadtools.h; no linker flag is needed.
 # minimp3r is the ReAction/ClassAct frontend; it pulls amiga_mp3dec.c in itself
 # (like amiga_mp3gui.c) so only the shared decoder modules are listed here.  The
 # ReAction classes are opened at runtime, so no extra linker flag is needed.
-# lodepng.c is now linked into the GadTools frontend too (PNG is the most
-# common favicon format); svgdec.c remains minimp3r-only, so SVG favicon
-# support is not wired into the GadTools frontend above.
-GUIR_SOURCES := minimp3r.c picojpeg.c lodepng.c svgdec.c miniamp_memguard.c $(TASKSAFE_MALLOC_SOURCE) radio_runtime_flags.c $(RADIO_SOURCES) \
+# lodepng.c/webpdec.c/svgdec.c are linked into both frontends now, so the
+# GadTools and ReAction builds decode the same favicon formats (JPEG, PNG,
+# WebP, ICO and SVG).
+GUIR_SOURCES := minimp3r.c picojpeg.c lodepng.c webpdec.c svgdec.c miniamp_memguard.c $(TASKSAFE_MALLOC_SOURCE) radio_runtime_flags.c $(RADIO_SOURCES) \
 	radio_browser_controller.c radio_browser.c radio_browser_url.c \
 	radio_browser_http.c radio_browser_json.c radio_stream_probe.c
 
