@@ -860,10 +860,9 @@ struct RadioStream {
     volatile int workerCloseRequested;
     volatile unsigned long workerPumpGeneration;
 #endif
-    /* Set once a read/write/connect fault is classified fatal (see
-     * radio_ssl_error_is_fatal()): this session is done, permanently. No
-     * further pumping, no reconnect, no AAC-timeout wait -- Radio_Pump() and
-     * reconnect_http() both refuse to do anything once these are set. */
+    /* Set when an internal corruption check makes the session unsafe. Ordinary
+     * remote read/write/connect failures set noReconnect only: the session is
+     * done, but its SSL object remains safe to free after the socket closes. */
 	int fatalStop;
 	int noReconnect;
 	unsigned long workerReadCalls;
@@ -971,13 +970,12 @@ int Radio_IsMemoryPoisoned(void)
 
 const char *Radio_TlsPoisonedMessage(void)
 {
-    /* Only detected memory corruption reaches this state now (TLS faults
-     * quarantine and continue). Reboot, not just app restart: once poisoned
-     * cleanup has been skipped, the corrupted amissl.library stays resident
-     * with a nonzero open count (AmigaOS never reclaims library opens from
-     * an exited process), so a relaunch gets handed the same broken
-     * library. */
-    return "HTTPS disabled after TLS/memory poison; restart the app before using HTTPS.";
+    /* This state is reserved for positively detected memory corruption or an
+     * unrecoverable internal worker/cleanup failure, never an ordinary remote
+     * handshake/read/write error. Reboot, not just app restart: poisoned
+     * cleanup is deliberately skipped and amissl.library can remain resident
+     * with a nonzero open count, so a relaunch may inherit the same instance. */
+    return "HTTPS disabled after unrecoverable TLS/memory state; reboot before using HTTPS.";
 }
 
 /* Fatal TLS faults quarantine the faulting connection SSL and now poison the
@@ -1711,7 +1709,10 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
         radio_close_mode_name(mode), rs->session_id, (int)rs->status, rs->sslHandshakeDone,
         (void *)rs->ssl, (void *)rs->ctx, (long)rs->sock, radio_open_socket_count););
     if (rs->ssl && !rs->sslFreed) {
-        int poisoned = rs->sslStatePoisoned || rs->fatalStop || rs->noReconnect ||
+        /* noReconnect means only that this failed remote session must end; it
+         * does not make its SSL object unsafe to free. Quarantine is reserved
+         * for positively detected object/heap poison or an internal fatalStop. */
+        int poisoned = rs->sslStatePoisoned || rs->fatalStop ||
             Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned();
         if (poisoned) {
             RADIO_DBG(printf("radio-cleanup: SSL_free skipped (quarantined/poisoned) session=%lu ssl=%p\n",
@@ -1951,7 +1952,7 @@ static int radio_ssl_do_handshake(RadioStream *rs)
                 rs->noReconnect = 1;
                 strcpy(rs->lastSslOp, (e == SSL_ERROR_SYSCALL && ssl_lib_error == 0) ?
                     "ssl-connect-syscall" : "ssl-connect-fatal");
-                RADIO_DBG(printf("radio-tls: session=%lu fatal handshake failed; connection SSL quarantined and shared SSL_CTX poisoned for this run\n", rs->session_id));
+                RADIO_DBG(printf("radio-tls: session=%lu handshake failed; session will not reconnect, connection SSL will be freed after socket close\n", rs->session_id));
             }
             /* Drain the rest of the queue so the failure cannot masquerade
              * as a later session's fault. */
@@ -2164,7 +2165,7 @@ static int radio_send_all(RadioStream *rs, const char *buf, int len)
                     rs->noReconnect = 1;
                     strcpy(rs->lastSslOp, (e == SSL_ERROR_SYSCALL && ssl_lib_error == 0) ?
                         "ssl-write-syscall" : "ssl-write-fatal");
-                    RADIO_DBG(printf("radio-ssl-write: session=%lu fatal write failure; connection SSL quarantined and HTTPS disabled for this run\n", rs->session_id));
+                    RADIO_DBG(printf("radio-ssl-write: session=%lu write failure; session will not reconnect, connection SSL will be freed after socket close\n", rs->session_id));
                     ERR_clear_error();
                 }
             }
@@ -2275,8 +2276,18 @@ static int radio_net_transport_tls_connect(RadioNetTransport *t, const char *hos
             continue;
         }
         if (radio_ssl_error_is_fatal(e)) {
-            t->ssl_poisoned = 1;
-            Radio_MarkWorkerSslCtxPoisoned("transport SSL_connect fatal");
+            unsigned long ssl_lib_error = ERR_get_error();
+            char ssl_error_buf[160];
+            ssl_error_buf[0] = '\0';
+            if (ssl_lib_error != 0)
+                ERR_error_string_n(ssl_lib_error, ssl_error_buf, sizeof(ssl_error_buf));
+            /* A server-side rejection, reset, timeout or protocol mismatch is
+             * terminal for this transport only. It is not evidence that the
+             * AmiSSL worker, SSL_CTX or heap is corrupt. The caller closes the
+             * socket and frees this private SSL/SSL_CTX pair below. */
+            RADIO_DBG(printf("radio-net: transport TLS handshake failed session=%lu ssl_error=%d lib_error=%08lx (%s) -- connection-only failure\n",
+                t->session_id, e, ssl_lib_error,
+                ssl_error_buf[0] ? ssl_error_buf : "none"););
             ERR_clear_error();
         }
         return -1;
@@ -2541,7 +2552,12 @@ static void radio_net_write_worker(void *arg)
             if (n > 0) { done += n; continue; }
             n = SSL_get_error(t->ssl, n);
             if (n == SSL_ERROR_WANT_READ || n == SSL_ERROR_WANT_WRITE) { radio_backoff_sleep(); tries++; continue; }
-            if (radio_ssl_error_is_fatal(n)) { t->ssl_poisoned = 1; Radio_ReportTlsFault("transport fatal TLS write"); }
+            if (radio_ssl_error_is_fatal(n)) {
+                unsigned long ssl_lib_error = ERR_get_error();
+                RADIO_DBG(printf("radio-net: transport TLS write failed session=%lu ssl_error=%d lib_error=%08lx -- connection-only failure\n",
+                    t->session_id, n, ssl_lib_error););
+                ERR_clear_error();
+            }
             a->result = -1; radio_net_io_complete(a); return;
         }
 #endif
@@ -2605,8 +2621,12 @@ static void radio_net_read_worker(void *arg)
             if (n == SSL_ERROR_ZERO_RETURN) { a->result = 0; radio_net_io_complete(a); return; }
 #endif
             if (n == SSL_ERROR_WANT_READ || n == SSL_ERROR_WANT_WRITE) { radio_backoff_sleep(); continue; }
-            t->ssl_poisoned = 1;
-            Radio_ReportTlsFault("transport fatal TLS read");
+            {
+                unsigned long ssl_lib_error = ERR_get_error();
+                RADIO_DBG(printf("radio-net: transport TLS read failed session=%lu ssl_error=%d lib_error=%08lx -- connection-only failure\n",
+                    t->session_id, n, ssl_lib_error););
+                ERR_clear_error();
+            }
             a->result = -1;
             radio_net_io_complete(a);
             return;
@@ -3294,15 +3314,15 @@ static void close_current_socket_mode_local(RadioStream *rs, RadioCloseMode mode
     RADIO_DBG(printf("radio-cleanup: close mode=%s session=%lu status=%d fd=%ld open_socket_count_before=%ld\n",
         radio_close_mode_name(mode), rs->session_id, (int)rs->status, (long)rs->sock, before););
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-    /* Healthy TLS teardown keeps the worker-owned shared SSL_CTX retained:
-     * SSL_shutdown() -> CloseSocket() -> SSL_free(). Fatal/poisoned sessions
-     * close the raw socket, then quarantine SSL instead of making further
-     * AmiSSL calls if memory/TLS poison is present. */
+    /* A remote TLS failure is terminal for that session but its SSL object is
+     * still safe to free after the raw socket closes. Only verified object,
+     * heap or internal fatal poison quarantines the SSL/shared SSL_CTX. */
     {
-        int fatal_close = rs->sslStatePoisoned || rs->fatalStop || rs->noReconnect ||
+        int fatal_close = rs->sslStatePoisoned || rs->fatalStop ||
             Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned();
         int shutdown_will_call = rs->ssl && !rs->sslFreed && rs->sslHandshakeDone &&
-            rs->sock != RADIO_INVALID_SOCKET && !rs->socketClosed && !fatal_close;
+            rs->sock != RADIO_INVALID_SOCKET && !rs->socketClosed && !fatal_close &&
+            !rs->noReconnect;
         int ssl_diag_leaked = radio_runtime_diag_leak_ssl_enabled() &&
             rs->ssl && !rs->sslFreed && !fatal_close;
         radio_ssl_attempt_shutdown(rs);
@@ -3310,7 +3330,7 @@ static void close_current_socket_mode_local(RadioStream *rs, RadioCloseMode mode
         radio_abort_current_socket(rs);
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
         radio_ssl_close_stream_mode(rs, mode);
-        fatal_close = rs->sslStatePoisoned || rs->fatalStop || rs->noReconnect ||
+        fatal_close = rs->sslStatePoisoned || rs->fatalStop ||
             Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned();
         printf("radio-tls-close: category=playback session=%lu health=%s shutdown=%s socket=closed-before-SSL_free ssl=%s ctx=%s\n",
             rs->session_id, fatal_close ? "fatal" : "healthy",
@@ -4232,7 +4252,7 @@ static int radio_pump_body(RadioStream *rs)
                     rs->noReconnect = 1;
                     strcpy(rs->lastSslOp, (e == SSL_ERROR_SYSCALL && ssl_lib_error == 0) ?
                         "ssl-read-syscall" : "ssl-read-fatal");
-                    RADIO_DBG(printf("radio-ssl-read: session=%lu fatal read failure; connection SSL quarantined and HTTPS disabled for this run\n", rs->session_id));
+                    RADIO_DBG(printf("radio-ssl-read: session=%lu read failure; session will not reconnect, connection SSL will be freed after socket close\n", rs->session_id));
                     ERR_clear_error();
                 }
             }
