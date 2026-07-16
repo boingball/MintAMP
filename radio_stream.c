@@ -271,6 +271,48 @@ static void radio_net_job_free(RadioNetWorkerJob *job)
 #endif
 }
 
+/* Every per-request / per-connection network object -- the open+IO request
+ * blocks, their duplicated URL/host/category strings, the payload buffers and
+ * the RadioNetTransport itself -- is allocated with AllocVec/FreeVec instead
+ * of the C library malloc/free. These objects cross the GUI/opener <-> net
+ * worker task boundary: the opener task allocates a request, the worker frees
+ * it on the abandon path, and the worker allocates and frees its own transport
+ * and a fresh IO buffer on every single read while the GUI keeps allocating
+ * too. libnix's malloc arena is NOT task-safe, so sharing it between those
+ * tasks was silently corrupting the exec heap (surfacing later as a
+ * "bad chunk size" in the free list). AllocVec/FreeVec route straight to
+ * Exec's AllocMem/FreeMem, which serialise internally, so ownership may move
+ * between tasks and concurrent alloc/free from GUI + worker is safe -- the
+ * same isolation the standalone amissl_child_worker_repro gets for free by
+ * being a separate executable with its own C runtime. */
+static void *radio_net_alloc0(size_t n)
+{
+#if defined(AMIGA_M68K)
+    return AllocVec(n, MEMF_ANY | MEMF_CLEAR);
+#else
+    return calloc(1, n);
+#endif
+}
+
+static void *radio_net_alloc_raw(size_t n)
+{
+#if defined(AMIGA_M68K)
+    return AllocVec(n, MEMF_ANY);
+#else
+    return malloc(n);
+#endif
+}
+
+static void radio_net_free(void *p)
+{
+    if (!p) return;
+#if defined(AMIGA_M68K)
+    FreeVec(p);
+#else
+    free(p);
+#endif
+}
+
 static int radio_net_worker_is_self(void)
 {
     return radio_net_worker_task != NULL && FindTask(NULL) == radio_net_worker_task;
@@ -2337,7 +2379,7 @@ static char *radio_net_strdup(const char *s)
     size_t n;
     if (!s) s = "";
     n = strlen(s) + 1;
-    copy = (char *)malloc(n);
+    copy = (char *)radio_net_alloc_raw(n);
     if (copy) memcpy(copy, s, n);
     return copy;
 }
@@ -2345,17 +2387,17 @@ static char *radio_net_strdup(const char *s)
 static void radio_net_open_args_free(RadioNetOpenArgs *a)
 {
     if (!a) return;
-    if (a->url) free(a->url);
-    if (a->host) free(a->host);
-    if (a->category) free(a->category);
-    free(a);
+    radio_net_free(a->url);
+    radio_net_free(a->host);
+    radio_net_free(a->category);
+    radio_net_free(a);
 }
 
 static void radio_net_io_args_free(RadioNetIoArgs *a)
 {
     if (!a) return;
-    if (a->buffer) free(a->buffer);
-    free(a);
+    radio_net_free(a->buffer);
+    radio_net_free(a);
 }
 
 static void radio_net_transport_count_socket(RadioNetTransport *t)
@@ -2415,17 +2457,17 @@ static void radio_net_open_worker(void *arg)
         return;
     }
     if (!a || !a->host) { if (a) radio_net_open_complete(a, NULL); return; }
-    t = (RadioNetTransport *)calloc(1, sizeof(*t));
+    t = (RadioNetTransport *)radio_net_alloc0(sizeof(*t));
     if (!t) { radio_net_open_complete(a, NULL); return; }
     t->sock = RADIO_INVALID_SOCKET;
     t->use_tls = a->use_tls;
     t->session_id = a->session_id;
     radio_copy_string(t->category, sizeof(t->category), a->category ? a->category : "transport");
     he = gethostbyname((char *)a->host);
-    if (!he || !he->h_addr_list || !he->h_addr_list[0]) { free(t); radio_net_open_complete(a, NULL); return; }
+    if (!he || !he->h_addr_list || !he->h_addr_list[0]) { radio_net_free(t); radio_net_open_complete(a, NULL); return; }
     memcpy(&t->host_addr_be, he->h_addr_list[0], 4);
     t->sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (t->sock == RADIO_INVALID_SOCKET) { free(t); radio_net_open_complete(a, NULL); return; }
+    if (t->sock == RADIO_INVALID_SOCKET) { radio_net_free(t); radio_net_open_complete(a, NULL); return; }
     radio_net_transport_count_socket(t);
     radio_set_nonblocking(t->sock);
     memset(&sa, 0, sizeof(sa));
@@ -2450,7 +2492,7 @@ RadioNetTransport *RadioNet_Open(const char *url, const char *host, int port, in
 {
     RadioNetOpenArgs *args;
     RadioNetTransport *result;
-    args = (RadioNetOpenArgs *)calloc(1, sizeof(*args));
+    args = (RadioNetOpenArgs *)radio_net_alloc0(sizeof(*args));
     if (!args) return NULL;
     args->url = radio_net_strdup(url ? url : "");
     args->host = radio_net_strdup(host ? host : "");
@@ -2517,13 +2559,13 @@ int RadioNet_Write(RadioNetTransport *t, const void *buffer, int length)
     RadioNetIoArgs *args;
     int result;
     if (!t || !buffer || length < 0) return -1;
-    args = (RadioNetIoArgs *)calloc(1, sizeof(*args));
+    args = (RadioNetIoArgs *)radio_net_alloc0(sizeof(*args));
     if (!args) return -1;
     radio_net_io_req_init(args);
     args->transport = t;
     args->length = length;
     if (length > 0) {
-        args->buffer = (char *)malloc((size_t)length);
+        args->buffer = (char *)radio_net_alloc_raw((size_t)length);
         if (!args->buffer) { radio_net_io_args_free(args); return -1; }
         memcpy(args->buffer, buffer, (size_t)length);
     }
@@ -2584,12 +2626,12 @@ int RadioNet_Read(RadioNetTransport *t, void *buffer, int length)
     RadioNetIoArgs *args;
     int result;
     if (!t || !buffer || length <= 0) return -1;
-    args = (RadioNetIoArgs *)calloc(1, sizeof(*args));
+    args = (RadioNetIoArgs *)radio_net_alloc0(sizeof(*args));
     if (!args) return -1;
     radio_net_io_req_init(args);
     args->transport = t;
     args->length = length;
-    args->buffer = (char *)malloc((size_t)length);
+    args->buffer = (char *)radio_net_alloc_raw((size_t)length);
     if (!args->buffer) { radio_net_io_args_free(args); return -1; }
     args->result = -1;
     if (radio_net_worker_is_self()) radio_net_read_worker(args);
@@ -2667,7 +2709,7 @@ static void radio_net_close_transport_worker(RadioNetTransport *t, int graceful)
         }
     }
 #endif
-    free(t);
+    radio_net_free(t);
 }
 
 static void radio_net_close_worker(void *arg)
@@ -2691,7 +2733,7 @@ void RadioNet_Close(RadioNetTransport *t, int graceful)
         radio_net_close_transport_worker(t, graceful);
         return;
     }
-    args = (RadioNetIoArgs *)calloc(1, sizeof(*args));
+    args = (RadioNetIoArgs *)radio_net_alloc0(sizeof(*args));
     if (!args) {
         Radio_MarkTlsPoisoned("RadioNet_Close request allocation failed");
         return;

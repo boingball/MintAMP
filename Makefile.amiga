@@ -130,6 +130,23 @@ ifneq ($(filter 1 yes true on,$(HEAPGUARD)),)
 DEBUG_CPPFLAGS += -DMINIAMP_DEBUG_ALLOC
 endif
 
+# Process-wide task-safe C allocator (amiga_tasksafe_malloc.c). This program
+# runs the GUI task, every playback child and the AmiSSL net worker inside one
+# loaded image, all sharing libnix's single UNLOCKED malloc arena, which is not
+# task-safe; concurrent malloc/free from two of those tasks corrupts the arena
+# and, downstream, the Exec free list. Overriding malloc/calloc/realloc/free
+# with strong AllocVec/FreeVec-backed symbols (Exec-serialised) removes that
+# shared arena from every task in EVERY build (unlike HEAPGUARD, which only
+# serialises MiniMem-wrapped allocations in debug builds). On by default;
+# TASKSAFEMALLOC=0 reverts to libnix's allocator for A/B testing.
+TASKSAFEMALLOC ?= 1
+ifneq ($(filter 1 yes true on,$(TASKSAFEMALLOC)),)
+CPPFLAGS_COMMON += -DAMIGA_TASKSAFE_MALLOC
+TASKSAFE_MALLOC_SOURCE := amiga_tasksafe_malloc.c
+else
+TASKSAFE_MALLOC_SOURCE :=
+endif
+
 # PNG favicon decoding for the radio artwork feature (lvandeve/lodepng,
 # vendored as lodepng.c/.h).  Used by both the minimp3r (ReAction) and the
 # amiga_mp3gui (GadTools) frontends.  Decoder-only, no encoder/disk-IO/
@@ -147,10 +164,10 @@ PNG_CPPFLAGS := -DENABLE_PNG_ARTWORK -DLODEPNG_NO_COMPILE_ENCODER \
 # EXTRA_CFLAGS and drop svgdec.c from GUIR_SOURCES below to also shrink
 # the binary; the C-level guard alone only skips the decode calls.
 
-SOURCES := amiga_mp3dec.c miniamp_memguard.c radio_runtime_flags.c $(RADIO_SOURCES) $(DECODER_SOURCES)
+SOURCES := amiga_mp3dec.c miniamp_memguard.c $(TASKSAFE_MALLOC_SOURCE) radio_runtime_flags.c $(RADIO_SOURCES) $(DECODER_SOURCES)
 # miniamp_memguard.c compiles to nothing unless HEAPGUARD=1 (see
 # MINIAMP_DEBUG_ALLOC above), so it's harmless to always list it.
-GUI_SOURCES := amiga_mp3gui.c picojpeg.c lodepng.c miniamp_memguard.c radio_runtime_flags.c $(RADIO_SOURCES) \
+GUI_SOURCES := amiga_mp3gui.c picojpeg.c lodepng.c miniamp_memguard.c $(TASKSAFE_MALLOC_SOURCE) radio_runtime_flags.c $(RADIO_SOURCES) \
 	radio_browser_controller.c radio_browser.c radio_browser_url.c \
 	radio_browser_http.c radio_browser_json.c radio_stream_probe.c
 # miniamp3 uses gadtools.library via proto/gadtools.h; no linker flag is needed.
@@ -160,7 +177,7 @@ GUI_SOURCES := amiga_mp3gui.c picojpeg.c lodepng.c miniamp_memguard.c radio_runt
 # lodepng.c is now linked into the GadTools frontend too (PNG is the most
 # common favicon format); svgdec.c remains minimp3r-only, so SVG favicon
 # support is not wired into the GadTools frontend above.
-GUIR_SOURCES := minimp3r.c picojpeg.c lodepng.c svgdec.c miniamp_memguard.c radio_runtime_flags.c $(RADIO_SOURCES) \
+GUIR_SOURCES := minimp3r.c picojpeg.c lodepng.c svgdec.c miniamp_memguard.c $(TASKSAFE_MALLOC_SOURCE) radio_runtime_flags.c $(RADIO_SOURCES) \
 	radio_browser_controller.c radio_browser.c radio_browser_url.c \
 	radio_browser_http.c radio_browser_json.c radio_stream_probe.c
 
