@@ -1906,7 +1906,11 @@ static void CloseInputFile(FILE **file, int debugCleanup)
 		printf("debug-cleanup: input file closed: yes\n");
 }
 
-#if ENABLE_RADIO
+/* These two helpers have no radio dependency (DateStamp/clock() and
+ * Delay()/usleep() only) and are referenced unconditionally by
+ * InputSourceRead()'s live-stream branch below, so they must be defined in
+ * every build -- not just #if ENABLE_RADIO -- or a non-radio link fails with
+ * an undefined reference to radio_input_clock_ms. */
 static unsigned long radio_input_clock_ms(void)
 {
 #if defined(AMIGA_M68K) && defined(HAVE_AMIGA_AUDIO_DEVICE)
@@ -1928,7 +1932,6 @@ static void radio_input_wait_tick(void)
 	usleep(20000);
 #endif
 }
-#endif
 
 static size_t InputSourceRead(InputSource *input, void *dest, size_t bytes)
 {
