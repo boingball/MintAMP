@@ -978,10 +978,10 @@ const char *Radio_TlsPoisonedMessage(void)
     return "HTTPS disabled after unrecoverable TLS/memory state; reboot before using HTTPS.";
 }
 
-/* Fatal TLS faults quarantine the faulting connection SSL and now poison the
- * worker-owned shared SSL_CTX for the rest of this application run. The
- * context itself is deliberately kept until worker shutdown (or leaked if
- * poisoned), and no later HTTPS connection may allocate a new SSL from it. */
+/* Explicit internal poison reports quarantine the affected SSL and the
+ * worker-owned shared SSL_CTX for the rest of this application run. Ordinary
+ * remote handshake/read/write failures never call this path; they close and
+ * free only their per-connection state. */
 static long radio_tls_fault_count = 0;
 /* Diagnostic skip/quarantine marker.  This alone is not enough to abandon
  * the long-lived worker during Radio_NetworkShutdown(): MP3_SKIP_ABORT_SSL_FREE
@@ -2155,9 +2155,10 @@ static int radio_send_all(RadioStream *rs, const char *buf, int len)
                 if (e == SSL_ERROR_WANT_WRITE || e == SSL_ERROR_WANT_READ) {
                     radio_backoff_sleep(); tries++; continue;
                 }
-                /* TLS write failure: fatal cases quarantine this connection
-                 * and poison the shared context; nonfatal cases free only
-                 * the per-connection SSL. */
+                /* A non-WANT result ends this remote session. It does not
+                 * prove that the SSL object, shared context or heap is
+                 * corrupt; cleanup frees the connection after closing the
+                 * socket and leaves later HTTPS sessions available. */
                 ssl_lib_error = ERR_get_error();
                 RADIO_DBG(printf("radio-ssl-write: session=%lu write failed ssl_error=%d lib_error=%08lx\n", rs->session_id, e, ssl_lib_error));
                 if (radio_ssl_error_is_fatal(e)) {
@@ -4232,14 +4233,10 @@ static int radio_pump_body(RadioStream *rs)
 	                RADIO_DBG(printf("radio-ssl-read: session=%lu SSL_ERROR_ZERO_RETURN clean close\n", rs->session_id));
 	            }
             else {
-                /* Not a "call again later" condition -- a real record-layer
-                 * failure (bad MAC, unexpected message, truncated record,
-                 * ...). The handshake-failure path already logs the
-                 * OpenSSL/AmiSSL error-queue detail behind SSL_get_error()'s
-                 * bare numeric code; this path never did, so a read fault
-                 * like this had no detail to go on. This SSL object is about
-                 * to be torn down via close_current_socket(); fatal cases
-                 * quarantine the SSL instead of freeing it. */
+                /* Not a "call again later" condition: this remote session is
+                 * finished. Log the OpenSSL/AmiSSL queue detail, mark only the
+                 * session noReconnect, then close the socket and free this
+                 * connection's SSL normally. */
                 unsigned long ssl_lib_error = ERR_get_error();
                 char ssl_error_buf[160];
                 ssl_error_buf[0] = '\0';
@@ -4300,14 +4297,10 @@ static int radio_pump_body(RadioStream *rs)
     if (n <= 0) {
         close_current_socket(rs);
         if (rs->fatalStop || rs->noReconnect) {
-            /* A fatal SSL fault (SSL_ERROR_SSL/SYSCALL/unknown) was just
-             * classified above: this session is terminal, full stop. Every
-             * other branch below either waits for the AAC/HTTPS stream-start
-             * timeout or schedules a reconnect -- both re-enter
-             * SSL_connect()/SSL_read() against per-task AmiSSL state this
-             * fault may have already damaged, which is what looped
-             * "close mode=abort" for a long time and eventually corrupted
-             * the exec heap. Fail the stream now instead. */
+            /* A remote SSL failure was classified above. This session is
+             * terminal and must not reconnect automatically, but its
+             * connection object has already been safely freed and the worker
+             * remains available for the next user-selected station. */
             set_error(rs, "TLS read failed");
             RADIO_DBG(printf("radio-stream: session=%lu TLS/socket failure marked noReconnect -- refusing reconnect/timeout wait, failing stream\n", rs->session_id));
             return -1;
