@@ -3087,9 +3087,69 @@ static long Id3BigEndian32(const unsigned char *p)
 
 static void CopyId3Text(char *dst, size_t size, const unsigned char *p, long n)
 {
-	if (n <= 1) return;
-	if (p[0] == 0 || p[0] == 3) CopyTrim(dst, size, p + 1, (int)(n - 1));
-	else if (n > 3) CopyTrim(dst, size, p + 3, (int)(n - 3));
+	unsigned char enc;
+	long i, out;
+	int bigEndian;
+
+	if (!dst || size == 0) return;
+	dst[0] = 0;
+	if (!p || n <= 0) return;
+
+	enc = p[0];
+	p++;
+	n--;
+	if (enc == 0 || enc == 3) {
+		CopyTrim(dst, size, p, (int)n);
+		return;
+	}
+	if (enc != 1 && enc != 2) {
+		p--;
+		n++;
+		CopyTrim(dst, size, p, (int)n);
+		return;
+	}
+
+	bigEndian = (enc == 2);
+	if (n >= 2 && p[0] == 0xfe && p[1] == 0xff) {
+		bigEndian = 1;
+		p += 2;
+		n -= 2;
+	} else if (n >= 2 && p[0] == 0xff && p[1] == 0xfe) {
+		bigEndian = 0;
+		p += 2;
+		n -= 2;
+	}
+
+	out = 0;
+	for (i = 0; i + 1 < n && out + 1 < (long)size; i += 2) {
+		unsigned int cp = bigEndian ?
+			(((unsigned int)p[i] << 8) | p[i + 1]) :
+			(((unsigned int)p[i + 1] << 8) | p[i]);
+
+		if (cp == 0)
+			break;
+		if (cp >= 0xd800 && cp <= 0xdbff) {
+			if (i + 3 < n) {
+				unsigned int lo = bigEndian ?
+					(((unsigned int)p[i + 2] << 8) | p[i + 3]) :
+					(((unsigned int)p[i + 3] << 8) | p[i + 2]);
+				if (lo >= 0xdc00 && lo <= 0xdfff)
+					i += 2;
+			}
+			dst[out++] = '?';
+		} else if (cp >= 0xdc00 && cp <= 0xdfff) {
+			dst[out++] = '?';
+		} else if (cp < 0x20 || cp == 0x7f) {
+			dst[out++] = '?';
+		} else if (cp <= 0x00ff) {
+			dst[out++] = (char)(cp & 0xff);
+		} else {
+			dst[out++] = '?';
+		}
+	}
+	dst[out] = 0;
+	while (out > 0 && (dst[out - 1] == ' ' || dst[out - 1] == 0))
+		dst[--out] = 0;
 }
 
 static int RatingFromPopmByte(unsigned char b)
