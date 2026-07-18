@@ -53,4 +53,40 @@ plain=$($MP3DEC --info "$tmp/untagged.mp3")
 printf '%s\n' "$plain" | grep '^ID3v2 detected: no$' >/dev/null
 printf '%s\n' "$plain" | grep '^ID3v2 size skipped: 0 bytes$' >/dev/null
 printf '%s\n' "$plain" | grep '^first MPEG frame offset: 0$' >/dev/null
+
+python3 - "$tmp/utf16.mp3" <<'PY'
+import struct
+import sys
+
+
+def syncsafe(size):
+    return bytes(((size >> 21) & 0x7f, (size >> 14) & 0x7f, (size >> 7) & 0x7f, size & 0x7f))
+
+
+def text_frame(frame_id, text, encoding=1):
+    if encoding == 1:
+        body = b"\x01\xff\xfe" + text.encode("utf-16le")
+    elif encoding == 2:
+        body = b"\x02" + text.encode("utf-16be")
+    else:
+        body = b"\x00" + text.encode("latin-1")
+    return frame_id.encode("ascii") + struct.pack(">I", len(body)) + b"\0\0" + body
+
+frames = b"".join((
+    text_frame("TIT2", "Since You Been Gone", 1),
+    text_frame("TPE1", "Rainbow", 1),
+    text_frame("TALB", "Classic Rock The Ultimate Collection CD3", 2),
+    text_frame("TCON", "Rock", 1),
+    text_frame("TRCK", "1/18", 0),
+))
+open(sys.argv[1], "wb").write(b"ID3\x03\x00\x00" + syncsafe(len(frames)) + frames + b"\xff\xfb\x90\x00" + bytes(1024))
+PY
+utf16=$($MP3DEC --info "$tmp/utf16.mp3")
+printf '%s\n' "$utf16"
+printf '%s\n' "$utf16" | grep '^title: Since You Been Gone$' >/dev/null
+printf '%s\n' "$utf16" | grep '^artist: Rainbow$' >/dev/null
+printf '%s\n' "$utf16" | grep '^album: Classic Rock The Ultimate Collection CD3$' >/dev/null
+printf '%s\n' "$utf16" | grep '^genre: Rock$' >/dev/null
+printf '%s\n' "$utf16" | grep '^track: 1/18$' >/dev/null
+
 printf '%s\n' 'MP3 info regression passed'

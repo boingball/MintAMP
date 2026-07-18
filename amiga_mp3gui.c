@@ -1378,8 +1378,20 @@ static void CopyId3v2TextField(char *dst, size_t dstSize,
 
 			if (cp == 0)
 				break;
-			if (cp < 0x20 || cp == 0x7F) {
-				/* skip control chars */
+			if (cp >= 0xD800 && cp <= 0xDBFF) {
+				if (i + 3 < len) {
+					unsigned int loHi = bigEndian ? src[i + 2] : src[i + 3];
+					unsigned int loLo = bigEndian ? src[i + 3] : src[i + 2];
+					unsigned int loCp = (loHi << 8) | loLo;
+
+					if (loCp >= 0xDC00 && loCp <= 0xDFFF)
+						i += 2;
+				}
+				dst[out++] = '?';
+			} else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+				dst[out++] = '?';
+			} else if (cp < 0x20 || cp == 0x7F) {
+				dst[out++] = '?';
 			} else if (cp <= 0x00FF) {
 				dst[out++] = (char)(cp & 0xFF);
 			} else {
