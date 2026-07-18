@@ -6825,7 +6825,13 @@ static void OpenRadioWindow(HelixAmp3Gui *app)
 	struct NewGadget ng;
 	struct Gadget *gad;
 	static STRPTR codecs[] = { (STRPTR)"All", (STRPTR)"MP3", (STRPTR)"AAC", (STRPTR)"AAC+", NULL };
-	if (app->rbWin || !app->win || !GadToolsBase || !app->hasNetwork) return;
+	if (app->rbWin) {
+		WindowToFront(app->rbWin);
+		ActivateWindow(app->rbWin);
+		return;
+	}
+	if (!app->win || !GadToolsBase || !app->hasNetwork)
+		return;
 	rb_controller_init(&app->rbController);
 	app->rbShowHttps = FALSE;
 	app->rbSchemeMode = 0;

@@ -5824,7 +5824,18 @@ static void OpenRadioWindow(MrApp *app)
 {
 	Object *root = NULL;
 	static STRPTR codecs[] = { (STRPTR)"All", (STRPTR)"MP3", (STRPTR)"AAC", (STRPTR)"AAC+", NULL };
-	if (app->rbWinObj || !app->win || !app->hasNetwork) return;
+	if (app->rbWinObj) {
+		struct Window *rbWin = NULL;
+
+		GetAttr(WINDOW_Window, app->rbWinObj, (ULONG *)&rbWin);
+		if (rbWin) {
+			WindowToFront(rbWin);
+			ActivateWindow(rbWin);
+		}
+		return;
+	}
+	if (!app->win || !app->hasNetwork)
+		return;
 	if (app->rbController.limit <= 0) { rb_controller_init(&app->rbController); app->rbShowHttps = FALSE; app->rbSchemeMode = 0; app->rbCountryMode = 0; }
 	app->rbCountryMode = RadioCountryToIndex(app->rbController.countrycode); app->rbShowingFavourites = FALSE; app->rbSelectedFavourite = -1; NewList(&app->rbList);
 	app->rbSearchGad = (Object *)NewObject(STRING_GetClass(), NULL, GA_ID, RB_GID_SEARCH_TEXT, GA_RelVerify, TRUE, STRINGA_TextVal, (ULONG)app->rbController.name, STRINGA_MaxChars, RB_MAX_NAME, TAG_DONE);
