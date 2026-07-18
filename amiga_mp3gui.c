@@ -490,8 +490,6 @@ enum {
 	GID_ALBUM,
 	GID_SPEED_MODE,
 	GID_FAST_MEM,
-	GID_EXP_POLY,
-	GID_EXP_REDUCED_TAPS,
 	GID_CHANNEL_MODE,
 	GID_FAKE_STEREO,
 	GID_FAKE_STEREO_WIDTH,
@@ -635,8 +633,6 @@ typedef struct HelixAmp3Gui {
 	struct Gadget  *gadSpeedMode;
 	struct Gadget  *gadRate;
 	struct Gadget  *gadFastMem;
-	struct Gadget  *gadExpPoly;
-	struct Gadget  *gadExpReducedTaps;
 	struct Gadget  *gadChannelMode;
 	struct Gadget  *gadFakeStereo;
 	struct Gadget  *gadFakeStereoWidth;
@@ -728,8 +724,6 @@ typedef struct HelixAmp3Gui {
 	int   ultrafast;
 	int   cd32Ultrafast;
 	int   fastMem;
-	int   expPoly;
-	int   expReducedTaps;
 	int   mono;
 	int   fakeStereo;
 	int   fakeStereoWidthIndex;
@@ -912,10 +906,11 @@ static const STRPTR kSubbandCapLabels[] = {
 	(STRPTR)"20",
 	(STRPTR)"16",
 	(STRPTR)"12",
+	(STRPTR)"10",
 	(STRPTR)"8",
 	NULL
 };
-static const int kSubbandCapValues[] = { 0, 26, 20, 16, 12, 8 };
+static const int kSubbandCapValues[] = { 0, 26, 20, 16, 12, 10, 8 };
 #define SUBBAND_CAP_COUNT (sizeof(kSubbandCapValues) / sizeof(kSubbandCapValues[0]))
 
 static const STRPTR kFakeStereoWidthLabels[] = {
@@ -1131,8 +1126,6 @@ static void SaveGuiSettings(HelixAmp3Gui *gui)
 	SaveEnvInt("Ultrafast", gui->ultrafast);
 	SaveEnvInt("CD32Ultrafast", gui->cd32Ultrafast);
 	SaveEnvInt("FastMem", gui->fastMem);
-	SaveEnvInt("ExpPoly", gui->expPoly);
-	SaveEnvInt("ExpReducedTaps", gui->expReducedTaps);
 	SaveEnvInt("Mono", gui->mono);
 	SaveEnvInt("FakeStereo", gui->fakeStereo);
 	SaveEnvInt("FakeStereoWidthIndex", gui->fakeStereoWidthIndex);
@@ -5376,30 +5369,12 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 	if (!gad)
 		return -1;
 
-	/* Both are opt-in and off by default -- see MP3SetExperimentalPolyphase()/
-	 * MP3SetExperimentalReducedTaps() in amiga_mp3dec.c. Exp-poly is an
-	 * alternate asm implementation of the same math (correctness-preserving
-	 * in principle, just less soak-tested than the default path); exp-reduced-
-	 * taps is explicitly lossy (see its --exp-reduced-taps help text) -- kept
-	 * as two separate checkboxes rather than folded into Speed Mode so either
-	 * can be soak-tested independently of which speed preset is active. */
-	gui->gadExpPoly = gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_EXP_POLY,
-		OPTION1_X, ROW_DECODER + 1, CHECK_W, CHECK_H, "Poly ASM",
-		GTCB_Checked, gui->expPoly,
-		TAG_IGNORE, 0,
-		TAG_IGNORE, 0,
-		TAG_IGNORE, 0);
-	if (!gad)
-		return -1;
-
-	gui->gadExpReducedTaps = gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_EXP_REDUCED_TAPS,
-		OPTION2_X, ROW_DECODER + 1, CHECK_W, CHECK_H, "Reduced taps",
-		GTCB_Checked, gui->expReducedTaps,
-		TAG_IGNORE, 0,
-		TAG_IGNORE, 0,
-		TAG_IGNORE, 0);
-	if (!gad)
-		return -1;
+	/* The decoder optimisation stack is now driven entirely by the Quality
+	 * cycle (see ApplyQualityOptions() in amiga_mp3dec.c): "Faster" enables the
+	 * ASM polyphase, ASM Huffman, reduced-tap dewindowing and quarter-rate
+	 * FDCT32 paths, with fewer of them at each higher-quality step.  The old
+	 * "Poly ASM" and "Reduced taps" checkboxes duplicated that (and were
+	 * silently overridden at "Faster"), so they have been removed. */
 
 	gui->gadChannelMode = gad = MakeGadget(gui, gad, CYCLE_KIND, GID_CHANNEL_MODE,
 		STEREO_X, ROW_PLAYBACK, CYCLE_W_SMALL, GUI_GADGET_HEIGHT, "Stereo:",
@@ -5761,8 +5736,6 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	gui->ultrafast = LoadEnvInt("Ultrafast", 0, 0, 1);
 	gui->cd32Ultrafast = LoadEnvInt("CD32Ultrafast", 0, 0, 1);
 	gui->fastMem = LoadEnvInt("FastMem", 1, 0, 1);
-	gui->expPoly = LoadEnvInt("ExpPoly", 0, 0, 1);
-	gui->expReducedTaps = LoadEnvInt("ExpReducedTaps", 0, 0, 1);
 	gui->mono = LoadEnvInt("Mono", 1, 0, 1);
 	gui->fakeStereo = LoadEnvInt("FakeStereo", 0, 0, 1);
 	gui->fakeStereoWidthIndex = LoadEnvInt("FakeStereoWidthIndex", 1, 0, 4);
@@ -7812,13 +7785,12 @@ static void BuildPlaybackArgs(HelixAmp3Gui *gui, HelixAmp3Args *args)
 	}
 	if (gui->ultrafast && strcmp(kRates[gui->rateIndex], "28600") == 0)
 		AddArg(args, "--ultrafast");
-	if (gui->expPoly)
-		AddArg(args, "--exp-poly");
-	/* cd32Ultrafast already adds --exp-reduced-taps unconditionally above
-	 * (its own tested default); avoid adding it twice when the independent
-	 * checkbox is also on. */
-	if (gui->expReducedTaps && !gui->cd32Ultrafast)
-		AddArg(args, "--exp-reduced-taps");
+	/* The ASM polyphase (--exp-poly) and reduced-tap dewindowing
+	 * (--exp-reduced-taps) are no longer toggled from the GUI: the Quality
+	 * level (--quality below) selects them via ApplyQualityOptions() in
+	 * amiga_mp3dec.c ("Faster" enables both, plus ASM Huffman and quarter-rate
+	 * FDCT32).  CD32 Ultrafast still adds its own --exp-reduced-taps above as
+	 * part of its fixed preset. */
 	/* Manual subband cap always comes last so it overrides whatever default
 	 * a fast-lowrate/ultrafast preset above already picked (e.g. CD32
 	 * Ultrafast's hardcoded --subband-cap 12) -- --subband-cap N just does
@@ -8461,30 +8433,6 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 		GT_SetGadgetAttrs(gad, gui->win, NULL, GTCB_Checked, gui->fastMem, TAG_DONE);
 		SetStatus(gui, gui->fastMem ? "Fast memory path enabled." : "Fast memory path disabled.");
 		GuiDisableFastMemIfTooSmall(gui);
-		SaveGuiSettings(gui);
-		break;
-	case GID_EXP_POLY:
-		if (gui->playbackActive || gui->playbackDonePending) {
-			GT_SetGadgetAttrs(gad, gui->win, NULL,
-				GTCB_Checked, gui->expPoly, TAG_DONE);
-			SetStatus(gui, "Stop playback before changing experimental options.");
-			break;
-		}
-		gui->expPoly = !gui->expPoly;
-		GT_SetGadgetAttrs(gad, gui->win, NULL, GTCB_Checked, gui->expPoly, TAG_DONE);
-		SetStatus(gui, gui->expPoly ? "Experimental polyphase asm enabled." : "Experimental polyphase asm disabled.");
-		SaveGuiSettings(gui);
-		break;
-	case GID_EXP_REDUCED_TAPS:
-		if (gui->playbackActive || gui->playbackDonePending) {
-			GT_SetGadgetAttrs(gad, gui->win, NULL,
-				GTCB_Checked, gui->expReducedTaps, TAG_DONE);
-			SetStatus(gui, "Stop playback before changing experimental options.");
-			break;
-		}
-		gui->expReducedTaps = !gui->expReducedTaps;
-		GT_SetGadgetAttrs(gad, gui->win, NULL, GTCB_Checked, gui->expReducedTaps, TAG_DONE);
-		SetStatus(gui, gui->expReducedTaps ? "Reduced-tap dewindowing enabled (lossy)." : "Reduced-tap dewindowing disabled.");
 		SaveGuiSettings(gui);
 		break;
 	case GID_CHANNEL_MODE:

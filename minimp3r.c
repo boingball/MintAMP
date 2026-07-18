@@ -262,9 +262,6 @@ enum {
 	GID_VOLUME,
 	GID_BUFFER,
 	GID_FASTMEM,
-	GID_FASTLOW,
-	GID_EXPPOLY,
-	GID_EXPREDUCEDTAPS,
 	GID_SPEED,
 	GID_WIDTH,
 	GID_DELAY,
@@ -334,10 +331,11 @@ static const STRPTR kSubbandCapLabels[] = {
 	(STRPTR)"20",
 	(STRPTR)"16",
 	(STRPTR)"12",
+	(STRPTR)"10",
 	(STRPTR)"8",
 	NULL
 };
-static const int kSubbandCapValues[] = { 0, 26, 20, 16, 12, 8 };
+static const int kSubbandCapValues[] = { 0, 26, 20, 16, 12, 10, 8 };
 #define SUBBAND_CAP_COUNT (sizeof(kSubbandCapValues) / sizeof(kSubbandCapValues[0]))
 
 static const STRPTR kChannelLabels[] = {
@@ -361,7 +359,7 @@ static const STRPTR kSpeedLabelsNo22050[] = {
 };
 
 static const STRPTR kWidthLabels[] = {
-	(STRPTR)"Normal stereo",
+	(STRPTR)"Normal M/S",
 	(STRPTR)"Fake stereo 1",
 	(STRPTR)"Fake stereo 2",
 	(STRPTR)"Fake stereo 3",
@@ -392,19 +390,35 @@ static const int kFakeStereoDelays[] = { 48, 64, 96, 128, 192 };
 #define ITEMNUM_ARTRELOAD  6
 #define ITEMNUM_ARTCLEAN   7
 #define ITEMNUM_PROGRESS   8
+/* Mutually-exclusive "HTTPS stream wait" choices occupy the next block of
+ * Playback items. The wait is the settle gap inserted before the next HTTPS
+ * radio stream's decoder child is launched, giving the previous stream's
+ * AmiSSL/socket teardown time to finish; slow links need a longer gap. */
+#define ITEMNUM_HTTPSWAIT_BASE 9
+#define HTTPS_WAIT_COUNT       5
+#define PLAYBACK_ITEM_COUNT    (ITEMNUM_HTTPSWAIT_BASE + HTTPS_WAIT_COUNT)
+
+/* Amiga Delay() ticks (50 ticks = 1 second). Index 0 keeps the historical
+ * 4-tick (~80 ms) default so behaviour is unchanged unless the user opts in. */
+static const int kHttpsWaitTicks[HTTPS_WAIT_COUNT] = { 4, 25, 50, 100, 200 };
+static const char * const kHttpsWaitDesc[HTTPS_WAIT_COUNT] = {
+	"default (~0.1s)", "0.5s", "1s", "2s", "4s"
+};
 
 static struct Menu kMenus[2];
 static struct MenuItem kProjectItems[3];
-static struct MenuItem kPlaybackItems[9];
+static struct MenuItem kPlaybackItems[PLAYBACK_ITEM_COUNT];
 static struct IntuiText kProjectText[3];
-static struct IntuiText kPlaybackText[9];
+static struct IntuiText kPlaybackText[PLAYBACK_ITEM_COUNT];
 static const char * const kProjectLabels[3] = {
 	"About MiniAMP3...", "Internet Radio", "Quit"
 };
-static const char * const kPlaybackLabels[9] = {
+static const char * const kPlaybackLabels[PLAYBACK_ITEM_COUNT] = {
 	"Decode-then-play", "Bench mode", "Artwork", "Artwork Cache",
 	"Colour Artwork", "Refresh Artwork", "Reload Art from File",
-	"Clear Artwork Cache", "Progress Bar"
+	"Clear Artwork Cache", "Progress Bar",
+	"HTTPS wait: Default", "HTTPS wait: 0.5 sec", "HTTPS wait: 1 sec",
+	"HTTPS wait: 2 sec", "HTTPS wait: 4 sec"
 };
 
 static void MrInitMenuStrip(void)
@@ -450,7 +464,7 @@ static void MrInitMenuStrip(void)
 		kProjectItems[i].ItemFill = (APTR)&kProjectText[i];
 		kProjectItems[i].NextSelect = MENUNULL;
 	}
-	for (i = 0; i < 9; i++) {
+	for (i = 0; i < PLAYBACK_ITEM_COUNT; i++) {
 		/* Same FrontPen/BackPen swap as kProjectText above. */
 		kPlaybackText[i].FrontPen = 1;
 		kPlaybackText[i].BackPen = 0;
@@ -458,15 +472,29 @@ static void MrInitMenuStrip(void)
 		kPlaybackText[i].LeftEdge = 14;
 		kPlaybackText[i].TopEdge = 1;
 		kPlaybackText[i].IText = (STRPTR)kPlaybackLabels[i];
-		kPlaybackItems[i].NextItem = (i < 8) ? &kPlaybackItems[i + 1] : NULL;
+		kPlaybackItems[i].NextItem = (i < PLAYBACK_ITEM_COUNT - 1) ? &kPlaybackItems[i + 1] : NULL;
 		kPlaybackItems[i].LeftEdge = 0;
 		kPlaybackItems[i].TopEdge = i * 10;
-		kPlaybackItems[i].Width = 176;
+		kPlaybackItems[i].Width = 200;
 		kPlaybackItems[i].Height = 10;
 		kPlaybackItems[i].Flags = ITEMTEXT | ITEMENABLED | HIGHCOMP;
 		if (i == ITEMNUM_DTP || i == ITEMNUM_BENCH || i == ITEMNUM_ARTWORK ||
 			i == ITEMNUM_ARTCACHE || i == ITEMNUM_ARTCOLOR || i == ITEMNUM_PROGRESS)
 			kPlaybackItems[i].Flags |= CHECKIT | MENUTOGGLE;
+		if (i >= ITEMNUM_HTTPSWAIT_BASE &&
+			i < ITEMNUM_HTTPSWAIT_BASE + HTTPS_WAIT_COUNT) {
+			/* Radio-style group: CHECKIT (no MENUTOGGLE) plus a MutualExclude
+			 * mask of the other four HTTPS-wait items, so picking one clears
+			 * the rest. SyncMenuChecks() also enforces the persisted choice. */
+			int j;
+			LONG mx = 0;
+			for (j = ITEMNUM_HTTPSWAIT_BASE;
+				j < ITEMNUM_HTTPSWAIT_BASE + HTTPS_WAIT_COUNT; j++)
+				if (j != i)
+					mx |= (1L << j);
+			kPlaybackItems[i].Flags |= CHECKIT;
+			kPlaybackItems[i].MutualExclude = mx;
+		}
 		kPlaybackItems[i].ItemFill = (APTR)&kPlaybackText[i];
 		kPlaybackItems[i].NextSelect = MENUNULL;
 	}
@@ -565,9 +593,6 @@ typedef struct MrApp {
 	Object         *volumeGad;
 	Object         *bufferGad;
 	Object         *fastMemGad;
-	Object         *fastLowGad;
-	Object         *expPolyGad;
-	Object         *expReducedTapsGad;
 	Object         *speedGad;
 	Object         *widthGad;
 	Object         *delayGad;
@@ -659,8 +684,6 @@ typedef struct MrApp {
 	int   subbandCapIndex;
 	int   mono;
 	int   fastMem;
-	int   expPoly;
-	int   expReducedTaps;
 	int   fastLowrate;
 	int   superfastLowrate;
 	int   ultrafast;
@@ -673,6 +696,7 @@ typedef struct MrApp {
 	int   bench;
 	int   haveRadioHostAddr;
 	unsigned long radioHostAddrBe;
+	int   httpsWaitIndex;   /* index into kHttpsWaitTicks[] */
 	int   artEnabled;
 	int   artCacheEnabled;
 	int   artColorEnabled;
@@ -740,6 +764,7 @@ typedef struct MrApp {
 	unsigned long lastTimeTick;
 	int   shownGaugeLevel;
 	int   shownChannelDisabled;
+	int   shownWidthDisabled;
 	int   shownNextDisabled;
 	int   lastRadioStatusShown;
 	int   shuttingDown;
@@ -1053,8 +1078,6 @@ static void LoadSettings(MrApp *app)
 		app->superfastLowrate = 0;
 	}
 	app->fastMem = LoadEnvInt("FastMem", app->fastMem, 0, 1);
-	app->expPoly = LoadEnvInt("ExpPoly", app->expPoly, 0, 1);
-	app->expReducedTaps = LoadEnvInt("ExpReducedTaps", app->expReducedTaps, 0, 1);
 	app->mono = LoadEnvInt("Mono", app->mono, 0, 1);
 	app->fakeStereo = LoadEnvInt("FakeStereo", app->fakeStereo, 0, 1);
 	app->fakeStereoWidthIndex = LoadEnvInt("FakeStereoWidthIndex", app->fakeStereoWidthIndex, 0, 4);
@@ -1062,7 +1085,11 @@ static void LoadSettings(MrApp *app)
 	app->hardwareFilter = LoadEnvInt("HardwareFilter", app->hardwareFilter, 0, 1);
 	app->rateIndex = LoadEnvInt("RateIndex", app->rateIndex, 0, MR_RATE_COUNT - 1);
 	if (app->cd32Ultrafast) {
+		/* Mono-only: drop any stale saved fake-stereo so the greyed Mode/width
+		 * chooser comes up parked on "Normal M/S" rather than a fake-stereo
+		 * width the output can never actually use. */
 		app->mono = 1;
+		app->fakeStereo = 0;
 		app->rateIndex = MR_RATE_22050_INDEX;
 	}
 	app->bufferSeconds = LoadEnvInt("BufferSeconds", app->bufferSeconds, 1, 10);
@@ -1070,6 +1097,7 @@ static void LoadSettings(MrApp *app)
 	app->qualityIndex = LoadEnvInt("QualityIndex", app->qualityIndex, 0, 3);
 	app->subbandCapIndex = LoadEnvInt("SubbandCapIndex", app->subbandCapIndex, 0, SUBBAND_CAP_COUNT - 1);
 	app->decodeThenPlay = LoadEnvInt("DecodeThenPlay", app->decodeThenPlay, 0, 1);
+	app->httpsWaitIndex = LoadEnvInt("HttpsWaitIndex", app->httpsWaitIndex, 0, HTTPS_WAIT_COUNT - 1);
 	app->bench = LoadEnvInt("Bench", app->bench, 0, 1);
 	app->artEnabled = LoadEnvInt("Artwork", app->artEnabled, 0, 1);
 	app->artCacheEnabled = LoadEnvInt("ArtworkCache", app->artCacheEnabled, 0, 1);
@@ -1096,8 +1124,6 @@ static void SaveSettings(MrApp *app)
 	SaveEnvInt("Ultrafast", app->ultrafast);
 	SaveEnvInt("CD32Ultrafast", app->cd32Ultrafast);
 	SaveEnvInt("FastMem", app->fastMem);
-	SaveEnvInt("ExpPoly", app->expPoly);
-	SaveEnvInt("ExpReducedTaps", app->expReducedTaps);
 	SaveEnvInt("Mono", app->mono);
 	SaveEnvInt("FakeStereo", app->fakeStereo);
 	SaveEnvInt("FakeStereoWidthIndex", app->fakeStereoWidthIndex);
@@ -1110,6 +1136,7 @@ static void SaveSettings(MrApp *app)
 	SaveEnvInt("SubbandCapIndex", app->subbandCapIndex);
 	SaveEnvInt("SettingsVersion", MR_SETTINGS_VERSION);
 	SaveEnvInt("DecodeThenPlay", app->decodeThenPlay);
+	SaveEnvInt("HttpsWaitIndex", app->httpsWaitIndex);
 	SaveEnvInt("Bench", app->bench);
 	SaveEnvInt("Artwork", app->artEnabled);
 	SaveEnvInt("ArtworkCache", app->artCacheEnabled);
@@ -1415,13 +1442,27 @@ static void UpdateSpeedGadgetChoices(MrApp *app)
 
 static void UpdateChannelGadgetState(MrApp *app)
 {
-	int disabled = app->fakeStereo ? TRUE : FALSE;
-	if (disabled == app->shownChannelDisabled)
-		return;
-	app->shownChannelDisabled = disabled;
-	if (app->win && app->channelGad)
-		SetGadgetAttrs((struct Gadget *)app->channelGad, app->win, NULL,
-			GA_Disabled, (ULONG)disabled, TAG_DONE);
+	/* The output channel count is forced -- so the Mono/Stereo chooser must be
+	 * greyed -- whenever fake stereo is engaged or 22050 Mono Ultrafast
+	 * (cd32Ultrafast) is selected.  The latter is mono-only, so the fake-stereo
+	 * Mode/width and Delay choosers are meaningless there and get greyed too. */
+	int channelDisabled = (app->fakeStereo || app->cd32Ultrafast) ? TRUE : FALSE;
+	int widthDisabled = app->cd32Ultrafast ? TRUE : FALSE;
+	if (channelDisabled != app->shownChannelDisabled) {
+		app->shownChannelDisabled = channelDisabled;
+		if (app->win && app->channelGad)
+			SetGadgetAttrs((struct Gadget *)app->channelGad, app->win, NULL,
+				GA_Disabled, (ULONG)channelDisabled, TAG_DONE);
+	}
+	if (widthDisabled != app->shownWidthDisabled) {
+		app->shownWidthDisabled = widthDisabled;
+		if (app->win && app->widthGad)
+			SetGadgetAttrs((struct Gadget *)app->widthGad, app->win, NULL,
+				GA_Disabled, (ULONG)widthDisabled, TAG_DONE);
+		if (app->win && app->delayGad)
+			SetGadgetAttrs((struct Gadget *)app->delayGad, app->win, NULL,
+				GA_Disabled, (ULONG)widthDisabled, TAG_DONE);
+	}
 }
 
 static void UpdateNextButtonState(MrApp *app)
@@ -1531,13 +1572,12 @@ static void BuildPlaybackArgs(MrApp *app, MrPlayArgs *args)
 	}
 	if (useUltrafast && strcmp(kRates[rateIndex], "28600") == 0)
 		AddArg(args, "--ultrafast");
-	if (app->expPoly)
-		AddArg(args, "--exp-poly");
-	/* useCd32Ultrafast already adds --exp-reduced-taps unconditionally above
-	 * (its own tested default); avoid adding it twice when the independent
-	 * checkbox is also on. */
-	if (app->expReducedTaps && !useCd32Ultrafast)
-		AddArg(args, "--exp-reduced-taps");
+	/* The ASM polyphase (--exp-poly) and reduced-tap dewindowing
+	 * (--exp-reduced-taps) are no longer toggled from the GUI: the Quality
+	 * level (--quality below) selects them via ApplyQualityOptions() in
+	 * amiga_mp3dec.c ("Faster" enables both, plus ASM Huffman and quarter-rate
+	 * FDCT32).  CD32 Ultrafast still adds its own --exp-reduced-taps above as
+	 * part of its fixed preset. */
 	/* Manual subband cap always comes last so it overrides whatever default
 	 * a fast-lowrate/ultrafast preset above already picked (e.g. CD32
 	 * Ultrafast's hardcoded --subband-cap 12) -- --subband-cap N just does
@@ -2637,6 +2677,13 @@ static int MrOpenWindow(MrApp *app)
 	                SLIDER_LevelFormat, (ULONG)"%ld s",
 	                TAG_DONE);
 
+	/* The decoder optimisation stack is now driven entirely by the Quality
+	 * chooser (see ApplyQualityOptions() in amiga_mp3dec.c): "Faster" enables
+	 * the ASM polyphase, ASM Huffman, reduced-tap dewindowing and quarter-rate
+	 * FDCT32 paths, with fewer of them at each higher-quality step.  The old
+	 * "Fast Polyphase", "Reduced-tap dewindowing" and "Fast low-rate decode"
+	 * checkboxes duplicated that (and were silently overridden at "Faster"), so
+	 * only the genuinely independent "Decode from Fast RAM" toggle remains. */
 	app->fastMemGad = (Object *)NewObject(CHECKBOX_GetClass(), NULL,
 	                GA_ID, GID_FASTMEM,
 	                GA_RelVerify, TRUE,
@@ -2644,38 +2691,19 @@ static int MrOpenWindow(MrApp *app)
 	                GA_Selected, (ULONG)(app->fastMem ? TRUE : FALSE),
 	                TAG_DONE);
 
-	app->fastLowGad = (Object *)NewObject(CHECKBOX_GetClass(), NULL,
-	                GA_ID, GID_FASTLOW,
-	                GA_RelVerify, TRUE,
-	                GA_Text, (ULONG)"Fast low-rate decode",
-	                GA_Selected, (ULONG)(app->fastLowrate ? TRUE : FALSE),
-	                TAG_DONE);
-
-	/* Both opt-in and off by default -- see MP3SetExperimentalPolyphase()/
-	 * MP3SetExperimentalReducedTaps() in amiga_mp3dec.c. Exp-poly is an
-	 * alternate asm implementation of the same math (correctness-preserving
-	 * in principle, just less soak-tested than the default path); reduced-
-	 * taps is explicitly lossy (see its --exp-reduced-taps help text) --
-	 * kept as two separate checkboxes, independent of Speed Mode, so either
-	 * can be soak-tested on its own. */
-	app->expPolyGad = (Object *)NewObject(CHECKBOX_GetClass(), NULL,
-	                GA_ID, GID_EXPPOLY,
-	                GA_RelVerify, TRUE,
-	                GA_Text, (ULONG)"Experimental polyphase asm",
-	                GA_Selected, (ULONG)(app->expPoly ? TRUE : FALSE),
-	                TAG_DONE);
-
-	app->expReducedTapsGad = (Object *)NewObject(CHECKBOX_GetClass(), NULL,
-	                GA_ID, GID_EXPREDUCEDTAPS,
-	                GA_RelVerify, TRUE,
-	                GA_Text, (ULONG)"Reduced-tap dewindowing (lossy)",
-	                GA_Selected, (ULONG)(app->expReducedTaps ? TRUE : FALSE),
-	                TAG_DONE);
-
+	/* Build with the FULL label list so the layout sizes the chooser box to
+	 * its longest entry, "22050 Mono Ultrafast".  Sizing it to the shorter
+	 * kSpeedLabelsNo22050 set (as happens whenever the app starts at a non-
+	 * 22050 rate) left the box too narrow, so once the rate was switched to
+	 * 22050 the swapped-in long label spilled past the frame ("...ast"
+	 * overlapping the border).  The rate-appropriate (possibly narrower) list
+	 * is applied by UpdateSpeedGadgetChoices() right after the window opens;
+	 * swapping to a shorter list never needs a wider box, so the frame stays
+	 * correctly sized for the long label. */
 	app->speedGad = (Object *)NewObject(CHOOSER_GetClass(), NULL,
 	                GA_ID, GID_SPEED,
 	                GA_RelVerify, TRUE,
-	                CHOOSER_LabelArray, (ULONG)(app->rateIndex == MR_RATE_22050_INDEX ? kSpeedLabels : kSpeedLabelsNo22050),
+	                CHOOSER_LabelArray, (ULONG)kSpeedLabels,
 	                CHOOSER_Selected, (ULONG)SpeedChoiceFromApp(app),
 	                TAG_DONE);
 
@@ -2756,8 +2784,7 @@ static int MrOpenWindow(MrApp *app)
 		!CheckGadget(app->qualityGad, "quality") || !CheckGadget(app->subbandCapGad, "subband cap") ||
 		!CheckGadget(app->channelGad, "channel") ||
 		!CheckGadget(app->volumeGad, "volume") || !CheckGadget(app->bufferGad, "buffer") ||
-		!CheckGadget(app->fastMemGad, "fast memory") || !CheckGadget(app->fastLowGad, "fast low-rate") ||
-		!CheckGadget(app->expPolyGad, "experimental polyphase") || !CheckGadget(app->expReducedTapsGad, "reduced taps") ||
+		!CheckGadget(app->fastMemGad, "fast memory") ||
 		!CheckGadget(app->speedGad, "speed") || !CheckGadget(app->widthGad, "width") ||
 		!CheckGadget(app->delayGad, "delay") || !CheckGadget(app->playGad, "play") ||
 		!CheckGadget(app->nextGad, "next") || !CheckGadget(app->stopGad, "stop") ||
@@ -2901,14 +2928,6 @@ static int MrOpenWindow(MrApp *app)
 			LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
 				LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
 				LAYOUT_AddChild, (ULONG)app->fastMemGad,
-				LAYOUT_AddChild, (ULONG)app->fastLowGad,
-				TAG_DONE),
-			CHILD_WeightedHeight, 0,
-
-			LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
-				LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
-				LAYOUT_AddChild, (ULONG)app->expPolyGad,
-				LAYOUT_AddChild, (ULONG)app->expReducedTapsGad,
 				TAG_DONE),
 			CHILD_WeightedHeight, 0,
 			TAG_DONE),
@@ -3024,8 +3043,7 @@ static void MrCloseWindow(MrApp *app)
 		app->winObj = NULL;
 		app->win = NULL;
 		app->fileGad = app->rateGad = app->qualityGad = app->subbandCapGad = app->channelGad = NULL;
-		app->volumeGad = app->bufferGad = app->fastMemGad = app->fastLowGad = NULL;
-		app->expPolyGad = app->expReducedTapsGad = NULL;
+		app->volumeGad = app->bufferGad = app->fastMemGad = NULL;
 		app->speedGad = app->widthGad = app->delayGad = app->playGad = NULL;
 		app->nextGad = app->stopGad = app->filterGad = app->playlistGad = NULL;
 		app->radioGad = app->timeGad = app->fileInfoGad = app->titleGad = NULL;
@@ -5288,9 +5306,14 @@ static void RadioProbeUrlAndStart(MrApp *app, const char *url, const char *stati
 #if defined(AMIGA_M68K)
 	if (app->lastCompletedWasHttps && !strncmp(info.final_url, "https://", 8) &&
 		!app->playbackActive && !app->playbackDonePending && !PlaybackProcessStillExists()) {
-		RADIO_DBG(printf("radio-done: Delay(4) between fully completed HTTPS sessions before starting next HTTPS URL\n");)
+		/* Settle gap before the next HTTPS stream so the previous session's
+		 * AmiSSL/socket teardown can finish; user-tunable via the Playback
+		 * "HTTPS wait" menu (index 0 keeps the historical ~80 ms default). */
+		int waitTicks = kHttpsWaitTicks[(app->httpsWaitIndex >= 0 &&
+			app->httpsWaitIndex < HTTPS_WAIT_COUNT) ? app->httpsWaitIndex : 0];
+		RADIO_DBG(printf("radio-done: Delay(%d) between fully completed HTTPS sessions before starting next HTTPS URL\n", waitTicks);)
 		RadioSetStatus(app, "Waiting briefly before next HTTPS stream...");
-		Delay(4);
+		Delay(waitTicks);
 	}
 #endif
 	SafeCopy(app->inputName, sizeof(app->inputName), info.final_url);
@@ -5715,9 +5738,14 @@ static void RadioDoProbeAndPlay(MrApp *app)
 #if defined(AMIGA_M68K)
 	if (app->lastCompletedWasHttps && strncmp(info.final_url, "https://", 8) == 0 &&
 		!app->playbackActive && !app->playbackDonePending && !PlaybackProcessStillExists()) {
-		RADIO_DBG(printf("radio-done: Delay(4) between fully completed HTTPS sessions before starting next HTTPS URL\n");)
+		/* Settle gap before the next HTTPS stream so the previous session's
+		 * AmiSSL/socket teardown can finish; user-tunable via the Playback
+		 * "HTTPS wait" menu (index 0 keeps the historical ~80 ms default). */
+		int waitTicks = kHttpsWaitTicks[(app->httpsWaitIndex >= 0 &&
+			app->httpsWaitIndex < HTTPS_WAIT_COUNT) ? app->httpsWaitIndex : 0];
+		RADIO_DBG(printf("radio-done: Delay(%d) between fully completed HTTPS sessions before starting next HTTPS URL\n", waitTicks);)
 		RadioSetStatus(app, "Waiting briefly before next HTTPS stream...");
-		Delay(4);
+		Delay(waitTicks);
 	}
 #endif
 	SafeCopy(app->inputName, sizeof(app->inputName), info.final_url);
@@ -6329,6 +6357,12 @@ static void SyncMenuChecks(MrApp *app)
 		app->artColorEnabled);
 	SetMenuItemChecked(app, MENUNUM_PLAYBACK, ITEMNUM_PROGRESS,
 		app->progressEnabled);
+	{
+		int i;
+		for (i = 0; i < HTTPS_WAIT_COUNT; i++)
+			SetMenuItemChecked(app, MENUNUM_PLAYBACK,
+				ITEMNUM_HTTPSWAIT_BASE + i, app->httpsWaitIndex == i);
+	}
 }
 
 static void SetDecodeThenPlay(MrApp *app, int enabled)
@@ -6402,6 +6436,15 @@ static void HandleMenu(MrApp *app, UWORD code, int *done)
 				SetStatus(app, app->artValid ? "Artwork refreshed." : "No artwork.");
 			} else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_ARTCLEAN) {
 				CleanArtworkCache(app);
+			} else if (mn == MENUNUM_PLAYBACK &&
+				it >= ITEMNUM_HTTPSWAIT_BASE &&
+				it < ITEMNUM_HTTPSWAIT_BASE + HTTPS_WAIT_COUNT) {
+				char msg[64];
+				app->httpsWaitIndex = it - ITEMNUM_HTTPSWAIT_BASE;
+				sprintf(msg, "HTTPS stream wait set to %s.",
+					kHttpsWaitDesc[app->httpsWaitIndex]);
+				SetStatus(app, msg);
+				SaveSettings(app);
 			}
 			SyncMenuChecks(app);
 			code = item->NextSelect;
@@ -6445,12 +6488,6 @@ static void SyncFromGadgets(MrApp *app)
 		app->bufferSeconds = ClampInt((int)v, 1, 10);
 	if (app->fastMemGad && GetAttr(GA_Selected, app->fastMemGad, &v))
 		app->fastMem = (v != 0);
-	if (app->fastLowGad && GetAttr(GA_Selected, app->fastLowGad, &v))
-		app->fastLowrate = (v != 0);
-	if (app->expPolyGad && GetAttr(GA_Selected, app->expPolyGad, &v))
-		app->expPoly = (v != 0);
-	if (app->expReducedTapsGad && GetAttr(GA_Selected, app->expReducedTapsGad, &v))
-		app->expReducedTaps = (v != 0);
 	if (app->speedGad && GetAttr(CHOOSER_Selected, app->speedGad, &v)) {
 		app->cd32Ultrafast = (app->rateIndex == MR_RATE_22050_INDEX && (int)v == 3);
 		app->ultrafast = ((int)v == 2);
@@ -6459,12 +6496,32 @@ static void SyncFromGadgets(MrApp *app)
 			app->fastLowrate = 1;
 			app->mono = 1;
 			app->rateIndex = MR_RATE_22050_INDEX;
+			/* Reflect the forced mono output in the (about-to-be-greyed)
+			 * Mono/Stereo chooser so it doesn't keep showing "Stereo". */
+			if (app->win && app->channelGad)
+				SetGadgetAttrs((struct Gadget *)app->channelGad, app->win, NULL,
+					CHOOSER_Selected, (ULONG)1, TAG_DONE);
 		} else if (app->ultrafast)
 			app->fastLowrate = 0;
+		else
+			/* The Speed chooser is now the sole owner of fast-lowrate (the
+			 * "Fast low-rate decode" checkbox was removed): Normal=off,
+			 * Superfast low-rate=on. */
+			app->fastLowrate = app->superfastLowrate;
 	}
 	if (app->widthGad && GetAttr(CHOOSER_Selected, app->widthGad, &v)) {
-		app->fakeStereo = ((int)v > 0);
-		app->fakeStereoWidthIndex = app->fakeStereo ? (int)v - 1 : 0;
+		if (app->cd32Ultrafast) {
+			/* 22050 Mono Ultrafast is mono-only, so fake stereo can't apply:
+			 * force it off and keep the greyed Mode/width chooser parked on the
+			 * "Normal M/S" entry rather than leaving a stale width selected. */
+			app->fakeStereo = 0;
+			if (app->win && app->widthGad)
+				SetGadgetAttrs((struct Gadget *)app->widthGad, app->win, NULL,
+					CHOOSER_Selected, (ULONG)0, TAG_DONE);
+		} else {
+			app->fakeStereo = ((int)v > 0);
+			app->fakeStereoWidthIndex = app->fakeStereo ? (int)v - 1 : 0;
+		}
 		UpdateChannelGadgetState(app);
 	}
 	if (app->delayGad && GetAttr(CHOOSER_Selected, app->delayGad, &v)) {
@@ -6524,6 +6581,7 @@ static int MrMainReal(int argc, char **argv)
 	app.lastPhaseShown = -1;
 	app.shownGaugeLevel = -1;
 	app.shownChannelDisabled = -1;
+	app.shownWidthDisabled = -1;
 	app.shownNextDisabled = -1;
 	app.lastRadioStatusShown = -1;
 
@@ -6573,6 +6631,15 @@ static int MrMainReal(int argc, char **argv)
 		CloseLibs();
 		return 1;
 	}
+
+	/* The Speed chooser was built with the full label list so the layout
+	 * reserved room for the longest option; now that the window is open and
+	 * sized, narrow it to the rate-appropriate set (the box keeps its width).
+	 * Also apply the initial greyed state for the Mono/Stereo and Mode/width
+	 * choosers in case a saved 22050-Mono-Ultrafast / fake-stereo setting is
+	 * in effect. */
+	UpdateSpeedGadgetChoices(&app);
+	UpdateChannelGadgetState(&app);
 
 	GetAttr(WINDOW_SigMask, app.winObj, &winSig);
 	timerSig = 1UL << app.timerPort->mp_SigBit;
