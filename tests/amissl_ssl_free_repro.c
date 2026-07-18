@@ -1,7 +1,7 @@
 /* Standalone AmiSSL reproducer / soak harness for suspected AmiSSL SSL_free()
  * heap corruption after SSL_ERROR_SYSCALL with an empty OpenSSL error queue.
  *
- * This file intentionally avoids MiniAMP3's production guard/quarantine logic.
+ * This file intentionally avoids MintAMP's production guard/quarantine logic.
  * It creates fresh SSL_CTX/SSL/socket objects, performs real HTTPS radio stream
  * handshakes/reads, then tears the objects down using the deliberately naive
  * abort path from the bug report so AmiSSL's behaviour is visible directly.
@@ -43,7 +43,7 @@
  *   setenv MP3_REPRO_ITERS 500
  *   amissl_ssl_free_repro
  *
- * WARNING: do not copy the cleanup path into production code. MiniAMP3's
+ * WARNING: do not copy the cleanup path into production code. MintAMP's
  * radio_stream.c should keep its guarded/quarantine close path.
  */
 

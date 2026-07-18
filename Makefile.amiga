@@ -69,8 +69,8 @@ endif
 STD ?= -std=gnu89
 OPTFLAGS ?= -O2 -fomit-frame-pointer
 TARGET ?= amiga_mp3dec
-GUI_TARGET ?= miniamp3
-GUIR_TARGET ?= minimp3r
+GUI_TARGET ?= MintAMP-GT
+GUIR_TARGET ?= MintAMP
 
 CPPFLAGS_COMMON := -Ipub -Ireal -DAMIGA_M68K
 CFLAGS_COMMON := $(CPU_MFLAG) $(STD) $(OPTFLAGS)
@@ -121,7 +121,7 @@ FREEALL_DISCOVERY_LDFLAGS := -Wl,--defsym,___freeall_head0=0 \
 	-Wl,--defsym,___freeall_head2=0
 FREEALL_HEAD_EXTRACT := python3 tools/libnix_freeall_heads.py
 
-# Debug-only heap guard for MiniAMP3's own allocations (front/rear guard
+# Debug-only heap guard for MintAMP's own allocations (front/rear guard
 # bytes, double-free and leak detection -- see miniamp_memguard.c).
 # Independent of DEBUG=1 above; combine as e.g. `make ... DEBUG=1 HEAPGUARD=1`.
 # Never affects a normal (release) build: without this, miniamp_memguard.c
@@ -148,7 +148,7 @@ TASKSAFE_MALLOC_SOURCE :=
 endif
 
 # PNG favicon decoding for the radio artwork feature (lvandeve/lodepng,
-# vendored as lodepng.c/.h).  Used by both the minimp3r (ReAction) and the
+# vendored as lodepng.c/.h).  Used by both the MintAMP (ReAction) and the
 # amiga_mp3gui (GadTools) frontends.  Decoder-only, no encoder/disk-IO/
 # ancillary chunk support compiled in -- both frontends feed it an
 # in-memory buffer directly, same as the JPEG path.  Disable with
@@ -176,8 +176,8 @@ SOURCES := amiga_mp3dec.c miniamp_memguard.c $(TASKSAFE_MALLOC_SOURCE) radio_run
 GUI_SOURCES := amiga_mp3gui.c picojpeg.c lodepng.c webpdec.c svgdec.c miniamp_memguard.c $(TASKSAFE_MALLOC_SOURCE) radio_runtime_flags.c $(RADIO_SOURCES) \
 	radio_browser_controller.c radio_browser.c radio_browser_url.c \
 	radio_browser_http.c radio_browser_json.c radio_stream_probe.c
-# miniamp3 uses gadtools.library via proto/gadtools.h; no linker flag is needed.
-# minimp3r is the ReAction/ClassAct frontend; it pulls amiga_mp3dec.c in itself
+# MintAMP-GT uses gadtools.library via proto/gadtools.h; no linker flag is needed.
+# MintAMP is the ReAction/ClassAct frontend; it pulls amiga_mp3dec.c in itself
 # (like amiga_mp3gui.c) so only the shared decoder modules are listed here.  The
 # ReAction classes are opened at runtime, so no extra linker flag is needed.
 # lodepng.c/webpdec.c/svgdec.c are linked into both frontends now, so the
@@ -197,12 +197,12 @@ FAST030_TARGET := amiga_mp3dec.fastexp
 PROF030_TARGET := amiga_mp3dec.prof
 PROF030_CPPFLAGS := -DAMIGA_PROFILE_DECODE -DHAVE_AMIGA_AUDIO_DEVICE
 FAST030_HALFASM_TEST_TARGET := amiga_mp3dec.fdcthalf-test
-GUI_HALFASM_TEST_TARGET := miniamp3.fdcthalf-test
+GUI_HALFASM_TEST_TARGET := MintAMP-GT.fdcthalf-test
 HALFASM_TEST_CPPFLAGS := -DAMIGA_M68K_ASM_FDCT32
 FAST030_ASM_SOURCES := $(CPU_ASM_SOURCES)
 AMIGA_HUNK_FAST_PREFERRED := python3 tools/amiga_fast_preferred_hunks.py
 
-.PHONY: all fast030 radio030 sslradio030 amissl-get-test amissl-free-repro-test amissl-spawn-repro-test amissl-exec-repro-test rb-stream-probe-test prof030 gui guir sslgui sslguir fast030-halfasm-test gui-halfasm-test decoder-modules clean print-command print-fast030-command print-gui-command print-guir-command
+.PHONY: all fast030 radio030 sslradio030 amissl-get-test amissl-free-repro-test amissl-spawn-repro-test amissl-exec-repro-test rb-stream-probe-test prof030 gui guir miniamp3 minimp3r sslgui sslguir fast030-halfasm-test gui-halfasm-test decoder-modules clean print-command print-fast030-command print-gui-command print-guir-command
 
 all: $(TARGET) decoder-modules
 
@@ -278,6 +278,10 @@ gui: $(GUI_TARGET) decoder-modules
 
 guir: $(GUIR_TARGET) decoder-modules
 
+miniamp3: gui
+
+minimp3r: guir
+
 fast030-halfasm-test: $(FAST030_HALFASM_TEST_TARGET)
 
 gui-halfasm-test: $(GUI_HALFASM_TEST_TARGET)
@@ -293,7 +297,7 @@ $(GUI_TARGET): $(GUI_SOURCES) amiga_mp3dec.c $(DECODER_SOURCES) $(FAST030_ASM_SO
 	$(FREEALL_HEAD_EXTRACT) $@ --verify $$FREEALL_HEAD0 $$FREEALL_HEAD1 $$FREEALL_HEAD2
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
 
-# minimp3r — ReAction/ClassAct frontend.  Built with the same fast030 ASM path
+# MintAMP — ReAction/ClassAct frontend.  Built with the same fast030 ASM path
 # as the GadTools GUI since it targets 030+/3.5/3.9 machines.  minimp3r.c
 # #includes amiga_mp3dec.c, so only the shared decoder modules are linked.
 $(GUIR_TARGET): $(GUIR_SOURCES) amiga_mp3dec.c $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(LIBNIX_FREEALL_COMPAT_SOURCES)

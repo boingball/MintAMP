@@ -1,5 +1,5 @@
 /*
- * wav_module.c - WAV (RIFF/PCM) decoder module for MiniAMP3.
+ * wav_module.c - WAV (RIFF/PCM) decoder module for MintAMP.
  *
  * Implements the DecoderOps vtable from decoder_module.h for plain
  * uncompressed PCM WAV files: 8/16/24/32-bit integer samples, mono or

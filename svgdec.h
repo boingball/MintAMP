@@ -1,4 +1,4 @@
-/* Small SVG-subset decoder for MiniAMP3 radio favicon artwork.
+/* Small SVG-subset decoder for MintAMP radio favicon artwork.
  *
  * Not a general SVG renderer: supports path/rect/circle/ellipse/
  * polygon/polyline/line with solid fills and simple strokes,

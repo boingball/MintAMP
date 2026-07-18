@@ -1,5 +1,5 @@
 /*
- * aac_module.c - AAC decoder module for MiniAMP3 using libhelix-aac.
+ * aac_module.c - AAC decoder module for MintAMP using libhelix-aac.
  *
  * Implements the DecoderOps vtable from decoder_module.h.
  * Targets ADTS-framed AAC (.aac files); raw/ADIF also handled by the

@@ -105,7 +105,7 @@ directory lock or interrupt/task-switch nesting state.
 
 ## Pluggable decoder modules and FLAC/AAC playback
 
-MiniAMP3 can now play non-MP3 formats through loadable Amiga hunk decoder
+MintAMP can now play non-MP3 formats through loadable Amiga hunk decoder
 modules.  The host scans the configured decoder-module directory for
 `*.decoder` files, calls the module ABI entry point, and matches the selected
 file extension against the module extension list.  MP3 remains built in; other
@@ -148,7 +148,7 @@ default. Pass `OGGASM=0` to build Tremor with its plain C fallback instead.
 inside the module through an Exec `AllocMem`/`FreeMem` shim, and audits for
 forbidden libc/startup symbols before producing `flac.decoder`.
 
-At runtime, keep the decoder modules next to MiniAMP3 or in the discovered
+At runtime, keep the decoder modules next to MintAMP or in the discovered
 module directory.  Use `--debug-decoder` when diagnosing module discovery, ABI
 revision checks, extension matching, stream format probing, or generic decoder
 startup.  Current FLAC support targets subset FLAC streams up to 48 kHz stereo;
@@ -157,18 +157,18 @@ fast-lowrate, fake-stereo, volume, and buffer handling used for MP3 playback.
 
 ## GUI builds
 
-Two native Amiga frontends are available.  `miniamp3` is the Workbench
-2.x/3.x GadTools frontend; `minimp3r` is the ReAction/ClassAct frontend for
+Two native Amiga frontends are available.  `MintAMP-GT` is the Workbench
+2.x/3.x GadTools frontend; `MintAMP` is the ReAction/ClassAct frontend for
 newer 3.x systems.  Both reuse the command-line decoder/playback core and both
 participate in the decoder-module build, so MP3 stays built in while FLAC, AAC, and
 future formats are supplied by `*.decoder` modules.
 
 ```sh
-make -f Makefile.amiga gui      # GadTools: miniamp3
-make -f Makefile.amiga guir     # ReAction/ClassAct: minimp3r
+make -f Makefile.amiga gui      # GadTools: MintAMP-GT
+make -f Makefile.amiga guir     # ReAction/ClassAct: MintAMP
 # or the explicit target names
-make -f Makefile.amiga miniamp3
-make -f Makefile.amiga minimp3r
+make -f Makefile.amiga miniamp3  # compatibility alias for MintAMP-GT
+make -f Makefile.amiga minimp3r  # compatibility alias for MintAMP
 ```
 
 ## AmiSSL HTTPS smoke test
@@ -185,7 +185,7 @@ Run it on AmigaOS to fetch only the response headers from
 test prints the HTTP/ICY status line and the `Content-Type` header, which should
 be `audio/mpeg` for the Groove Salad MP3 stream.
 
-`miniamp3` opens the MiniAMP3 window with an ASL file requester whose pattern is
+`MintAMP-GT` opens the MintAMP-GT window with an ASL file requester whose pattern is
 expanded from built-in MP3 plus discovered decoder-module extensions such as
 FLAC and AAC.  Internet radio URLs can be entered from
 Project/Internet Stream.  The main window includes speed-mode, channel-mode,
@@ -209,7 +209,7 @@ Fast-mem is always obeyed.  When an internet stream is selected the GadTools
 frontend clears Fast-mem and omits `--fast-mem`, matching the ReAction frontend,
 because stream inputs are live sockets rather than finite seekable files.
 
-The buffer slider chooses the `--buffer-seconds` value from 1 to 30 seconds. The Volume slider stores `ENVARC:MiniAMP3/Volume` as 0-100% and maps it to `audio.device` `ioa_Volume` 0-64, so 0% is silent and 100% preserves the previous full-volume request value. Volume changes are shared with the embedded playback subprocess and applied to the next safe `CMD_WRITE` submission without changing PCM samples. The GUI rate selector cycles through 8287, 8820, 11025, 14700, 22050, and 28600 Hz.
+The buffer slider chooses the `--buffer-seconds` value from 1 to 30 seconds. The Volume slider stores `ENVARC:MintAMP/Volume` as 0-100% and maps it to `audio.device` `ioa_Volume` 0-64, so 0% is silent and 100% preserves the previous full-volume request value. Volume changes are shared with the embedded playback subprocess and applied to the next safe `CMD_WRITE` submission without changing PCM samples. The GUI rate selector cycles through 8287, 8820, 11025, 14700, 22050, and 28600 Hz.
 Superfast is a fast-lowrate variant rather than a separate exclusive mode; when
 Superfast is ticked the rate selector narrows to its supported 11025 and 22050 Hz
 choices. Playback still
@@ -371,7 +371,7 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   minimum measured spare time before a playing buffer ended at exit.
 - `--fast-mem` preloads the complete compressed MP3 into Fast RAM before decoding
   or playback starts. On AmigaOS builds it requests `MEMF_FAST`, so the input
-  does not consume chip RAM needed by Paula buffers. MiniAMP3 disables the
+  does not consume chip RAM needed by Paula buffers. MintAMP disables the
   checkbox when the selected file will not fit in available Fast RAM. During
   startup it reports that it is copying the input to Fast RAM. This removes
   filesystem and slow-HDD reads from the realtime decode/refill loop and prints
@@ -384,8 +384,8 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   CPU-limited 68030 could still steal decode time at unpredictable points.
   For slow disks, start with `--play --fast-mem`; if decode-time spikes can still
   exhaust the queued audio, also increase `--buffer-seconds` toward 10.
-- MiniAMP3 GUI startup diagnostics are compiled out by default so release builds
-  do not write `T:MiniAMP3-startup.log` or show internal startup stages. Developers
+- MintAMP GUI startup diagnostics are compiled out by default so release builds
+  do not write `T:MintAMP-startup.log` or show internal startup stages. Developers
   can enable the detailed GUI startup log, watchdog text, task/process pointers,
   and embedded audio-open diagnostics by building with `-DMINIAMP3_DEBUG`, for
   example `make -f Makefile.amiga gui EXTRA_CFLAGS=-DMINIAMP3_DEBUG`.

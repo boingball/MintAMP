@@ -1,6 +1,6 @@
 /*
  * wma_asf.h - minimal ASF (Advanced Systems Format) container reader for
- * the WMA decoder module.  Original code for MiniAMP3 (not vendored) --
+ * the WMA decoder module.  Original code for MintAMP (not vendored) --
  * finds the WMAV1/WMAV2 audio stream's format info and hands raw payload
  * bytes to decoders/wma/wmadeci.c (Rockbox's libwma, vendored separately).
  *

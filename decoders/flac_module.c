@@ -1,5 +1,5 @@
 /*
- * flac_module.c - FLAC decoder module for MiniAMP3 using libfoxenflac.
+ * flac_module.c - FLAC decoder module for MintAMP using libfoxenflac.
  *
  * The module implements the DecoderOps vtable declared in decoder_module.h.
  * All memory is allocated via exec AllocMem (MEMF_FAST) on Amiga.

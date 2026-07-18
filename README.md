@@ -1,6 +1,6 @@
-# MiniAMP3 for Classic AmigaOS
+# MintAMP — Mini Internet Amiga Media Player
 
-Classic AmigaOS m68k audio player with local MP3 playback, modular AAC/FLAC decoders, ReAction and GadTools front-ends, Radio Browser search, ICY metadata, station artwork, and direct HTTP/HTTPS internet radio.
+Classic AmigaOS m68k audio player with two GUI editions: MintAMP for ReAction/ClassAct and MintAMP-GT for GadTools. Both editions use the same Helix-based playback engine and support local media and HTTP/HTTPS internet radio, with modular AAC/FLAC decoders, Radio Browser search, ICY metadata, station artwork, and Paula audio output.
 
 This started as an Amiga port of the Helix fixed-point MP3 decoder. It has grown into a small but surprisingly capable classic Amiga audio player for real hardware and emulators.
 
@@ -16,8 +16,8 @@ Classic AmigaOS • m68k • Paula • MP3 • AAC • FLAC • HTTP/HTTPS radio
 - Optional AAC m68k helper paths with `AACASM=1`
 - FLAC playback through external `flac.decoder`
 - Modular decoder loading
-- ReAction/ClassAct GUI: `minimp3r`
-- GadTools GUI: `miniamp3`
+- ReAction/ClassAct GUI: `MintAMP`
+- GadTools GUI: `MintAMP-GT`
 - CLI playback mode: `amiga_mp3dec.fastexp`
 - Direct HTTP and HTTPS internet radio with `RADIO=1 SSL=1`
 - Optional AmiSSL certificate verification with `SSLCERTS=1`
@@ -31,7 +31,7 @@ Classic AmigaOS • m68k • Paula • MP3 • AAC • FLAC • HTTP/HTTPS radio
 
 ## Project status
 
-MiniAMP3 is active classic Amiga development.
+MintAMP is active classic Amiga development. Older development builds were named MiniAMP3/minimp3r; compatibility make targets are retained where practical.
 
 Current focus areas:
 
@@ -69,7 +69,7 @@ Suggested screenshots:
 | HTTPS MP3/AAC radio | Working with AmiSSL | Build with `RADIO=1 SSL=1`. Uses AmiSSL and classic-Amiga-specific teardown quarantine for stability. |
 | HTTPS certificate verification | Optional | Add `SSLCERTS=1` to use AmiSSL's installed CA certificates for peer/hostname verification. |
 | Radio Browser search | Working | Used by the GUI radio search. |
-| JPEG artwork | Working | Station logo/artwork support in `minimp3r`. |
+| JPEG artwork | Working | Station logo/artwork support in `MintAMP`. |
 | PNG artwork | Working | `lodepng` is compiled into the ReAction front-end only. |
 | SVG artwork | Working (subset) | `svgdec.c`, a small from-scratch fixed-point decoder, compiled into the ReAction front-end only. See "Artwork notes" below for what's supported. |
 | HLS / M3U8 | Not supported | Out of scope currently. Direct stream URLs only. |
@@ -112,7 +112,7 @@ Add `SSLCERTS=1` to enable certificate verification:
 make -f Makefile.amiga sslguir SSLCERTS=1
 ```
 
-`SSLCERTS=1` defines the certificate-verification path and tells MiniAMP3 to use AmiSSL's installed CA certificate bundle. The Amiga-side AmiSSL install must have its current root certificates available, and the system clock must be sane, otherwise valid HTTPS streams may fail verification.
+`SSLCERTS=1` defines the certificate-verification path and tells MintAMP to use AmiSSL's installed CA certificate bundle. The Amiga-side AmiSSL install must have its current root certificates available, and the system clock must be sane, otherwise valid HTTPS streams may fail verification.
 
 Useful certificate-verifying builds:
 
@@ -163,7 +163,7 @@ Expected metadata includes station name, genre, bitrate, content type and live I
 
 Classic AmigaOS/AmiSSL teardown can be fragile when rapidly switching HTTPS streams from short-lived playback child tasks.
 
-MiniAMP3 therefore uses a conservative stability pattern for HTTPS radio:
+MintAMP therefore uses a conservative stability pattern for HTTPS radio:
 
 - the probe path reuses a shared probe `SSL_CTX` rather than creating/freeing one for every station probe
 - probe SSL objects are quarantined on dangerous close/EOF paths
@@ -182,7 +182,7 @@ If you are changing the HTTPS radio code, do not remove this quarantine behaviou
 - Git with submodule support
 - AmiSSL SDK headers for HTTPS radio builds
 - AmiSSL root certificates for `SSLCERTS=1` certificate verification
-- ReAction/ClassAct runtime classes for `minimp3r`
+- ReAction/ClassAct runtime classes for `MintAMP`
 - `bsdsocket.library` at runtime for radio
 
 Check the toolchain:
@@ -235,7 +235,7 @@ git submodule foreach --recursive 'git reset --hard && git clean -fd'
 
 make -C decoders clean || true
 find . -name "*.o" -delete
-rm -f amiga_mp3dec.fastexp miniamp3 minimp3r
+rm -f amiga_mp3dec.fastexp MintAMP MintAMP-GT
 rm -f decoders/*.decoder decoders/*.decoder.map
 
 make -C decoders flac
@@ -279,9 +279,9 @@ Keep the player and decoder modules together.
 Typical Amiga-side layout:
 
 ```text
-MiniAMP3/
-  minimp3r
-  miniamp3
+MintAMP/
+  MintAMP
+  MintAMP-GT
   amiga_mp3dec.fastexp
   decoders/
     aac.decoder
@@ -292,8 +292,8 @@ Depending on the build target/front-end, the executable may be:
 
 ```text
 amiga_mp3dec.fastexp   CLI/local and radio playback
-miniamp3               GadTools GUI
-minimp3r               ReAction/ClassAct GUI
+MintAMP-GT             GadTools GUI
+MintAMP                ReAction/ClassAct GUI
 ```
 
 ## Runtime tests
@@ -411,7 +411,7 @@ Supported artwork decode paths:
 
 `svgdec.c` covers `path`/`rect`/`circle`/`ellipse`/`polygon`/`polyline`/`line` with solid fills and simple strokes, `transform` (translate/scale/rotate/skewX/skewY/matrix), opacity/fill-opacity/stroke-opacity, and `viewBox`/`width`/`height` sizing. It does not resolve gradients, patterns, filters, clip/mask, `<use>`, `<image>`, `<text>`, or CSS `<style>` rules -- the affected paint or subtree is simply left unpainted rather than failing the whole decode. Elliptical arc (`A`) path commands degrade to a straight line to their endpoint rather than a true arc. A document with no usable `<svg>` root/size still fails outright, same as an undecodable JPEG/PNG/ICO.
 
-Artwork support is intentionally wired into `minimp3r` only. The GadTools and CLI builds do not need PNG/JPEG/ICO/SVG artwork support.
+Artwork support is available in both GUI editions. The CLI build does not need PNG/JPEG/ICO/SVG artwork support.
 
 ## Development notes
 
@@ -422,8 +422,8 @@ Do not commit generated files:
 *.decoder
 *.decoder.map
 *.fastexp
-miniamp3
-minimp3r
+MintAMP-GT
+MintAMP
 test audio files
 *:Zone.Identifier
 ```

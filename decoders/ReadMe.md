@@ -1,4 +1,4 @@
-Decoders for MiniAMP3
+Decoders for MintAMP
 
 Flac - https://github.com/astoeckel/libfoxenflac - 	
 Re-license as LGPLv2.1 or later

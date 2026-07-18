@@ -3,7 +3,7 @@
  * various platform headers, providing just what the vendored libwma/
  * lib/rbcodec sources (decoders/wma/ *.c files, from Rockbox's
  * lib/rbcodec/codecs/{libwma,lib}) need to compile freestanding for the
- * MiniAMP3 decoder-module build.  Not part of upstream Rockbox.
+ * MintAMP decoder-module build.  Not part of upstream Rockbox.
  */
 #ifndef MINIAMP3_WMA_PLATFORM_H
 #define MINIAMP3_WMA_PLATFORM_H

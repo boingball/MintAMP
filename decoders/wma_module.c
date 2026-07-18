@@ -1,5 +1,5 @@
 /*
- * wma_module.c - WMA (v1/v2) decoder module for MiniAMP3.
+ * wma_module.c - WMA (v1/v2) decoder module for MintAMP.
  *
  * Bridges the DecoderOps vtable (decoder_module.h) onto:
  *   - wma_asf.c: this project's own ASF container demuxer (see wma_asf.h)

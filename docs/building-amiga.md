@@ -94,7 +94,7 @@ Remove stale decoder objects, decoder binaries, maps, and main player outputs be
 make -C decoders clean || true
 find . -name "*.o" -delete
 rm -f amiga_mp3dec.fastexp
-rm -f minimp3r
+rm -f MintAMP
 rm -f decoders/*.decoder
 rm -f decoders/*.decoder.map
 ```
@@ -202,7 +202,7 @@ git submodule foreach --recursive 'git reset --hard && git clean -fd'
 
 make -C decoders clean || true
 find . -name "*.o" -delete
-rm -f amiga_mp3dec.fastexp minimp3r
+rm -f amiga_mp3dec.fastexp MintAMP MintAMP-GT
 rm -f decoders/*.decoder decoders/*.decoder.map
 
 make -C decoders flac
@@ -225,7 +225,8 @@ Expected runtime layout on the Amiga:
 
 ```text
 libhelix-mp3/
-  minimp3r
+  MintAMP
+  MintAMP-GT
   amiga_mp3dec.fastexp
   decoders/
     aac.decoder
@@ -299,7 +300,8 @@ Do not commit:
 * `*.decoder`
 * `*.decoder.map`
 * `*.fastexp`
-* `minimp3r`
+* `MintAMP`
+* `MintAMP-GT`
 * test audio files
 * `*:Zone.Identifier`
 
