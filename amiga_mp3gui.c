@@ -650,6 +650,7 @@ typedef struct HelixAmp3Gui {
 	struct Gadget  *plGadgets;
 	struct Gadget  *plGadContext;
 	struct Gadget  *plGadList;
+	struct VisualInfo *plVisualInfo;
 	Playlist playlist;
 	struct Window  *rbWin;
 	struct Gadget  *rbGadgets;
@@ -6998,23 +6999,35 @@ static void RefreshPlaylistView(HelixAmp3Gui *gui)
 
 static void ClosePlaylistWindow(HelixAmp3Gui *gui)
 {
+	struct IntuiMessage *msg;
+	struct MsgPort *port;
 	if (!gui->plWin)
-		return;
-	ModifyIDCMP(gui->plWin, 0);
-	{
-		struct IntuiMessage *msg;
-		while ((msg = GT_GetIMsg(gui->plWin->UserPort)) != NULL)
+		goto free_resources;
+
+	/* Snapshot and drain the Intuition-allocated IDCMP port before
+	 * ModifyIDCMP(win, 0), matching CloseRadioWindow().  That call may free
+	 * the port and clear win->UserPort, so the window's UserPort must not be
+	 * read afterwards. */
+	port = gui->plWin->UserPort;
+	if (port) {
+		while ((msg = GT_GetIMsg(port)) != NULL)
 			GT_ReplyIMsg(msg);
 	}
+	ModifyIDCMP(gui->plWin, 0);
 	if (gui->plGadgets)
 		RemoveGList(gui->plWin, gui->plGadgets, -1);
 	CloseWindow(gui->plWin);
 	gui->plWin = NULL;
+free_resources:
 	if (gui->plGadgets) {
 		FreeGadgets(gui->plGadgets);
 		gui->plGadgets = NULL;
 		gui->plGadContext = NULL;
 		gui->plGadList = NULL;
+	}
+	if (gui->plVisualInfo) {
+		FreeVisualInfo(gui->plVisualInfo);
+		gui->plVisualInfo = NULL;
 	}
 }
 
@@ -7033,12 +7046,15 @@ static void OpenPlaylistWindow(HelixAmp3Gui *gui)
 	int bw;
 	int bx;
 
-	if (gui->plWin || !gui->win || !gui->visualInfo)
+	if (gui->plWin || !gui->win)
 		return;
 
+	gui->plVisualInfo = GetVisualInfoA(gui->win->WScreen, NULL);
+	if (!gui->plVisualInfo)
+		return;
 	gui->plGadContext = CreateContext(&gui->plGadgets);
 	if (!gui->plGadContext)
-		return;
+		goto fail;
 	gad = gui->plGadContext;
 
 	PlaylistRebuildList(&gui->playlist);
@@ -7051,7 +7067,7 @@ static void OpenPlaylistWindow(HelixAmp3Gui *gui)
 	ng.ng_GadgetText = NULL;
 	ng.ng_GadgetID = PL_GID_LIST;
 	ng.ng_Flags = 0;
-	ng.ng_VisualInfo = gui->visualInfo;
+	ng.ng_VisualInfo = gui->plVisualInfo;
 	gui->plGadList = gad = CreateGadget(LISTVIEW_KIND, gad, &ng,
 		GTLV_Labels, (ULONG)&gui->playlist.list,
 		GTLV_Selected, gui->playlist.selected >= 0 ? (ULONG)gui->playlist.selected : (ULONG)~0,
@@ -7071,7 +7087,7 @@ static void OpenPlaylistWindow(HelixAmp3Gui *gui)
 	ng.ng_GadgetText = (UBYTE *)"Add";
 	ng.ng_GadgetID = PL_GID_ADD;
 	ng.ng_Flags = PLACETEXT_IN;
-	ng.ng_VisualInfo = gui->visualInfo;
+	ng.ng_VisualInfo = gui->plVisualInfo;
 	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE);
 	if (!gad) goto fail;
 	bx += bw + 4;
@@ -7139,12 +7155,7 @@ static void OpenPlaylistWindow(HelixAmp3Gui *gui)
 	return;
 
 fail:
-	if (gui->plGadgets) {
-		FreeGadgets(gui->plGadgets);
-		gui->plGadgets = NULL;
-		gui->plGadContext = NULL;
-		gui->plGadList = NULL;
-	}
+	ClosePlaylistWindow(gui);
 }
 
 static void PlaylistLoadAndShow(HelixAmp3Gui *gui, int index)
@@ -7369,6 +7380,7 @@ static void HandlePlaylistPoll(HelixAmp3Gui *gui)
 	ULONG classValue;
 	UWORD code;
 	struct Gadget *gad;
+	UWORD gid;
 
 	if (!gui->plWin)
 		return;
@@ -7376,6 +7388,7 @@ static void HandlePlaylistPoll(HelixAmp3Gui *gui)
 		classValue = msg->Class;
 		code = msg->Code;
 		gad = (struct Gadget *)msg->IAddress;
+		gid = gad ? gad->GadgetID : 0;
 		GT_ReplyIMsg(msg);
 		if (classValue == IDCMP_CLOSEWINDOW) {
 			ClosePlaylistWindow(gui);
@@ -7386,9 +7399,9 @@ static void HandlePlaylistPoll(HelixAmp3Gui *gui)
 			GT_EndRefresh(gui->plWin, TRUE);
 			continue;
 		}
-		if (classValue != IDCMP_GADGETUP || !gad)
+		if (classValue != IDCMP_GADGETUP || !gid)
 			continue;
-		switch ((int)gad->GadgetID) {
+		switch ((int)gid) {
 		case PL_GID_LIST:
 			gui->playlist.selected = (int)code;
 			break;
