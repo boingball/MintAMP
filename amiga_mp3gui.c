@@ -684,6 +684,14 @@ typedef struct HelixAmp3Gui {
 	int artEnabled;
 	int artCacheEnabled;
 	int artColorEnabled;
+	/* Random tint for the drawn no-artwork radio fallback icon.  Rolled once
+	 * per station/track (keyed on inputName) so it stays stable across the
+	 * many redraws a single station triggers, and changes when you tune away. */
+	unsigned long artFallbackKey;
+	int           artFallbackHasColor;
+	unsigned char artFallbackR;
+	unsigned char artFallbackG;
+	unsigned char artFallbackB;
 	int artCacheBypass;
 	int artValid;
 	int artLoading;
@@ -3929,6 +3937,93 @@ static void BuildArtColorPens(HelixAmp3Gui *gui)
 	gui->artPensBuilt = 1;
 }
 
+/* djb2 hash of a C string, used to key the random fallback-icon tint to the
+ * current station/track name so the colour only re-rolls when it changes. */
+static unsigned long ArtFallbackHash(const char *s)
+{
+	unsigned long h = 5381;
+	if (s)
+		while (*s)
+			h = ((h << 5) + h) + (unsigned char)*s++;
+	return h ? h : 1; /* never 0: 0 means "no colour rolled yet" */
+}
+
+/* Rolls a fresh, vivid random colour.  Hue is fully random; saturation and
+ * value are pinned to the top so the icon always reads clearly against the
+ * grey/blue Workbench regardless of which hue comes up.  A tiny self-seeding
+ * xorshift PRNG keeps this dependency-free (no <stdlib.h> rand, no math). */
+static void ArtRollFallbackColor(unsigned long salt,
+	unsigned char *r, unsigned char *g, unsigned char *b)
+{
+	static unsigned long state = 2463534242UL;
+	static unsigned long bump = 0;
+	unsigned long hue, region, rem, q, t;
+
+	state ^= salt + 0x9E3779B9UL + (bump++ << 6);
+	state ^= state << 13;
+	state ^= state >> 17;
+	state ^= state << 5;
+
+	hue = state % 360UL;
+	region = hue / 60UL;
+	rem = ((hue % 60UL) * 255UL) / 60UL;
+	q = 255UL - rem;
+	t = rem;
+	switch (region) {
+	case 0:  *r = 255;        *g = (unsigned char)t; *b = 0;            break;
+	case 1:  *r = (unsigned char)q; *g = 255;        *b = 0;            break;
+	case 2:  *r = 0;          *g = 255;        *b = (unsigned char)t;   break;
+	case 3:  *r = 0;          *g = (unsigned char)q; *b = 255;          break;
+	case 4:  *r = (unsigned char)t; *g = 0;          *b = 255;          break;
+	default: *r = 255;        *g = 0;          *b = (unsigned char)q;   break;
+	}
+}
+
+/* Returns the fallback-icon tint for the current input, rolling a new colour
+ * only when the station/track (keyed on inputName) has changed since last time.
+ * Stable across the frequent redraws a single station triggers. */
+static void ArtFallbackColor(HelixAmp3Gui *gui,
+	unsigned char *r, unsigned char *g, unsigned char *b)
+{
+	unsigned long key = ArtFallbackHash(gui->inputName);
+	if (!gui->artFallbackHasColor || key != gui->artFallbackKey) {
+		ArtRollFallbackColor(key, &gui->artFallbackR,
+			&gui->artFallbackG, &gui->artFallbackB);
+		gui->artFallbackKey = key;
+		gui->artFallbackHasColor = 1;
+	}
+	*r = gui->artFallbackR;
+	*g = gui->artFallbackG;
+	*b = gui->artFallbackB;
+}
+
+/* Obtains a pen in the current fallback tint (rolled per station/track) for a
+ * drawn no-artwork icon.  Returns the pen to draw with -- the obtained best
+ * pen, or system pen 1 if none is available -- and reports via *obtained the
+ * pen the caller must ReleasePen() afterwards (-1 when there is nothing to
+ * free).  *cmOut receives the colour map used for the release. */
+static UWORD ArtFallbackPen(HelixAmp3Gui *gui, struct ColorMap **cmOut, LONG *obtained)
+{
+	struct ColorMap *cm = gui->win ? gui->win->WScreen->ViewPort.ColorMap : NULL;
+	unsigned char rr, gg, bb;
+
+	*cmOut = cm;
+	*obtained = -1;
+	ArtFallbackColor(gui, &rr, &gg, &bb);
+	if (cm) {
+		ULONG r32 = (ULONG)rr | ((ULONG)rr << 8) | ((ULONG)rr << 16) | ((ULONG)rr << 24);
+		ULONG g32 = (ULONG)gg | ((ULONG)gg << 8) | ((ULONG)gg << 16) | ((ULONG)gg << 24);
+		ULONG b32 = (ULONG)bb | ((ULONG)bb << 8) | ((ULONG)bb << 16) | ((ULONG)bb << 24);
+		LONG pen = ObtainBestPen(cm, r32, g32, b32,
+			OBP_FailIfBad, (Tag)FALSE, TAG_DONE);
+		if (pen >= 0) {
+			*obtained = pen;
+			return (UWORD)pen;
+		}
+	}
+	return 1;
+}
+
 /* Integer Newton's-method sqrt, used to plot filled circles for the
  * fallback art icons below without pulling in <math.h>. */
 static int ArtIconIntSqrt(int n)
@@ -3958,12 +4053,16 @@ static void ArtIconFillCircle(struct RastPort *rp, int cx, int cy, int r)
  * radio stream: a boombox silhouette (handle, antenna, body, speaker
  * ring, tuning dial), built entirely from RectFill/Move/Draw so it
  * needs no bitmap asset. */
-static void DrawRadioIcon(struct RastPort *rp, int originX, int originY)
+static void DrawRadioIcon(HelixAmp3Gui *gui, struct RastPort *rp,
+	int originX, int originY)
 {
 	int bx0 = originX + 10, by0 = originY + 34;
 	int bx1 = originX + 54, by1 = originY + 58;
+	struct ColorMap *cm;
+	LONG obtained;
+	UWORD fgPen = ArtFallbackPen(gui, &cm, &obtained);
 
-	SetAPen(rp, 1);
+	SetAPen(rp, fgPen);
 
 	Move(rp, bx0 + 10, by0);
 	Draw(rp, bx0 + 10, by0 - 12);
@@ -3984,21 +4083,29 @@ static void DrawRadioIcon(struct RastPort *rp, int originX, int originY)
 	SetAPen(rp, 0);
 	ArtIconFillCircle(rp, bx0 + 12, by0 + 12, 4);
 
-	SetAPen(rp, 1);
+	SetAPen(rp, (UWORD)fgPen);
 	ArtIconFillCircle(rp, bx1 - 10, by0 + 12, 4);
+
+	if (obtained >= 0)
+		ReleasePen(cm, obtained);
 }
 
 /* Drawn when a local/offline file has no embedded artwork: a simple
- * eighth note (filled head, stem, flag), same no-asset approach. */
-static void DrawMusicNoteIcon(struct RastPort *rp, int originX, int originY)
+ * eighth note (filled head, stem, flag), same no-asset approach.  Tinted with
+ * the per-track random colour, matching the radio fallback icon. */
+static void DrawMusicNoteIcon(HelixAmp3Gui *gui, struct RastPort *rp,
+	int originX, int originY)
 {
 	int headCx = originX + 24;
 	int headCy = originY + 46;
 	int headR = 8;
 	int stemX = headCx + headR - 1;
 	int stemTopY = originY + 12;
+	struct ColorMap *cm;
+	LONG obtained;
+	UWORD fgPen = ArtFallbackPen(gui, &cm, &obtained);
 
-	SetAPen(rp, 1);
+	SetAPen(rp, fgPen);
 	ArtIconFillCircle(rp, headCx, headCy, headR);
 
 	Move(rp, stemX, headCy);
@@ -4007,6 +4114,9 @@ static void DrawMusicNoteIcon(struct RastPort *rp, int originX, int originY)
 	Draw(rp, stemX + 12, stemTopY + 8);
 	Draw(rp, stemX, stemTopY + 16);
 	Draw(rp, stemX, stemTopY);
+
+	if (obtained >= 0)
+		ReleasePen(cm, obtained);
 }
 
 /* Upper-cased file extension of a URL's path (ignoring any query string),
@@ -4178,12 +4288,17 @@ static void DrawArtPanel(HelixAmp3Gui *gui)
 			SetAPen(rp, 1);
 			Move(rp, ART_X + 10, ART_Y + ART_H / 2);
 			Text(rp, "Loading", 7);
-		} else if (IsRadioInputName(gui->inputName) && gui->currentRadioFavicon[0]) {
-			DrawNoArtFormatLabel(rp, ART_X, ART_Y, gui->currentRadioFavicon);
 		} else if (IsRadioInputName(gui->inputName)) {
-			DrawRadioIcon(rp, ART_X, ART_Y);
+			/* Any radio stream with no usable artwork gets the boombox
+			 * placeholder — whether the station advertised no favicon at all
+			 * or one was fetched and failed to load (404, unsupported/broken
+			 * format).  A failed favicon used to show a "No art (JPG)" style
+			 * label; the graphic reads better and still signals "no art".
+			 * (DrawNoArtFormatLabel is kept above if the diagnostic text is
+			 * ever wanted back.) */
+			DrawRadioIcon(gui, rp, ART_X, ART_Y);
 		} else {
-			DrawMusicNoteIcon(rp, ART_X, ART_Y);
+			DrawMusicNoteIcon(gui, rp, ART_X, ART_Y);
 		}
 	}
 }

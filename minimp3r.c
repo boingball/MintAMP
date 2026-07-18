@@ -676,6 +676,14 @@ typedef struct MrApp {
 	int   artEnabled;
 	int   artCacheEnabled;
 	int   artColorEnabled;
+	/* Random tint for the drawn no-artwork radio fallback icon.  Rolled once
+	 * per station/track (keyed on inputName) so it stays stable across the
+	 * many redraws a single station triggers, and changes when you tune away. */
+	unsigned long artFallbackKey;
+	int           artFallbackHasColor;
+	unsigned char artFallbackR;
+	unsigned char artFallbackG;
+	unsigned char artFallbackB;
 	int   progressEnabled;
 	int   artCacheBypass;
 	int   artPensBuilt;
@@ -4465,6 +4473,189 @@ static void UpdateArtwork(MrApp *app, MrMp3Info *info)
 	DrawArtPanel(app);
 }
 
+/* djb2 hash of a C string, used to key the random fallback-icon tint to the
+ * current station/track name so the colour only re-rolls when it changes. */
+static unsigned long ArtFallbackHash(const char *s)
+{
+	unsigned long h = 5381;
+	if (s)
+		while (*s)
+			h = ((h << 5) + h) + (unsigned char)*s++;
+	return h ? h : 1; /* never 0: 0 means "no colour rolled yet" */
+}
+
+/* Rolls a fresh, vivid random colour.  Hue is fully random; saturation and
+ * value are pinned to the top so the icon always reads clearly against the
+ * grey/blue Workbench regardless of which hue comes up.  A tiny self-seeding
+ * xorshift PRNG keeps this dependency-free (no <stdlib.h> rand, no math). */
+static void ArtRollFallbackColor(unsigned long salt,
+	unsigned char *r, unsigned char *g, unsigned char *b)
+{
+	static unsigned long state = 2463534242UL;
+	static unsigned long bump = 0;
+	unsigned long hue, region, rem, q, t;
+
+	state ^= salt + 0x9E3779B9UL + (bump++ << 6);
+	state ^= state << 13;
+	state ^= state >> 17;
+	state ^= state << 5;
+
+	hue = state % 360UL;
+	region = hue / 60UL;
+	rem = ((hue % 60UL) * 255UL) / 60UL;
+	q = 255UL - rem;
+	t = rem;
+	switch (region) {
+	case 0:  *r = 255;        *g = (unsigned char)t; *b = 0;            break;
+	case 1:  *r = (unsigned char)q; *g = 255;        *b = 0;            break;
+	case 2:  *r = 0;          *g = 255;        *b = (unsigned char)t;   break;
+	case 3:  *r = 0;          *g = (unsigned char)q; *b = 255;          break;
+	case 4:  *r = (unsigned char)t; *g = 0;          *b = 255;          break;
+	default: *r = 255;        *g = 0;          *b = (unsigned char)q;   break;
+	}
+}
+
+/* Returns the fallback-icon tint for the current input, rolling a new colour
+ * only when the station/track (keyed on inputName) has changed since last time.
+ * Stable across the frequent redraws a single station triggers. */
+static void ArtFallbackColor(MrApp *app,
+	unsigned char *r, unsigned char *g, unsigned char *b)
+{
+	unsigned long key = ArtFallbackHash(app->inputName);
+	if (!app->artFallbackHasColor || key != app->artFallbackKey) {
+		ArtRollFallbackColor(key, &app->artFallbackR,
+			&app->artFallbackG, &app->artFallbackB);
+		app->artFallbackKey = key;
+		app->artFallbackHasColor = 1;
+	}
+	*r = app->artFallbackR;
+	*g = app->artFallbackG;
+	*b = app->artFallbackB;
+}
+
+/* Integer Newton's-method sqrt for plotting filled circles without <math.h>. */
+static int ArtIconIntSqrt(int n)
+{
+	int x, y;
+	if (n <= 0)
+		return 0;
+	x = n;
+	y = (x + 1) / 2;
+	while (y < x) {
+		x = y;
+		y = (x + n / x) / 2;
+	}
+	return x;
+}
+
+static void ArtIconFillCircle(struct RastPort *rp, int cx, int cy, int r)
+{
+	int dy;
+	for (dy = -r; dy <= r; dy++) {
+		int dx = ArtIconIntSqrt(r * r - dy * dy);
+		RectFill(rp, cx - dx, cy + dy, cx + dx, cy + dy);
+	}
+}
+
+/* Obtains a pen in the current fallback tint (rolled per station/track) for a
+ * drawn no-artwork icon.  Returns the pen to draw with -- the obtained best
+ * pen, or system pen 1 if none is available -- and reports via *obtained the
+ * pen the caller must ReleasePen() afterwards (-1 when there is nothing to
+ * free).  *cmOut receives the colour map used for the release. */
+static UWORD ArtFallbackPen(MrApp *app, struct ColorMap **cmOut, LONG *obtained)
+{
+	struct ColorMap *cm = app->win ? app->win->WScreen->ViewPort.ColorMap : NULL;
+	unsigned char rr, gg, bb;
+
+	*cmOut = cm;
+	*obtained = -1;
+	ArtFallbackColor(app, &rr, &gg, &bb);
+	if (cm) {
+		ULONG r32 = (ULONG)rr | ((ULONG)rr << 8) | ((ULONG)rr << 16) | ((ULONG)rr << 24);
+		ULONG g32 = (ULONG)gg | ((ULONG)gg << 8) | ((ULONG)gg << 16) | ((ULONG)gg << 24);
+		ULONG b32 = (ULONG)bb | ((ULONG)bb << 8) | ((ULONG)bb << 16) | ((ULONG)bb << 24);
+		LONG pen = ObtainBestPen(cm, r32, g32, b32,
+			OBP_FailIfBad, (Tag)FALSE, TAG_DONE);
+		if (pen >= 0) {
+			*obtained = pen;
+			return (UWORD)pen;
+		}
+	}
+	return 1;
+}
+
+/* Boombox silhouette drawn entirely from RectFill/Move/Draw (no bitmap asset),
+ * shown for a radio stream that has no favicon.  Tinted with the per-station
+ * random colour; parity with the GadTools frontend's DrawRadioIcon.  Assumes a
+ * full 64x64 panel — callers fall back to a text label when the panel is
+ * smaller than the icon's fixed layout. */
+static void DrawRadioIcon(MrApp *app, struct RastPort *rp,
+	int originX, int originY)
+{
+	int bx0 = originX + 10, by0 = originY + 34;
+	int bx1 = originX + 54, by1 = originY + 58;
+	struct ColorMap *cm;
+	LONG obtained;
+	UWORD fgPen = ArtFallbackPen(app, &cm, &obtained);
+
+	SetAPen(rp, fgPen);
+
+	Move(rp, bx0 + 10, by0);
+	Draw(rp, bx0 + 10, by0 - 12);
+	Draw(rp, bx1 - 10, by0 - 12);
+	Draw(rp, bx1 - 10, by0);
+
+	Move(rp, bx1 - 8, by0);
+	Draw(rp, bx1 + 4, by0 - 16);
+	RectFill(rp, bx1 + 2, by0 - 18, bx1 + 6, by0 - 14);
+
+	Move(rp, bx0, by0);
+	Draw(rp, bx1, by0);
+	Draw(rp, bx1, by1);
+	Draw(rp, bx0, by1);
+	Draw(rp, bx0, by0);
+
+	ArtIconFillCircle(rp, bx0 + 12, by0 + 12, 7);
+	SetAPen(rp, 0);
+	ArtIconFillCircle(rp, bx0 + 12, by0 + 12, 4);
+
+	SetAPen(rp, (UWORD)fgPen);
+	ArtIconFillCircle(rp, bx1 - 10, by0 + 12, 4);
+
+	if (obtained >= 0)
+		ReleasePen(cm, obtained);
+}
+
+/* Drawn when a local/offline file has no embedded artwork: a simple eighth
+ * note (filled head, stem, flag), tinted with the per-track random colour.
+ * Parity with the GadTools frontend's DrawMusicNoteIcon; assumes a full
+ * 64x64 panel like DrawRadioIcon. */
+static void DrawMusicNoteIcon(MrApp *app, struct RastPort *rp,
+	int originX, int originY)
+{
+	int headCx = originX + 24;
+	int headCy = originY + 46;
+	int headR = 8;
+	int stemX = headCx + headR - 1;
+	int stemTopY = originY + 12;
+	struct ColorMap *cm;
+	LONG obtained;
+	UWORD fgPen = ArtFallbackPen(app, &cm, &obtained);
+
+	SetAPen(rp, fgPen);
+	ArtIconFillCircle(rp, headCx, headCy, headR);
+
+	Move(rp, stemX, headCy);
+	Draw(rp, stemX, stemTopY);
+
+	Draw(rp, stemX + 12, stemTopY + 8);
+	Draw(rp, stemX, stemTopY + 16);
+	Draw(rp, stemX, stemTopY);
+
+	if (obtained >= 0)
+		ReleasePen(cm, obtained);
+}
+
 static void DrawArtPanel(MrApp *app)
 {
 	struct Gadget *gad;
@@ -4551,8 +4742,16 @@ static void DrawArtPanel(MrApp *app)
 		 * wouldn't fit. */
 		char line1[16], line2[16];
 		int line1Len, line2Len, line1W, line2W;
+		int iconKind = 0; /* 0=text label, 1=radio boombox, 2=music note */
 		line2[0] = '\0';
 		if (MrIsRadioInput(app->inputName)) {
+			/* Any radio stream with no usable artwork gets the hand-drawn
+			 * boombox placeholder (parity with the GadTools frontend) --
+			 * whether the station advertised no favicon at all or one was
+			 * fetched and failed to load (404, unsupported/broken format).
+			 * line1/line2 are still filled in so a panel too small for the
+			 * fixed-size icon degrades to a text label instead. */
+			iconKind = 1;
 			if (!app->currentRadioFavicon[0]) {
 				SafeCopy(line1, sizeof(line1), "Blank");
 			} else {
@@ -4562,10 +4761,23 @@ static void DrawArtPanel(MrApp *app)
 				if (ext[0]) sprintf(line2, "(%s)", ext);
 			}
 		} else {
+			/* Local/offline file with no embedded artwork: music-note
+			 * placeholder (parity with the GadTools frontend), degrading to
+			 * the text label when the panel is too small for the icon. */
+			iconKind = 2;
 			SafeCopy(line1, sizeof(line1), "No art");
 		}
 		SetAPen(rp, 0);
 		RectFill(rp, ox, oy, ox + w - 1, oy + h - 1);
+		/* The icon uses a fixed 64x64 layout; only draw it when the panel is
+		 * at least that big, otherwise fall through to the text label. */
+		if (iconKind && w >= MR_ART_W && h >= MR_ART_H) {
+			if (iconKind == 1)
+				DrawRadioIcon(app, rp, ox, oy);
+			else
+				DrawMusicNoteIcon(app, rp, ox, oy);
+			return;
+		}
 		line1Len = (int)strlen(line1);
 		line2Len = (int)strlen(line2);
 		line1W = line1Len > 0 ? TextLength(rp, line1, line1Len) : 0;
