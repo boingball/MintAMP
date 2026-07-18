@@ -2863,7 +2863,11 @@ static void ArtworkCacheName(HelixAmp3Gui *gui, char *dst, size_t dstSize)
 	int i;
 	int j;
 
-	EnvName(dst, dstSize, "ArtCache");
+	/* Artwork cache lives beside the executable (PROGDIR:ArtCache), not under
+	 * ENV:/ENVARC: -- these are 16-20 KB .grey64 image files, and PROGDIR: is
+	 * persistent and launch-location independent (ENVARC: is for small config
+	 * vars, not image blobs). */
+	SafeCopy(dst, dstSize, "PROGDIR:ArtCache");
 	/* Radio input has no local path to key the cache off of; key it by the
 	 * station favicon URL instead so the fetch is skipped on the next visit
 	 * to the same station, matching minimp3r's ArtworkCacheName(). */
@@ -2939,7 +2943,7 @@ static void SaveArtworkCache(HelixAmp3Gui *gui)
 
 	if (!gui->artCacheEnabled || !gui->inputName[0] || !gui->artValid)
 		return;
-	EnvName(dir, sizeof(dir), "ArtCache");
+	SafeCopy(dir, sizeof(dir), "PROGDIR:ArtCache");
 	CreateDir((STRPTR)dir);
 	ArtworkCacheName(gui, path, sizeof(path));
 	f = fopen(path, "wb");
@@ -2958,7 +2962,7 @@ static void CleanArtworkCache(HelixAmp3Gui *gui)
 	struct FileInfoBlock *fib;
 	int removed = 0;
 
-	EnvName(dir, sizeof(dir), "ArtCache");
+	SafeCopy(dir, sizeof(dir), "PROGDIR:ArtCache");
 	lock = SafeLockPath("CleanArtworkCache/Lock", dir, ACCESS_READ);
 	if (!lock) {
 		SetStatus(gui, "Artwork cache is empty.");
@@ -5746,10 +5750,13 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	gui->hasHttps = Radio_HasHttps();
 	gui->fastLowrate = LoadEnvInt("FastLowrate", 1, 0, 1);
 	gui->superfastLowrate = LoadEnvInt("SuperfastLowrate", 0, 0, 1);
-	gui->ultrafast = LoadEnvInt("Ultrafast", 0, 0, 1);
+	gui->ultrafast = LoadEnvInt("Ultrafast", 1, 0, 1);
 	gui->cd32Ultrafast = LoadEnvInt("CD32Ultrafast", 0, 0, 1);
 	gui->fastMem = LoadEnvInt("FastMem", 1, 0, 1);
 	gui->mono = LoadEnvInt("Mono", 1, 0, 1);
+	/* NOTE: first-run defaults below (Ultrafast speed, Faster quality, colour
+	 * artwork on) match the MintAMP (ReAction) frontend so both builds ship the
+	 * same fastest-on-a-stock-030 out-of-box preset. */
 	gui->fakeStereo = LoadEnvInt("FakeStereo", 0, 0, 1);
 	gui->fakeStereoWidthIndex = LoadEnvInt("FakeStereoWidthIndex", 1, 0, 4);
 	gui->fakeStereoDelayIndex = LoadEnvInt("FakeStereoDelayIndex", 2, 0, 4);
@@ -5791,7 +5798,8 @@ static int GuiOpen(HelixAmp3Gui *gui)
 			SaveEnvInt("QualityIndex", gui->qualityIndex);
 			SaveEnvInt("SettingsVersion", HELIXAMP3_SETTINGS_VERSION);
 		} else {
-			gui->qualityIndex = hasQualityIndex ? loadedQuality : 1;
+			/* First-run default: "Faster" (index 0), the fastest quality preset. */
+			gui->qualityIndex = hasQualityIndex ? loadedQuality : 0;
 		}
 	}
 	gui->subbandCapIndex = LoadEnvInt("SubbandCapIndex", 0, 0, SUBBAND_CAP_COUNT - 1);
@@ -5799,7 +5807,7 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	gui->bench = LoadEnvInt("Bench", 0, 0, 1);
 	gui->artEnabled = LoadEnvInt("Artwork", 1, 0, 1);
 	gui->artCacheEnabled = LoadEnvInt("ArtworkCache", 1, 0, 1);
-	gui->artColorEnabled = LoadEnvInt("ArtworkColour", 0, 0, 1);
+	gui->artColorEnabled = LoadEnvInt("ArtworkColour", 1, 0, 1);
 	gui->progressEnabled = LoadEnvInt("ProgressBar", 0, 0, 1);
 	LoadEnvString("LastDrawer", gui->lastDrawer, sizeof(gui->lastDrawer));
 	{

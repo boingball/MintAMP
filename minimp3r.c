@@ -3864,7 +3864,11 @@ static void ArtworkCacheName(MrApp *app, char *dst, size_t dstSize)
 	const char *source, *base, *end;
 	char safe[80];
 	int i, j;
-	EnvName(dst, dstSize, "ArtCache");
+	/* Artwork cache lives beside the executable (PROGDIR:ArtCache), not under
+	 * ENV:/ENVARC: -- these are 16-20 KB .grey64 image files, and PROGDIR: is
+	 * persistent and launch-location independent (ENVARC: is for small config
+	 * vars, not image blobs). */
+	SafeCopy(dst, dstSize, "PROGDIR:ArtCache");
 	source = (MrIsRadioInput(app->inputName) && app->currentRadioFavicon[0]) ?
 		app->currentRadioFavicon : app->inputName;
 	end = strchr(source, '?');
@@ -3920,7 +3924,7 @@ static void SaveArtworkCache(MrApp *app)
 	static const unsigned char hdr[8] = { 'M','3','A','G','6','4','\0', 2 };
 	if (!app->artCacheEnabled || !app->inputName[0] || !app->artValid)
 		return;
-	EnvName(dir, sizeof(dir), "ArtCache");
+	SafeCopy(dir, sizeof(dir), "PROGDIR:ArtCache");
 	CreateDir((STRPTR)dir);
 	ArtworkCacheName(app, path, sizeof(path));
 	f = fopen(path, "wb");
@@ -3938,7 +3942,7 @@ static void CleanArtworkCache(MrApp *app)
 	BPTR lock;
 	struct FileInfoBlock *fib;
 	int removed = 0;
-	EnvName(dir, sizeof(dir), "ArtCache");
+	SafeCopy(dir, sizeof(dir), "PROGDIR:ArtCache");
 	lock = Lock((STRPTR)dir, ACCESS_READ);
 	if (!lock) { SetStatus(app, "Artwork cache is empty."); return; }
 	fib = (struct FileInfoBlock *)AllocDosObject(DOS_FIB, NULL);
@@ -5730,8 +5734,14 @@ static void RadioDoProbeAndPlay(MrApp *app)
 			return;
 		}
 	}
-	if ((app->playbackActive || app->playbackDonePending || PlaybackProcessStillExists()) &&
-		MrIsRadioInput(app->inputName)) {
+	if (app->playbackActive || app->playbackDonePending || PlaybackProcessStillExists()) {
+		/* Something is already playing -- a radio stream OR a local file.  Queue
+		 * this station and stop the current playback; FinalizePlayback() drains
+		 * the "radio-selection" marker and re-enters here once the child is gone,
+		 * so pressing Play on a station swaps out whatever was playing instead of
+		 * rejecting with "Already playing - press Stop first."  Previously this
+		 * branch was gated on MrIsRadioInput(app->inputName), so a local file
+		 * playing fell through to StartPlayback()'s active-playback guard. */
 		SafeCopy(app->queuedStreamUrl, sizeof(app->queuedStreamUrl), "radio-selection");
 		RadioSetStatus(app, "Queued stream; stopping previous stream...");
 		RADIO_DBG(printf("radio-ui: queued stream while stopping old stream\n");)
@@ -6631,21 +6641,24 @@ static int MrMainReal(int argc, char **argv)
 	 * worker or a playback child. */
 	MR_TASK_IDENTITY("application-startup-main-task");
 
-	/* Defaults that match a typical 030 setup. */
+	/* First-run defaults (used until the user saves settings): the fastest
+	 * out-of-the-box preset so RC1 plays smoothly on a stock 020/030 --
+	 * 11025 Hz, mono, Ultrafast speed, "Faster" quality, decode from Fast RAM,
+	 * with artwork and colour artwork on. */
 	app.magic = MR_APP_MAGIC;
 	app.rateIndex = 1;		/* 11025 Hz */
-	app.qualityIndex = 2;		/* Normal   */
-	app.mono = 0;
-	app.fastMem = 0;
+	app.qualityIndex = 0;		/* Faster (fastest quality preset) */
+	app.mono = 1;
+	app.fastMem = 1;
 	app.fastLowrate = 0;
-	app.ultrafast = 0;
+	app.ultrafast = 1;		/* Ultrafast speed preset */
 	app.cd32Ultrafast = 0;
 	app.volumePercent = 100;
 	app.bufferSeconds = 10;
 	app.fakeStereoDelayIndex = 0;
 	app.artEnabled = 1;
 	app.artCacheEnabled = 1;
-	app.artColorEnabled = 0;
+	app.artColorEnabled = 1;
 	app.progressEnabled = 0;
 	app.playlistCurrent = -1;
 	app.playlistSelected = -1;
