@@ -1,6 +1,6 @@
 # libnix `___free_all` sentinel compatibility note
 
-The armed MiniAMP3 diagnostics traced the shutdown alerts to libnix
+The armed MintAMP diagnostics traced the shutdown alerts to libnix
 `___free_all` walking three internal allocation-list heads during CRT exit. Two
 heads contained `0xffffffff` at shutdown. Stock `___free_all` only checked for
 `NULL`, so it treated `0xffffffff` as a node, derived `base = 0xfffffffb`, read a

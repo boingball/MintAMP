@@ -1,5 +1,5 @@
 /*
- * MiniAMP3 - compact AmigaOS GadTools mini-player frontend for the Helix
+ * MintAMP-GT - Mini Internet Amiga Media Player GadTools frontend for the Helix
  * fixed-point MP3 decoder.  The GUI wraps the existing amiga_mp3dec playback
  * frontend so the same Paula streaming path, fast-lowrate options, and buffer
  * handling are used from either Shell or Workbench.
@@ -263,11 +263,11 @@ static void GuiTaskIdentityLog(const char *phase)
  * below passes this through SetVar() with GVF_GLOBAL_ONLY (writes ENV:) and
  * separately with GVF_SAVE_VAR (which internally constructs the persistent
  * disk path as "ENVARC:" + name). An explicit "ENVARC:" baked into the name
- * itself made that second call target "ENVARC:ENVARC:MiniAMP3/..." -- a
+ * itself made that second call target "ENVARC:ENVARC:MintAMP/..." -- a
  * malformed, double-prefixed path that silently failed to persist, while
  * the plain ENV: (RAM, cleared on reboot) write still succeeded -- exactly
  * the "settings don't survive a restart" symptom this fixes. */
-#define GUI_ENV_PREFIX  "MiniAMP3"
+#define GUI_ENV_PREFIX  "MintAMP"
 #define GUI_STARTUP_STACK_SIZE 262144UL
 
 #define GUI_WIN_W       560    /* inner width; wide enough for all controls */
@@ -937,7 +937,7 @@ static const int kFakeStereoDelays[] = { 48, 64, 96, 128, 192 };
 
 static struct NewMenu myNewMenus[] = {
 	{ NM_TITLE, (STRPTR)"Project",          0, 0, 0, 0 },
-	{ NM_ITEM,  (STRPTR)"About MiniAMP3...",0, 0, 0,
+	{ NM_ITEM,  (STRPTR)"About MintAMP-GT...",0, 0, 0,
 		(APTR)(MENUNUM_PROJECT * 100 + ITEMNUM_ABOUT) },
 	{ NM_ITEM,  (STRPTR)"Internet Radio...",0, 0, 0,
 		(APTR)(MENUNUM_PROJECT * 100 + ITEMNUM_STREAM) },
@@ -4477,7 +4477,7 @@ static int PlaybackProcessStillExists(void)
 	/* The child posts its done message just before returning from PlaybackEntry.
 	 * Do not launch another decoder until DOS has actually removed that task. */
 	Forbid();
-	task = FindTask((STRPTR)"MiniAMP3 playback");
+	task = FindTask((STRPTR)"MintAMP-GT playback");
 	Permit();
 	return task != NULL;
 }
@@ -4757,7 +4757,7 @@ static void SignalPlaybackChildCtrlC(void)
 {
 	struct Task *child;
 	Forbid();
-	child = FindTask((STRPTR)"MiniAMP3 playback");
+	child = FindTask((STRPTR)"MintAMP-GT playback");
 	if (child)
 		Signal(child, SIGBREAKF_CTRL_C);
 	Permit();
@@ -5123,8 +5123,8 @@ static void ShowAbout(HelixAmp3Gui *gui)
 
 	es.es_StructSize = sizeof(es);
 	es.es_Flags = 0;
-	es.es_Title = (UBYTE *)"About MiniAMP3";
-	es.es_TextFormat = (UBYTE *)"MiniAMP3\nMade by boingball\n(C)2026 - v1.0\nTo support this application visit:\nhttps://buymeacoffee.com/boingball\n-----\nMade with decoders from\nHelix MP3 / ACC\nby Real Networks\nlibfoxenflac\nby astoeckel\n\nESP8266Audio\nby earlephilhower\n-----\nAI Used\nClaude and Codex\nLate Nights\nMany";
+	es.es_Title = (UBYTE *)"About MintAMP-GT";
+	es.es_TextFormat = (UBYTE *)"MintAMP-GT\nMini Internet Amiga Media Player\nGadTools Edition\nMade by boingball\n(C)2026 - v1.0\nTo support this application visit:\nhttps://buymeacoffee.com/boingball\n-----\nMade with decoders from\nHelix MP3 / ACC\nby Real Networks\nlibfoxenflac\nby astoeckel\n\nESP8266Audio\nby earlephilhower\n-----\nAI Used\nClaude and Codex\nLate Nights\nMany";
 	es.es_GadgetFormat = (UBYTE *)"OK";
 	EasyRequest(gui->win, &es, NULL, TAG_DONE);
 }
@@ -5814,24 +5814,24 @@ static int GuiOpen(HelixAmp3Gui *gui)
 
 	IntuitionBase = (struct IntuitionBase *)OpenLibrary("intuition.library", 37);
 	if (!IntuitionBase) {
-		fprintf(stderr, "MiniAMP3 requires intuition.library V37 or newer.\n");
+		fprintf(stderr, "MintAMP-GT requires intuition.library V37 or newer.\n");
 		return -1;
 	}
 	AslBase = OpenLibrary("asl.library", 37);
 	if (!AslBase) {
-		fprintf(stderr, "MiniAMP3 requires asl.library V37 or newer.\n");
+		fprintf(stderr, "MintAMP-GT requires asl.library V37 or newer.\n");
 		GuiClose(gui);
 		return -1;
 	}
 	GadToolsBase = OpenLibrary("gadtools.library", 37);
 	if (!GadToolsBase) {
-		fprintf(stderr, "MiniAMP3 requires gadtools.library V37 or newer.\n");
+		fprintf(stderr, "MintAMP-GT requires gadtools.library V37 or newer.\n");
 		GuiClose(gui);
 		return -1;
 	}
 	GfxBase = (struct GfxBase *)OpenLibrary("graphics.library", 37);
 	if (!GfxBase) {
-		fprintf(stderr, "MiniAMP3 requires graphics.library V37 or newer.\n");
+		fprintf(stderr, "MintAMP-GT requires graphics.library V37 or newer.\n");
 		GuiClose(gui);
 		return -1;
 	}
@@ -5851,7 +5851,7 @@ static int GuiOpen(HelixAmp3Gui *gui)
 		WFLG_SIZEGADGET | WFLG_SIZEBBOTTOM | WFLG_ACTIVATE |
 		WFLG_SMART_REFRESH;
 	nw.FirstGadget = NULL;
-	nw.Title = (UBYTE *)"MiniAMP3";
+	nw.Title = (UBYTE *)"MintAMP-GT";
 	nw.MinWidth = GUI_WIN_W;
 	nw.MinHeight = GUI_WIN_H;
 	nw.MaxWidth = 680;
@@ -5862,7 +5862,7 @@ static int GuiOpen(HelixAmp3Gui *gui)
 		WA_InnerHeight, GUI_WIN_H,
 		TAG_DONE);
 	if (!gui->win) {
-		fprintf(stderr, "cannot open MiniAMP3 window\n");
+		fprintf(stderr, "cannot open MintAMP-GT window\n");
 		GuiClose(gui);
 		return -1;
 	}
@@ -5887,7 +5887,7 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	if (gui->smallFont)
 		SetFont(gui->win->RPort, gui->smallFont);
 	if (GuiCreateGadgets(gui) != 0) {
-		fprintf(stderr, "cannot create MiniAMP3 gadgets\n");
+		fprintf(stderr, "cannot create MintAMP-GT gadgets\n");
 		GuiClose(gui);
 		return -1;
 	}
@@ -6591,7 +6591,7 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 	const RadioBrowserStation *st;
 	char msg[512];
 	if (Radio_IsMemoryPoisoned()) {
-		RadioSetStatus(app, "Memory corruption detected; restart MiniAMP3 before playing radio.");
+		RadioSetStatus(app, "Memory corruption detected; restart MintAMP before playing radio.");
 		RADIO_DBG(printf("radio-memory: refusing RadioDoProbeAndPlay after MiniMem/ring corruption\n");)
 		return;
 	}
@@ -6734,7 +6734,7 @@ static void RadioReplayCurrentUrl(HelixAmp3Gui *gui)
 
 	SafeCopy(url, sizeof(url), gui->inputName);
 	if (Radio_IsMemoryPoisoned()) {
-		SetStatus(gui, "Memory corruption detected; restart MiniAMP3 before playing radio.");
+		SetStatus(gui, "Memory corruption detected; restart MintAMP before playing radio.");
 		return;
 	}
 	if (Radio_PlaybackOwnsNetwork()) {
@@ -7122,7 +7122,7 @@ static void OpenPlaylistWindow(HelixAmp3Gui *gui)
 	nw.Height   = PL_WIN_H;
 	nw.IDCMPFlags = IDCMP_GADGETUP | IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW;
 	nw.Flags = WFLG_CLOSEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET | WFLG_SMART_REFRESH;
-	nw.Title = (UBYTE *)"MiniAMP3 Playlist";
+	nw.Title = (UBYTE *)"MintAMP-GT Playlist";
 	nw.MinWidth  = PL_WIN_W;
 	nw.MinHeight = PL_WIN_H;
 	nw.MaxWidth  = PL_WIN_W;
@@ -7508,7 +7508,7 @@ static void ChooseMp3(HelixAmp3Gui *gui)
 		CopyDrawerFromPath(gui->lastDrawer, sizeof(gui->lastDrawer),
 			gui->inputName);
 	req = (struct FileRequester *)AllocAslRequestTags(ASL_FileRequest,
-		ASLFR_TitleText, (ULONG)"Select audio file for MiniAMP3",
+		ASLFR_TitleText, (ULONG)"Select audio file for MintAMP-GT",
 		ASLFR_DoPatterns, TRUE,
 		ASLFR_InitialPattern, (ULONG)gSupportedExtPattern,
 		ASLFR_InitialDrawer,
@@ -7619,7 +7619,7 @@ static void EnterInternetStream(HelixAmp3Gui *gui)
 		IDCMP_VANILLAKEY;
 	nw.Flags = WFLG_DRAGBAR | WFLG_DEPTHGADGET | WFLG_CLOSEGADGET |
 		WFLG_ACTIVATE | WFLG_RMBTRAP;
-	nw.Title = (UBYTE *)"MiniAMP3 Internet Stream";
+	nw.Title = (UBYTE *)"MintAMP-GT Internet Stream";
 	nw.Type = CUSTOMSCREEN;
 	nw.Screen = gui->win->WScreen;
 
@@ -8051,7 +8051,7 @@ static void StartPlayback(HelixAmp3Gui *gui)
 	struct Process *thisProc;
 
 	if (Radio_IsMemoryPoisoned()) {
-		SetStatus(gui, "Memory corruption detected; restart MiniAMP3 before playing radio.");
+		SetStatus(gui, "Memory corruption detected; restart MintAMP before playing radio.");
 		RADIO_DBG(printf("radio-memory: refusing StartPlayback after MiniMem/ring corruption url=\"%s\"\n", gui->inputName);)
 		return;
 	}
@@ -8149,7 +8149,7 @@ static void StartPlayback(HelixAmp3Gui *gui)
 
 	if (nilOut) {
 		gGuiPlayer.process = CreateNewProcTags(NP_Entry, (ULONG)PlaybackEntry,
-			NP_Name, (ULONG)"MiniAMP3 playback",
+			NP_Name, (ULONG)"MintAMP-GT playback",
 			/* See AMIGA_PLAYBACK_TASK_PRIORITY's comment in amiga_mp3dec.c for
 			 * the tradeoff -- CPU-bound decoding vs. keeping the GadTools event
 			 * loop (and Stop) responsive. */
@@ -8162,7 +8162,7 @@ static void StartPlayback(HelixAmp3Gui *gui)
 			TAG_DONE);
 	} else {
 		gGuiPlayer.process = CreateNewProcTags(NP_Entry, (ULONG)PlaybackEntry,
-			NP_Name, (ULONG)"MiniAMP3 playback",
+			NP_Name, (ULONG)"MintAMP-GT playback",
 			/* See AMIGA_PLAYBACK_TASK_PRIORITY's comment in amiga_mp3dec.c for
 			 * the tradeoff -- CPU-bound decoding vs. keeping the GadTools event
 			 * loop (and Stop) responsive. */
@@ -8862,7 +8862,7 @@ int main(int argc, char **argv)
 
 	if (gGuiDetectedStackSize >= GUI_STARTUP_STACK_SIZE) {
 #if defined(DEBUG) || defined(RADIO_DEBUG)
-		printf("miniamp3: startup stack lower=%lu upper=%lu size=%lu, no swap needed\n",
+		printf("MintAMP-GT: startup stack lower=%lu upper=%lu size=%lu, no swap needed\n",
 			gGuiDetectedStackLower, gGuiDetectedStackUpper, gGuiDetectedStackSize);
 #endif
 		return GuiMainReal(argc, argv);
@@ -8881,7 +8881,7 @@ int main(int argc, char **argv)
 	gGuiOldStack = gGuiNewStack;
 
 #if defined(DEBUG) || defined(RADIO_DEBUG)
-	printf("miniamp3: startup stack lower=%lu upper=%lu size=%lu, swapped to %lu bytes\n",
+	printf("MintAMP-GT: startup stack lower=%lu upper=%lu size=%lu, swapped to %lu bytes\n",
 		gGuiDetectedStackLower, gGuiDetectedStackUpper, gGuiDetectedStackSize,
 		gGuiEffectiveStackSize);
 #endif
@@ -8902,7 +8902,7 @@ int main(int argc, char **argv)
 {
 	(void)argc;
 	(void)argv;
-	fprintf(stderr, "MiniAMP3 GUI requires an AMIGA_M68K Intuition/ASL/GadTools build.\n");
+	fprintf(stderr, "MintAMP-GT GUI requires an AMIGA_M68K Intuition/ASL/GadTools build.\n");
 	fprintf(stderr, "Use amiga_mp3dec --play --rate 11025 --buffer-seconds 10 file.mp3 on this host.\n");
 	return 1;
 }

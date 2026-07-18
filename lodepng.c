@@ -37,7 +37,7 @@ Rename this file to lodepng.cpp to use it for C++, or to lodepng.c to use it for
 
 #ifdef LODEPNG_COMPILE_ALLOCATORS
 #include <stdlib.h> /* allocations */
-/* Debug-only heap guard for MiniAMP3 (see miniamp_memguard.h).  This only
+/* Debug-only heap guard for MintAMP (see miniamp_memguard.h).  This only
  * redirects the raw malloc()/realloc()/free() calls inside the three
  * lodepng_malloc/lodepng_realloc/lodepng_free wrappers just below --
  * everything else in this file calls those wrappers, not the C library

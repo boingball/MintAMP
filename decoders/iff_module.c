@@ -1,5 +1,5 @@
 /*
- * iff_module.c - Amiga IFF-8SVX decoder module for MiniAMP3.
+ * iff_module.c - Amiga IFF-8SVX decoder module for MintAMP.
  *
  * Implements the DecoderOps vtable from decoder_module.h for the classic
  * Amiga "8-bit Voice" sample format: FORM/8SVX/VHDR/BODY, mono, 8-bit

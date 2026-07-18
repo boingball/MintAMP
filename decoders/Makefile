@@ -1,4 +1,4 @@
-# decoders/Makefile — builds pluggable audio decoder modules for MiniAMP3
+# decoders/Makefile — builds pluggable audio decoder modules for MintAMP
 #
 # Each module is a standalone Amiga hunk-format binary loaded at runtime with
 # LoadSeg().  flac_entry.c is compiled and linked FIRST so that its first
@@ -358,7 +358,7 @@ ogg.decoder: $(OGG_OBJS) decoder_module.h tremor/src/tremor/ivorbisfile.h
 	@echo "Built $@"
 
 # --------------------------------------------------------------------------
-# WAV — plain RIFF/PCM decoder, hand-written for MiniAMP3 (no third-party
+# WAV — plain RIFF/PCM decoder, hand-written for MintAMP (no third-party
 # library, so unlike FLAC/AAC/OGG above there is no forced malloc/calloc/
 # free shim -- wav_alloc.c's WavModule* names are called directly).
 # 8/16/24/32-bit integer PCM, mono or stereo, classic and
@@ -406,7 +406,7 @@ wav.decoder: $(WAV_OBJS) decoder_module.h
 	@echo "Built $@"
 
 # --------------------------------------------------------------------------
-# IFF/8SVX — Amiga "8-bit Voice" decoder, hand-written for MiniAMP3 (no
+# IFF/8SVX — Amiga "8-bit Voice" decoder, hand-written for MintAMP (no
 # third-party library). Mono, 8-bit signed PCM, sCompression 0 (raw) or 1
 # (Fibonacci-delta). IFF chunk sizes are big-endian, unlike WAV's RIFF.
 # --------------------------------------------------------------------------

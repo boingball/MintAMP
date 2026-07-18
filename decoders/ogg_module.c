@@ -1,5 +1,5 @@
 /*
- * ogg_module.c - OGG/Vorbis decoder module for MiniAMP3 using Tremor
+ * ogg_module.c - OGG/Vorbis decoder module for MintAMP using Tremor
  * (Xiph's fixed-point/integer-only Vorbis decoder) + libogg.
  *
  * Implements the DecoderOps vtable from decoder_module.h.  Follows the same

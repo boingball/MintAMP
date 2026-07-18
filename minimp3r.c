@@ -1,5 +1,5 @@
 /*
- * minimp3r - ReAction/ClassAct mini-player frontend for the Helix fixed-point
+ * MintAMP - Mini Internet Amiga Media Player ReAction/ClassAct frontend for the Helix fixed-point
  * MP3 decoder, aimed at AmigaOS 3.3/3.5/3.9 (and 68k boards with ReAction or
  * the older ClassAct distribution installed).
  *
@@ -71,7 +71,7 @@
  * persistent "ENVARC:" + name path itself, and an explicit "ENVARC:" baked
  * in here doubled up into a malformed path that silently failed to persist
  * across reboots while the plain ENV: (RAM) write kept working. */
-#define MR_ENV_PREFIX "MiniAMP3"
+#define MR_ENV_PREFIX "MintAMP"
 #define MR_SETTINGS_VERSION 1
 #define MR_RADIO_FAV_MAX 20
 #if !defined(__AROS__) && !defined(MR_DISABLE_CIA_FILTER)
@@ -411,7 +411,7 @@ static struct MenuItem kPlaybackItems[PLAYBACK_ITEM_COUNT];
 static struct IntuiText kProjectText[3];
 static struct IntuiText kPlaybackText[PLAYBACK_ITEM_COUNT];
 static const char * const kProjectLabels[3] = {
-	"About MiniAMP3...", "Internet Radio", "Quit"
+	"About MintAMP...", "Internet Radio", "Quit"
 };
 static const char * const kPlaybackLabels[PLAYBACK_ITEM_COUNT] = {
 	"Decode-then-play", "Bench mode", "Artwork", "Artwork Cache",
@@ -573,7 +573,7 @@ static volatile unsigned long gEntryRunId;
 static volatile unsigned long gDoneRunId;
 #define MR_APP_MAGIC 0x4d523047UL
 #define MR_DONE_MAGIC 0x4d52444fUL
-#define MR_WINDOW_TITLE "Amiga MP3 Player"
+#define MR_WINDOW_TITLE "MintAMP"
 
 /* ------------------------------------------------------------------------- */
 /* Application state                                                         */
@@ -919,7 +919,7 @@ static int AppCloseShutdown(MrApp *app)
 				gPlayer.stopRequested = 1;
 				gPlaybackInterrupted = 1;
 				Forbid();
-				child = FindTask((STRPTR)"minimp3r playback");
+				child = FindTask((STRPTR)"MintAMP playback");
 				if (child)
 					Signal(child, SIGBREAKF_CTRL_C);
 				Permit();
@@ -1532,7 +1532,7 @@ static void BuildPlaybackArgs(MrApp *app, MrPlayArgs *args)
 		useSuperfast = 0;
 		useFastLowrate = 0;
 	}
-	AddArg(args, "minimp3r");
+	AddArg(args, "MintAMP");
 	AddArg(args, "--play");
 	if (isRadio) {
 		AddArg(args, "--radio-stream");
@@ -1644,7 +1644,7 @@ static int PlaybackProcessStillExists(void)
 	struct Task *task;
 
 	Forbid();
-	task = FindTask((STRPTR)"minimp3r playback");
+	task = FindTask((STRPTR)"MintAMP playback");
 	Permit();
 	return task != NULL;
 }
@@ -1732,7 +1732,7 @@ static void StartPlayback(MrApp *app)
 	if (!MrVerifyAppMagic(app, "StartPlayback"))
 		return;
 	if (Radio_IsMemoryPoisoned()) {
-		SetStatus(app, "Memory corruption detected. Save log and reboot before using MiniAMP3 again.");
+		SetStatus(app, "Memory corruption detected. Save log and reboot before using MintAMP again.");
 		RADIO_DBG(printf("radio-memory: refusing StartPlayback after MiniMem/ring corruption url=\"%s\"\n", app->inputName);)
 		return;
 	}
@@ -1805,7 +1805,7 @@ static void StartPlayback(MrApp *app)
 
 	gPlayer.process = CreateNewProcTags(
 		NP_Entry,      (ULONG)PlaybackEntry,
-		NP_Name,       (ULONG)"minimp3r playback",
+		NP_Name,       (ULONG)"MintAMP playback",
 		NP_Priority,   AMIGA_PLAYBACK_TASK_PRIORITY,
 		NP_StackSize,  262144,
 		NP_CurrentDir, dirLock,
@@ -1906,7 +1906,7 @@ static void StopPlayback(MrApp *app)
 	 * a multi-second audio buffer.  Forbid()/FindTask() guards against the
 	 * child already being torn down by DOS. */
 	Forbid();
-	child = FindTask((STRPTR)"minimp3r playback");
+	child = FindTask((STRPTR)"MintAMP playback");
 	if (child)
 		Signal(child, SIGBREAKF_CTRL_C);
 	Permit();
@@ -2048,7 +2048,7 @@ static void FinalizePlayback(MrApp *app)
 	RADIO_DBG(printf("radio-guard: after FinalizePlayback\n");)
 	if (Radio_IsMemoryPoisoned()) {
 		if (app->queuedStreamUrl[0] || app->playlistNextPending)
-			SetStatus(app, "Memory corruption detected. Save log and reboot before using MiniAMP3 again.");
+			SetStatus(app, "Memory corruption detected. Save log and reboot before using MintAMP again.");
 		app->queuedStreamUrl[0] = '\0';
 		app->playlistNextPending = 0;
 		RADIO_DBG(printf("radio-memory: queued/next stream suppressed after memory poison session=%lu\n", gPlayer.sessionId);)
@@ -2552,17 +2552,17 @@ static int OpenLibs(void)
 {
 	IntuitionBase = (struct IntuitionBase *)OpenLibrary("intuition.library", 39);
 	if (!IntuitionBase) {
-		fprintf(stderr, "minimp3r needs intuition.library V39+.\n");
+		fprintf(stderr, "MintAMP needs intuition.library V39+.\n");
 		return 0;
 	}
 	UtilityBase = OpenLibrary("utility.library", 39);
 	if (!UtilityBase) {
-		fprintf(stderr, "minimp3r needs utility.library V39+.\n");
+		fprintf(stderr, "MintAMP needs utility.library V39+.\n");
 		return 0;
 	}
 	AslBase = OpenLibrary("asl.library", 39);
 	if (!AslBase) {
-		fprintf(stderr, "minimp3r needs asl.library V39+.\n");
+		fprintf(stderr, "MintAMP needs asl.library V39+.\n");
 		return 0;
 	}
 
@@ -2582,7 +2582,7 @@ static int OpenLibs(void)
 		!ChooserBase || !ListBrowserBase || !SliderBase || !CheckBoxBase || !FuelGaugeBase ||
 		!StringBase || !LabelBase) {
 		fprintf(stderr,
-			"minimp3r needs the ReAction (or ClassAct) classes V%d+ installed.\n",
+			"MintAMP needs the ReAction (or ClassAct) classes V%d+ installed.\n",
 			MINIMP3R_CLASS_VERSION);
 		return 0;
 	}
@@ -2611,7 +2611,7 @@ static int CheckGadget(Object *obj, const char *name)
 {
 	if (obj)
 		return 1;
-	fprintf(stderr, "minimp3r: could not create %s gadget.\n", name);
+	fprintf(stderr, "MintAMP: could not create %s gadget.\n", name);
 	return 0;
 }
 
@@ -2975,7 +2975,7 @@ static int MrOpenWindow(MrApp *app)
 		TAG_DONE);
 
         if (!root) {
-		fprintf(stderr, "minimp3r: could not build the gadget layout.\n");
+		fprintf(stderr, "MintAMP: could not build the gadget layout.\n");
 		return 0;
 	}
 
@@ -3000,13 +3000,13 @@ static int MrOpenWindow(MrApp *app)
                 TAG_DONE);
 
         if (!app->winObj) {
-		fprintf(stderr, "minimp3r: could not create the window object.\n");
+		fprintf(stderr, "MintAMP: could not create the window object.\n");
 		return 0;
 	}
 
 	app->win = (struct Window *)RA_OpenWindow(app->winObj);
 	if (!app->win) {
-		fprintf(stderr, "minimp3r: could not open the window.\n");
+		fprintf(stderr, "MintAMP: could not open the window.\n");
 		return 0;
 	}
 	if (app->bufferGad)
@@ -5269,8 +5269,8 @@ static void RadioProbeUrlAndStart(MrApp *app, const char *url, const char *stati
 		return;
 	}
 	if (Radio_IsMemoryPoisoned()) {
-		RadioSetStatus(app, "Memory corruption detected. Save log and reboot before using MiniAMP3 again.");
-		SetStatus(app, "Memory corruption detected. Save log and reboot before using MiniAMP3 again.");
+		RadioSetStatus(app, "Memory corruption detected. Save log and reboot before using MintAMP again.");
+		SetStatus(app, "Memory corruption detected. Save log and reboot before using MintAMP again.");
 		RADIO_DBG(printf("radio-memory: refusing direct/favourite probe after MiniMem/ring corruption url=\"%s\"\n", url);)
 		return;
 	}
@@ -5773,7 +5773,7 @@ static void RadioDoProbeAndPlay(MrApp *app)
 	RadioSetStatus(app, msg);
 	RADIO_DBG(printf("radio-ui: new stream start url=\"%s\"\n", info.final_url);)
 	if (Radio_IsMemoryPoisoned()) {
-		RadioSetStatus(app, "Memory corruption detected. Save log and reboot before using MiniAMP3 again.");
+		RadioSetStatus(app, "Memory corruption detected. Save log and reboot before using MintAMP again.");
 		RADIO_DBG(printf("radio-memory: refusing station switch after MiniMem/ring corruption url=\"%s\"\n", info.final_url);)
 		return;
 	}
@@ -5877,7 +5877,7 @@ static void HandleRadioWindow(MrApp *app)
 			 * user must still be able to get out of this window. No queued
 			 * stream may survive this either. */
 			if (Radio_IsMemoryPoisoned() && (result & WMHI_GADGETMASK) != RB_GID_CLOSE) {
-				RadioSetStatus(app, "Memory corruption detected. Save log and reboot before using MiniAMP3 again.");
+				RadioSetStatus(app, "Memory corruption detected. Save log and reboot before using MintAMP again.");
 				app->queuedStreamUrl[0] = '\0';
 				app->playlistNextPending = 0;
 				break;
@@ -6206,7 +6206,7 @@ static void OpenPlaylistWindow(MrApp *app)
 		goto fail;
 
 	app->plWinObj = (Object *)NewObject(WINDOW_GetClass(), NULL,
-		WA_Title, (ULONG)"MiniAMP3 Playlist",
+		WA_Title, (ULONG)"MintAMP Playlist",
 		WA_Activate, TRUE,
 		WA_DepthGadget, TRUE,
 		WA_DragBar, TRUE,
@@ -6402,8 +6402,8 @@ static void HandleMenu(MrApp *app, UWORD code, int *done)
 				struct EasyStruct es;
 				es.es_StructSize = sizeof(es);
 				es.es_Flags = 0;
-				es.es_Title = (UBYTE *)"About MiniAMP3";
-				es.es_TextFormat = (UBYTE *)"MiniAMP3\nMade by boingball\n(C)2026 - v1.0\nTo support this application visit:\nhttps://buymeacoffee.com/boingball\n-----\nMade with decoders from\nHelix MP3 / ACC\nby Real Networks\nlibfoxenflac\nby astoeckel\n\nESP8266Audio\nby earlephilhower\n-----\nAI Used\nClaude and Codex\nLate Nights\nMany";
+				es.es_Title = (UBYTE *)"About MintAMP";
+				es.es_TextFormat = (UBYTE *)"MintAMP\nMini Internet Amiga Media Player\nReAction Edition\nMade by boingball\n(C)2026 - v1.0\nTo support this application visit:\nhttps://buymeacoffee.com/boingball\n-----\nMade with decoders from\nHelix MP3 / ACC\nby Real Networks\nlibfoxenflac\nby astoeckel\n\nESP8266Audio\nby earlephilhower\n-----\nAI Used\nClaude and Codex\nLate Nights\nMany";
 				es.es_GadgetFormat = (UBYTE *)"OK";
 				EasyRequest(app->win, &es, NULL, TAG_DONE);
 			}
@@ -6620,13 +6620,13 @@ static int MrMainReal(int argc, char **argv)
 
 	app.donePort = CreateMsgPort();
 	if (!app.donePort) {
-		fprintf(stderr, "minimp3r: could not create the reply port.\n");
+		fprintf(stderr, "MintAMP: could not create the reply port.\n");
 		CloseLibs();
 		return 1;
 	}
 
 	if (!OpenTimer(&app)) {
-		fprintf(stderr, "minimp3r: could not open timer.device.\n");
+		fprintf(stderr, "MintAMP: could not open timer.device.\n");
 		CloseTimer(&app);
 		DeleteMsgPort(app.donePort);
 		CloseLibs();
@@ -6845,7 +6845,7 @@ int main(int argc, char **argv)
 
 	if (gMrDetectedStackSize >= MR_STARTUP_STACK_SIZE) {
 #if defined(DEBUG) || defined(RADIO_DEBUG)
-		printf("minimp3r: startup stack lower=%lu upper=%lu size=%lu, no swap needed\n",
+		printf("MintAMP: startup stack lower=%lu upper=%lu size=%lu, no swap needed\n",
 			gMrDetectedStackLower, gMrDetectedStackUpper, gMrDetectedStackSize);
 #endif
 		return MrMainReal(argc, argv);
@@ -6864,7 +6864,7 @@ int main(int argc, char **argv)
 	gMrOldStack = gMrNewStack;
 
 #if defined(DEBUG) || defined(RADIO_DEBUG)
-	printf("minimp3r: startup stack lower=%lu upper=%lu size=%lu, swapped to %lu bytes\n",
+	printf("MintAMP: startup stack lower=%lu upper=%lu size=%lu, swapped to %lu bytes\n",
 		gMrDetectedStackLower, gMrDetectedStackUpper, gMrDetectedStackSize,
 		gMrEffectiveStackSize);
 #endif
@@ -6886,7 +6886,7 @@ int main(int argc, char **argv)
 	(void)argc;
 	(void)argv;
 	fprintf(stderr,
-		"minimp3r is an AmigaOS ReAction/ClassAct frontend and needs an "
+		"MintAMP is an AmigaOS ReAction/ClassAct frontend and needs an "
 		"AMIGA_M68K build.\n");
 	return 1;
 }

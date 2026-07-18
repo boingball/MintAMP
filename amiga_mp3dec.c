@@ -6821,7 +6821,7 @@ static void GuiWriteDetailedStartupLog(int stage)
 			return;
 		if (len >= (int)sizeof(line))
 			len = (int)sizeof(line) - 1;
-		log = Open((STRPTR)"T:MiniAMP3-startup.log", MODE_READWRITE);
+		log = Open((STRPTR)"T:MintAMP-startup.log", MODE_READWRITE);
 		if (log) {
 			Seek(log, 0, OFFSET_END);
 			Write(log, line, len);
@@ -6830,7 +6830,7 @@ static void GuiWriteDetailedStartupLog(int stage)
 	}
 #else
 	{
-		FILE *log = fopen("MiniAMP3-startup.log", "a");
+		FILE *log = fopen("MintAMP-startup.log", "a");
 		if (log) {
 			fprintf(log, "runId=%lu stage=%d name=%s\n",
 				gGuiPlaybackStatus.runId, stage, GuiStartupStageName(stage));
@@ -6895,7 +6895,7 @@ int MP3ResetStatics(void)
 {
 	extern void AmigaResetPolyphaseStatics(void);
 
-	/* MiniAMP3 calls the CLI main() repeatedly in one GUI process.  Clear
+	/* MintAMP calls the CLI main() repeatedly in one GUI process.  Clear
 	 * frontend globals and decoder file-scope controls so each playback starts
 	 * from the same state as a fresh command-line process.
 	 *
@@ -12005,7 +12005,7 @@ int main(int argc, char **argv)
 			return 1;
 		}
 		playTiming = opt.bench ? &timing : NULL;
-		/* Do not clear gPlaybackInterrupted here.  The MiniAMP3 GUI can
+		/* Do not clear gPlaybackInterrupted here.  The MintAMP GUI can
 		 * signal Stop after PlaybackEntry() resets decoder statics but before
 		 * this play block is reached; clearing the flag at this late point
 		 * loses that stop request and leaves the old child holding audio.device

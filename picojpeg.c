@@ -1,5 +1,5 @@
 //------------------------------------------------------------------------------
-// Small picojpeg-compatible baseline JPEG decoder for MiniAMP3 artwork.
+// Small picojpeg-compatible baseline JPEG decoder for MintAMP artwork.
 //
 // This file implements the public picojpeg entrypoints used by the Amiga GUI:
 // pjpeg_decode_init() parses an in-memory JPEG supplied by the callback and

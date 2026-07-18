@@ -543,7 +543,7 @@ static int radio_net_worker_ensure_started(void)
     if (!radio_net_worker_task) {
         struct Process *proc = CreateNewProcTags(
             NP_Entry, (ULONG)radio_net_worker_entry,
-            NP_Name, (ULONG)"MiniAMP3 radio net worker",
+            NP_Name, (ULONG)"MintAMP radio net worker",
             NP_Priority, 0,
             NP_StackSize, 131072,
             NP_CopyVars, FALSE,
@@ -3605,7 +3605,7 @@ RadioStream *Radio_OpenWithHostAddr(const char *url, int haveHostAddr, unsigned 
     if (radioMemoryPoisoned) {
         rs->status = RADIO_STATUS_ERROR;
         radio_copy_string(rs->url, sizeof(rs->url), url ? url : "");
-        set_error(rs, "Memory corruption detected; restart MiniAMP3 before playing radio.");
+        set_error(rs, "Memory corruption detected; restart MintAMP before playing radio.");
         RADIO_OPEN_DEBUG_PRINTF(("radio-open: refused stream start after memory poison session=%lu url=\"%s\"\n", rs->session_id, rs->url));
         return rs;
     }
