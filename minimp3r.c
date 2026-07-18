@@ -4023,15 +4023,27 @@ static int DecodePngToGrey(const unsigned char *pngData, unsigned long pngBytes,
 	for (x = 0; x < pw; x++) xMap[x] = (unsigned char)(((unsigned long)x * (unsigned long)outW) / pw);
 	for (y = 0; y < ph; y++) yMap[y] = (unsigned char)(((unsigned long)y * (unsigned long)outH) / ph);
 
-	/* Alpha is ignored (treated as opaque), matching DecodeJpegToGrey's
-	 * source format -- favicons are rarely meaningfully transparent. */
+	/* Transparent pixels are composited over the panel's neutral grey (see
+	 * the per-pixel note below) so transparent favicons blend into the panel
+	 * instead of showing a raw RGB box. */
 	for (y = 0; y < ph; y++) {
 		const unsigned char *row = image + 4UL * (unsigned long)y * (unsigned long)pw;
 		int dstY = yMap[y];
 		for (x = 0; x < pw; x++) {
 			const unsigned char *px = row + 4 * x;
 			unsigned char r = px[0], g = px[1], b = px[2];
+			unsigned char a = px[3];
 			int dst = dstY * outW + xMap[x];
+			/* Composite over the panel's neutral grey so transparent favicon
+			 * areas blend into the recessed panel instead of showing raw RGB
+			 * (usually a black or white box).  0x80 matches the buffer fill and
+			 * the mid "background" dither band.  Opaque pixels (a==255) are left
+			 * untouched, so fully opaque images decode exactly as before. */
+			if (a != 255) {
+				r = (unsigned char)((r * a + 0x80 * (255 - a) + 127) / 255);
+				g = (unsigned char)((g * a + 0x80 * (255 - a) + 127) / 255);
+				b = (unsigned char)((b * a + 0x80 * (255 - a) + 127) / 255);
+			}
 			greyAccum[dst] += (77UL * r + 150UL * g + 29UL * b + 128UL) >> 8;
 			rAccum[dst] += r; gAccum[dst] += g; bAccum[dst] += b;
 			if (greyCount[dst] != 0xffff) greyCount[dst]++;

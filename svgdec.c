@@ -9,6 +9,8 @@
 #define SVG_MAX_SUBPATHS    24  /* subpaths ("M ... Z M ... Z ...") per shape */
 #define SVG_MAX_SHAPES     600  /* painted shapes per document (soft cap) */
 #define SVG_SCAN_LIMIT    (256L * 1024L) /* bytes actually walked */
+#define SVG_MAX_GRADIENTS   16  /* linear/radial gradient defs kept per document */
+#define SVG_GRAD_ID_MAX     40  /* gradient id length kept (longer ids truncated) */
 
 /* ---- fixed point (Q16.16) ------------------------------------------- */
 
@@ -416,6 +418,51 @@ static void SvgStyleDefault(SvgStyle *st)
 	st->evenOdd = 0;
 }
 
+/* ---- linear/radial gradient support (solid-colour approximation) --------
+ *
+ * A true gradient renderer is overkill for a 64x64 favicon, but skipping
+ * url(#id) paints entirely leaves gradient-filled logos blank.  Instead the
+ * document is pre-scanned (SvgCollectGradients, below) for <linearGradient>/
+ * <radialGradient> definitions; each one's <stop> colours are averaged into a
+ * single representative solid colour keyed by id, and fill/stroke "url(#id)"
+ * references resolve to that colour.  Only the presentation-attribute form
+ * (fill="url(#id)") is resolved; CSS style="" paints and href-inherited
+ * gradient stops are not. */
+typedef struct {
+	char id[SVG_GRAD_ID_MAX];
+	unsigned char r, g, b;
+	int alpha;
+} SvgGradient;
+static SvgGradient sSvgGradients[SVG_MAX_GRADIENTS];
+static int sSvgGradientCount;
+
+/* Resolves a "url(#id)" paint value against the pre-scanned gradient table.
+ * Returns 1 and fills the r, g, b and alpha outputs on a hit, 0 otherwise. */
+static int SvgResolveGradient(const char *s, int len, unsigned char *r,
+	unsigned char *g, unsigned char *b, int *alpha)
+{
+	const char *end = s + len, *p, *idStart, *idEnd;
+	int i, idLen;
+	p = SvgSkipWs(s, end);
+	if ((int)(end - p) < 5 || memcmp(p, "url(", 4) != 0) return 0;
+	p += 4;
+	while (p < end && (*p == '"' || *p == '\'' || *p == '#' || *p == ' ')) p++;
+	idStart = p;
+	while (p < end && *p != ')' && *p != '"' && *p != '\'' && *p != ' ') p++;
+	idEnd = p;
+	idLen = (int)(idEnd - idStart);
+	if (idLen <= 0) return 0;
+	for (i = 0; i < sSvgGradientCount; i++) {
+		if ((int)strlen(sSvgGradients[i].id) == idLen &&
+			memcmp(sSvgGradients[i].id, idStart, (size_t)idLen) == 0) {
+			*r = sSvgGradients[i].r; *g = sSvgGradients[i].g;
+			*b = sSvgGradients[i].b; *alpha = sSvgGradients[i].alpha;
+			return 1;
+		}
+	}
+	return 0;
+}
+
 /* Applies presentation attributes found on one tag onto a style already
  * seeded with the parent's (inherited) values. */
 static void SvgApplyAttrs(SvgStyle *st, const char *attrs, const char *attrsEnd)
@@ -429,15 +476,23 @@ static void SvgApplyAttrs(SvgStyle *st, const char *attrs, const char *attrsEnd)
 		MatMul(&st->m, &st->m, &local);
 	}
 	if (SvgFindAttr(attrs, attrsEnd, "fill", &v, &vlen)) {
-		unsigned char r, g, b;
+		unsigned char r, g, b; int ga;
 		int rc = SvgParseColor(v, vlen, &r, &g, &b);
 		if (rc == 0) { st->hasFill = 1; st->fillR = r; st->fillG = g; st->fillB = b; }
+		else if (rc == 2 && SvgResolveGradient(v, vlen, &r, &g, &b, &ga)) {
+			st->hasFill = 1; st->fillR = r; st->fillG = g; st->fillB = b;
+			st->fillAlpha = (st->fillAlpha * ga) / 255;
+		}
 		else st->hasFill = 0;
 	}
 	if (SvgFindAttr(attrs, attrsEnd, "stroke", &v, &vlen)) {
-		unsigned char r, g, b;
+		unsigned char r, g, b; int ga;
 		int rc = SvgParseColor(v, vlen, &r, &g, &b);
 		if (rc == 0) { st->hasStroke = 1; st->strokeR = r; st->strokeG = g; st->strokeB = b; }
+		else if (rc == 2 && SvgResolveGradient(v, vlen, &r, &g, &b, &ga)) {
+			st->hasStroke = 1; st->strokeR = r; st->strokeG = g; st->strokeB = b;
+			st->strokeAlpha = (st->strokeAlpha * ga) / 255;
+		}
 		else st->hasStroke = 0;
 	}
 	if (SvgFindAttr(attrs, attrsEnd, "stroke-width", &v, &vlen)) {
@@ -1034,6 +1089,136 @@ int SvgLooksLikeSvg(const unsigned char *data, int bytes)
 	return 0;
 }
 
+/* Extracts one "prop:value" declaration from a CSS style="" string (used for
+ * <stop> elements that carry stop-color/stop-opacity inline).  Returns 1 with
+ * val and vlen pointing at the trimmed value on a match, 0 otherwise. */
+static int SvgStyleProp(const char *style, int slen, const char *prop,
+	const char **val, int *vlen)
+{
+	const char *s = style, *end = style + slen;
+	int plen = (int)strlen(prop);
+	while (s < end) {
+		const char *ps, *vs, *ve;
+		int nlen;
+		while (s < end && (*s == ';' || *s == ' ' || *s == '\t' ||
+			*s == '\n' || *s == '\r')) s++;
+		if (s >= end) break;
+		ps = s;
+		while (s < end && *s != ':' && *s != ';') s++;
+		if (s >= end || *s == ';') { if (s < end) s++; continue; }
+		nlen = (int)(s - ps);
+		while (nlen > 0 && (ps[nlen - 1] == ' ' || ps[nlen - 1] == '\t')) nlen--;
+		vs = SvgSkipWs(s + 1, end);
+		ve = vs;
+		while (ve < end && *ve != ';') ve++;
+		s = ve;
+		if (nlen == plen && memcmp(ps, prop, (size_t)plen) == 0) {
+			while (ve > vs && (ve[-1] == ' ' || ve[-1] == '\t')) ve--;
+			*val = vs; *vlen = (int)(ve - vs);
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/* Reads a <stop>'s colour and opacity from either presentation attributes
+ * (stop-color=/stop-opacity=) or an inline style="".  Returns 1 if a usable
+ * colour was found. */
+static int SvgReadStop(const char *attrs, const char *attrsEnd,
+	unsigned char *r, unsigned char *g, unsigned char *b, int *alpha)
+{
+	const char *v; int vlen;
+	const char *sv; int svl;
+	int got = 0;
+	*alpha = 255;
+	if (SvgFindAttr(attrs, attrsEnd, "stop-color", &v, &vlen) &&
+		SvgParseColor(v, vlen, r, g, b) == 0)
+		got = 1;
+	if (SvgFindAttr(attrs, attrsEnd, "stop-opacity", &v, &vlen))
+		*alpha = SvgParseOpacity255(v, vlen);
+	if (SvgFindAttr(attrs, attrsEnd, "style", &v, &vlen)) {
+		if (SvgStyleProp(v, vlen, "stop-color", &sv, &svl) &&
+			SvgParseColor(sv, svl, r, g, b) == 0)
+			got = 1;
+		if (SvgStyleProp(v, vlen, "stop-opacity", &sv, &svl))
+			*alpha = SvgParseOpacity255(sv, svl);
+	}
+	return got;
+}
+
+/* Pre-scan pass: walks the raw document collecting every <linearGradient>/
+ * <radialGradient> into sSvgGradients[] as one averaged solid colour keyed by
+ * id.  Runs before rendering so forward references (a shape that precedes its
+ * gradient def) still resolve, and independently of the render pass's skip
+ * logic (which ignores <defs> and the gradient elements themselves). */
+static void SvgCollectGradients(const unsigned char *buf, long len)
+{
+	long pos = 0;
+	int active = 0, cnt = 0;
+	unsigned long sumR = 0, sumG = 0, sumB = 0, sumA = 0;
+	char curId[SVG_GRAD_ID_MAX];
+
+	sSvgGradientCount = 0;
+	curId[0] = '\0';
+	while (pos < len) {
+		const char *name, *attrs, *tagEnd, *ae;
+		int nlen, isClose, selfClose;
+		long p;
+		if (buf[pos] != '<') { pos++; continue; }
+		/* Skip comments so a "<stop>" mentioned inside one can't desync the
+		 * scan (the render pass handles this via SvgScanSkipMisc). */
+		if (pos + 3 < len && buf[pos + 1] == '!' && buf[pos + 2] == '-' &&
+			buf[pos + 3] == '-') {
+			pos += 4;
+			while (pos + 2 < len && !(buf[pos] == '-' && buf[pos + 1] == '-' &&
+				buf[pos + 2] == '>')) pos++;
+			pos += 3;
+			continue;
+		}
+		isClose = (pos + 1 < len && buf[pos + 1] == '/');
+		p = SvgReadTagName(buf, len, pos + (isClose ? 2 : 1), &name, &nlen);
+		attrs = (const char *)buf + p;
+		ae = (const char *)buf + len;
+		tagEnd = attrs;
+		while (tagEnd < ae && *tagEnd != '>') tagEnd++;
+		selfClose = (tagEnd > attrs && tagEnd[-1] == '/');
+		pos = (long)(tagEnd - (const char *)buf) + 1;
+		if (nlen == 0) continue;
+
+		if (SvgStrEqN(name, nlen, "linearGradient") ||
+			SvgStrEqN(name, nlen, "radialGradient")) {
+			if (isClose) {
+				if (active && cnt > 0 && curId[0] &&
+					sSvgGradientCount < SVG_MAX_GRADIENTS) {
+					SvgGradient *gr = &sSvgGradients[sSvgGradientCount++];
+					int il = (int)strlen(curId);
+					memcpy(gr->id, curId, (size_t)il); gr->id[il] = '\0';
+					gr->r = (unsigned char)(sumR / (unsigned)cnt);
+					gr->g = (unsigned char)(sumG / (unsigned)cnt);
+					gr->b = (unsigned char)(sumB / (unsigned)cnt);
+					gr->alpha = (int)(sumA / (unsigned)cnt);
+				}
+				active = 0; cnt = 0; sumR = sumG = sumB = sumA = 0; curId[0] = '\0';
+			} else {
+				const char *v; int vlen;
+				const char *attrsEnd = tagEnd - (selfClose ? 1 : 0);
+				active = 1; cnt = 0; sumR = sumG = sumB = sumA = 0; curId[0] = '\0';
+				if (SvgFindAttr(attrs, attrsEnd, "id", &v, &vlen)) {
+					int cl = vlen < SVG_GRAD_ID_MAX - 1 ? vlen : SVG_GRAD_ID_MAX - 1;
+					memcpy(curId, v, (size_t)cl); curId[cl] = '\0';
+				}
+				if (selfClose) { active = 0; curId[0] = '\0'; } /* empty def */
+			}
+		} else if (active && !isClose && SvgStrEqN(name, nlen, "stop")) {
+			unsigned char r, g, b; int a;
+			const char *attrsEnd = tagEnd - (selfClose ? 1 : 0);
+			if (SvgReadStop(attrs, attrsEnd, &r, &g, &b, &a)) {
+				sumR += r; sumG += g; sumB += b; sumA += (unsigned long)a; cnt++;
+			}
+		}
+	}
+}
+
 /* Static scratch for SvgDecodeToGrey(): a style-stack entry, the RGB
  * working canvas, and its coverage map, all sized for the SVG_MAX_DIM
  * cap. Kept off the C stack for the same real-Amiga-stack-budget reason
@@ -1065,6 +1250,10 @@ int SvgDecodeToGrey(const unsigned char *svgData, unsigned long svgBytes,
 
 	docLen = (long)(svgBytes < (unsigned long)SVG_SCAN_LIMIT ? svgBytes : (unsigned long)SVG_SCAN_LIMIT);
 	sc.buf = svgData; sc.len = docLen; sc.pos = 0;
+
+	/* Collect gradient definitions up front so fill/stroke url(#id) paints can
+	 * resolve to a solid approximation during the render pass below. */
+	SvgCollectGradients(svgData, docLen);
 
 	memset(rgbBuf, 0x80, sizeof(sSvgRgbBuf));
 	memset(touchedBuf, 0, sizeof(sSvgTouchedBuf));

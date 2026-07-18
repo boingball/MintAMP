@@ -13,7 +13,7 @@
 #include <string.h>
 #include "miniamp_memguard.h"
 
-#define PJPG_MAX_COMPONENTS 3
+#define PJPG_MAX_COMPONENTS 4
 #define PJPG_MAX_TABLES 4
 #define PJPG_IN_CHUNK 128
 #define PJPG_MARKER_NONE 0
@@ -91,6 +91,10 @@ static int gRestartInterval;
 static int gRestartLeft;
 static int gNextRestart;
 static int gReduce;
+/* Adobe APP14 colour-transform flag: -1 none, 0 = CMYK (unchanged), 1 = YCbCr,
+ * 2 = YCCK.  Only consulted for 4-component images to pick the CMYK vs YCCK
+ * conversion; 3-component JPEGs stay plain YCbCr as before. */
+static int gAppTransform;
 static PjComponent gComp[PJPG_MAX_COMPONENTS];
 static int gQuant[PJPG_MAX_TABLES][64];
 static pj_u8 gQuantValid[PJPG_MAX_TABLES];
@@ -353,7 +357,7 @@ static unsigned char pj_read_sof0(void)
 		return PJPG_BAD_WIDTH;
 	if (gHeight <= 0)
 		return PJPG_BAD_HEIGHT;
-	if (gNumComps != 1 && gNumComps != 3)
+	if (gNumComps != 1 && gNumComps != 3 && gNumComps != 4)
 		return PJPG_UNSUPPORTED_COLORSPACE;
 	if (len != 8 + 3 * gNumComps)
 		return PJPG_BAD_SOF_LENGTH;
@@ -376,6 +380,16 @@ static unsigned char pj_read_sof0(void)
 	}
 	if (gNumComps == 1) {
 		if (gComp[0].h != 1 || gComp[0].v != 1)
+			return PJPG_UNSUPPORTED_SAMP_FACTORS;
+	} else if (gNumComps == 4) {
+		/* CMYK/YCCK: only the simple, unsubsampled case (every component
+		 * 1x1, one 8x8 block each) is handled -- this keeps the MCU decode a
+		 * flat 4-block loop and covers the print-quality CMYK JPEGs that
+		 * appear as album art.  Subsampled 4-component images are rejected. */
+		if (gComp[0].h != 1 || gComp[0].v != 1 ||
+			gComp[1].h != 1 || gComp[1].v != 1 ||
+			gComp[2].h != 1 || gComp[2].v != 1 ||
+			gComp[3].h != 1 || gComp[3].v != 1)
 			return PJPG_UNSUPPORTED_SAMP_FACTORS;
 	} else {
 		if (gComp[1].h != 1 || gComp[1].v != 1 ||
@@ -443,6 +457,37 @@ static unsigned char pj_read_dri(void)
 	gRestartInterval = pj_read_be16();
 	if (gRestartInterval < 0)
 		return PJPG_BAD_DRI_LENGTH;
+	return 0;
+}
+
+/* Reads an APP14 marker, capturing the Adobe colour-transform flag when the
+ * segment is an "Adobe" marker (needed to tell CMYK from YCCK on 4-component
+ * images).  Non-Adobe APP14 segments are simply skipped. */
+static unsigned char pj_read_app14(void)
+{
+	int len = pj_read_be16();
+	if (len < 2)
+		return PJPG_BAD_VARIABLE_MARKER;
+	if (len >= 14) {
+		pj_u8 sig[5];
+		int i;
+		for (i = 0; i < 5; i++)
+			sig[i] = (pj_u8)pj_read_byte();
+		if (sig[0] == 'A' && sig[1] == 'd' && sig[2] == 'o' &&
+			sig[3] == 'b' && sig[4] == 'e') {
+			if (pj_skip(6)) /* version(2) + flags0(2) + flags1(2) */
+				return PJPG_BAD_VARIABLE_MARKER;
+			gAppTransform = pj_read_byte();
+			if (len > 14 && pj_skip((unsigned long)(len - 14)))
+				return PJPG_BAD_VARIABLE_MARKER;
+			return 0;
+		}
+		if (pj_skip((unsigned long)(len - 2 - 5)))
+			return PJPG_BAD_VARIABLE_MARKER;
+		return 0;
+	}
+	if (pj_skip((unsigned long)(len - 2)))
+		return PJPG_BAD_VARIABLE_MARKER;
 	return 0;
 }
 
@@ -758,6 +803,11 @@ static unsigned char pj_parse_jpeg(void)
 			return pj_read_sos();
 		case 0xD9:
 			return PJPG_UNEXPECTED_MARKER;
+		case 0xEE:
+			status = pj_read_app14();
+			if (status)
+				return status;
+			break;
 		default:
 			if ((marker >= 0xD0 && marker <= 0xD7) || marker == 0x01)
 				return PJPG_UNEXPECTED_MARKER;
@@ -791,6 +841,7 @@ unsigned char pjpeg_decode_init(pjpeg_image_info_t *pInfo,
 	gPos = 0;
 	gMcuIndex = 0;
 	gRestartInterval = 0;
+	gAppTransform = -1;
 	for (;;) {
 		status = pNeed_bytes_callback(tmp, sizeof(tmp), &got, pCallback_data);
 		if (status)
@@ -843,7 +894,7 @@ unsigned char pjpeg_decode_mcu(void)
 	pj_u8 yBlocks[4][64];
 	pj_u8 cbBlock[64];
 	pj_u8 crBlock[64];
-	int bx, by, y, x;
+	int bx, by, y, x, i;
 	unsigned char status;
 	if (gMcuIndex >= gMcuPerRow * gMcuPerCol)
 		return PJPG_NO_MORE_BLOCKS;
@@ -859,6 +910,32 @@ unsigned char pjpeg_decode_mcu(void)
 		status = pj_decode_block(0, gMCUBufR);
 		if (status)
 			return status;
+	} else if (gNumComps == 4) {
+		/* CMYK/YCCK, all components 1x1 (enforced in pj_read_sof0): decode the
+		 * four 8x8 blocks and convert to RGB.  Adobe CMYK data is stored
+		 * inverted, so with stored samples C,M,Y,K the result is simply
+		 * R=C*K/255, G=M*K/255, B=Y*K/255.  For YCCK (Adobe transform 2) the
+		 * first three components are the inverted CMY carried as YCbCr, so run
+		 * the YCbCr->RGB step first and treat its output as C,M,Y. */
+		for (i = 0; i < 4; i++) {
+			status = pj_decode_block(i, yBlocks[i]);
+			if (status)
+				return status;
+		}
+		for (i = 0; i < 64; i++) {
+			int c, m, yv, k = yBlocks[3][i];
+			if (gAppTransform == 2) {
+				pj_u8 rr, gg, bb;
+				pj_ycbcr_to_rgb(yBlocks[0][i], yBlocks[1][i], yBlocks[2][i],
+					&rr, &gg, &bb);
+				c = rr; m = gg; yv = bb;
+			} else {
+				c = yBlocks[0][i]; m = yBlocks[1][i]; yv = yBlocks[2][i];
+			}
+			gMCUBufR[i] = (pj_u8)((c * k + 127) / 255);
+			gMCUBufG[i] = (pj_u8)((m * k + 127) / 255);
+			gMCUBufB[i] = (pj_u8)((yv * k + 127) / 255);
+		}
 	} else {
 		int yCount = gComp[0].h * gComp[0].v;
 		int bi = 0;

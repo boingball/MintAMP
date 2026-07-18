@@ -3218,7 +3218,19 @@ static int DecodeFaviconPngToGrey(const unsigned char *pngData, unsigned long pn
 		for (x = 0; x < pw; x++) {
 			const unsigned char *px = row + 4 * x;
 			unsigned char r = px[0], g = px[1], b = px[2];
+			unsigned char a = px[3];
 			int dst = dstY * outW + xMap[x];
+
+			/* Composite over the panel's neutral grey so transparent favicon
+			 * areas blend into the recessed panel instead of showing raw RGB
+			 * (usually a black or white box).  0x80 matches the buffer fill and
+			 * the mid "background" dither band.  Opaque pixels (a==255) are left
+			 * untouched, so fully opaque images decode exactly as before. */
+			if (a != 255) {
+				r = (unsigned char)((r * a + 0x80 * (255 - a) + 127) / 255);
+				g = (unsigned char)((g * a + 0x80 * (255 - a) + 127) / 255);
+				b = (unsigned char)((b * a + 0x80 * (255 - a) + 127) / 255);
+			}
 
 			greyAccum[dst] += (77UL * r + 150UL * g + 29UL * b + 128UL) >> 8;
 			rAccum[dst] += r; gAccum[dst] += g; bAccum[dst] += b;
