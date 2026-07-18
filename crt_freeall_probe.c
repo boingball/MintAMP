@@ -28,8 +28,14 @@
  * It preserves the valid-node traversal order, but treats both NULL and
  * 0xffffffff as empty list-head values.  The latter is normalised to NULL
  * before any dereference, preventing the stock libnix exit path from calling
- * FreeMem(0xfffffffb, 0).  FREEALL_PROBE builds additionally store the latest
- * attempted free in gFreeAllProbe and emit non-allocating RawPutChar diagnostics.
+ * FreeMem(0xfffffffb, 0).  Beyond the empty-head sentinels, each live node is
+ * validated (base alignment/NULL, size zero/absurd, self-referential next and
+ * repeated node/base double frees) and the FreeMem is SKIPPED for any node Exec
+ * would reject -- so once the task-safe allocator has done the real work of
+ * keeping libnix's arena empty, this backup can never itself raise the
+ * AN_FreeTwice/AN_BadFreeAddr alert it exists to suppress.  FREEALL_PROBE builds
+ * additionally store the latest attempted free in gFreeAllProbe and emit
+ * non-allocating RawPutChar diagnostics.
  *
  * ---------------------------------------------------------------------------
  * Layout stability (the whole point of this revision)
@@ -156,6 +162,20 @@ FreeAllProbeRecord gFreeAllProbe = {
 #define FREEALL_FLAG_NEXT_SELF        0x00000040UL
 #define FREEALL_FLAG_NODE_REPEATED    0x00000080UL
 #define FREEALL_FLAG_BASE_REPEATED    0x00000100UL
+
+/* Flags that make a node unsafe to hand to Exec FreeMem.  Any one of these is
+ * exactly what turns the stock ___free_all walk into a recoverable close-time
+ * alert: a NULL/odd base is AN_BadFreeAddr, a repeated node/base is the
+ * AN_FreeTwice double free, a zero or absurd size makes FreeMem walk off the
+ * end, and a self-referential next spins the list.  SIZE_ODD is deliberately
+ * excluded -- libnix records the true (possibly odd) request size and FreeMem
+ * accepts it as long as base/size match the AllocMem, so an odd size alone is
+ * benign. */
+#define FREEALL_UNSAFE_MASK (FREEALL_FLAG_NODE_MISALIGNED | \
+	FREEALL_FLAG_BASE_NULL | FREEALL_FLAG_BASE_MISALIGNED | \
+	FREEALL_FLAG_SIZE_ZERO | FREEALL_FLAG_SIZE_HUGE | \
+	FREEALL_FLAG_NEXT_SELF | FREEALL_FLAG_NODE_REPEATED | \
+	FREEALL_FLAG_BASE_REPEATED)
 
 static void *gFreeAllSeenNodes[FREEALL_SEEN_LIMIT];
 static void *gFreeAllSeenBases[FREEALL_SEEN_LIMIT];
@@ -560,14 +580,43 @@ void LibnixFreeAllCompat_Run(void)
 				gFreeAllSeenCount++;
 			}
 
+			/* Unlink the node from its head BEFORE deciding whether to free
+			 * it, so a skipped or self-referential node can never be walked a
+			 * second time. */
 			*(void **)headA = next;
-			FreeMem((APTR)base, size);
+
+			/* Stock ___free_all frees every node unconditionally -- which is
+			 * how a malformed or already-freed node still sitting on a libnix
+			 * head at exit becomes a recoverable alert.  The task-safe
+			 * allocator is the real fix (it keeps libnix's arena empty, so a
+			 * healthy shutdown never reaches here with a live node); this shim
+			 * is the backup, so it must not itself raise the alert it exists to
+			 * suppress.  Validate the node and skip FreeMem for anything Exec
+			 * would reject, trading an at-exit leak of an already-broken block
+			 * for no alert. */
+			if (flags & FREEALL_UNSAFE_MASK) {
+				probe_str("FREEALL-SKIP-UNSAFE seq=");
+				probe_dec32(gFreeAllProbe.seq);
+				probe_str(" base=");
+				probe_hex32((ULONG)base);
+				probe_str(" size=");
+				probe_dec32(size);
+				probe_str(" flags=");
+				probe_hex32((ULONG)flags);
+				probe_ch('\n');
+			} else {
+				FreeMem((APTR)base, size);
+			}
 
 			gFreeAllProbe.state = FREEALL_STATE_FREE_RETURNED;
 			probe_str("FREEALL seq=");
 			probe_dec32(gFreeAllProbe.seq);
 			probe_str(" state=FREE_RETURNED\n");
 
+			/* A self-referential next would otherwise re-enter this node until
+			 * the guard trips; stop the walk of this head instead. */
+			if (flags & FREEALL_FLAG_NEXT_SELF)
+				break;
 			node = next;
 		}
 	}
