@@ -5963,7 +5963,29 @@ static void OpenRadioWindow(MrApp *app)
 	 * which lists IDCMP_NEWSIZE, drags fine.  IDCMP_VANILLAKEY lets Enter in the
 	 * search string submit, matching the main window. */
 	app->rbWinObj = (Object *)NewObject(WINDOW_GetClass(), NULL, WA_Title, (ULONG)"Internet Radio", WA_Activate, TRUE, WA_DepthGadget, TRUE, WA_DragBar, TRUE, WA_CloseGadget, TRUE, WA_SizeGadget, TRUE, WA_IDCMP, IDCMP_GADGETUP | IDCMP_CLOSEWINDOW | IDCMP_IDCMPUPDATE | IDCMP_REFRESHWINDOW | IDCMP_NEWSIZE | IDCMP_VANILLAKEY, WA_Left, rbWinLeft, WA_Top, rbWinTop, WA_Width, rbWinW, WA_Height, rbWinH, WINDOW_ParentGroup, (ULONG)root, TAG_DONE);
-	if (!app->rbWinObj) goto fail; app->rbWin = (struct Window *)RA_OpenWindow(app->rbWinObj); if (!app->rbWin) goto fail; WindowToFront(app->rbWin); ActivateWindow(app->rbWin); RadioRefreshResults(app); return;
+	if (!app->rbWinObj)
+		goto fail;
+
+	app->rbWin = (struct Window *)RA_OpenWindow(app->rbWinObj);
+	if (!app->rbWin)
+		goto fail;
+
+	/* Kick window.class through its first size commit immediately.  Some
+	 * ReAction versions leave the freshly opened size-gadget window's drag
+	 * border inactive until the first IDCMP_NEWSIZE pass, so make a minimal
+	 * bounded size change and restore the exact size before user input. */
+	if (app->rbWin->LeftEdge + app->rbWin->Width < rbScrW) {
+		SizeWindow(app->rbWin, 1, 0);
+		SizeWindow(app->rbWin, -1, 0);
+	} else if (app->rbWin->TopEdge + app->rbWin->Height < rbScrH) {
+		SizeWindow(app->rbWin, 0, 1);
+		SizeWindow(app->rbWin, 0, -1);
+	}
+
+	WindowToFront(app->rbWin);
+	ActivateWindow(app->rbWin);
+	RadioRefreshResults(app);
+	return;
 fail:
 	if (!app->rbWinObj && root) DisposeObject(root); CloseRadioWindow(app);
 }
