@@ -2002,11 +2002,13 @@ static int radio_ssl_do_handshake(RadioStream *rs)
         {
             unsigned long ssl_lib_error = ERR_get_error();
             char ssl_error_buf[160];
+            char handshake_error[128];
             ssl_error_buf[0] = '\0';
             if (ssl_lib_error != 0)
                 ERR_error_string_n(ssl_lib_error, ssl_error_buf, sizeof(ssl_error_buf));
-            RADIO_DBG(printf("SSL_CONNECT_FATAL session=%lu err=%d lib_error=%08lx (%s)\n",
-                rs ? rs->session_id : 0, e, ssl_lib_error, ssl_error_buf[0] ? ssl_error_buf : "none"););
+            printf("radio-tls: SSL_connect final failure session=%lu attempt=%d ret=%d ssl_error=%d lib_error=%08lx reason=\"%s\" fd=%ld\n",
+                rs ? rs->session_id : 0, tries + 1, r, e, ssl_lib_error,
+                ssl_error_buf[0] ? ssl_error_buf : "none", rs ? (long)rs->sock : -1L);
             if (rs && radio_ssl_error_is_fatal(e)) {
                 rs->lastSslError = e;
                 rs->noReconnect = 1;
@@ -2014,6 +2016,12 @@ static int radio_ssl_do_handshake(RadioStream *rs)
                     rs->sslDroppedTransport = 1; /* peer close: leak SSL, keep HTTPS usable */
                 strcpy(rs->lastSslOp, (e == SSL_ERROR_SYSCALL && ssl_lib_error == 0) ?
                     "ssl-connect-syscall" : "ssl-connect-fatal");
+                if (ssl_error_buf[0]) {
+                    sprintf(handshake_error, "TLS handshake failed: %.105s", ssl_error_buf);
+                    set_error(rs, handshake_error);
+                } else if (e == SSL_ERROR_SYSCALL && ssl_lib_error == 0) {
+                    set_error(rs, "TLS handshake failed: peer closed connection");
+                }
                 RADIO_DBG(printf("radio-tls: session=%lu handshake failed; connection SSL quarantined (poison=%d)\n", rs->session_id, radio_tls_fault_should_poison(e, ssl_lib_error)));
             }
             /* Drain the rest of the queue so the failure cannot masquerade
@@ -2022,7 +2030,9 @@ static int radio_ssl_do_handshake(RadioStream *rs)
         }
         return -1;
     }
-    RADIO_DBG(printf("radio-tls: SSL_connect timeout session=%lu last_ssl_error=%d fd=%ld\n", rs ? rs->session_id : 0, last_error, rs ? (long)rs->sock : -1L););
+    printf("radio-tls: SSL_connect retry budget expired session=%lu budget=%d attempts=%d last_ssl_error=%d fd=%ld memory_poison=%d tls_poison=%d\n",
+        rs ? rs->session_id : 0, budget, tries, last_error, rs ? (long)rs->sock : -1L,
+        Radio_IsMemoryPoisoned() ? 1 : 0, Radio_IsTlsPoisoned() ? 1 : 0);
     return -1;
 }
 
@@ -2081,7 +2091,7 @@ static int radio_ssl_connect(RadioStream *rs)
     if (radio_ssl_do_handshake(rs) != 0) {
         RADIO_DBG(printf("radio-tls: handshake cleanup session=%lu error_ptr=%p stream_range=%p..%p status=%d open_socket_count=%ld active_ssl_count=%ld active_ssl_ctx_count=%ld SocketBase=%p AmiSSLBase=%p AmiSSLMasterBase=%p\n", rs->session_id, (void *)rs->error, (void *)rs, (void *)(rs + 1), (int)rs->status, radio_open_socket_count, radio_active_ssl_count, radio_active_ssl_ctx_count, (void *)SocketBase, (void *)AmiSSLBase, (void *)AmiSSLMasterBase););
         radio_ssl_close_stream(rs);
-        set_error(rs, "TLS handshake failed"); return -1;
+        if (!rs->error[0]) set_error(rs, "TLS handshake failed"); return -1;
     }
     return 0;
 }
