@@ -5894,6 +5894,20 @@ static void OpenRadioWindow(MrApp *app)
 {
 	Object *root = NULL;
 	static STRPTR codecs[] = { (STRPTR)"All", (STRPTR)"MP3", (STRPTR)"AAC", (STRPTR)"AAC+", NULL };
+	/* Window geometry, fitted to the actual screen.  The radio window's natural
+	 * size is 540x340; on a standard PAL/NTSC Workbench screen (256/200 px tall)
+	 * a 340-tall window centred with WPOS_CENTERSCREEN puts its title/drag bar
+	 * ABOVE the top of the screen, so it can't be dragged.  Cap the size to the
+	 * screen and anchor the top below the screen title bar so the drag bar is
+	 * always reachable. */
+	struct Screen *rbScreen = app->win ? app->win->WScreen : NULL;
+	LONG rbScrW = rbScreen ? (LONG)rbScreen->Width : 640;
+	LONG rbScrH = rbScreen ? (LONG)rbScreen->Height : 256;
+	LONG rbBarH = rbScreen ? (LONG)rbScreen->BarHeight + 1 : 11;
+	LONG rbWinW = 540;
+	LONG rbWinH = 340;
+	LONG rbWinLeft;
+	LONG rbWinTop;
 	if (app->rbWinObj) {
 		struct Window *rbWin = NULL;
 
@@ -5927,7 +5941,28 @@ static void OpenRadioWindow(MrApp *app)
 		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL, LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ, LAYOUT_EvenSize, TRUE, LAYOUT_AddChild, (ULONG)app->rbDoSearchGad, LAYOUT_AddChild, (ULONG)app->rbPlayGad, LAYOUT_AddChild, (ULONG)app->rbAddFavGad, LAYOUT_AddChild, (ULONG)app->rbFavouritesGad, LAYOUT_AddChild, (ULONG)app->rbUpGad, LAYOUT_AddChild, (ULONG)app->rbDownGad, LAYOUT_AddChild, (ULONG)app->rbCloseGad, TAG_DONE), CHILD_WeightedHeight, 0,
 		LAYOUT_AddChild, (ULONG)app->rbStatusGad, CHILD_WeightedHeight, 0, TAG_DONE);
 	if (!root) goto fail;
-	app->rbWinObj = (Object *)NewObject(WINDOW_GetClass(), NULL, WA_Title, (ULONG)"Internet Radio", WA_Activate, TRUE, WA_DepthGadget, TRUE, WA_DragBar, TRUE, WA_CloseGadget, TRUE, WA_SizeGadget, TRUE, WA_IDCMP, IDCMP_GADGETUP | IDCMP_CLOSEWINDOW | IDCMP_IDCMPUPDATE | IDCMP_REFRESHWINDOW, WA_Width, 540, WA_Height, 340, WINDOW_Position, WPOS_CENTERSCREEN, WINDOW_ParentGroup, (ULONG)root, TAG_DONE);
+	if (rbWinW > rbScrW) rbWinW = rbScrW;
+	if (rbWinH > rbScrH - rbBarH) rbWinH = rbScrH - rbBarH;
+	/* Open offset from the main window, NOT centred.  The main window is itself
+	 * centred, so a centred radio window lands with its title bar directly over
+	 * the main window's -- the overlapping drag bars fight and the drag grabs
+	 * the window behind, until the user moves the main window out from under it.
+	 * Offsetting keeps the two title bars apart (the GadTools frontend already
+	 * opens its radio window at main + 30 for this reason).  Clamp so the whole
+	 * window still lands on-screen. */
+	rbWinLeft = (app->win ? (LONG)app->win->LeftEdge : 0) + 30;
+	rbWinTop  = (app->win ? (LONG)app->win->TopEdge : rbBarH) + 30;
+	if (rbWinLeft + rbWinW > rbScrW) rbWinLeft = rbScrW - rbWinW;
+	if (rbWinLeft < 0) rbWinLeft = 0;
+	if (rbWinTop + rbWinH > rbScrH) rbWinTop = rbScrH - rbWinH;
+	if (rbWinTop < rbBarH) rbWinTop = rbBarH;
+	/* WA_IDCMP must include IDCMP_NEWSIZE for a size-gadget window: without it
+	 * window.class never sees the resize that commits its border/drag regions,
+	 * so the title bar stays inert until the user manually resizes the window
+	 * (the "only draggable after I resize it down" symptom).  The main window,
+	 * which lists IDCMP_NEWSIZE, drags fine.  IDCMP_VANILLAKEY lets Enter in the
+	 * search string submit, matching the main window. */
+	app->rbWinObj = (Object *)NewObject(WINDOW_GetClass(), NULL, WA_Title, (ULONG)"Internet Radio", WA_Activate, TRUE, WA_DepthGadget, TRUE, WA_DragBar, TRUE, WA_CloseGadget, TRUE, WA_SizeGadget, TRUE, WA_IDCMP, IDCMP_GADGETUP | IDCMP_CLOSEWINDOW | IDCMP_IDCMPUPDATE | IDCMP_REFRESHWINDOW | IDCMP_NEWSIZE | IDCMP_VANILLAKEY, WA_Left, rbWinLeft, WA_Top, rbWinTop, WA_Width, rbWinW, WA_Height, rbWinH, WINDOW_ParentGroup, (ULONG)root, TAG_DONE);
 	if (!app->rbWinObj) goto fail; app->rbWin = (struct Window *)RA_OpenWindow(app->rbWinObj); if (!app->rbWin) goto fail; WindowToFront(app->rbWin); ActivateWindow(app->rbWin); RadioRefreshResults(app); return;
 fail:
 	if (!app->rbWinObj && root) DisposeObject(root); CloseRadioWindow(app);
