@@ -5350,9 +5350,16 @@ static void RadioProbeUrlAndStart(MrApp *app, const char *url, const char *stati
 	RADIO_DBG(printf("radio-ui: direct/favourite probe result rc=%d final=\"%s\" content=\"%s\" codec=%d redirects=%d\n",
 		rc, info.final_url, info.content_type, (int)info.codec, info.redirect_count);)
 	if (rc < 0) {
+		char emsg[256];
 		err = rb_probe_error_text(rc);
-		RadioSetStatus(app, err);
-		SetStatus(app, err);
+		if (info.error_detail[0]) {
+			sprintf(emsg, "%.150s [%.90s]", err, info.error_detail);
+			RadioSetStatus(app, emsg);
+			SetStatus(app, emsg);
+		} else {
+			RadioSetStatus(app, err);
+			SetStatus(app, err);
+		}
 		return;
 	}
 	if (info.codec != RB_STREAM_CODEC_MP3 && info.codec != RB_STREAM_CODEC_AAC &&

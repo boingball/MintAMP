@@ -64,6 +64,10 @@ typedef struct RbStreamInfo {
     RbStreamCodec codec;
     int have_host_addr;
     unsigned long host_addr_be;
+    /* On a failed open, a short human-readable "host:port ip=A.B.C.D" the probe
+     * actually tried -- surfaced in the GUI status so a headless Amiga has some
+     * diagnostic to read. Empty on success. */
+    char error_detail[96];
 } RbStreamInfo;
 
 enum {

@@ -1869,17 +1869,23 @@ static void radio_tls_range_snapshot(RadioStream *rs, const char *where)
 }
 #endif
 
+/* Connect/handshake poll budget (defined below, near radio_wait_connected):
+ * default ~12s, tunable via MP3_CONNECT_SECONDS. Forward-declared here because
+ * the TLS handshake poll loop is compiled ahead of the definition. */
+static int radio_connect_poll_tries(void);
+
 /* Poll SSL_connect on the non-blocking socket — same budget as radio_wait_connected. */
 static int radio_ssl_do_handshake(RadioStream *rs)
 {
     int tries;
+    int budget = radio_connect_poll_tries();
     int last_error = 0;
     radio_net_adopt_context(rs);
     /* Start with a clean OpenSSL error queue: a stale entry left by an
      * earlier failed connection would otherwise be misread as this
      * connection's fatal error by the fault handling below. */
     ERR_clear_error();
-    for (tries = 0; tries < 150; tries++) {
+    for (tries = 0; tries < budget; tries++) {
         int r, e;
         if (radio_is_stopping(rs)) return -1;
         RADIO_DBG(printf("BEFORE SSL_connect session=%lu attempt=%d ssl=%p ctx=%p fd=%ld\n",
@@ -2084,6 +2090,41 @@ void *Radio_GetWorkerSslCtx(const char *category, unsigned long session_id) { (v
 void Radio_MarkWorkerSslCtxPoisoned(const char *where) { (void)where; }
 #endif
 
+/* Number of ~40ms connect() poll iterations to attempt before giving up
+ * (shared by radio_wait_connected() for playback and
+ * radio_net_transport_wait_connected() for the probe/artwork transport).
+ *
+ * The historical budget was a hard-coded 150 (~6s). That is comfortable on a
+ * fast emulated network but too tight on a slow/lossy real-hardware link -- on
+ * a 115200-baud WiFi modem a single dropped TCP SYN already costs a ~3s kernel
+ * retransmit, so a perfectly good but slightly slow station can exceed 6s and
+ * fail the probe with "timeout while connecting" while faster ones succeed.
+ *
+ * The default is raised to ~12s and made tunable at runtime via
+ * MP3_CONNECT_SECONDS (an env var or an ENV: variable, clamped to 3..80s) so a
+ * slow link can be given more headroom without a rebuild. Larger values do
+ * extend how long a genuinely dead server holds the "Connecting..." state up,
+ * because the probe connect is a synchronous net-worker round trip -- hence the
+ * clamp. Read once and cached: the value cannot change mid-run, and this keeps
+ * the poll loops free of repeated getenv()/GetVar() calls. */
+static int radio_connect_poll_tries(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        int secs = 12;
+        const char *v = radio_runtime_flag_raw_getenv("MP3_CONNECT_SECONDS");
+        if (!v || !*v) v = radio_runtime_flag_raw_getvar("MP3_CONNECT_SECONDS");
+        if (v && *v) {
+            int parsed = atoi(v);
+            if (parsed > 0) secs = parsed;
+        }
+        if (secs < 3) secs = 3;
+        if (secs > 80) secs = 80;
+        cached = secs * 25; /* ~40ms per poll (radio_backoff_sleep) => 25 polls/sec */
+    }
+    return cached;
+}
+
 /* Drive a non-blocking connect() to completion by re-issuing connect() and
  * yielding with Delay() between tries, so the connect never blocks (and so
  * never freezes WinUAE's emulation).  Returns 0 on success, -1 on failure or
@@ -2093,10 +2134,11 @@ void Radio_MarkWorkerSslCtxPoisoned(const char *where) { (void)where; }
 static int radio_wait_connected(RadioStream *rs, struct sockaddr_in *sa)
 {
     int tries;
+    int budget = radio_connect_poll_tries();
     radio_net_adopt_context(rs);
-    RADIO_DBG(printf("radio-connect: session=%lu wait_connected enter fd=%ld host=%s\n", rs ? rs->session_id : 0, rs ? (long)rs->sock : -1L, rs ? rs->host : ""););
-    /* ~6s budget at 40ms/poll; generous for a slow stream server. */
-    for (tries = 0; tries < 150; tries++) {
+    RADIO_DBG(printf("radio-connect: session=%lu wait_connected enter fd=%ld host=%s budget=%d\n", rs ? rs->session_id : 0, rs ? (long)rs->sock : -1L, rs ? rs->host : "", budget););
+    /* ~12s default at 40ms/poll (tunable via MP3_CONNECT_SECONDS). */
+    for (tries = 0; tries < budget; tries++) {
         long e;
         int cr;
         if (radio_is_stopping(rs)) {
@@ -2199,7 +2241,8 @@ struct RadioNetTransport {
 static int radio_net_transport_wait_connected(RadioNetTransport *t, struct sockaddr_in *sa)
 {
     int tries;
-    for (tries = 0; tries < 150; tries++) {
+    int budget = radio_connect_poll_tries();
+    for (tries = 0; tries < budget; tries++) {
         long e;
         int cr;
         radio_backoff_sleep();
@@ -2253,7 +2296,7 @@ static int radio_net_transport_tls_connect(RadioNetTransport *t, const char *hos
     }
     Radio_DebugCheckExecMem("after transport SSL_set_fd");
     ERR_clear_error();
-    for (tries = 0; tries < 150; tries++) {
+    for (tries = 0; tries < radio_connect_poll_tries(); tries++) {
         int r, e;
         Radio_DebugCheckExecMem("before transport SSL_connect");
         radio_tls_connect_marker("TLS-CONNECT-ENTER", t->session_id, tries + 1, t->ssl, t->ctx, (long)t->sock, 0);
@@ -2298,8 +2341,22 @@ typedef struct RadioNetOpenArgs {
     int port;
     int use_tls;
     unsigned long session_id;
+    int fail_reason;
+    unsigned long resolved_addr_be;
     RadioNetTransport *result;
 } RadioNetOpenArgs;
+
+/* Phase of the most recent RadioNet_Open() (RADIO_NET_OPEN_* from
+ * radio_stream.h), plus the IP gethostbyname() resolved for it (0 if none).
+ * Set from the per-request fields once the open the caller waited on has
+ * completed; opens are serialized on the one net worker task, so a
+ * NULL-getting caller reads the reason (and resolved IP) for its own open.
+ * The resolved IP lets a probe put the actual host/IP/port it tried into the
+ * on-screen error, which is the only diagnostic channel on a headless Amiga. */
+static int radio_net_last_open_error = RADIO_NET_OPEN_OK;
+static unsigned long radio_net_last_open_addr_be = 0;
+int RadioNet_LastOpenError(void) { return radio_net_last_open_error; }
+unsigned long RadioNet_LastOpenAddr(void) { return radio_net_last_open_addr_be; }
 
 typedef struct RadioNetIoArgs {
     int state;
@@ -2453,21 +2510,23 @@ static void radio_net_open_worker(void *arg)
     struct sockaddr_in sa;
     if (!radio_net_worker_is_self()) {
         RADIO_DBG(printf("radio-net: open refused off worker\n");)
-        if (a) radio_net_open_complete(a, NULL);
+        if (a) { a->fail_reason = RADIO_NET_OPEN_ERR_OTHER; radio_net_open_complete(a, NULL); }
         return;
     }
-    if (!a || !a->host) { if (a) radio_net_open_complete(a, NULL); return; }
+    if (!a || !a->host) { if (a) { a->fail_reason = RADIO_NET_OPEN_ERR_OTHER; radio_net_open_complete(a, NULL); } return; }
+    a->fail_reason = RADIO_NET_OPEN_ERR_OTHER;
     t = (RadioNetTransport *)radio_net_alloc0(sizeof(*t));
-    if (!t) { radio_net_open_complete(a, NULL); return; }
+    if (!t) { a->fail_reason = RADIO_NET_OPEN_ERR_SOCKET; radio_net_open_complete(a, NULL); return; }
     t->sock = RADIO_INVALID_SOCKET;
     t->use_tls = a->use_tls;
     t->session_id = a->session_id;
     radio_copy_string(t->category, sizeof(t->category), a->category ? a->category : "transport");
     he = gethostbyname((char *)a->host);
-    if (!he || !he->h_addr_list || !he->h_addr_list[0]) { radio_net_free(t); radio_net_open_complete(a, NULL); return; }
+    if (!he || !he->h_addr_list || !he->h_addr_list[0]) { a->fail_reason = RADIO_NET_OPEN_ERR_DNS; radio_net_free(t); radio_net_open_complete(a, NULL); return; }
     memcpy(&t->host_addr_be, he->h_addr_list[0], 4);
+    memcpy(&a->resolved_addr_be, he->h_addr_list[0], 4);
     t->sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (t->sock == RADIO_INVALID_SOCKET) { radio_net_free(t); radio_net_open_complete(a, NULL); return; }
+    if (t->sock == RADIO_INVALID_SOCKET) { a->fail_reason = RADIO_NET_OPEN_ERR_SOCKET; radio_net_free(t); radio_net_open_complete(a, NULL); return; }
     radio_net_transport_count_socket(t);
     radio_set_nonblocking(t->sock);
     memset(&sa, 0, sizeof(sa));
@@ -2476,15 +2535,18 @@ static void radio_net_open_worker(void *arg)
     memcpy(&sa.sin_addr, he->h_addr_list[0], 4);
     if (connect(t->sock, (struct sockaddr *)&sa, sizeof(sa)) < 0 &&
         radio_net_transport_wait_connected(t, &sa) != 0) {
+        a->fail_reason = RADIO_NET_OPEN_ERR_CONNECT;
         radio_net_close_transport_worker(t, 0);
         radio_net_open_complete(a, NULL);
         return;
     }
     if (a->use_tls && radio_net_transport_tls_connect(t, a->host) != 0) {
+        a->fail_reason = RADIO_NET_OPEN_ERR_TLS;
         radio_net_close_transport_worker(t, 0);
         radio_net_open_complete(a, NULL);
         return;
     }
+    a->fail_reason = RADIO_NET_OPEN_OK;
     radio_net_open_complete(a, t);
 }
 
@@ -2492,6 +2554,8 @@ RadioNetTransport *RadioNet_Open(const char *url, const char *host, int port, in
 {
     RadioNetOpenArgs *args;
     RadioNetTransport *result;
+    radio_net_last_open_error = RADIO_NET_OPEN_ERR_OTHER;
+    radio_net_last_open_addr_be = 0;
     args = (RadioNetOpenArgs *)radio_net_alloc0(sizeof(*args));
     if (!args) return NULL;
     args->url = radio_net_strdup(url ? url : "");
@@ -2500,6 +2564,7 @@ RadioNetTransport *RadioNet_Open(const char *url, const char *host, int port, in
     args->port = port;
     args->use_tls = use_tls;
     args->session_id = session_id;
+    args->fail_reason = RADIO_NET_OPEN_ERR_OTHER;
     if (!args->host || !args->category || (url && !args->url)) { radio_net_open_args_free(args); return NULL; }
     radio_net_open_req_init(args);
     if (radio_net_worker_is_self()) {
@@ -2508,16 +2573,22 @@ RadioNetTransport *RadioNet_Open(const char *url, const char *host, int port, in
         radio_net_open_req_lock(args);
         if (args->state == RADIO_NET_REQ_COMPLETED) {
             result = args->result;
+            radio_net_last_open_error = args->fail_reason;
+            radio_net_last_open_addr_be = args->resolved_addr_be;
             radio_net_open_req_unlock(args);
             radio_net_open_args_free(args);
             return result;
         }
         args->state = RADIO_NET_REQ_ABANDONED;
+        radio_net_last_open_error = RADIO_NET_OPEN_ERR_OTHER;
+        radio_net_last_open_addr_be = 0;
         radio_net_open_req_unlock(args);
         return NULL;
     }
     radio_net_open_req_lock(args);
     result = args->result;
+    radio_net_last_open_error = args->fail_reason;
+    radio_net_last_open_addr_be = args->resolved_addr_be;
     radio_net_open_req_unlock(args);
     radio_net_open_args_free(args);
     return result;
@@ -3171,6 +3242,30 @@ static void radio_worker_job_open(void *arg)
 {
     RadioOpenJobArgs *a = (RadioOpenJobArgs *)arg;
     radio_worker_state = RADIO_WORKER_OPENING;
+    /* Consume any SIGBREAKF_CTRL_C left pending on this persistent worker task
+     * by an earlier session's Radio_RequestStop() wake-up Signal() (see the
+     * Signal() comment there). That bit is only a mechanism to break a wedged
+     * blocking call; the durable "this session is stopping" state lives in
+     * rs->stopping / rs->workerStop* / rs->generation / the shared external
+     * stop flag, all still honoured by the radio_is_stopping() checks in
+     * connect_http() below. Left pending, the stale bit trips connect_http()'s
+     * very first radio_is_stopping() check, which returns -1 without setting an
+     * error -- surfacing as the generic "cannot open radio stream" -- and
+     * because every probe-then-play caches the host address (rs->haveHostAddr),
+     * connect_http() takes its cached-DNS path and never reaches its own later
+     * SetSignal() clear, so the bit stays pending and dead-ends every following
+     * open until an unrelated browser fetch happens to consume it (the "search
+     * again to un-stick it" workaround). Only clear it for a genuinely fresh
+     * open: if any durable stop indicator for this session is set, a real Stop
+     * raced in and must still abort here, so leave the signal alone. */
+    if (a && a->rs &&
+        !a->rs->stopping && !a->rs->workerStopRequested &&
+        !a->rs->workerCloseRequested && !a->rs->workerDetached &&
+        a->rs->status != RADIO_STATUS_STOPPING &&
+        a->rs->status != RADIO_STATUS_CLOSED &&
+        a->rs->generation == radio_current_generation &&
+        !(radio_external_stop_flag && *radio_external_stop_flag))
+        SetSignal(0, SIGBREAKF_CTRL_C);
     a->result = connect_http(a->rs);
     if (a->result == 0) radio_worker_register_stream(a->rs);
     else { close_current_socket(a->rs); radio_worker_state = RADIO_WORKER_IDLE; }

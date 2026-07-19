@@ -150,6 +150,26 @@ int RadioNet_Write(RadioNetTransport *transport, const void *buffer, int length)
 int RadioNet_Read(RadioNetTransport *transport, void *buffer, int length);
 void RadioNet_Close(RadioNetTransport *transport, int graceful);
 unsigned long RadioNet_HostAddr(RadioNetTransport *transport);
+/* Which phase of the most recent RadioNet_Open() failed. Set on every
+ * RadioNet_Open() call (OK on success) so a caller that only gets a NULL
+ * transport back can still report *why* -- in particular so an HTTPS probe can
+ * say "TLS handshake failed" or "cannot resolve host" instead of collapsing
+ * every failure into the misleading "timeout while connecting". Opens are
+ * serialized on the single net worker task, so this reflects the open the
+ * caller just waited on. */
+enum {
+    RADIO_NET_OPEN_OK = 0,
+    RADIO_NET_OPEN_ERR_DNS = 1,      /* gethostbyname() failed */
+    RADIO_NET_OPEN_ERR_SOCKET = 2,   /* socket() failed / out of memory */
+    RADIO_NET_OPEN_ERR_CONNECT = 3,  /* TCP connect timed out */
+    RADIO_NET_OPEN_ERR_TLS = 4,      /* TLS handshake failed */
+    RADIO_NET_OPEN_ERR_OTHER = 5     /* abandoned / worker unavailable */
+};
+int RadioNet_LastOpenError(void);
+/* IP (network byte order) gethostbyname() resolved for the most recent
+ * RadioNet_Open(), or 0 if it never got that far. Lets a failed probe show the
+ * actual host/IP/port it tried. */
+unsigned long RadioNet_LastOpenAddr(void);
 /* True when the calling task is the net worker task -- the only task that
  * ever runs OpenAmiSSLTags()/InitAmiSSL() in this process, so per the AmiSSL
  * v5/v6 SDK it is already initialized and must NOT run a manual
@@ -263,6 +283,16 @@ static int RadioNet_Write(RadioNetTransport *transport, const void *buffer, int 
 static int RadioNet_Read(RadioNetTransport *transport, void *buffer, int length) { (void)transport; (void)buffer; (void)length; return -1; }
 static void RadioNet_Close(RadioNetTransport *transport, int graceful) { (void)transport; (void)graceful; }
 static unsigned long RadioNet_HostAddr(RadioNetTransport *transport) { (void)transport; return 0; }
+enum {
+    RADIO_NET_OPEN_OK = 0,
+    RADIO_NET_OPEN_ERR_DNS = 1,
+    RADIO_NET_OPEN_ERR_SOCKET = 2,
+    RADIO_NET_OPEN_ERR_CONNECT = 3,
+    RADIO_NET_OPEN_ERR_TLS = 4,
+    RADIO_NET_OPEN_ERR_OTHER = 5
+};
+static int RadioNet_LastOpenError(void) { return RADIO_NET_OPEN_OK; }
+static unsigned long RadioNet_LastOpenAddr(void) { return 0; }
 static int Radio_AmiSslTaskIsOpener(void) { return 0; }
 static int Radio_AmiSslLock(void) { return 0; }
 static void Radio_AmiSslUnlock(void) { }

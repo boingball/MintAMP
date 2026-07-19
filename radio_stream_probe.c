@@ -461,7 +461,23 @@ static int rb_probe_transport_open_ex(RbProbeTransport *transport, const char *u
     transport->category = category ? category : "probe";
     Radio_SetTlsFaultContext(transport->session_id, transport->url);
     transport->net = RadioNet_Open(url, host, port, use_ssl, transport->category, transport->session_id);
-    if (!transport->net) return use_ssl && Radio_IsTlsPoisoned() ? RB_STREAM_PROBE_ERR_TLS_POISONED : RB_STREAM_PROBE_ERR_CONNECT;
+    if (!transport->net) {
+        /* Report the phase that actually failed instead of always saying
+         * "timeout while connecting": for an HTTPS stream a failed TLS
+         * handshake and a genuine TCP connect timeout are very different
+         * problems, and collapsing them made HTTPS failures undiagnosable. */
+        switch (RadioNet_LastOpenError()) {
+        case RADIO_NET_OPEN_ERR_DNS:
+            return RB_STREAM_PROBE_ERR_DNS;
+        case RADIO_NET_OPEN_ERR_TLS:
+            return use_ssl && Radio_IsTlsPoisoned() ? RB_STREAM_PROBE_ERR_TLS_POISONED : RB_STREAM_PROBE_ERR_TLS_HANDSHAKE;
+        case RADIO_NET_OPEN_ERR_CONNECT:
+        case RADIO_NET_OPEN_ERR_SOCKET:
+            return RB_STREAM_PROBE_ERR_CONNECT;
+        default:
+            return use_ssl && Radio_IsTlsPoisoned() ? RB_STREAM_PROBE_ERR_TLS_POISONED : RB_STREAM_PROBE_ERR_CONNECT;
+        }
+    }
     rb_probe_open_socket_count++;
     if (use_ssl) rb_probe_active_ssl_count++;
     if (host_addr_be) {
@@ -976,11 +992,36 @@ static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
         rc = rb_probe_transport_open(&transport, current_url, parsed.host, parsed.port, parsed.isSSL, &info->host_addr_be);
         if (rc == RB_STREAM_PROBE_OK)
             info->have_host_addr = 1;
-        if (rc < 0) return rc;
+        if (rc < 0) {
+            /* Record what we actually tried so the GUI status can show it --
+             * the only diagnostic channel on a headless Amiga. If DNS resolved
+             * an IP the connect/TLS phase is what failed; no IP means we never
+             * got past name resolution. */
+            unsigned long ip = RadioNet_LastOpenAddr();
+            if (ip) {
+                char ipbuf[16];
+                rb_probe_format_ipv4_be(ip, ipbuf, (int)sizeof(ipbuf));
+                sprintf(info->error_detail, "%.48s:%d ip=%.15s", parsed.host, parsed.port, ipbuf);
+            } else {
+                sprintf(info->error_detail, "%.48s:%d (unresolved)", parsed.host, parsed.port);
+            }
+            return rc;
+        }
         rc = rb_probe_send_all(&transport, request, request_len);
         if (rc < 0) {
             rb_probe_transport_close(&transport);
             return rc;
+        }
+        {
+            /* First line of the request (up to CR/LF) so we can see exactly
+             * what the server was asked -- e.g. GET /CapitalUK HTTP/1.0. */
+            char reqline[80];
+            int ri;
+            for (ri = 0; ri < 79 && request[ri] && request[ri] != '\r' && request[ri] != '\n'; ri++)
+                reqline[ri] = request[ri];
+            reqline[ri] = '\0';
+            printf("rb-probe: %.48s:%d %s request sent (%d bytes): \"%s\", awaiting response...\n",
+                parsed.host, parsed.port, parsed.isSSL ? "TLS" : "HTTP", request_len, reqline);
         }
         total = 0;
         header_end = -1;
@@ -1003,6 +1044,27 @@ n = rb_probe_transport(&transport, (char *)header_buf + total, want);
                 return RB_STREAM_PROBE_ERR_RECV;
             }
             if (n == 0) {
+                /* Clean close (TLS close_notify / TCP FIN). Whether the server
+                 * sent anything first is the whole question: total==0 means it
+                 * rejected/closed without a byte; total>0 means it sent a
+                 * partial response (e.g. a redirect) then closed. Show both on
+                 * the CLI and in the on-screen status so a headless machine can
+                 * tell them apart. */
+                if (total > 0) {
+                    char snip[65];
+                    int si;
+                    for (si = 0; si < 64 && si < total; si++) {
+                        unsigned char c = header_buf[si];
+                        snip[si] = (c >= 32 && c < 127) ? (char)c : '.';
+                    }
+                    snip[si] = '\0';
+                    printf("rb-probe: server closed after sending %d bytes: \"%s\"\n", total, snip);
+                    sprintf(info->error_detail, "closed after %dB: %.60s", total, snip);
+                } else {
+                    printf("rb-probe: %.48s:%d server closed with 0 bytes sent (our request was %d bytes)\n",
+                        parsed.host, parsed.port, request_len);
+                    sprintf(info->error_detail, "%.40s:%d closed, server sent 0 bytes", parsed.host, parsed.port);
+                }
                 rb_probe_transport_close(&transport);
                 return RB_STREAM_PROBE_ERR_SERVER_CLOSED;
             }

@@ -6774,8 +6774,15 @@ static void RadioReplayCurrentUrl(HelixAmp3Gui *gui)
 	SetStatus(gui, "Checking stream...");
 	rc = rb_probe_stream_url(url, &info, peek, (int)sizeof(peek), &peekLen);
 	if (rc < 0) {
+		char emsg[256];
 		err = rb_probe_error_text(rc);
-		SetRadioFailureStatus(gui, (err && err[0]) ? err : "radio stream failed");
+		if (!err || !err[0]) err = "radio stream failed";
+		if (info.error_detail[0]) {
+			sprintf(emsg, "%.150s [%.90s]", err, info.error_detail);
+			SetRadioFailureStatus(gui, emsg);
+		} else {
+			SetRadioFailureStatus(gui, err);
+		}
 		return;
 	}
 	if (info.codec != RB_STREAM_CODEC_MP3 && info.codec != RB_STREAM_CODEC_AAC &&
