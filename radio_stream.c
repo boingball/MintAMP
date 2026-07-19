@@ -866,6 +866,12 @@ struct RadioStream {
      * reconnect_http() both refuse to do anything once these are set. */
 	int fatalStop;
 	int noReconnect;
+	/* Set when this session failed only because the peer dropped the
+	 * connection (SSL_ERROR_SYSCALL with an empty error queue) -- a network
+	 * event, not AmiSSL corruption. The SSL object is still leaked at cleanup
+	 * (freeing one that took an I/O fault is what caused AN_BadFreeAddr), but
+	 * the shared worker SSL_CTX is NOT poisoned, so HTTPS stays usable. */
+	int sslDroppedTransport;
 	unsigned long workerReadCalls;
 	unsigned long workerReadBytes;
 	unsigned long workerWantReadCount;
@@ -1014,6 +1020,19 @@ void Radio_MarkTlsPoisoned(const char *where)
 {
     if (!radioAmiSslPoisoned) {
         printf("%s\n", Radio_TlsPoisonedMessage());
+        /* Release-visible FIRST-poison reason. This fires exactly once (guarded
+         * by !radioAmiSslPoisoned) and outside any connect/handshake retry loop,
+         * so it exposes what actually triggered the poison without the
+         * per-iteration debug prints that would change handshake timing. The
+         * message text alone is ambiguous -- a fatal TLS fault
+         * (Radio_ReportTlsFault) and a memory-corruption cascade
+         * (Radio_MarkMemoryPoisoned -> here) print the same line -- so log the
+         * where/session/url and whether the heap was already flagged, which
+         * distinguishes the two: memoryPoisoned=1 means a MiniMem canary tripped
+         * first, memoryPoisoned=0 means a fatal SSL result poisoned directly. */
+        printf("radio-tls-poison: FIRST where=\"%s\" session=%lu url=\"%s\" memoryPoisoned=%d\n",
+            where ? where : "", radio_poison_session_id,
+            radio_poison_url[0] ? radio_poison_url : "", radioMemoryPoisoned ? 1 : 0);
         if (where && where[0]) {
             strncpy(radio_tls_poison_reason, where, sizeof(radio_tls_poison_reason) - 1);
             radio_tls_poison_reason[sizeof(radio_tls_poison_reason) - 1] = '\0';
@@ -1711,13 +1730,23 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
         radio_close_mode_name(mode), rs->session_id, (int)rs->status, rs->sslHandshakeDone,
         (void *)rs->ssl, (void *)rs->ctx, (long)rs->sock, radio_open_socket_count););
     if (rs->ssl && !rs->sslFreed) {
-        int poisoned = rs->sslStatePoisoned || rs->fatalStop || rs->noReconnect ||
-            Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned();
-        if (poisoned) {
-            RADIO_DBG(printf("radio-cleanup: SSL_free skipped (quarantined/poisoned) session=%lu ssl=%p\n",
-                rs->session_id, (void *)rs->ssl);)
-            radio_tls_shutdown_quarantine = 1;
-            radio_worker_ssl_ctx_poisoned = 1;
+        /* A genuine AmiSSL/heap fault both leaks (quarantines) the SSL and
+         * poisons the shared instance. A bare peer-close (sslDroppedTransport)
+         * must STILL leak the SSL -- freeing one that took an I/O fault is what
+         * produced the AN_BadFreeAddr alert -- but must NOT poison the shared
+         * worker SSL_CTX, or every later HTTPS attempt this run is refused for
+         * what was only a network drop (the CD32-vs-WinUAE difference). */
+        int real_fault = rs->sslStatePoisoned || rs->fatalStop ||
+            Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned() ||
+            (rs->noReconnect && !rs->sslDroppedTransport);
+        int quarantine = real_fault || rs->noReconnect || rs->sslDroppedTransport;
+        if (quarantine) {
+            RADIO_DBG(printf("radio-cleanup: SSL_free skipped (quarantined%s) session=%lu ssl=%p\n",
+                real_fault ? "/poisoned" : "/transport-drop", rs->session_id, (void *)rs->ssl);)
+            if (real_fault) {
+                radio_tls_shutdown_quarantine = 1;
+                radio_worker_ssl_ctx_poisoned = 1;
+            }
             rs->sslFreed = 1;
             if (radio_active_ssl_count > 0) radio_active_ssl_count--;
             rs->ssl = NULL;
@@ -1801,6 +1830,32 @@ static int radio_ssl_error_is_fatal(int e)
 {
     return e != SSL_ERROR_WANT_READ && e != SSL_ERROR_WANT_WRITE &&
         e != SSL_ERROR_ZERO_RETURN;
+}
+
+/* Whether a "fatal" SSL fault (radio_ssl_error_is_fatal) should poison the
+ * whole shared AmiSSL instance -- disabling HTTPS for the rest of the run --
+ * as opposed to merely quarantining this one connection's SSL object.
+ *
+ * The per-connection quarantine (leak instead of SSL_free) must still happen
+ * for ANY fatal outcome: freeing an SSL that just took an I/O fault is what
+ * produced the AN_BadFreeAddr alert, so callers keep setting ssl_poisoned/
+ * noReconnect regardless. But instance-wide poison is far heavier and should be
+ * reserved for a genuine AmiSSL-internal fault, not a network event.
+ *
+ * A bare transport close -- the peer resetting or EOF-ing the socket, which
+ * AmiSSL reports as SSL_ERROR_SYSCALL with an EMPTY error queue (lib_error 0)
+ * -- is a network drop, not AmiSSL corruption. It is exactly what a slow or
+ * marginal link provokes (a CDN hanging up mid-probe/artwork/read), and it was
+ * wrongly poisoning HTTPS for the whole session on the CD32 while a fast WinUAE
+ * link never tripped it. Poison only when the OpenSSL error queue actually
+ * holds a library error (a real protocol/record/state fault); treat a bare
+ * SYSCALL/EOF close as connection-local. ZERO_RETURN is already non-fatal. */
+static int radio_tls_fault_should_poison(int e, unsigned long lib_error)
+{
+    if (!radio_ssl_error_is_fatal(e)) return 0;
+    if (lib_error != 0) return 1;
+    if (e == SSL_ERROR_SYSCALL) return 0; /* bare transport reset/EOF: network, not AmiSSL */
+    return 1;
 }
 
 
@@ -1955,9 +2010,11 @@ static int radio_ssl_do_handshake(RadioStream *rs)
             if (rs && radio_ssl_error_is_fatal(e)) {
                 rs->lastSslError = e;
                 rs->noReconnect = 1;
+                if (!radio_tls_fault_should_poison(e, ssl_lib_error))
+                    rs->sslDroppedTransport = 1; /* peer close: leak SSL, keep HTTPS usable */
                 strcpy(rs->lastSslOp, (e == SSL_ERROR_SYSCALL && ssl_lib_error == 0) ?
                     "ssl-connect-syscall" : "ssl-connect-fatal");
-                RADIO_DBG(printf("radio-tls: session=%lu fatal handshake failed; connection SSL quarantined and shared SSL_CTX poisoned for this run\n", rs->session_id));
+                RADIO_DBG(printf("radio-tls: session=%lu handshake failed; connection SSL quarantined (poison=%d)\n", rs->session_id, radio_tls_fault_should_poison(e, ssl_lib_error)));
             }
             /* Drain the rest of the queue so the failure cannot masquerade
              * as a later session's fault. */
@@ -2204,9 +2261,11 @@ static int radio_send_all(RadioStream *rs, const char *buf, int len)
                 if (radio_ssl_error_is_fatal(e)) {
                     rs->lastSslError = e;
                     rs->noReconnect = 1;
+                    if (!radio_tls_fault_should_poison(e, ssl_lib_error))
+                        rs->sslDroppedTransport = 1; /* peer close: leak SSL, keep HTTPS usable */
                     strcpy(rs->lastSslOp, (e == SSL_ERROR_SYSCALL && ssl_lib_error == 0) ?
                         "ssl-write-syscall" : "ssl-write-fatal");
-                    RADIO_DBG(printf("radio-ssl-write: session=%lu fatal write failure; connection SSL quarantined and HTTPS disabled for this run\n", rs->session_id));
+                    RADIO_DBG(printf("radio-ssl-write: session=%lu write failure; connection SSL quarantined (poison=%d)\n", rs->session_id, radio_tls_fault_should_poison(e, ssl_lib_error)));
                     ERR_clear_error();
                 }
             }
@@ -2229,7 +2288,8 @@ struct RadioNetTransport {
     SSL *ssl;
 #endif
     int handshake_done;
-    int ssl_poisoned;
+    int ssl_poisoned;          /* real fault: leak the SSL AND poison the shared instance */
+    int ssl_dropped_transport; /* bare peer close: leak the SSL, do NOT poison the instance */
     char category[16];
     unsigned long session_id;
     unsigned long host_addr_be;
@@ -2317,10 +2377,45 @@ static int radio_net_transport_tls_connect(RadioNetTransport *t, const char *hos
             radio_backoff_sleep();
             continue;
         }
-        if (radio_ssl_error_is_fatal(e)) {
-            t->ssl_poisoned = 1;
-            Radio_MarkWorkerSslCtxPoisoned("transport SSL_connect fatal");
-            ERR_clear_error();
+        /* Non-retriable handshake result. Decode the OpenSSL/AmiSSL error queue
+         * so the exact cause is visible (release-visible: this path is only
+         * reached on failure and returns immediately, so no per-iteration cost
+         * and no effect on handshake timing). This is the probe/transport
+         * counterpart of the decode radio_ssl_do_handshake() already does for
+         * the playback path. Distinguishes a genuine protocol/cipher fault
+         * (SSL_ERROR_SSL, lib_error set) from the server closing mid-handshake
+         * (SSL_ERROR_SYSCALL/ZERO_RETURN, lib_error 0) -- the latter being what
+         * a too-slow client on a slow link provokes. */
+        {
+            unsigned long ssl_lib_error = ERR_get_error();
+            char ssl_error_buf[160];
+            ssl_error_buf[0] = '\0';
+            if (ssl_lib_error != 0)
+                ERR_error_string_n(ssl_lib_error, ssl_error_buf, sizeof(ssl_error_buf));
+            printf("radio-net-tls: transport SSL_connect failed session=%lu attempt=%d ssl_error=%d lib_error=%08lx reason=\"%s\"\n",
+                t->session_id, tries + 1, e, ssl_lib_error,
+                ssl_error_buf[0] ? ssl_error_buf : "none");
+            if (radio_ssl_error_is_fatal(e)) {
+                /* Always quarantine this connection's SSL (leak, not free) to
+                 * avoid the AN_BadFreeAddr crash -- but only poison the shared
+                 * AmiSSL instance for a genuine internal fault, not a bare
+                 * peer close on a slow link (see radio_tls_fault_should_poison). */
+                if (radio_tls_fault_should_poison(e, ssl_lib_error)) {
+                    char where_buf[200];
+                    t->ssl_poisoned = 1;
+                    sprintf(where_buf, "transport SSL_connect fatal ssl_error=%d %.150s",
+                        e, ssl_error_buf[0] ? ssl_error_buf : "");
+                    Radio_MarkWorkerSslCtxPoisoned(where_buf);
+                } else {
+                    /* Leak this SSL at cleanup, but keep the shared instance
+                     * usable -- the cleanup path keys poison off ssl_poisoned,
+                     * so use the drop-only flag instead. */
+                    t->ssl_dropped_transport = 1;
+                    printf("radio-net-tls: transport SSL_connect peer-close (ssl_error=%d lib_error=0) session=%lu -- connection quarantined, shared AmiSSL NOT poisoned\n",
+                        e, t->session_id);
+                }
+                ERR_clear_error();
+            }
         }
         return -1;
     }
@@ -2612,7 +2707,17 @@ static void radio_net_write_worker(void *arg)
             if (n > 0) { done += n; continue; }
             n = SSL_get_error(t->ssl, n);
             if (n == SSL_ERROR_WANT_READ || n == SSL_ERROR_WANT_WRITE) { radio_backoff_sleep(); tries++; continue; }
-            if (radio_ssl_error_is_fatal(n)) { t->ssl_poisoned = 1; Radio_ReportTlsFault("transport fatal TLS write"); }
+            if (radio_ssl_error_is_fatal(n)) {
+                unsigned long le = ERR_get_error();
+                if (radio_tls_fault_should_poison(n, le)) {
+                    t->ssl_poisoned = 1;
+                    Radio_ReportTlsFault("transport fatal TLS write");
+                } else {
+                    t->ssl_dropped_transport = 1; /* leak SSL at cleanup, don't poison instance */
+                    printf("radio-net: transport TLS write peer-close (ssl_error=%d lib_error=0) session=%lu -- quarantined, shared AmiSSL NOT poisoned\n", n, t->session_id);
+                }
+                ERR_clear_error();
+            }
             a->result = -1; radio_net_io_complete(a); return;
         }
 #endif
@@ -2676,8 +2781,17 @@ static void radio_net_read_worker(void *arg)
             if (n == SSL_ERROR_ZERO_RETURN) { a->result = 0; radio_net_io_complete(a); return; }
 #endif
             if (n == SSL_ERROR_WANT_READ || n == SSL_ERROR_WANT_WRITE) { radio_backoff_sleep(); continue; }
-            t->ssl_poisoned = 1;
-            Radio_ReportTlsFault("transport fatal TLS read");
+            {
+                unsigned long le = ERR_get_error();
+                if (radio_tls_fault_should_poison(n, le)) {
+                    t->ssl_poisoned = 1;
+                    Radio_ReportTlsFault("transport fatal TLS read");
+                } else {
+                    t->ssl_dropped_transport = 1; /* leak SSL at cleanup, don't poison instance */
+                    printf("radio-net: transport TLS read peer-close (ssl_error=%d lib_error=0) session=%lu -- quarantined, shared AmiSSL NOT poisoned\n", n, t->session_id);
+                }
+                ERR_clear_error();
+            }
             a->result = -1;
             radio_net_io_complete(a);
             return;
@@ -2733,6 +2847,7 @@ static void radio_net_close_transport_worker(RadioNetTransport *t, int graceful)
     if (!t) return;
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     if (graceful && t->ssl && t->handshake_done && !t->ssl_poisoned &&
+        !t->ssl_dropped_transport &&
         !Radio_IsMemoryPoisoned() && !Radio_IsTlsPoisoned()) {
         radio_amissl_lifecycle_diag("SSL_shutdown-before", t->session_id, t->ssl, t->ctx);
         SSL_shutdown(t->ssl);
@@ -2753,6 +2868,13 @@ static void radio_net_close_transport_worker(RadioNetTransport *t, int graceful)
         if (t->ssl_poisoned || Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
             Radio_MarkWorkerSslCtxPoisoned("transport close fatal SSL quarantined");
             t->ssl = NULL;
+        } else if (t->ssl_dropped_transport) {
+            /* Peer dropped the connection: leak this SSL (freeing one that took
+             * an I/O fault is what caused AN_BadFreeAddr) but do NOT poison the
+             * shared instance -- the shared SSL_CTX is untouched by a transport
+             * EOF, so the next HTTPS attempt must stay allowed. */
+            printf("radio-net: category=%s session=%lu ssl=%p action=transport-drop-quarantine-no-poison\n", t->category, t->session_id, (void *)t->ssl);
+            t->ssl = NULL;
         } else if (radio_runtime_diag_leak_ssl_enabled()) {
             printf("radio-diag-leak: category=%s session=%lu ssl=%p action=quarantined-no-SSL_free\n", t->category, t->session_id, (void *)t->ssl);
             t->ssl = NULL;
@@ -2768,7 +2890,7 @@ static void radio_net_close_transport_worker(RadioNetTransport *t, int graceful)
         }
     }
     if (t->ctx) {
-        if (t->ssl_poisoned || Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned() || radio_runtime_diag_leak_ssl_enabled()) {
+        if (t->ssl_poisoned || t->ssl_dropped_transport || Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned() || radio_runtime_diag_leak_ssl_enabled()) {
             t->ctx = NULL;
         } else {
             radio_amissl_lifecycle_diag("SSL_CTX_free-before", t->session_id, NULL, t->ctx);
@@ -4325,9 +4447,11 @@ static int radio_pump_body(RadioStream *rs)
                 if (radio_ssl_error_is_fatal(e)) {
                     rs->lastSslError = e;
                     rs->noReconnect = 1;
+                    if (!radio_tls_fault_should_poison(e, ssl_lib_error))
+                        rs->sslDroppedTransport = 1; /* peer close: leak SSL, keep HTTPS usable */
                     strcpy(rs->lastSslOp, (e == SSL_ERROR_SYSCALL && ssl_lib_error == 0) ?
                         "ssl-read-syscall" : "ssl-read-fatal");
-                    RADIO_DBG(printf("radio-ssl-read: session=%lu fatal read failure; connection SSL quarantined and HTTPS disabled for this run\n", rs->session_id));
+                    RADIO_DBG(printf("radio-ssl-read: session=%lu read failure; connection SSL quarantined (poison=%d)\n", rs->session_id, radio_tls_fault_should_poison(e, ssl_lib_error)));
                     ERR_clear_error();
                 }
             }
