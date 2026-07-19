@@ -112,7 +112,6 @@ static int RadioStreamLockedPrintf(const char *fmt, ...)
 #include <proto/dos.h>
 #include <proto/bsdsocket.h>
 #include <sys/socket.h>
-#include <sys/time.h>
 #include <netinet/in.h>
 #include <netdb.h>
 extern struct ExecBase *SysBase;
@@ -1645,6 +1644,24 @@ static long radio_ioerr_value(void)
 #endif
 }
 
+static unsigned long radio_monotonic_ticks(void)
+{
+#if defined(AMIGA_M68K)
+    struct DateStamp ds;
+    DateStamp(&ds);
+    return ((unsigned long)ds.ds_Days * 24UL * 60UL * 50UL) +
+        ((unsigned long)ds.ds_Minute * 60UL * 50UL) +
+        (unsigned long)ds.ds_Tick;
+#else
+    return (unsigned long)(clock() * 50UL / CLOCKS_PER_SEC);
+#endif
+}
+
+static int radio_deadline_pending(unsigned long deadline_ticks)
+{
+    return (long)(deadline_ticks - radio_monotonic_ticks()) >= 0;
+}
+
 #if defined(HAVE_AMISSL)
 static int radio_ssl_wait_ready(RADIO_SOCKET sock, int ssl_error)
 {
@@ -1982,15 +1999,14 @@ static int radio_ssl_do_handshake(RadioStream *rs)
 {
     int tries = 0;
     int budget = radio_connect_poll_tries();
-    int deadline_seconds = (budget + 24) / 25;
-    time_t deadline = time(NULL) + deadline_seconds;
+    unsigned long deadline_ticks = radio_monotonic_ticks() + (unsigned long)((budget + 24) / 25) * 50UL;
     int last_error = 0;
     radio_net_adopt_context(rs);
     /* Start with a clean OpenSSL error queue: a stale entry left by an
      * earlier failed connection would otherwise be misread as this
      * connection's fatal error by the fault handling below. */
     ERR_clear_error();
-    while (time(NULL) <= deadline) {
+    while (radio_deadline_pending(deadline_ticks)) {
         int r, e;
         if (radio_is_stopping(rs)) return -1;
         tries++;
@@ -2390,8 +2406,7 @@ static int radio_net_transport_tls_connect(RadioNetTransport *t, const char *hos
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     int tries = 0;
     int budget = radio_connect_poll_tries();
-    int deadline_seconds = (budget + 24) / 25;
-    time_t deadline = time(NULL) + deadline_seconds;
+    unsigned long deadline_ticks = radio_monotonic_ticks() + (unsigned long)((budget + 24) / 25) * 50UL;
     const SSL_METHOD *method;
     if (radio_net_worker_amissl_ready(NULL) != 0) return -1;
     method = SSLv23_client_method();
@@ -2425,7 +2440,7 @@ static int radio_net_transport_tls_connect(RadioNetTransport *t, const char *hos
     }
     Radio_DebugCheckExecMem("after transport SSL_set_fd");
     ERR_clear_error();
-    while (time(NULL) <= deadline) {
+    while (radio_deadline_pending(deadline_ticks)) {
         int r, e;
         tries++;
         Radio_DebugCheckExecMem("before transport SSL_connect");
