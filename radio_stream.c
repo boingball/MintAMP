@@ -852,7 +852,6 @@ struct RadioStream {
      * for *this object only*, with no task-wide poisoning and no HTTPS
      * disablement. */
     int sslReadCloseSeen;
-    int sslTeardownUnsafe; /* SSL_shutdown did not complete safely; leak only this SSL */
     struct SignalSemaphore workerLock;
     struct RadioStream *workerNext;
     volatile int workerRegistered;
@@ -1808,10 +1807,10 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
         int real_fault = rs->sslStatePoisoned || rs->fatalStop ||
             Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned() ||
             (rs->noReconnect && !rs->sslDroppedTransport);
-        int quarantine = real_fault || rs->noReconnect || rs->sslDroppedTransport || rs->sslTeardownUnsafe;
+        int quarantine = real_fault || rs->noReconnect || rs->sslDroppedTransport;
         if (quarantine) {
             RADIO_DBG(printf("radio-cleanup: SSL_free skipped (quarantined%s) session=%lu ssl=%p\n",
-                real_fault ? "/poisoned" : (rs->sslTeardownUnsafe ? "/teardown-unsafe" : "/transport-drop"), rs->session_id, (void *)rs->ssl);)
+                real_fault ? "/poisoned" : "/transport-drop", rs->session_id, (void *)rs->ssl);)
             if (real_fault) {
                 radio_tls_shutdown_quarantine = 1;
                 radio_worker_ssl_ctx_poisoned = 1;
@@ -2146,7 +2145,6 @@ static int radio_ssl_connect(RadioStream *rs)
     if (rs->ssl) {
         rs->sslFreed = 0;
         rs->sslReadCloseSeen = 0;
-        rs->sslTeardownUnsafe = 0;
         radio_active_ssl_count++;
         RADIO_DBG(printf("radio-resource: session=%lu SSL allocated active_ssl_count=%ld\n", rs->session_id, radio_active_ssl_count));
     }
@@ -3586,7 +3584,7 @@ static void radio_abort_current_socket_local(RadioStream *rs)
 static void radio_abort_current_socket_job(void *arg) { radio_abort_current_socket_local((RadioStream *)arg); }
 
 /* Controlled worker-owned stop for Radio_RequestStop(): run the exact same
- * atomic unregister+shutdown+close+free sequence as Radio_Close()'s own
+ * atomic unregister+free+close sequence as Radio_Close()'s own
  * radio_worker_close_detach_stream_job(), immediately, instead of only doing
  * the unregister+abort half here and leaving SSL_free()/SSL_CTX_free() for
  * Radio_Close()'s separate, later worker round-trip.
@@ -3601,9 +3599,10 @@ static void radio_abort_current_socket_job(void *arg) { radio_abort_current_sock
  * exactly the kind of AmiSSL-instance-wide interference the manual BIO fd
  * detach in radio_abort_current_socket_local() defends against for the raw
  * socket, but does not (and cannot) cover for AmiSSL's own internal state.
- * Doing the full close here, in one uninterrupted worker-task call, matches
- * the AmiSSL reference example's shutdown -> close -> free sequence with no
- * gap for anything else to run in between, and removes the "network owned"
+ * Doing the full close here, in one uninterrupted worker-task call, performs
+ * the free-before-close sequence (SSL_free() while the descriptor is valid,
+ * then CloseSocket(), with no SSL_shutdown() network I/O) with no gap for
+ * anything else to run in between, and removes the "network owned"
  * signal at the very end instead of the very start.
  *
  * radio_worker_close_detach_stream_job() (and everything it calls) is
@@ -3680,7 +3679,7 @@ static void close_current_socket_mode_local(RadioStream *rs, RadioCloseMode mode
             rs->session_id, fatal_close ? "fatal" : "healthy",
             ssl_diag_leaked ? "diag-leaked" :
                 (ssl_freed_before_close ? "freed-before-close" :
-                    ((fatal_close || rs->sslTeardownUnsafe) ? "quarantined" : "freed-after-close")),
+                    (fatal_close ? "quarantined" : "freed-after-close")),
             fatal_close ? "quarantined" : "shared-retained");
     }
 #endif
