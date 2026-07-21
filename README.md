@@ -4,6 +4,9 @@ Classic AmigaOS m68k audio player with two GUI editions: MintAMP for ReAction/Cl
 
 This started as an Amiga port of the Helix fixed-point MP3 decoder. It has grown into a small but surprisingly capable classic Amiga audio player for real hardware and emulators.
 
+<img width="509" height="221" alt="image" src="https://github.com/user-attachments/assets/0feac783-0244-4425-8c65-fe21ae234d79" />
+
+
 ```text
 Classic AmigaOS • m68k • Paula • MP3 • AAC • FLAC • HTTP/HTTPS radio • ReAction • GadTools
 ```
