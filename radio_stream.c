@@ -66,6 +66,31 @@
 #include <stdarg.h>
 #include <exec/semaphores.h>
 #include <proto/exec.h>
+
+/* MP3_TLS_TRACE gate: the per-operation TLS/network lifecycle traces below
+ * (radio-tls-order/-close, radio-net*, radio-diag-leak, radio-resource,
+ * radio-tcp, radio-pump, ...) are diagnostic noise for a normal user, so
+ * radio_trace() prints only when MP3_TLS_TRACE is set (env var or ENV:). A
+ * normal release build stays silent and pays no printf/fflush/serial cost; a
+ * user hitting a problem can enable it for field logs without a debug rebuild.
+ * Rare one-shot events (radio-memory corruption, radio-tls-poison FIRST) keep
+ * plain printf() and stay always-visible. */
+static int radio_tls_trace_enabled(void)
+{
+    static int cached = -1;
+    if (cached < 0) cached = radio_runtime_flag_enabled("MP3_TLS_TRACE") ? 1 : 0;
+    return cached;
+}
+static void radio_trace(const char *fmt, ...)
+{
+    va_list ap;
+    if (!radio_tls_trace_enabled()) return;
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+    fflush(stdout);
+}
+
 /* Every printf() call in this file -- not just the RADIO_DBG-wrapped ones --
  * runs on whichever task happens to own the RadioStream in question (the net
  * worker task, a playback child, or occasionally the GUI task), against the
@@ -134,6 +159,9 @@ void Radio_AmiSslUnlock(void) { }
 #include <proto/amissl.h>
 #include <amissl/amissl.h>
 #include <errno.h>
+#ifndef BIO_NOCLOSE
+#define BIO_NOCLOSE 0
+#endif
 /* Strong definitions, private to the radio net worker task -- see the
  * "single AmiSSL/bsdsocket worker" block below.  radio_stream_probe.c still
  * references these same symbol names (required by the AmiSSL/bsdsocket
@@ -339,7 +367,7 @@ static void radio_amissl_lifecycle_diag_impl(const char *op, unsigned long sessi
     const char *task_name = "(unnamed)";
     if (task && task->tc_Node.ln_Name)
         task_name = task->tc_Node.ln_Name;
-    printf("radio-amissl-life: op=%s task=%p taskName=\"%s\" AmiSSLBase=%p AmiSSLExtBase=%p AmiSSLMasterBase=%p SocketBase=%p ssl=%p ctx=%p session=%lu\n",
+    radio_trace("radio-amissl-life: op=%s task=%p taskName=\"%s\" AmiSSLBase=%p AmiSSLExtBase=%p AmiSSLMasterBase=%p SocketBase=%p ssl=%p ctx=%p session=%lu\n",
         op ? op : "(null)", (void *)task, task_name, (void *)AmiSSLBase,
         (void *)AmiSSLExtBase, (void *)AmiSSLMasterBase, (void *)SocketBase,
         (void *)ssl, (void *)ctx, session);
@@ -440,7 +468,7 @@ static void radio_net_worker_entry(void)
          * teardown is plain Exec and touches nothing of AmiSSL's). */
         radio_net_worker_shutdown_stage = "diag-leak teardown skipped";
         radio_worker_breadcrumb("diag-leak teardown skipped", "shutdown", 0);
-        printf("radio-diag-leak: final AmiSSL/SSL_CTX/library teardown skipped; reboot required after diagnostic run\n");
+        radio_trace("radio-diag-leak: final AmiSSL/SSL_CTX/library teardown skipped; reboot required after diagnostic run\n");
     }
     if (AmiSSLBase && !diag_leak_abandon) {
         radio_net_worker_shutdown_stage = "before CloseAmiSSL";
@@ -703,6 +731,7 @@ int Radio_RunOnNetWorker(void (*fn)(void *arg), void *arg)
 #include <netinet/in.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/select.h>
 #define RADIO_SOCKET int
 #define RADIO_INVALID_SOCKET (-1)
 #define radio_close_socket(s) close(s)
@@ -866,6 +895,12 @@ struct RadioStream {
      * reconnect_http() both refuse to do anything once these are set. */
 	int fatalStop;
 	int noReconnect;
+	/* Set when this session failed only because the peer dropped the
+	 * connection (SSL_ERROR_SYSCALL with an empty error queue) -- a network
+	 * event, not AmiSSL corruption. The SSL object is still leaked at cleanup
+	 * (freeing one that took an I/O fault is what caused AN_BadFreeAddr), but
+	 * the shared worker SSL_CTX is NOT poisoned, so HTTPS stays usable. */
+	int sslDroppedTransport;
 	unsigned long workerReadCalls;
 	unsigned long workerReadBytes;
 	unsigned long workerWantReadCount;
@@ -1014,6 +1049,19 @@ void Radio_MarkTlsPoisoned(const char *where)
 {
     if (!radioAmiSslPoisoned) {
         printf("%s\n", Radio_TlsPoisonedMessage());
+        /* Release-visible FIRST-poison reason. This fires exactly once (guarded
+         * by !radioAmiSslPoisoned) and outside any connect/handshake retry loop,
+         * so it exposes what actually triggered the poison without the
+         * per-iteration debug prints that would change handshake timing. The
+         * message text alone is ambiguous -- a fatal TLS fault
+         * (Radio_ReportTlsFault) and a memory-corruption cascade
+         * (Radio_MarkMemoryPoisoned -> here) print the same line -- so log the
+         * where/session/url and whether the heap was already flagged, which
+         * distinguishes the two: memoryPoisoned=1 means a MiniMem canary tripped
+         * first, memoryPoisoned=0 means a fatal SSL result poisoned directly. */
+        printf("radio-tls-poison: FIRST where=\"%s\" session=%lu url=\"%s\" memoryPoisoned=%d\n",
+            where ? where : "", radio_poison_session_id,
+            radio_poison_url[0] ? radio_poison_url : "", radioMemoryPoisoned ? 1 : 0);
         if (where && where[0]) {
             strncpy(radio_tls_poison_reason, where, sizeof(radio_tls_poison_reason) - 1);
             radio_tls_poison_reason[sizeof(radio_tls_poison_reason) - 1] = '\0';
@@ -1624,6 +1672,70 @@ static long radio_ioerr_value(void)
 #endif
 }
 
+static unsigned long radio_monotonic_ticks(void)
+{
+#if defined(AMIGA_M68K)
+    struct DateStamp ds;
+    DateStamp(&ds);
+    return ((unsigned long)ds.ds_Days * 24UL * 60UL * 50UL) +
+        ((unsigned long)ds.ds_Minute * 60UL * 50UL) +
+        (unsigned long)ds.ds_Tick;
+#else
+    return (unsigned long)(clock() * 50UL / CLOCKS_PER_SEC);
+#endif
+}
+
+static int radio_deadline_pending(unsigned long deadline_ticks)
+{
+    return (long)(deadline_ticks - radio_monotonic_ticks()) >= 0;
+}
+
+#if defined(HAVE_AMISSL)
+static int radio_ssl_wait_ready(RADIO_SOCKET sock, int ssl_error)
+{
+    fd_set rfds;
+    fd_set wfds;
+    struct timeval tv;
+    int nfds;
+
+    FD_ZERO(&rfds);
+    FD_ZERO(&wfds);
+    if (ssl_error == SSL_ERROR_WANT_READ)
+        FD_SET((int)sock, &rfds);
+    else if (ssl_error == SSL_ERROR_WANT_WRITE)
+        FD_SET((int)sock, &wfds);
+    else
+        return -1;
+
+    tv.tv_sec = 0;
+    tv.tv_usec = 160000;
+    nfds = (int)sock + 1;
+#if defined(AMIGA_M68K)
+    return WaitSelect(nfds, &rfds, &wfds, NULL, &tv, NULL);
+#else
+    return select(nfds, &rfds, &wfds, NULL, &tv);
+#endif
+}
+
+static int radio_socket_connect_error(RADIO_SOCKET sock, long *out_error)
+{
+    int so_error = 0;
+    int r;
+#if defined(AMIGA_M68K)
+    LONG optlen = sizeof(so_error);
+#else
+    socklen_t optlen = sizeof(so_error);
+#endif
+    r = getsockopt(sock, SOL_SOCKET, SO_ERROR, (char *)&so_error, &optlen);
+    if (r != 0) {
+        if (out_error) *out_error = radio_sock_errno();
+        return -1;
+    }
+    if (out_error) *out_error = so_error;
+    return so_error == 0 ? 0 : -1;
+}
+#endif
+
 static void radio_log_socket_failure(RadioStream *rs, const char *context, const char *where)
 {
     RADIO_DBG(printf("radio-socket: %s socket failed session=%lu host=%s fd=-1 errno=%ld IoErr=%ld open_socket_count=%ld playback_open_socket_count=%ld active_stream_sessions=%ld active_stream_tasks=%ld active_ssl_count=%ld active_ssl_ctx_count=%ld current_state=%d previous_stream_state=n/a old_child_done_posted=n/a parent_done_received=n/a where=%s\n",
@@ -1701,7 +1813,7 @@ int Radio_PlaybackOwnsNetwork(void) { return !Radio_WorkerIsIdle(); }
  * the worker to exit. Radio_Close() used to call radio_net_close_child()
  * here; there is nothing left for it to do per station. */
 
-static void radio_ssl_attempt_shutdown(RadioStream *rs);
+static int radio_ssl_free_before_socket_close(RadioStream *rs);
 static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
 {
     if (!rs) return;
@@ -1711,19 +1823,29 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
         radio_close_mode_name(mode), rs->session_id, (int)rs->status, rs->sslHandshakeDone,
         (void *)rs->ssl, (void *)rs->ctx, (long)rs->sock, radio_open_socket_count););
     if (rs->ssl && !rs->sslFreed) {
-        int poisoned = rs->sslStatePoisoned || rs->fatalStop || rs->noReconnect ||
-            Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned();
-        if (poisoned) {
-            RADIO_DBG(printf("radio-cleanup: SSL_free skipped (quarantined/poisoned) session=%lu ssl=%p\n",
-                rs->session_id, (void *)rs->ssl);)
-            radio_tls_shutdown_quarantine = 1;
-            radio_worker_ssl_ctx_poisoned = 1;
+        /* A genuine AmiSSL/heap fault both leaks (quarantines) the SSL and
+         * poisons the shared instance. A bare peer-close (sslDroppedTransport)
+         * must STILL leak the SSL -- freeing one that took an I/O fault is what
+         * produced the AN_BadFreeAddr alert -- but must NOT poison the shared
+         * worker SSL_CTX, or every later HTTPS attempt this run is refused for
+         * what was only a network drop (the CD32-vs-WinUAE difference). */
+        int real_fault = rs->sslStatePoisoned || rs->fatalStop ||
+            Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned() ||
+            (rs->noReconnect && !rs->sslDroppedTransport);
+        int quarantine = real_fault || rs->noReconnect || rs->sslDroppedTransport;
+        if (quarantine) {
+            RADIO_DBG(printf("radio-cleanup: SSL_free skipped (quarantined%s) session=%lu ssl=%p\n",
+                real_fault ? "/poisoned" : "/transport-drop", rs->session_id, (void *)rs->ssl);)
+            if (real_fault) {
+                radio_tls_shutdown_quarantine = 1;
+                radio_worker_ssl_ctx_poisoned = 1;
+            }
             rs->sslFreed = 1;
             if (radio_active_ssl_count > 0) radio_active_ssl_count--;
             rs->ssl = NULL;
             rs->sslHandshakeDone = 0;
         } else if (radio_runtime_diag_leak_ssl_enabled()) {
-            printf("radio-diag-leak: category=playback session=%lu ssl=%p action=quarantined-no-SSL_free\n",
+            radio_trace("radio-diag-leak: category=playback session=%lu ssl=%p action=quarantined-no-SSL_free\n",
                 rs->session_id, (void *)rs->ssl);
             rs->sslFreed = 1;
             if (radio_active_ssl_count > 0) radio_active_ssl_count--;
@@ -1732,12 +1854,12 @@ static void radio_ssl_close_stream_mode(RadioStream *rs, RadioCloseMode mode)
         } else if (rs->sock == RADIO_INVALID_SOCKET || rs->socketClosed) {
             SSL *ssl_to_free = rs->ssl;
             Radio_DebugCheckExecMem("before playback SSL_free after socket close");
-            printf("radio-tls-order: category=playback session=%lu step=SSL_free-begin ssl=%p\n",
+            radio_trace("radio-tls-order: category=playback session=%lu step=SSL_free-begin ssl=%p\n",
                 rs->session_id, (void *)ssl_to_free);
             radio_amissl_lifecycle_diag("SSL_free-before", rs->session_id, ssl_to_free, rs->ctx);
             SSL_free(ssl_to_free);
             radio_amissl_lifecycle_diag("SSL_free-after", rs->session_id, ssl_to_free, rs->ctx);
-            printf("radio-tls-order: category=playback session=%lu step=SSL_free-complete\n", rs->session_id);
+            radio_trace("radio-tls-order: category=playback session=%lu step=SSL_free-complete\n", rs->session_id);
             Radio_DebugCheckExecMem("after playback SSL_free after socket close");
             rs->sslFreed = 1;
             if (radio_active_ssl_count > 0) radio_active_ssl_count--;
@@ -1801,6 +1923,49 @@ static int radio_ssl_error_is_fatal(int e)
 {
     return e != SSL_ERROR_WANT_READ && e != SSL_ERROR_WANT_WRITE &&
         e != SSL_ERROR_ZERO_RETURN;
+}
+
+/* Whether a "fatal" SSL fault (radio_ssl_error_is_fatal) should poison the
+ * whole shared AmiSSL instance -- disabling HTTPS for the rest of the run --
+ * as opposed to merely quarantining this one connection's SSL object.
+ *
+ * The per-connection quarantine (leak instead of SSL_free) must still happen
+ * for ANY fatal outcome: freeing an SSL that just took an I/O fault is what
+ * produced the AN_BadFreeAddr alert, so callers keep setting ssl_poisoned/
+ * noReconnect regardless. But instance-wide poison is far heavier and should be
+ * reserved for a genuine AmiSSL-internal fault, not a network event.
+ *
+ * A bare transport close -- the peer resetting or EOF-ing the socket, which
+ * AmiSSL reports as SSL_ERROR_SYSCALL with an EMPTY error queue (lib_error 0)
+ * -- is a network drop, not AmiSSL corruption. It is exactly what a slow or
+ * marginal link provokes (a CDN hanging up mid-probe/artwork/read), and it was
+ * wrongly poisoning HTTPS for the whole session on the CD32 while a fast WinUAE
+ * link never tripped it. Poison only when the OpenSSL error queue actually
+ * holds a library error (a real protocol/record/state fault); treat a bare
+ * SYSCALL/EOF close as connection-local. ZERO_RETURN is already non-fatal. */
+static int radio_tls_fault_should_poison(int e, unsigned long lib_error)
+{
+    (void)e;
+    (void)lib_error;
+    /* Policy: a fatal per-connection TLS fault quarantines that connection --
+     * its SSL is leaked, never freed after an I/O fault (the AN_BadFreeAddr
+     * guard) -- but must NOT poison the shared AmiSSL instance / disable HTTPS
+     * for the rest of the run.
+     *
+     * Every "fatal" outcome observed on real CD32 hardware was a per-server
+     * network or protocol event, not AmiSSL corruption, and always with
+     * memoryPoisoned=0: a bare EPIPE mid-write (OpenSSL 3.0 reports it in the
+     * queue as ERR_SYSTEM_FLAG|errno, e.g. 0x80000020), and a peer "tlsv1 alert
+     * decode error" on a single album-art host (lib_error 0x0a00041a). Each of
+     * those was disabling ALL HTTPS for the session -- one flaky station or
+     * artwork server taking out streaming until an app restart -- while a fast
+     * WinUAE link rarely tripped it. The instance was never actually damaged.
+     *
+     * Genuine AmiSSL/heap corruption is detected independently by the exec-heap
+     * memcheck -> Radio_MarkMemoryPoisoned() (which hard-poisons TLS and does
+     * disable HTTPS), so real corruption is still caught. Connection-level TLS
+     * faults therefore quarantine only; they never poison. */
+    return 0;
 }
 
 
@@ -1877,30 +2042,32 @@ static int radio_connect_poll_tries(void);
 /* Poll SSL_connect on the non-blocking socket — same budget as radio_wait_connected. */
 static int radio_ssl_do_handshake(RadioStream *rs)
 {
-    int tries;
+    int tries = 0;
     int budget = radio_connect_poll_tries();
+    unsigned long deadline_ticks = radio_monotonic_ticks() + (unsigned long)((budget + 24) / 25) * 50UL;
     int last_error = 0;
     radio_net_adopt_context(rs);
     /* Start with a clean OpenSSL error queue: a stale entry left by an
      * earlier failed connection would otherwise be misread as this
      * connection's fatal error by the fault handling below. */
     ERR_clear_error();
-    for (tries = 0; tries < budget; tries++) {
+    while (radio_deadline_pending(deadline_ticks)) {
         int r, e;
         if (radio_is_stopping(rs)) return -1;
+        tries++;
         RADIO_DBG(printf("BEFORE SSL_connect session=%lu attempt=%d ssl=%p ctx=%p fd=%ld\n",
-            rs ? rs->session_id : 0, tries + 1, rs ? (void *)rs->ssl : 0,
+            rs ? rs->session_id : 0, tries, rs ? (void *)rs->ssl : 0,
             rs ? (void *)rs->ctx : 0, rs ? (long)rs->sock : -1L););
         radio_tls_range_snapshot(rs, "before-SSL_connect");
         Radio_DebugCheckExecMem("before SSL_connect");
-        radio_tls_connect_marker("TLS-CONNECT-ENTER", rs ? rs->session_id : 0, tries + 1,
+        radio_tls_connect_marker("TLS-CONNECT-ENTER", rs ? rs->session_id : 0, tries,
             rs ? rs->ssl : NULL, rs ? rs->ctx : NULL, rs ? (long)rs->sock : -1L, 0);
         radio_amissl_lifecycle_diag("SSL_connect-before", rs->session_id, rs->ssl, rs->ctx);
         r = SSL_connect(rs->ssl);
-        radio_tls_connect_marker("TLS-CONNECT-RETURN", rs ? rs->session_id : 0, tries + 1,
+        radio_tls_connect_marker("TLS-CONNECT-RETURN", rs ? rs->session_id : 0, tries,
             rs ? rs->ssl : NULL, rs ? rs->ctx : NULL, rs ? (long)rs->sock : -1L, r);
         RADIO_DBG(printf("SSL_CONNECT_RET session=%lu attempt=%d ret=%d ssl=%p ctx=%p fd=%ld\n",
-            rs ? rs->session_id : 0, tries + 1, r, rs ? (void *)rs->ssl : 0,
+            rs ? rs->session_id : 0, tries, r, rs ? (void *)rs->ssl : 0,
             rs ? (void *)rs->ctx : 0, rs ? (long)rs->sock : -1L););
         radio_amissl_lifecycle_diag("SSL_connect-after", rs->session_id, rs->ssl, rs->ctx);
         Radio_DebugCheckExecMem("after SSL_connect");
@@ -1912,32 +2079,37 @@ static int radio_ssl_do_handshake(RadioStream *rs)
         }
         if (r == 1) {
             RADIO_DBG(printf("AFTER SSL_connect success session=%lu attempt=%d ssl=%p ctx=%p fd=%ld\n",
-                rs ? rs->session_id : 0, tries + 1, rs ? (void *)rs->ssl : 0,
+                rs ? rs->session_id : 0, tries, rs ? (void *)rs->ssl : 0,
                 rs ? (void *)rs->ctx : 0, rs ? (long)rs->sock : -1L););
-            RADIO_DBG(printf("SSL_CONNECT_ATTEMPT session=%lu attempt=%d ret=%d err=0 fd=%ld ssl=%p ctx=%p handshake=%d\n", rs ? rs->session_id : 0, tries + 1, r, rs ? (long)rs->sock : -1L, rs ? (void *)rs->ssl : 0, rs ? (void *)rs->ctx : 0, rs ? rs->sslHandshakeDone : 0););
+            RADIO_DBG(printf("SSL_CONNECT_ATTEMPT session=%lu attempt=%d ret=%d err=0 fd=%ld ssl=%p ctx=%p handshake=%d\n", rs ? rs->session_id : 0, tries, r, rs ? (long)rs->sock : -1L, rs ? (void *)rs->ssl : 0, rs ? (void *)rs->ctx : 0, rs ? rs->sslHandshakeDone : 0););
             if (rs) rs->sslHandshakeDone = 1;
             RADIO_DBG(printf("SSL_CONNECT_DONE session=%lu\n", rs ? rs->session_id : 0););
             return 0;
         }
         Radio_DebugCheckExecMem("before SSL_get_error after SSL_connect");
-        radio_tls_connect_marker("TLS-CONNECT-GETERROR-BEGIN", rs ? rs->session_id : 0, tries + 1,
+        radio_tls_connect_marker("TLS-CONNECT-GETERROR-BEGIN", rs ? rs->session_id : 0, tries,
             rs ? rs->ssl : NULL, rs ? rs->ctx : NULL, rs ? (long)rs->sock : -1L, r);
         e = SSL_get_error(rs->ssl, r);
-        radio_tls_connect_marker("TLS-CONNECT-GETERROR-END", rs ? rs->session_id : 0, tries + 1,
+        radio_tls_connect_marker("TLS-CONNECT-GETERROR-END", rs ? rs->session_id : 0, tries,
             rs ? rs->ssl : NULL, rs ? rs->ctx : NULL, rs ? (long)rs->sock : -1L, e);
         Radio_DebugCheckExecMem("after SSL_get_error after SSL_connect");
         RADIO_DBG(printf("AFTER SSL_connect fail session=%lu attempt=%d ret=%d err=%d ssl=%p ctx=%p fd=%ld\n",
-            rs ? rs->session_id : 0, tries + 1, r, e, rs ? (void *)rs->ssl : 0,
+            rs ? rs->session_id : 0, tries, r, e, rs ? (void *)rs->ssl : 0,
             rs ? (void *)rs->ctx : 0, rs ? (long)rs->sock : -1L););
         last_error = e;
-        RADIO_DBG(printf("SSL_CONNECT_ATTEMPT session=%lu attempt=%d ret=%d err=%d fd=%ld ssl=%p ctx=%p handshake=%d\n", rs ? rs->session_id : 0, tries + 1, r, e, rs ? (long)rs->sock : -1L, rs ? (void *)rs->ssl : 0, rs ? (void *)rs->ctx : 0, rs ? rs->sslHandshakeDone : 0););
-        if (e == SSL_ERROR_WANT_READ) {
-            RADIO_DBG(printf("SSL_CONNECT_WANT_READ session=%lu attempt=%d retry\n", rs ? rs->session_id : 0, tries + 1););
-            radio_backoff_sleep(); continue;
-        }
-        if (e == SSL_ERROR_WANT_WRITE) {
-            RADIO_DBG(printf("SSL_CONNECT_WANT_WRITE session=%lu attempt=%d retry\n", rs ? rs->session_id : 0, tries + 1););
-            radio_backoff_sleep(); continue;
+        RADIO_DBG(printf("SSL_CONNECT_ATTEMPT session=%lu attempt=%d ret=%d err=%d fd=%ld ssl=%p ctx=%p handshake=%d\n", rs ? rs->session_id : 0, tries, r, e, rs ? (long)rs->sock : -1L, rs ? (void *)rs->ssl : 0, rs ? (void *)rs->ctx : 0, rs ? rs->sslHandshakeDone : 0););
+        if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
+            int wr;
+            RADIO_DBG(printf("SSL_CONNECT_WANT_%s session=%lu attempt=%d wait-ready\n",
+                e == SSL_ERROR_WANT_READ ? "READ" : "WRITE", rs ? rs->session_id : 0, tries););
+            wr = radio_ssl_wait_ready(rs->sock, e);
+            if (wr > 0) continue;
+            if (wr == 0) continue;
+            if (radio_is_stopping(rs)) return -1;
+            printf("radio-tls: SSL_connect readiness wait failed session=%lu attempt=%d ssl_error=%d socket_error=%ld fd=%ld\n",
+                rs ? rs->session_id : 0, tries, e, radio_sock_errno(), rs ? (long)rs->sock : -1L);
+            if (rs) set_error(rs, "TLS readiness wait failed");
+            return -1;
         }
         /* SSL_ERROR_WANT_READ/WRITE just means "call again later" on a
          * non-blocking socket; anything else is a real handshake failure,
@@ -1947,17 +2119,27 @@ static int radio_ssl_do_handshake(RadioStream *rs)
         {
             unsigned long ssl_lib_error = ERR_get_error();
             char ssl_error_buf[160];
+            char handshake_error[128];
             ssl_error_buf[0] = '\0';
             if (ssl_lib_error != 0)
                 ERR_error_string_n(ssl_lib_error, ssl_error_buf, sizeof(ssl_error_buf));
-            RADIO_DBG(printf("SSL_CONNECT_FATAL session=%lu err=%d lib_error=%08lx (%s)\n",
-                rs ? rs->session_id : 0, e, ssl_lib_error, ssl_error_buf[0] ? ssl_error_buf : "none"););
+            printf("radio-tls: SSL_connect final failure session=%lu attempt=%d ret=%d ssl_error=%d lib_error=%08lx reason=\"%s\" fd=%ld\n",
+                rs ? rs->session_id : 0, tries, r, e, ssl_lib_error,
+                ssl_error_buf[0] ? ssl_error_buf : "none", rs ? (long)rs->sock : -1L);
             if (rs && radio_ssl_error_is_fatal(e)) {
                 rs->lastSslError = e;
                 rs->noReconnect = 1;
+                if (!radio_tls_fault_should_poison(e, ssl_lib_error))
+                    rs->sslDroppedTransport = 1; /* peer close: leak SSL, keep HTTPS usable */
                 strcpy(rs->lastSslOp, (e == SSL_ERROR_SYSCALL && ssl_lib_error == 0) ?
                     "ssl-connect-syscall" : "ssl-connect-fatal");
-                RADIO_DBG(printf("radio-tls: session=%lu fatal handshake failed; connection SSL quarantined and shared SSL_CTX poisoned for this run\n", rs->session_id));
+                if (ssl_error_buf[0]) {
+                    sprintf(handshake_error, "TLS handshake failed: %.105s", ssl_error_buf);
+                    set_error(rs, handshake_error);
+                } else if (e == SSL_ERROR_SYSCALL && ssl_lib_error == 0) {
+                    set_error(rs, "TLS handshake failed: peer closed connection");
+                }
+                RADIO_DBG(printf("radio-tls: session=%lu handshake failed; connection SSL quarantined (poison=%d)\n", rs->session_id, radio_tls_fault_should_poison(e, ssl_lib_error)));
             }
             /* Drain the rest of the queue so the failure cannot masquerade
              * as a later session's fault. */
@@ -1965,7 +2147,9 @@ static int radio_ssl_do_handshake(RadioStream *rs)
         }
         return -1;
     }
-    RADIO_DBG(printf("radio-tls: SSL_connect timeout session=%lu last_ssl_error=%d fd=%ld\n", rs ? rs->session_id : 0, last_error, rs ? (long)rs->sock : -1L););
+    printf("radio-tls: SSL_connect retry budget expired session=%lu budget=%d attempts=%d last_ssl_error=%d fd=%ld memory_poison=%d tls_poison=%d\n",
+        rs ? rs->session_id : 0, budget, tries, last_error, rs ? (long)rs->sock : -1L,
+        Radio_IsMemoryPoisoned() ? 1 : 0, Radio_IsTlsPoisoned() ? 1 : 0);
     return -1;
 }
 
@@ -2024,59 +2208,65 @@ static int radio_ssl_connect(RadioStream *rs)
     if (radio_ssl_do_handshake(rs) != 0) {
         RADIO_DBG(printf("radio-tls: handshake cleanup session=%lu error_ptr=%p stream_range=%p..%p status=%d open_socket_count=%ld active_ssl_count=%ld active_ssl_ctx_count=%ld SocketBase=%p AmiSSLBase=%p AmiSSLMasterBase=%p\n", rs->session_id, (void *)rs->error, (void *)rs, (void *)(rs + 1), (int)rs->status, radio_open_socket_count, radio_active_ssl_count, radio_active_ssl_ctx_count, (void *)SocketBase, (void *)AmiSSLBase, (void *)AmiSSLMasterBase););
         radio_ssl_close_stream(rs);
-        set_error(rs, "TLS handshake failed"); return -1;
+        if (!rs->error[0]) set_error(rs, "TLS handshake failed"); return -1;
     }
     return 0;
 }
 
-/* Attempt an SSL close_notify while the socket is still open, matching the
- * AmiSSL/amissl_https_get.c reference example (https.c): it unconditionally
- * calls SSL_shutdown() before CloseSocket() whenever SSL_connect() actually
- * completed, regardless of whether the session is ending cleanly, on error,
- * or via user interrupt -- there is no "abort, skip shutdown" mode in the
- * reference at all. This codebase's RADIO_CLOSE_GRACEFUL/RADIO_CLOSE_ABORT
- * split had made SSL_shutdown() unreachable dead code (every call site used
- * RADIO_CLOSE_ABORT, which never attempted it) -- a real, unconditional
- * deviation from the documented pattern, not a defensible "abort mode"
- * choice. Must run BEFORE the socket is closed (radio_abort_current_socket())
- * -- once the fd is gone there is nothing left for SSL_shutdown() to write
- * the close_notify alert to. A single, unretried, non-blocking call is
- * exactly what the (blocking-socket) reference does too: a unidirectional
- * shutdown that does not wait for the peer's close_notify is a normal,
- * supported OpenSSL pattern, not a partial/incomplete one. */
-static void radio_ssl_attempt_shutdown(RadioStream *rs)
+/* Normal Stop/station-switch teardown on real CD32 hardware must not enter
+ * SSL_shutdown(): even readiness-driven SSL_shutdown() can wedge AmiSSL while
+ * the peer is still streaming.  A healthy per-connection SSL object can still
+ * be released cleanly without leaking:
+ *
+ *   1. stop/unregister worker pumping before this helper is called;
+ *   2. mark close_notify as locally sent (no socket I/O);
+ *   3. ensure the SSL-owned socket BIO does not close the Amiga descriptor;
+ *   4. SSL_free() while the descriptor is still valid;
+ *   5. let radio_abort_current_socket() CloseSocket() exactly once.
+ *
+ * SSL_set_fd() normally creates a BIO_NOCLOSE socket BIO, but setting it
+ * explicitly here makes ownership unambiguous across AmiSSL versions.
+ * Fatal/peer-drop/diagnostic sessions return 0 and keep the existing
+ * quarantine policy in radio_ssl_close_stream_mode(). */
+static int radio_ssl_free_before_socket_close(RadioStream *rs)
 {
-    if (!rs) return;
-    if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) return;
-    if (rs->sslStatePoisoned || rs->fatalStop || rs->noReconnect) return;
-    if (!rs->ssl || rs->sslFreed) return;
-    if (!rs->sslHandshakeDone) return;
-    if (rs->sock == RADIO_INVALID_SOCKET || rs->socketClosed) return;
+    SSL *ssl_to_free;
+    BIO *rbio;
+    BIO *wbio;
+
+    if (!rs) return 0;
+    if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) return 0;
+    if (rs->sslStatePoisoned || rs->fatalStop || rs->noReconnect) return 0;
+    if (!rs->ssl || rs->sslFreed) return 0;
+    if (!rs->sslHandshakeDone) return 0;
+    if (rs->sock == RADIO_INVALID_SOCKET || rs->socketClosed) return 0;
+    if (radio_runtime_diag_leak_ssl_enabled()) return 0;
+
     radio_net_adopt_context(rs);
-    radio_worker_risk_log("before SSL_shutdown", rs);
-    RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_shutdown start ssl=%p\n", (void *)rs->ssl));
-    RADIO_DBG(printf("radio-cleanup: SSL_shutdown session=%lu ssl=%p fd=%ld\n",
-        rs->session_id, (void *)rs->ssl, (long)rs->sock););
-    Radio_DebugCheckExecMem("before SSL_shutdown");
-    if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
-        rs->sslStatePoisoned = 1;
-        rs->fatalStop = 1;
-        rs->noReconnect = 1;
-        radio_tls_shutdown_quarantine = 1;
-        return;
-    }
-    radio_amissl_lifecycle_diag("SSL_shutdown-before", rs->session_id, rs->ssl, rs->ctx);
-    SSL_shutdown(rs->ssl);
-    radio_amissl_lifecycle_diag("SSL_shutdown-after", rs->session_id, rs->ssl, rs->ctx);
-    Radio_DebugCheckExecMem("after SSL_shutdown");
-    if (Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
-        rs->sslStatePoisoned = 1;
-        rs->fatalStop = 1;
-        rs->noReconnect = 1;
-        radio_tls_shutdown_quarantine = 1;
-    }
-    printf("radio-tls-order: category=playback session=%lu step=SSL_shutdown-complete\n", rs->session_id);
-    RADIO_CLEANUP_DEBUG_PRINTF(("radio-cleanup: SSL_shutdown done\n"));
+    ssl_to_free = rs->ssl;
+    rbio = SSL_get_rbio(ssl_to_free);
+    wbio = SSL_get_wbio(ssl_to_free);
+
+    SSL_set_shutdown(ssl_to_free, SSL_SENT_SHUTDOWN);
+    if (rbio) BIO_set_close(rbio, BIO_NOCLOSE);
+    if (wbio && wbio != rbio) BIO_set_close(wbio, BIO_NOCLOSE);
+
+    Radio_DebugCheckExecMem("before playback SSL_free before socket close");
+    radio_trace("radio-tls-order: category=playback session=%lu step=SSL_free-begin ssl=%p fd=%ld\n",
+        rs->session_id, (void *)ssl_to_free, (long)rs->sock);
+    radio_amissl_lifecycle_diag("SSL_free-before", rs->session_id, ssl_to_free, rs->ctx);
+    SSL_free(ssl_to_free);
+    radio_amissl_lifecycle_diag("SSL_free-after", rs->session_id, ssl_to_free, rs->ctx);
+    radio_trace("radio-tls-order: category=playback session=%lu step=SSL_free-complete\n",
+        rs->session_id);
+    Radio_DebugCheckExecMem("after playback SSL_free before socket close");
+
+    rs->sslFreed = 1;
+    if (radio_active_ssl_count > 0) radio_active_ssl_count--;
+    rs->ssl = NULL;
+    rs->sslHandshakeDone = 0;
+    rs->ctx = NULL; /* borrowed shared context remains owned by the worker */
+    return 1;
 }
 
 static void radio_ssl_close_stream(RadioStream *rs) { radio_ssl_close_stream_mode(rs, RADIO_CLOSE_ABORT); }
@@ -2186,6 +2376,7 @@ static int radio_send_all(RadioStream *rs, const char *buf, int len)
                 close_current_socket(rs);
                 return -1;
             }
+            ERR_clear_error(); /* clean queue so ERR_get_error() below reflects only this SSL_write: a bare SYSCALL/EPIPE drop must stay lib_error=0 and quarantine, not poison */
             radio_amissl_lifecycle_diag("SSL_write-before", rs->session_id, rs->ssl, rs->ctx);
             r = (int)SSL_write(rs->ssl, buf + sent, len - sent);
             radio_amissl_lifecycle_diag("SSL_write-after", rs->session_id, rs->ssl, rs->ctx);
@@ -2204,9 +2395,11 @@ static int radio_send_all(RadioStream *rs, const char *buf, int len)
                 if (radio_ssl_error_is_fatal(e)) {
                     rs->lastSslError = e;
                     rs->noReconnect = 1;
+                    if (!radio_tls_fault_should_poison(e, ssl_lib_error))
+                        rs->sslDroppedTransport = 1; /* peer close: leak SSL, keep HTTPS usable */
                     strcpy(rs->lastSslOp, (e == SSL_ERROR_SYSCALL && ssl_lib_error == 0) ?
                         "ssl-write-syscall" : "ssl-write-fatal");
-                    RADIO_DBG(printf("radio-ssl-write: session=%lu fatal write failure; connection SSL quarantined and HTTPS disabled for this run\n", rs->session_id));
+                    RADIO_DBG(printf("radio-ssl-write: session=%lu write failure; connection SSL quarantined (poison=%d)\n", rs->session_id, radio_tls_fault_should_poison(e, ssl_lib_error)));
                     ERR_clear_error();
                 }
             }
@@ -2229,7 +2422,9 @@ struct RadioNetTransport {
     SSL *ssl;
 #endif
     int handshake_done;
-    int ssl_poisoned;
+    int ssl_poisoned;          /* real fault: leak the SSL AND poison the shared instance */
+    int ssl_dropped_transport; /* bare peer close: leak the SSL, do NOT poison the instance */
+    int ssl_teardown_unsafe;    /* incomplete shutdown: leak this SSL, do NOT poison the instance */
     char category[16];
     unsigned long session_id;
     unsigned long host_addr_be;
@@ -2255,29 +2450,26 @@ static int radio_net_transport_wait_connected(RadioNetTransport *t, struct socka
 }
 
 static void radio_net_transport_count_socket(RadioNetTransport *t);
-static void radio_net_transport_count_ctx(RadioNetTransport *t);
 static void radio_net_transport_count_ssl(RadioNetTransport *t);
 static void radio_net_close_transport_worker(RadioNetTransport *t, int graceful);
 
 static int radio_net_transport_tls_connect(RadioNetTransport *t, const char *host)
 {
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-    int tries;
-    const SSL_METHOD *method;
+    int tries = 0;
+    int budget = radio_connect_poll_tries();
+    unsigned long deadline_ticks = radio_monotonic_ticks() + (unsigned long)((budget + 24) / 25) * 50UL;
     if (radio_net_worker_amissl_ready(NULL) != 0) return -1;
-    method = SSLv23_client_method();
-    if (!method) return -1;
-    Radio_DebugCheckExecMem("before transport SSL_CTX_new");
-    radio_amissl_lifecycle_diag("SSL_CTX_new-before", t->session_id, NULL, NULL);
-    t->ctx = SSL_CTX_new(method);
-    radio_amissl_lifecycle_diag("SSL_CTX_new-after", t->session_id, NULL, t->ctx);
-    if (t->ctx) radio_net_transport_count_ctx(t);
-    Radio_DebugCheckExecMem("after transport SSL_CTX_new");
+    /* Borrow the worker-owned shared SSL_CTX -- created once, retained for the
+     * whole run, already configured VERIFY_NONE + IGNORE_UNEXPECTED_EOF -- the
+     * same context playback uses. Creating and freeing a fresh SSL_CTX per
+     * probe/artwork fetch churned AmiSSL and hard-locked the real CD32; one
+     * retained context reused for every connection is how AmiSSL is meant to be
+     * used. Borrowed: not counted as transport-owned and never SSL_CTX_free'd
+     * at close (freed once at worker shutdown). */
+    t->ctx = radio_worker_get_ssl_ctx(t->category, t->session_id);
+    Radio_DebugCheckExecMem("after transport shared SSL_CTX");
     if (!t->ctx || Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) return -1;
-    SSL_CTX_set_verify(t->ctx, SSL_VERIFY_NONE, NULL);
-#ifdef SSL_OP_IGNORE_UNEXPECTED_EOF
-    SSL_CTX_set_options(t->ctx, SSL_OP_IGNORE_UNEXPECTED_EOF);
-#endif
     Radio_DebugCheckExecMem("before transport SSL_new");
     radio_amissl_lifecycle_diag("SSL_new-before", t->session_id, NULL, t->ctx);
     t->ssl = SSL_new(t->ctx);
@@ -2296,31 +2488,71 @@ static int radio_net_transport_tls_connect(RadioNetTransport *t, const char *hos
     }
     Radio_DebugCheckExecMem("after transport SSL_set_fd");
     ERR_clear_error();
-    for (tries = 0; tries < radio_connect_poll_tries(); tries++) {
+    while (radio_deadline_pending(deadline_ticks)) {
         int r, e;
+        tries++;
         Radio_DebugCheckExecMem("before transport SSL_connect");
-        radio_tls_connect_marker("TLS-CONNECT-ENTER", t->session_id, tries + 1, t->ssl, t->ctx, (long)t->sock, 0);
+        radio_tls_connect_marker("TLS-CONNECT-ENTER", t->session_id, tries, t->ssl, t->ctx, (long)t->sock, 0);
         radio_amissl_lifecycle_diag("SSL_connect-before", t->session_id, t->ssl, t->ctx);
         r = SSL_connect(t->ssl);
-        radio_tls_connect_marker("TLS-CONNECT-RETURN", t->session_id, tries + 1, t->ssl, t->ctx, (long)t->sock, r);
+        radio_tls_connect_marker("TLS-CONNECT-RETURN", t->session_id, tries, t->ssl, t->ctx, (long)t->sock, r);
         RADIO_DBG(printf("SSL_CONNECT_RET transport session=%lu attempt=%d ret=%d ssl=%p ctx=%p fd=%ld\n",
-            t->session_id, tries + 1, r, (void *)t->ssl, (void *)t->ctx, (long)t->sock););
+            t->session_id, tries, r, (void *)t->ssl, (void *)t->ctx, (long)t->sock););
         radio_amissl_lifecycle_diag("SSL_connect-after", t->session_id, t->ssl, t->ctx);
         Radio_DebugCheckExecMem("after transport SSL_connect");
         if (r == 1) { t->handshake_done = 1; return 0; }
         Radio_DebugCheckExecMem("before transport SSL_get_error after SSL_connect");
-        radio_tls_connect_marker("TLS-CONNECT-GETERROR-BEGIN", t->session_id, tries + 1, t->ssl, t->ctx, (long)t->sock, r);
+        radio_tls_connect_marker("TLS-CONNECT-GETERROR-BEGIN", t->session_id, tries, t->ssl, t->ctx, (long)t->sock, r);
         e = SSL_get_error(t->ssl, r);
-        radio_tls_connect_marker("TLS-CONNECT-GETERROR-END", t->session_id, tries + 1, t->ssl, t->ctx, (long)t->sock, e);
+        radio_tls_connect_marker("TLS-CONNECT-GETERROR-END", t->session_id, tries, t->ssl, t->ctx, (long)t->sock, e);
         Radio_DebugCheckExecMem("after transport SSL_get_error after SSL_connect");
         if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
-            radio_backoff_sleep();
-            continue;
+            int wr = radio_ssl_wait_ready(t->sock, e);
+            if (wr > 0) continue;
+            if (wr == 0) continue;
+            radio_trace("radio-net-tls: transport SSL_connect readiness wait failed session=%lu attempt=%d ssl_error=%d socket_error=%ld fd=%ld\n",
+                t->session_id, tries, e, radio_sock_errno(), (long)t->sock);
+            return -1;
         }
-        if (radio_ssl_error_is_fatal(e)) {
-            t->ssl_poisoned = 1;
-            Radio_MarkWorkerSslCtxPoisoned("transport SSL_connect fatal");
-            ERR_clear_error();
+        /* Non-retriable handshake result. Decode the OpenSSL/AmiSSL error queue
+         * so the exact cause is visible (release-visible: this path is only
+         * reached on failure and returns immediately, so no per-iteration cost
+         * and no effect on handshake timing). This is the probe/transport
+         * counterpart of the decode radio_ssl_do_handshake() already does for
+         * the playback path. Distinguishes a genuine protocol/cipher fault
+         * (SSL_ERROR_SSL, lib_error set) from the server closing mid-handshake
+         * (SSL_ERROR_SYSCALL/ZERO_RETURN, lib_error 0) -- the latter being what
+         * a too-slow client on a slow link provokes. */
+        {
+            unsigned long ssl_lib_error = ERR_get_error();
+            char ssl_error_buf[160];
+            ssl_error_buf[0] = '\0';
+            if (ssl_lib_error != 0)
+                ERR_error_string_n(ssl_lib_error, ssl_error_buf, sizeof(ssl_error_buf));
+            radio_trace("radio-net-tls: transport SSL_connect failed session=%lu attempt=%d ssl_error=%d lib_error=%08lx reason=\"%s\"\n",
+                t->session_id, tries, e, ssl_lib_error,
+                ssl_error_buf[0] ? ssl_error_buf : "none");
+            if (radio_ssl_error_is_fatal(e)) {
+                /* Always quarantine this connection's SSL (leak, not free) to
+                 * avoid the AN_BadFreeAddr crash -- but only poison the shared
+                 * AmiSSL instance for a genuine internal fault, not a bare
+                 * peer close on a slow link (see radio_tls_fault_should_poison). */
+                if (radio_tls_fault_should_poison(e, ssl_lib_error)) {
+                    char where_buf[200];
+                    t->ssl_poisoned = 1;
+                    sprintf(where_buf, "transport SSL_connect fatal ssl_error=%d %.150s",
+                        e, ssl_error_buf[0] ? ssl_error_buf : "");
+                    Radio_MarkWorkerSslCtxPoisoned(where_buf);
+                } else {
+                    /* Leak this SSL at cleanup, but keep the shared instance
+                     * usable -- the cleanup path keys poison off ssl_poisoned,
+                     * so use the drop-only flag instead. */
+                    t->ssl_dropped_transport = 1;
+                    radio_trace("radio-net-tls: transport SSL_connect peer-close (ssl_error=%d lib_error=0) session=%lu -- connection quarantined, shared AmiSSL NOT poisoned\n",
+                        e, t->session_id);
+                }
+                ERR_clear_error();
+            }
         }
         return -1;
     }
@@ -2462,11 +2694,6 @@ static void radio_net_transport_count_socket(RadioNetTransport *t)
     if (t && !t->socket_counted) { radio_open_socket_count++; t->socket_counted = 1; }
 }
 
-static void radio_net_transport_count_ctx(RadioNetTransport *t)
-{
-    if (t && !t->ctx_counted) { radio_active_ssl_ctx_count++; t->ctx_counted = 1; }
-}
-
 static void radio_net_transport_count_ssl(RadioNetTransport *t)
 {
     if (t && !t->ssl_counted) { radio_active_ssl_count++; t->ssl_counted = 1; }
@@ -2540,6 +2767,17 @@ static void radio_net_open_worker(void *arg)
         radio_net_open_complete(a, NULL);
         return;
     }
+    if (a->use_tls) {
+        long so_error = 0;
+        if (radio_socket_connect_error(t->sock, &so_error) != 0) {
+            radio_trace("radio-net-tcp: transport connected socket check failed session=%lu socket_error=%ld fd=%ld\n",
+                t->session_id, so_error, (long)t->sock);
+            a->fail_reason = RADIO_NET_OPEN_ERR_CONNECT;
+            radio_net_close_transport_worker(t, 0);
+            radio_net_open_complete(a, NULL);
+            return;
+        }
+    }
     if (a->use_tls && radio_net_transport_tls_connect(t, a->host) != 0) {
         a->fail_reason = RADIO_NET_OPEN_ERR_TLS;
         radio_net_close_transport_worker(t, 0);
@@ -2606,13 +2844,28 @@ static void radio_net_write_worker(void *arg)
         int n;
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
         if (t->use_tls && t->ssl) {
+            int write_ret;
+            ERR_clear_error(); /* clean queue so ERR_get_error() below reflects only this SSL_write: a bare SYSCALL/EPIPE drop must stay lib_error=0 and quarantine, not poison */
             radio_amissl_lifecycle_diag("SSL_write-before", t->session_id, t->ssl, t->ctx);
             n = (int)SSL_write(t->ssl, a->buffer + done, a->length - done);
             radio_amissl_lifecycle_diag("SSL_write-after", t->session_id, t->ssl, t->ctx);
             if (n > 0) { done += n; continue; }
+            write_ret = n; /* preserve raw SSL_write return before SSL_get_error() overwrites n */
             n = SSL_get_error(t->ssl, n);
             if (n == SSL_ERROR_WANT_READ || n == SSL_ERROR_WANT_WRITE) { radio_backoff_sleep(); tries++; continue; }
-            if (radio_ssl_error_is_fatal(n)) { t->ssl_poisoned = 1; Radio_ReportTlsFault("transport fatal TLS write"); }
+            if (radio_ssl_error_is_fatal(n)) {
+                unsigned long le = ERR_get_error();
+                radio_trace("radio-net-tls: transport SSL_write failed category=%s session=%lu ret=%d ssl_error=%d lib_error=%08lx socket_error=%ld fd=%ld\n",
+                    t->category, t->session_id, write_ret, n, le, radio_sock_errno(), (long)t->sock);
+                if (radio_tls_fault_should_poison(n, le)) {
+                    t->ssl_poisoned = 1;
+                    Radio_ReportTlsFault("transport fatal TLS write");
+                } else {
+                    t->ssl_dropped_transport = 1; /* leak SSL at cleanup, don't poison instance */
+                    radio_trace("radio-net: transport TLS write peer-close (ssl_error=%d lib_error=0) session=%lu -- quarantined, shared AmiSSL NOT poisoned\n", n, t->session_id);
+                }
+                ERR_clear_error();
+            }
             a->result = -1; radio_net_io_complete(a); return;
         }
 #endif
@@ -2667,6 +2920,7 @@ static void radio_net_read_worker(void *arg)
         int n;
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
         if (t->use_tls && t->ssl) {
+            ERR_clear_error(); /* clean queue so ERR_get_error() below reflects only this SSL_read: a bare SYSCALL/EPIPE drop must stay lib_error=0 and quarantine, not poison */
             radio_amissl_lifecycle_diag("SSL_read-before", t->session_id, t->ssl, t->ctx);
             n = (int)SSL_read(t->ssl, a->buffer, a->length);
             radio_amissl_lifecycle_diag("SSL_read-after", t->session_id, t->ssl, t->ctx);
@@ -2676,8 +2930,17 @@ static void radio_net_read_worker(void *arg)
             if (n == SSL_ERROR_ZERO_RETURN) { a->result = 0; radio_net_io_complete(a); return; }
 #endif
             if (n == SSL_ERROR_WANT_READ || n == SSL_ERROR_WANT_WRITE) { radio_backoff_sleep(); continue; }
-            t->ssl_poisoned = 1;
-            Radio_ReportTlsFault("transport fatal TLS read");
+            {
+                unsigned long le = ERR_get_error();
+                if (radio_tls_fault_should_poison(n, le)) {
+                    t->ssl_poisoned = 1;
+                    Radio_ReportTlsFault("transport fatal TLS read");
+                } else {
+                    t->ssl_dropped_transport = 1; /* leak SSL at cleanup, don't poison instance */
+                    radio_trace("radio-net: transport TLS read peer-close (ssl_error=%d lib_error=0) session=%lu -- quarantined, shared AmiSSL NOT poisoned\n", n, t->session_id);
+                }
+                ERR_clear_error();
+            }
             a->result = -1;
             radio_net_io_complete(a);
             return;
@@ -2732,18 +2995,38 @@ static void radio_net_close_transport_worker(RadioNetTransport *t, int graceful)
     if (!radio_net_worker_is_self()) { RADIO_DBG(printf("radio-net: close refused off worker\n");) return; }
     if (!t) return;
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+    /* Healthy graceful teardown frees the per-connection SSL with NO network
+     * I/O while the descriptor is still valid, mirroring the playback path
+     * (radio_ssl_free_before_socket_close()). The previous readiness-driven
+     * SSL_shutdown() loop here did socket I/O during teardown and hard-locked
+     * real CD32 hardware on station switches. Fatal/dropped/poisoned/diag-leak
+     * sessions fall through to the quarantine handling below with t->ssl set. */
     if (graceful && t->ssl && t->handshake_done && !t->ssl_poisoned &&
-        !Radio_IsMemoryPoisoned() && !Radio_IsTlsPoisoned()) {
-        radio_amissl_lifecycle_diag("SSL_shutdown-before", t->session_id, t->ssl, t->ctx);
-        SSL_shutdown(t->ssl);
-        radio_amissl_lifecycle_diag("SSL_shutdown-after", t->session_id, t->ssl, t->ctx);
-        printf("radio-tls-order: category=%s session=%lu step=SSL_shutdown-complete\n", t->category, t->session_id);
+        !t->ssl_dropped_transport && !t->ssl_teardown_unsafe &&
+        !Radio_IsMemoryPoisoned() && !Radio_IsTlsPoisoned() &&
+        !radio_runtime_diag_leak_ssl_enabled() &&
+        t->sock != RADIO_INVALID_SOCKET) {
+        BIO *rbio = SSL_get_rbio(t->ssl);
+        BIO *wbio = SSL_get_wbio(t->ssl);
+        SSL_set_shutdown(t->ssl, SSL_SENT_SHUTDOWN);
+        if (rbio) BIO_set_close(rbio, BIO_NOCLOSE);
+        if (wbio && wbio != rbio) BIO_set_close(wbio, BIO_NOCLOSE);
+        radio_trace("radio-tls-order: category=%s session=%lu step=SSL_free-begin ssl=%p fd=%ld\n",
+            t->category, t->session_id, (void *)t->ssl, (long)t->sock);
+        radio_amissl_lifecycle_diag("SSL_free-before", t->session_id, t->ssl, t->ctx);
+        SSL_free(t->ssl);
+        radio_amissl_lifecycle_diag("SSL_free-after", t->session_id, t->ssl, t->ctx);
+        radio_trace("radio-tls-order: category=%s session=%lu step=SSL_free-complete\n",
+            t->category, t->session_id);
+        t->ssl = NULL;
+        if (t->ssl_counted && radio_active_ssl_count > 0) radio_active_ssl_count--;
+        t->ssl_counted = 0;
     }
 #endif
     if (t->sock != RADIO_INVALID_SOCKET) {
-        printf("radio-tls-order: category=%s session=%lu step=CloseSocket-begin fd=%ld\n", t->category, t->session_id, (long)t->sock);
+        radio_trace("radio-tls-order: category=%s session=%lu step=CloseSocket-begin fd=%ld\n", t->category, t->session_id, (long)t->sock);
         radio_close_socket(t->sock);
-        printf("radio-tls-order: category=%s session=%lu step=CloseSocket-complete\n", t->category, t->session_id);
+        radio_trace("radio-tls-order: category=%s session=%lu step=CloseSocket-complete\n", t->category, t->session_id);
         t->sock = RADIO_INVALID_SOCKET;
         if (t->socket_counted && radio_open_socket_count > 0) radio_open_socket_count--;
         t->socket_counted = 0;
@@ -2753,31 +3036,33 @@ static void radio_net_close_transport_worker(RadioNetTransport *t, int graceful)
         if (t->ssl_poisoned || Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned()) {
             Radio_MarkWorkerSslCtxPoisoned("transport close fatal SSL quarantined");
             t->ssl = NULL;
+        } else if (t->ssl_dropped_transport || t->ssl_teardown_unsafe) {
+            /* Peer dropped the connection: leak this SSL (freeing one that took
+             * an I/O fault is what caused AN_BadFreeAddr) but do NOT poison the
+             * shared instance -- the shared SSL_CTX is untouched by a transport
+             * EOF, so the next HTTPS attempt must stay allowed. */
+            radio_trace("radio-net: category=%s session=%lu ssl=%p action=%s\n",
+                t->category, t->session_id, (void *)t->ssl,
+                t->ssl_teardown_unsafe ? "teardown-quarantine-no-poison" : "transport-drop-quarantine-no-poison");
+            t->ssl = NULL;
         } else if (radio_runtime_diag_leak_ssl_enabled()) {
-            printf("radio-diag-leak: category=%s session=%lu ssl=%p action=quarantined-no-SSL_free\n", t->category, t->session_id, (void *)t->ssl);
+            radio_trace("radio-diag-leak: category=%s session=%lu ssl=%p action=quarantined-no-SSL_free\n", t->category, t->session_id, (void *)t->ssl);
             t->ssl = NULL;
         } else {
-            printf("radio-tls-order: category=%s session=%lu step=SSL_free-begin ssl=%p\n", t->category, t->session_id, (void *)t->ssl);
+            radio_trace("radio-tls-order: category=%s session=%lu step=SSL_free-begin ssl=%p\n", t->category, t->session_id, (void *)t->ssl);
             radio_amissl_lifecycle_diag("SSL_free-before", t->session_id, t->ssl, t->ctx);
             SSL_free(t->ssl);
             radio_amissl_lifecycle_diag("SSL_free-after", t->session_id, t->ssl, t->ctx);
-            printf("radio-tls-order: category=%s session=%lu step=SSL_free-complete\n", t->category, t->session_id);
+            radio_trace("radio-tls-order: category=%s session=%lu step=SSL_free-complete\n", t->category, t->session_id);
             t->ssl = NULL;
             if (t->ssl_counted && radio_active_ssl_count > 0) radio_active_ssl_count--;
             t->ssl_counted = 0;
         }
     }
     if (t->ctx) {
-        if (t->ssl_poisoned || Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned() || radio_runtime_diag_leak_ssl_enabled()) {
-            t->ctx = NULL;
-        } else {
-            radio_amissl_lifecycle_diag("SSL_CTX_free-before", t->session_id, NULL, t->ctx);
-            SSL_CTX_free(t->ctx);
-            radio_amissl_lifecycle_diag("SSL_CTX_free-after", t->session_id, NULL, t->ctx);
-            t->ctx = NULL;
-            if (t->ctx_counted && radio_active_ssl_ctx_count > 0) radio_active_ssl_ctx_count--;
-            t->ctx_counted = 0;
-        }
+        /* Borrowed shared worker SSL_CTX: retained for the whole run and freed
+         * only at worker shutdown -- never SSL_CTX_free'd per transport. */
+        t->ctx = NULL;
     }
 #endif
     radio_net_free(t);
@@ -3200,6 +3485,12 @@ static int connect_http(RadioStream *rs){
     RADIO_DBG(printf("radio-connect: session=%lu TCP connected, starting SSL/HTTP request phase isSSL=%d\n", rs->session_id, rs->isSSL););
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     if (rs->isSSL) {
+        long so_error = 0;
+        if (radio_socket_connect_error(rs->sock, &so_error) != 0) {
+            radio_trace("radio-tcp: connected socket check failed session=%lu socket_error=%ld fd=%ld\n",
+                rs->session_id, so_error, (long)rs->sock);
+            close_current_socket(rs); set_error(rs, "TCP connect failed"); return -1;
+        }
         RADIO_DBG(printf("radio-child-net: before TLS session=%lu fd=%ld host=%s SocketBase=%p AmiSSLBase=%p AmiSSLExtBase=%p\n",
             rs->session_id, (long)rs->sock, rs->host, (void *)SocketBase,
             (void *)AmiSSLBase, (void *)AmiSSLExtBase););
@@ -3290,9 +3581,9 @@ static void radio_abort_current_socket_local(RadioStream *rs)
             radio_playback_open_socket_count););
         rs->socket_close_count++;
         Radio_DebugCheckExecMem("before playback CloseSocket");
-        printf("radio-tls-order: category=playback session=%lu step=CloseSocket-begin fd=%ld\n", rs->session_id, closing_fd);
+        radio_trace("radio-tls-order: category=playback session=%lu step=CloseSocket-begin fd=%ld\n", rs->session_id, closing_fd);
         radio_close_socket(rs->sock);
-        printf("radio-tls-order: category=playback session=%lu step=CloseSocket-complete\n", rs->session_id);
+        radio_trace("radio-tls-order: category=playback session=%lu step=CloseSocket-complete\n", rs->session_id);
         Radio_DebugCheckExecMem("after playback CloseSocket");
         radio_worker_breadcrumb("after CloseSocket", "CloseSocket", rs->session_id);
         RADIO_DBG(printf("radio-cleanup: abort raw socket closed before SSL_free session=%lu fd=%ld\n", rs->session_id, closing_fd);)
@@ -3316,7 +3607,7 @@ static void radio_abort_current_socket_local(RadioStream *rs)
 static void radio_abort_current_socket_job(void *arg) { radio_abort_current_socket_local((RadioStream *)arg); }
 
 /* Controlled worker-owned stop for Radio_RequestStop(): run the exact same
- * atomic unregister+shutdown+close+free sequence as Radio_Close()'s own
+ * atomic unregister+free+close sequence as Radio_Close()'s own
  * radio_worker_close_detach_stream_job(), immediately, instead of only doing
  * the unregister+abort half here and leaving SSL_free()/SSL_CTX_free() for
  * Radio_Close()'s separate, later worker round-trip.
@@ -3331,9 +3622,10 @@ static void radio_abort_current_socket_job(void *arg) { radio_abort_current_sock
  * exactly the kind of AmiSSL-instance-wide interference the manual BIO fd
  * detach in radio_abort_current_socket_local() defends against for the raw
  * socket, but does not (and cannot) cover for AmiSSL's own internal state.
- * Doing the full close here, in one uninterrupted worker-task call, matches
- * the AmiSSL reference example's shutdown -> close -> free sequence with no
- * gap for anything else to run in between, and removes the "network owned"
+ * Doing the full close here, in one uninterrupted worker-task call, performs
+ * the free-before-close sequence (SSL_free() while the descriptor is valid,
+ * then CloseSocket(), with no SSL_shutdown() network I/O) with no gap for
+ * anything else to run in between, and removes the "network owned"
  * signal at the very end instead of the very start.
  *
  * radio_worker_close_detach_stream_job() (and everything it calls) is
@@ -3389,28 +3681,28 @@ static void close_current_socket_mode_local(RadioStream *rs, RadioCloseMode mode
     RADIO_DBG(printf("radio-cleanup: close mode=%s session=%lu status=%d fd=%ld open_socket_count_before=%ld\n",
         radio_close_mode_name(mode), rs->session_id, (int)rs->status, (long)rs->sock, before););
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
-    /* Healthy TLS teardown keeps the worker-owned shared SSL_CTX retained:
-     * SSL_shutdown() -> CloseSocket() -> SSL_free(). Fatal/poisoned sessions
-     * close the raw socket, then quarantine SSL instead of making further
-     * AmiSSL calls if memory/TLS poison is present. */
+    /* Healthy TLS teardown keeps the worker-owned shared SSL_CTX retained and
+     * performs no network I/O: SSL_free() while the descriptor is valid, then
+     * CloseSocket(). Fatal/poisoned sessions still close the raw socket first
+     * and quarantine SSL instead of making further AmiSSL calls. */
     {
         int fatal_close = rs->sslStatePoisoned || rs->fatalStop || rs->noReconnect ||
             Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned();
-        int shutdown_will_call = rs->ssl && !rs->sslFreed && rs->sslHandshakeDone &&
-            rs->sock != RADIO_INVALID_SOCKET && !rs->socketClosed && !fatal_close;
+        int ssl_freed_before_close;
         int ssl_diag_leaked = radio_runtime_diag_leak_ssl_enabled() &&
             rs->ssl && !rs->sslFreed && !fatal_close;
-        radio_ssl_attempt_shutdown(rs);
+        ssl_freed_before_close = radio_ssl_free_before_socket_close(rs);
 #endif
         radio_abort_current_socket(rs);
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
         radio_ssl_close_stream_mode(rs, mode);
         fatal_close = rs->sslStatePoisoned || rs->fatalStop || rs->noReconnect ||
             Radio_IsMemoryPoisoned() || Radio_IsTlsPoisoned();
-        printf("radio-tls-close: category=playback session=%lu health=%s shutdown=%s socket=closed-before-SSL_free ssl=%s ctx=%s\n",
+        radio_trace("radio-tls-close: category=playback session=%lu health=%s shutdown=skipped ssl=%s socket=closed ctx=%s\n",
             rs->session_id, fatal_close ? "fatal" : "healthy",
-            shutdown_will_call ? "called" : "skipped",
-            ssl_diag_leaked ? "diag-leaked" : (fatal_close ? "quarantined" : "freed"),
+            ssl_diag_leaked ? "diag-leaked" :
+                (ssl_freed_before_close ? "freed-before-close" :
+                    (fatal_close ? "quarantined" : "freed-after-close")),
             fatal_close ? "quarantined" : "shared-retained");
     }
 #endif
@@ -3454,9 +3746,9 @@ static void close_current_socket_mode(RadioStream *rs, RadioCloseMode mode)
 }
 
 /* Default close path: the authoritative worker-owned close function classifies
- * the session from its fatal/poison flags. Healthy stops/station switches get
- * shutdown/free/free/close; fatal or poisoned sessions get raw-socket-only
- * quarantine. */
+ * the session from its fatal/poison flags. Healthy stops/station switches free
+ * the per-connection SSL before closing the raw socket; fatal or poisoned
+ * sessions get raw-socket-only quarantine. */
 static void close_current_socket(RadioStream *rs) { close_current_socket_mode(rs, RADIO_CLOSE_ABORT); }
 
 static int reconnect_http(RadioStream *rs)
@@ -3744,7 +4036,7 @@ RadioStream *Radio_OpenWithHostAddr(const char *url, int haveHostAddr, unsigned 
      * [ringAlloc, ringAlloc+16), rear guard is
      * [ringAlloc+16+size, ringAlloc+32+size). */
     if (rs->ringAlloc)
-        printf("radio-resource: session=%lu ring buffer allocated at %p (front guard %p..%p, data %p..%p, rear guard %p..%p)\n",
+        radio_trace("radio-resource: session=%lu ring buffer allocated at %p (front guard %p..%p, data %p..%p, rear guard %p..%p)\n",
             rs->session_id, (void *)rs->ringAlloc,
             (void *)rs->ringAlloc, (void *)(rs->ringAlloc + RADIO_RING_GUARD_BYTES),
             (void *)rs->ring, (void *)(rs->ring + rs->size),
@@ -3836,22 +4128,11 @@ void Radio_RequestStop(RadioStream *rs)
     rs->stop_request_count++;
     RADIO_STOP_DEBUG_PRINTF(("radio-stop: session=%lu stop requested count=%u status=%d fd=%ld\n", rs->session_id, rs->stop_request_count, (int)rs->status, (long)rs->sock));
     if (rs->status == RADIO_STATUS_CLOSED) return;
-    /* mode only controls diagnostic naming/logging now (radio_close_mode_
-     * name()) -- RADIO_CLOSE_GRACEFUL vs RADIO_CLOSE_ABORT no longer gates
-     * whether SSL_shutdown() is attempted; radio_ssl_attempt_shutdown()
-     * (called from radio_worker_stop_unregister_abort_job() below) always
-     * attempts it whenever the handshake completed and the socket is still
-     * open, matching the AmiSSL reference example (amissl_https_get.c/
-     * https.c), which unconditionally calls SSL_shutdown() before
-     * CloseSocket() whenever SSL_connect() succeeded -- there is no
-     * "abort, skip shutdown" mode in the reference. A prior revision here
-     * had reasoned the opposite way (that shutting down a still-live session
-     * on interrupt was itself the crash cause) and made this path skip
-     * shutdown entirely; the crash reproduced across multiple captured logs
-     * regardless, always specifically for a live-aborted session, in
-     * SSL_free() -- exactly the AmiSSL reference's *other* invariant this
-     * codebase was also violating (SSL_shutdown() was unreachable dead code
-     * everywhere, not just here). */
+    /* On real CD32 hardware, SSL_shutdown() during a live station switch can
+     * wedge AmiSSL. The worker therefore performs one atomic non-leaking close:
+     * unregister the old stream, mark its SSL locally shut down, free the SSL
+     * while its BIO still has a valid descriptor, then CloseSocket(). Fatal
+     * SSL objects retain the existing connection-local quarantine policy. */
     mode = RADIO_CLOSE_ABORT;
     RADIO_DBG(printf("radio-cleanup: close mode=%s session=%lu status=%d (Radio_RequestStop)\n", radio_close_mode_name(mode), rs->session_id, (int)rs->status););
     radio_stream_lock(rs);
@@ -3884,7 +4165,7 @@ void Radio_RequestStop(RadioStream *rs)
     if (radio_net_worker_task && !radio_net_worker_is_self())
         Signal(radio_net_worker_task, SIGBREAKF_CTRL_C);
 #endif
-    /* Run the full unregister+shutdown+close+free sequence as one
+    /* Run the full unregister+free+close sequence as one
      * uninterrupted worker-owned step (radio_worker_stop_unregister_abort_
      * job() above, which just calls radio_worker_close_detach_stream_job())
      * instead of only aborting the socket here and leaving SSL_free() for
@@ -4293,6 +4574,7 @@ static int radio_pump_body(RadioStream *rs)
 	        }
 	        radio_net_adopt_context(rs);
 	        rs->workerReadCalls++;
+            ERR_clear_error(); /* clean queue so ERR_get_error() below reflects only this SSL_read: a bare SYSCALL/EPIPE drop must stay lib_error=0 and quarantine, not poison */
             radio_amissl_lifecycle_diag("SSL_read-before", rs->session_id, rs->ssl, rs->ctx);
 	        n = (int)SSL_read(rs->ssl, (char *)b, requested);
             radio_amissl_lifecycle_diag("SSL_read-after", rs->session_id, rs->ssl, rs->ctx);
@@ -4325,9 +4607,11 @@ static int radio_pump_body(RadioStream *rs)
                 if (radio_ssl_error_is_fatal(e)) {
                     rs->lastSslError = e;
                     rs->noReconnect = 1;
+                    if (!radio_tls_fault_should_poison(e, ssl_lib_error))
+                        rs->sslDroppedTransport = 1; /* peer close: leak SSL, keep HTTPS usable */
                     strcpy(rs->lastSslOp, (e == SSL_ERROR_SYSCALL && ssl_lib_error == 0) ?
                         "ssl-read-syscall" : "ssl-read-fatal");
-                    RADIO_DBG(printf("radio-ssl-read: session=%lu fatal read failure; connection SSL quarantined and HTTPS disabled for this run\n", rs->session_id));
+                    RADIO_DBG(printf("radio-ssl-read: session=%lu read failure; connection SSL quarantined (poison=%d)\n", rs->session_id, radio_tls_fault_should_poison(e, ssl_lib_error)));
                     ERR_clear_error();
                 }
             }
@@ -4421,7 +4705,7 @@ static int radio_pump_body(RadioStream *rs)
         audioUntilMeta = rs->audioUntilMeta;
         metaLeft = rs->metaLeft;
         radio_stream_unlock(rs);
-        printf("radio-pump: ERROR would drop input bytes session=%lu consumed=%d total=%d ringFill=%lu ringFree=%lu parseState=%d audioUntilMeta=%d metaLeft=%d\n",
+        radio_trace("radio-pump: ERROR would drop input bytes session=%lu consumed=%d total=%d ringFill=%lu ringFree=%lu parseState=%d audioUntilMeta=%d metaLeft=%d\n",
             rs->session_id, consumed, n, fill, freeBytes, parseState, audioUntilMeta, metaLeft);
         set_error(rs, "radio pump backpressure would drop stream bytes");
         return -1;
