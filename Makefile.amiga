@@ -374,12 +374,14 @@ decoder-modules:
 
 # Build a self-contained Amiga application drawer suitable for LhA/Aminet
 # packaging. MintAMP is the ReAction frontend; MintAMP-GT is the GadTools
-# fallback. The applications create PROGDIR:ArtCache themselves when needed,
-# but the empty drawer is included here for a tidy unpacked layout.
-release: $(GUIR_TARGET) $(GUI_TARGET) decoder-modules
+# fallback; amiga_mp3dec.fastexp is the fast command-line edition. The
+# applications create PROGDIR:ArtCache themselves when needed, but the empty
+# drawer is included here for a tidy unpacked layout.
+release: $(GUIR_TARGET) $(GUI_TARGET) $(FAST030_TARGET) decoder-modules
 	rm -rf "$(RELEASE_DIR)"
 	mkdir -p "$(RELEASE_DIR)/decoders" "$(RELEASE_DIR)/ArtCache"
-	cp "$(GUIR_TARGET)" "$(GUI_TARGET)" "$(RELEASE_DIR)/"
+	@test -f "$(FAST030_TARGET)" || { echo "ERROR: missing $(FAST030_TARGET)"; exit 1; }
+	cp "$(GUIR_TARGET)" "$(GUI_TARGET)" "$(FAST030_TARGET)" "$(RELEASE_DIR)/"
 	@test -f "$(GUIR_TARGET).info" || { echo "ERROR: missing $(GUIR_TARGET).info"; exit 1; }
 	@test -f "$(GUI_TARGET).info" || { echo "ERROR: missing $(GUI_TARGET).info"; exit 1; }
 	cp "$(GUIR_TARGET).info" "$(GUI_TARGET).info" "$(RELEASE_DIR)/"
