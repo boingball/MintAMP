@@ -65,6 +65,45 @@ Suggested screenshots:
 - GadTools GUI
 - CLI playback output
 
+## CLI / `fast030` edition
+
+MintAMP also includes a command-line edition named `amiga_mp3dec.fastexp`. It uses the same Paula playback engine and external decoder modules as the GUI editions, without the ReAction/GadTools interface, station browser or artwork code.
+
+The CLI edition is useful for Shell scripts, direct file/URL playback, decoder testing and lower-overhead setups.
+
+Build the local-media CLI:
+
+```sh
+make -f Makefile.amiga fast030
+```
+
+Build it with HTTP radio support:
+
+```sh
+make -f Makefile.amiga radio030
+```
+
+Build it with HTTP and HTTPS/AmiSSL radio support:
+
+```sh
+make -f Makefile.amiga sslradio030
+```
+
+Example playback:
+
+```text
+amiga_mp3dec.fastexp --play music.mp3
+amiga_mp3dec.fastexp --play music.flac
+amiga_mp3dec.fastexp --play music.ogg
+amiga_mp3dec.fastexp --play sample.wav
+amiga_mp3dec.fastexp --play sample.iff
+amiga_mp3dec.fastexp --play "https://example.com/direct-stream"
+```
+
+Useful playback controls include `--rate`, `--quality`, `--subband-cap`, `--mono`, `--stereo`, `--fake-stereo`, `--buffer-seconds`, `--volume` and `--fast-mem`. Run the binary without arguments to display the complete option list.
+
+The `fast030` target name is retained for compatibility. The actual target CPU is selected with `CPU=00`, `20`, `30`, `40` or `60`; the release build uses the 68030-optimised path.
+
 ## Supported formats
 
 | Format | Status | Notes |
