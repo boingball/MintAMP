@@ -6943,6 +6943,15 @@ int main(int argc, char **argv)
 	struct Task *task = FindTask(NULL);
 	int rc;
 
+	/*
+	 * Workbench launches have no normal Shell console. Route incidental
+	 * stdout/stderr output to NIL: before startup code can print or flush.
+	 */
+	if (argc == 0) {
+		(void)freopen("NIL:", "w", stdout);
+		(void)freopen("NIL:", "w", stderr);
+	}
+
 	/* True program entry point: init the cross-task stdout lock exactly
 	 * once here, before any playback child or the net worker task can be
 	 * spawned. See amiga_mp3dec.c's radio_console_lock definition and
