@@ -72,6 +72,10 @@ TARGET ?= amiga_mp3dec
 GUI_TARGET ?= MintAMP-GT
 GUIR_TARGET ?= MintAMP
 
+RELEASE_ROOT ?= release
+RELEASE_NAME ?= MintAMP
+RELEASE_DIR := $(RELEASE_ROOT)/$(RELEASE_NAME)
+
 CPPFLAGS_COMMON := -Ipub -Ireal -DAMIGA_M68K
 CFLAGS_COMMON := $(CPU_MFLAG) $(STD) $(OPTFLAGS)
 DECODER_SOURCES := mp3dec.c mp3tabs.c $(wildcard real/*.c)
@@ -202,7 +206,7 @@ HALFASM_TEST_CPPFLAGS := -DAMIGA_M68K_ASM_FDCT32
 FAST030_ASM_SOURCES := $(CPU_ASM_SOURCES)
 AMIGA_HUNK_FAST_PREFERRED := python3 tools/amiga_fast_preferred_hunks.py
 
-.PHONY: all fast030 radio030 sslradio030 amissl-get-test amissl-free-repro-test amissl-spawn-repro-test amissl-exec-repro-test rb-stream-probe-test prof030 gui guir miniamp3 minimp3r sslgui sslguir fast030-halfasm-test gui-halfasm-test decoder-modules clean print-command print-fast030-command print-gui-command print-guir-command
+.PHONY: all fast030 radio030 sslradio030 amissl-get-test amissl-free-repro-test amissl-spawn-repro-test amissl-exec-repro-test rb-stream-probe-test prof030 gui guir miniamp3 minimp3r sslgui sslguir fast030-halfasm-test gui-halfasm-test decoder-modules release release-clean clean print-command print-fast030-command print-gui-command print-guir-command
 
 all: $(TARGET) decoder-modules
 
@@ -367,6 +371,38 @@ decoder-modules:
 	$(MAKE) -C decoders \
 		CC="$(CC)" \
 		CPU="$(CPU)"
+
+# Build a self-contained Amiga application drawer suitable for LhA/Aminet
+# packaging. MintAMP is the ReAction frontend; MintAMP-GT is the GadTools
+# fallback. The applications create PROGDIR:ArtCache themselves when needed,
+# but the empty drawer is included here for a tidy unpacked layout.
+release: $(GUIR_TARGET) $(GUI_TARGET) decoder-modules
+	rm -rf "$(RELEASE_DIR)"
+	mkdir -p "$(RELEASE_DIR)/decoders" "$(RELEASE_DIR)/ArtCache"
+	cp "$(GUIR_TARGET)" "$(GUI_TARGET)" "$(RELEASE_DIR)/"
+	@test -f "$(GUIR_TARGET).info" || { echo "ERROR: missing $(GUIR_TARGET).info"; exit 1; }
+	@test -f "$(GUI_TARGET).info" || { echo "ERROR: missing $(GUI_TARGET).info"; exit 1; }
+	cp "$(GUIR_TARGET).info" "$(GUI_TARGET).info" "$(RELEASE_DIR)/"
+	@set -e; \
+	found=0; \
+	for decoder in decoders/*.decoder; do \
+		if test -f "$$decoder"; then \
+			cp "$$decoder" "$(RELEASE_DIR)/decoders/"; \
+			found=1; \
+		fi; \
+	done; \
+	if test "$$found" -eq 0; then \
+		echo "ERROR: no decoder modules found in decoders/"; \
+		exit 1; \
+	fi
+	@for file in README.md README LICENSE LICENSE.txt COPYING CHANGELOG.md; do \
+		if test -f "$$file"; then cp "$$file" "$(RELEASE_DIR)/"; fi; \
+	done
+	@echo "Release drawer created: $(RELEASE_DIR)"
+	@find "$(RELEASE_DIR)" -maxdepth 2 -type f -print | sort
+
+release-clean:
+	rm -rf "$(RELEASE_ROOT)"
 
 clean:
 	rm -f $(TARGET) $(FAST030_TARGET) $(PROF030_TARGET) $(FAST030_HALFASM_TEST_TARGET) $(GUI_TARGET) $(GUIR_TARGET) $(GUI_TARGET).freeall-discovery $(GUIR_TARGET).freeall-discovery $(GUI_TARGET).freeall-heads $(GUIR_TARGET).freeall-heads $(GUI_HALFASM_TEST_TARGET) \
