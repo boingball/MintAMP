@@ -85,6 +85,7 @@ void MP3EnableFdct32HalfSparse16PreconditionCheck(int enabled)
 void FDCT32FastLowrate(int *x, int *d, int offset, int oddBlock, int gb,
 	int stride, int phase)
 {
+	(void)phase;
 #if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE)
 	if (stride == 2) {
 #if defined(AMIGA_FAST_SUBBAND_CAP)

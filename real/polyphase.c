@@ -303,7 +303,8 @@ void AmigaResetPolyphaseStatics(void)
 #if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_M68K_ASM_POLYPHASE)
 /*
  * Keep this a weak reference so command lines that define
- * AMIGA_M68K_ASM_POLYPHASE but still use real/*.c without the optional .S file
+ * AMIGA_M68K_ASM_POLYPHASE but still use the real C sources without the
+ * optional .S file
  * link cleanly and fall back to the existing C fast path.
  */
 extern void AmigaM68KPolyphaseMonoFast(short *pcm, int *vbuf,
