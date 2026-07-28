@@ -33,6 +33,7 @@ struct SignalSemaphore radio_console_lock;
 #if defined(AMIGA_M68K) && (defined(__amigaos__) || defined(__AMIGA__) || defined(__MORPHOS__))
 #define HAVE_AMIGA_AUDIO_DEVICE 1
 #include <exec/types.h>
+#include <exec/execbase.h>
 #include <exec/memory.h>
 #include <exec/io.h>
 #include <exec/ports.h>
@@ -6206,6 +6207,29 @@ static int DecodeStreamCopySpill(DecodeStream *stream, signed char *dest,
 	return n;
 }
 
+/* A fast 68060 can decode cached local data without any blocking DOS I/O.
+ * Yield once every 16 successfully decoded frames so equal-priority GUI,
+ * input and network tasks get a scheduling opportunity.  Keep this runtime
+ * gated to 68060 hardware so slower 68020/030/040 playback is unchanged. */
+static void DecodeStreamMaybeYield(DecodeStream *stream)
+{
+#if defined(AMIGA_M68K) && defined(HAVE_AMIGA_AUDIO_DEVICE)
+	if (!stream || !stream->stats || !SysBase ||
+		!(SysBase->AttnFlags & AFF_68060) ||
+		(stream->stats->decodedFrames & 15UL) != 0)
+		return;
+
+	if (SetSignal(0, 0) & SIGBREAKF_CTRL_C)
+		gPlaybackInterrupted = 1;
+	if (!gPlaybackInterrupted)
+		Delay(1);
+	if (SetSignal(0, 0) & SIGBREAKF_CTRL_C)
+		gPlaybackInterrupted = 1;
+#else
+	(void)stream;
+#endif
+}
+
 static int DecodeStreamFillS8(DecodeStream *stream, const DecodeOptions *opt,
 	signed char *dest, int maxBytes)
 {
@@ -6381,6 +6405,9 @@ static int DecodeStreamFillS8(DecodeStream *stream, const DecodeOptions *opt,
 			}
 			stream->stats->outputSamples += (unsigned long)outSamps;
 			stream->stats->decodedFrames++;
+			DecodeStreamMaybeYield(stream);
+			if (gPlaybackInterrupted)
+				break;
 			if (stream->stats->decodedFrames == 1)
 				RADIO_DBG(printf("radio-decode: first successful MP3 frame decode samprate=%d chans=%d output_samps=%d effective_rate=%d produced=%d\n",
 					info.samprate, info.nChans, outSamps, stream->effectiveRate, produced);)
@@ -6584,6 +6611,9 @@ static int DecodeStreamFillPlanarS8(DecodeStream *stream, const DecodeOptions *o
 		produced += direct;
 		stream->stats->outputSamples += (unsigned long)frames * 2UL;
 		stream->stats->decodedFrames++;
+		DecodeStreamMaybeYield(stream);
+		if (gPlaybackInterrupted)
+			break;
 		if (stream->timing)
 			stream->timing->pcmConvert += clock() - t0;
 	}

@@ -4817,7 +4817,36 @@ int Radio_ReadAudio(RadioStream *rs,unsigned char *buf,int maxBytes)
 	if(rs->status==RADIO_STATUS_BUFFERING && rs->used>=RADIO_START_THRESHOLD) set_status(rs,RADIO_STATUS_PLAYING);
 	return got;
 }
-int Radio_ReadStartupAudio(RadioStream *rs,unsigned char *buf,int maxBytes,unsigned long timeoutMs){ clock_t start; int got; if(!rs||!buf||maxBytes<=0)return 0; start=clock(); while(!radio_is_stopping(rs)&&rs->used==0&&rs->status!=RADIO_STATUS_ERROR){ if(Radio_Pump(rs)<0)break; if(timeoutMs>0 && (unsigned long)((clock()-start)*1000UL/CLOCKS_PER_SEC)>=timeoutMs){ set_error(rs,"AAC stream start timeout"); close_current_socket(rs); break; } } if(radio_is_stopping(rs)||!rs->headerDone||!rs->decoderStarted||rs->status==RADIO_STATUS_ERROR) return 0; got=ring_read(rs,buf,maxBytes); if(!rs->everPlayed&&rs->headerDone&&rs->status!=RADIO_STATUS_PLAYING&&rs->status!=RADIO_STATUS_ERROR) set_status(rs,RADIO_STATUS_BUFFERING); return got; }
+int Radio_ReadStartupAudio(RadioStream *rs,unsigned char *buf,int maxBytes,unsigned long timeoutMs)
+{
+	clock_t start;
+	int got;
+
+	if(!rs||!buf||maxBytes<=0)return 0;
+	start=clock();
+	while(!radio_is_stopping(rs)&&rs->used==0&&rs->status!=RADIO_STATUS_ERROR) {
+		int pumpResult=Radio_Pump(rs);
+		if(pumpResult<0)break;
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+		/* The worker-backed Radio_Pump() already sleeps while connecting,
+		 * buffering or reconnecting.  PLAYING with an empty ring was the
+		 * remaining no-progress path that could spin at full speed. */
+		if(pumpResult==0&&rs->used==0&&rs->status==RADIO_STATUS_PLAYING)
+			radio_backoff_sleep();
+#endif
+		if(timeoutMs>0 && (unsigned long)((clock()-start)*1000UL/CLOCKS_PER_SEC)>=timeoutMs) {
+			set_error(rs,"AAC stream start timeout");
+			close_current_socket(rs);
+			break;
+		}
+	}
+	if(radio_is_stopping(rs)||!rs->headerDone||!rs->decoderStarted||rs->status==RADIO_STATUS_ERROR)
+		return 0;
+	got=ring_read(rs,buf,maxBytes);
+	if(!rs->everPlayed&&rs->headerDone&&rs->status!=RADIO_STATUS_PLAYING&&rs->status!=RADIO_STATUS_ERROR)
+		set_status(rs,RADIO_STATUS_BUFFERING);
+	return got;
+}
 void Radio_FailStartup(RadioStream *rs,const char *message){ if(!rs)return; set_error(rs,message&&message[0]?message:"AAC stream start timeout"); radio_stream_lock(rs); rs->stopping=1; rs->reconnectAttempts=RADIO_RECONNECT_MAX; rs->reconnectDelay=0; radio_stream_unlock(rs); close_current_socket(rs); }
 RadioStatus Radio_GetStatus(RadioStream *rs){ return rs?rs->status:RADIO_STATUS_CLOSED; }
 const char *Radio_GetTitle(RadioStream *rs){ return rs?rs->title:""; }
