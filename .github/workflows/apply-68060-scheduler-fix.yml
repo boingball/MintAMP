@@ -1,0 +1,155 @@
+name: Apply 68060 scheduler fix
+
+on:
+  push:
+    branches:
+      - copilot/investigate-fix-realtime-playback-bug
+    paths:
+      - .github/workflows/apply-68060-scheduler-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: copilot/investigate-fix-realtime-playback-bug
+          fetch-depth: 0
+
+      - name: Apply focused scheduling fix
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          decoder_path = Path("amiga_mp3dec.c")
+          decoder = decoder_path.read_text()
+
+          old = "#include <exec/types.h>\n#include <exec/memory.h>"
+          new = "#include <exec/types.h>\n#include <exec/execbase.h>\n#include <exec/memory.h>"
+          if old not in decoder:
+              raise SystemExit("exec include insertion point not found")
+          decoder = decoder.replace(old, new, 1)
+
+          marker = """static int DecodeStreamFillS8(DecodeStream *stream, const DecodeOptions *opt,
+          \tsigned char *dest, int maxBytes)
+          """
+          helper = """/* A fast 68060 can decode cached local data without any blocking DOS I/O.
+           * Yield once every 16 successfully decoded frames so equal-priority GUI,
+           * input and network tasks get a scheduling opportunity.  Keep this runtime
+           * gated to 68060 hardware so slower 68020/030/040 playback is unchanged. */
+          static void DecodeStreamMaybeYield(DecodeStream *stream)
+          {
+          #if defined(AMIGA_M68K) && defined(HAVE_AMIGA_AUDIO_DEVICE)
+          \tif (!stream || !stream->stats || !SysBase ||
+          \t\t!(SysBase->AttnFlags & AFF_68060) ||
+          \t\t(stream->stats->decodedFrames & 15UL) != 0)
+          \t\treturn;
+
+          \tif (SetSignal(0, 0) & SIGBREAKF_CTRL_C)
+          \t\tgPlaybackInterrupted = 1;
+          \tif (!gPlaybackInterrupted)
+          \t\tDelay(1);
+          \tif (SetSignal(0, 0) & SIGBREAKF_CTRL_C)
+          \t\tgPlaybackInterrupted = 1;
+          #else
+          \t(void)stream;
+          #endif
+          }
+
+          """
+          if marker not in decoder:
+              raise SystemExit("DecodeStreamFillS8 marker not found")
+          decoder = decoder.replace(marker, helper + marker, 1)
+
+          mono_old = """\t\t\tstream->stats->outputSamples += (unsigned long)outSamps;
+          \t\t\tstream->stats->decodedFrames++;
+          \t\t\tif (stream->stats->decodedFrames == 1)
+          """
+          mono_new = """\t\t\tstream->stats->outputSamples += (unsigned long)outSamps;
+          \t\t\tstream->stats->decodedFrames++;
+          \t\t\tDecodeStreamMaybeYield(stream);
+          \t\t\tif (gPlaybackInterrupted)
+          \t\t\t\tbreak;
+          \t\t\tif (stream->stats->decodedFrames == 1)
+          """
+          if mono_old not in decoder:
+              raise SystemExit("interleaved decode success point not found")
+          decoder = decoder.replace(mono_old, mono_new, 1)
+
+          stereo_old = """\t\tstream->stats->outputSamples += (unsigned long)frames * 2UL;
+          \t\tstream->stats->decodedFrames++;
+          \t\tif (stream->timing)
+          """
+          stereo_new = """\t\tstream->stats->outputSamples += (unsigned long)frames * 2UL;
+          \t\tstream->stats->decodedFrames++;
+          \t\tDecodeStreamMaybeYield(stream);
+          \t\tif (gPlaybackInterrupted)
+          \t\t\tbreak;
+          \t\tif (stream->timing)
+          """
+          if stereo_old not in decoder:
+              raise SystemExit("planar stereo decode success point not found")
+          decoder = decoder.replace(stereo_old, stereo_new, 1)
+          decoder_path.write_text(decoder)
+
+          radio_path = Path("radio_stream.c")
+          radio = radio_path.read_text()
+          pattern = re.compile(
+              r"int Radio_ReadStartupAudio\(RadioStream \*rs,unsigned char \*buf,int maxBytes,unsigned long timeoutMs\)\{.*?\nvoid Radio_FailStartup",
+              re.S,
+          )
+          replacement = """int Radio_ReadStartupAudio(RadioStream *rs,unsigned char *buf,int maxBytes,unsigned long timeoutMs)
+          {
+          \tclock_t start;
+          \tint got;
+
+          \tif(!rs||!buf||maxBytes<=0)return 0;
+          \tstart=clock();
+          \twhile(!radio_is_stopping(rs)&&rs->used==0&&rs->status!=RADIO_STATUS_ERROR) {
+          \t\tint pumpResult=Radio_Pump(rs);
+          \t\tif(pumpResult<0)break;
+          #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+          \t\t/* The worker-backed Radio_Pump() already sleeps while connecting,
+          \t\t * buffering or reconnecting.  PLAYING with an empty ring was the
+          \t\t * remaining no-progress path that could spin at full speed. */
+          \t\tif(pumpResult==0&&rs->used==0&&rs->status==RADIO_STATUS_PLAYING)
+          \t\t\tradio_backoff_sleep();
+          #endif
+          \t\tif(timeoutMs>0 && (unsigned long)((clock()-start)*1000UL/CLOCKS_PER_SEC)>=timeoutMs) {
+          \t\t\tset_error(rs,"AAC stream start timeout");
+          \t\t\tclose_current_socket(rs);
+          \t\t\tbreak;
+          \t\t}
+          \t}
+          \tif(radio_is_stopping(rs)||!rs->headerDone||!rs->decoderStarted||rs->status==RADIO_STATUS_ERROR)
+          \t\treturn 0;
+          \tgot=ring_read(rs,buf,maxBytes);
+          \tif(!rs->everPlayed&&rs->headerDone&&rs->status!=RADIO_STATUS_PLAYING&&rs->status!=RADIO_STATUS_ERROR)
+          \t\tset_status(rs,RADIO_STATUS_BUFFERING);
+          \treturn got;
+          }
+          void Radio_FailStartup"""
+          radio, count = pattern.subn(replacement, radio, count=1)
+          if count != 1:
+              raise SystemExit(f"Radio_ReadStartupAudio replacement count was {count}")
+          radio_path.write_text(radio)
+          PY
+
+          git diff --check
+          git diff --stat
+
+      - name: Commit patch and remove one-shot workflow
+        shell: bash
+        run: |
+          git rm .github/workflows/apply-68060-scheduler-fix.yml
+          git config user.name "Chippy"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add amiga_mp3dec.c radio_stream.c
+          git commit -m "Fix 68060 playback scheduler starvation [skip ci]"
+          git push origin HEAD:copilot/investigate-fix-realtime-playback-bug
