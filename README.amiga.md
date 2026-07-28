@@ -50,6 +50,34 @@ the quality 0 preset and remains available as `--exp-huff` for targeted
 profiling; builds without `AMIGA_M68K_ASM_HUFFMAN` silently stay on the portable
 C Huffman decoder.
 
+### 68060-safe decoder build
+
+The 68060 does not execute the register-pair forms of `MULS.L`, `MULU.L`,
+`DIVS.L`, or `DIVU.L` in hardware. Several decoder assembly kernels use those
+forms, so the default `CPU=60` configuration retains GCC's `-m68060` code
+generation while selecting the C reference implementations and omitting the
+handwritten `.S` files:
+
+```sh
+make -f Makefile.amiga cpu60-safe
+```
+
+That target builds `amiga_mp3dec.060c` and disassembles it with
+`m68k-amigaos-objdump`; the build fails if the audit finds a long multiply or
+divide with a data-register pair. After establishing the all-C hardware
+baseline, individual groups can be enabled for trap/performance isolation:
+
+```sh
+make -f Makefile.amiga cpu60-group ASM60_GROUPS=fdct32
+make -f Makefile.amiga cpu60-group ASM60_GROUPS=polyphase
+make -f Makefile.amiga cpu60-group ASM60_GROUPS="huffman dequant"
+```
+
+Available groups are `core`, `fdct32`, `polyphase`, `imdct`, `antialias`,
+`midside`, `intensity`, `dequant`, `huffman`, `jpeg`, and `planars8`. The group
+build is intentionally audited too: a failure identifies a kernel that must
+stay on its C reference path until it has a 68060-specific implementation.
+
 Keep a space between every `-D...` define and every `-I...` include path.  For
 example, `-DAMIGA_M68K_ASM_MIDSIDE-Ipub` is parsed as one malformed macro
 definition, so the compiler never receives the `pub` include path and then fails
