@@ -80,6 +80,31 @@ tools/audit_68060_instructions.py --objdump m68k-amigaos-objdump \
 `tools/audit_68060_instructions.py --self-test` validates the instruction
 classifier (three-operand and colon forms, 32-bit vs 64-bit divide) offline.
 
+## Dedicated 68060 polyphase kernel (`poly060`)
+
+`real/polyphase_68060.h` is a distinct 68060 polyphase implementation
+(`ASM60_GROUPS=poly060`, define `AMIGA_M68K_POLYPHASE_68060`). It computes the
+same per-tap high multiply as the fast path -- the high 32 bits of a signed
+32x32 product, `MULSHIFT32(x, y)` -- but with Warren's signed `mulhs`: four
+hardware 32x32->32 `muls.l <ea>,Dn` partial products, shifts and adds. No
+register pair, no 64-bit libgcc call. A small guard-bit accumulator recovers
+the precision the plain fast path throws away.
+
+Verified here (host + `m68k-linux-gnu` `-m68060`):
+
+* `MulShift68060` is bit-exact vs `(int)(((long long)x*y)>>32)` over an
+  exhaustive probe set plus 2,000,000 random pairs;
+* the kernel's PCM output is within **1 LSB** of the bit-exact 64-bit reference
+  polyphase, mono and stereo (`tests/polyphase60_ref_test.c`,
+  `make -f Makefile.amiga poly60-ref-test`);
+* `MulShift68060` emits exactly four hardware `muls.l %dn,%dm` and zero libgcc
+  calls;
+* the whole decoder core built with `poly060` shows **0** register-pair
+  multiplies in the polyphase hot path, versus **8281** for `asm_polyphase`.
+
+What is NOT yet verified: real-hardware throughput and responsiveness on the
+physical ~75 MHz 68060. A zero static count is necessary but not sufficient.
+
 ## Status
 
 No config here is release-safe on the strength of a static count alone. A low

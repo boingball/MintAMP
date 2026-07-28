@@ -2419,9 +2419,18 @@ int PolyphaseStereoFastLowrate(short *pcm, int *vbuf, const int *coefBase, int s
 #endif
 }
 
+#if defined(AMIGA_M68K) && defined(AMIGA_M68K_POLYPHASE_68060)
+#include "polyphase_68060.h"
+#endif
+
 void PolyphaseMono(short *pcm, int *vbuf, const int *coefBase)
 {
-#if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_M68K_ASM_POLYPHASE)
+#if defined(AMIGA_M68K) && defined(AMIGA_M68K_POLYPHASE_68060)
+	/* Dedicated 68060 kernel: hardware-only multiplies, no emulated muls.l
+	 * register pair. Selected first so every established 030 branch below is
+	 * left byte-for-byte unchanged when this is not enabled. */
+	PolyphaseMono68060(pcm, vbuf, coefBase);
+#elif defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_M68K_ASM_POLYPHASE)
 	if (AmigaM68KPolyphaseMonoFast_IsActive()) {
 		AmigaM68KPolyphaseMonoFast(pcm, vbuf, PolyAsmCoef(coefBase));
 		return;
@@ -2436,6 +2445,10 @@ void PolyphaseMono(short *pcm, int *vbuf, const int *coefBase)
 
 void PolyphaseStereo(short *pcm, int *vbuf, const int *coefBase)
 {
+#if defined(AMIGA_M68K) && defined(AMIGA_M68K_POLYPHASE_68060)
+	PolyphaseStereo68060(pcm, vbuf, coefBase);
+	return;
+#endif
 #if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_M68K_ASM_POLYPHASE)
 	if (AmigaM68KPolyphaseFullRateStereo) {
 		AmigaM68KPolyphaseFullRateStereo(pcm, vbuf, PolyAsmCoef(coefBase));

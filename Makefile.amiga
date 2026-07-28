@@ -120,6 +120,11 @@ ASM60_FLAGS_imdct_thin_output   := -DAMIGA_FAST_POLYPHASE -DAMIGA_M68K_IMDCT_THI
 # The task is explicit: do NOT re-enable this unchanged for CPU=60. It exists
 # only as an opt-in A/B/audit knob, never in a default build.
 ASM60_FLAGS_asm_polyphase       := -DAMIGA_FAST_POLYPHASE -DAMIGA_M68K_ASM_POLYPHASE
+# poly060: the dedicated 68060 polyphase kernel (real/polyphase_68060.h). A
+# distinct implementation that computes the same high multiply with
+# hardware-only muls (Warren mulhs) instead of the emulated register pair.
+# Correctness is covered by tests/polyphase60_ref_test.c. Experimental.
+ASM60_FLAGS_poly060             := -DAMIGA_M68K_POLYPHASE_68060
 # Meta group: reproduce the entire 030 bundle on CPU=60 (the known-bad
 # "assembly-heavy" config) purely for A/B and audit baselining.
 ASM60_FLAGS_full030             := $(CPU_ASM_CPPFLAGS_FULL030)
@@ -132,7 +137,7 @@ ASM60_SRC_full030         := $(CPU_ASM_SOURCES_FULL030)
 ASM60_KNOWN := huffman dequant imdct fdct32 antialias midside intensity \
 	jpeg_grey planars8 asm_core fast_polyphase fast_reduced_taps \
 	fast_subband_cap fast_fdct32_quarter imdct_thin_output asm_polyphase \
-	full030
+	poly060 full030
 
 ifeq ($(CPU),00)
 CPU_ASM_CPPFLAGS :=
@@ -293,7 +298,7 @@ HALFASM_TEST_CPPFLAGS := -DAMIGA_M68K_ASM_FDCT32
 FAST030_ASM_SOURCES := $(CPU_ASM_SOURCES)
 AMIGA_HUNK_FAST_PREFERRED := python3 tools/amiga_fast_preferred_hunks.py
 
-.PHONY: all fast030 radio030 sslradio030 amissl-get-test amissl-free-repro-test amissl-spawn-repro-test amissl-exec-repro-test rb-stream-probe-test prof030 gui guir miniamp3 minimp3r sslgui sslguir fast030-halfasm-test gui-halfasm-test decoder-modules release release-clean clean print-command print-fast030-command print-gui-command print-guir-command cpu60-baseline cpu60-huffman cpu60-huffman-dequant cpu60-huffman-dequant-imdct cpu60-huffman-dequant-imdct-fdct32 cpu60-audit-stages
+.PHONY: all fast030 radio030 sslradio030 amissl-get-test amissl-free-repro-test amissl-spawn-repro-test amissl-exec-repro-test rb-stream-probe-test prof030 gui guir miniamp3 minimp3r sslgui sslguir fast030-halfasm-test gui-halfasm-test decoder-modules release release-clean clean print-command print-fast030-command print-gui-command print-guir-command cpu60-baseline cpu60-huffman cpu60-huffman-dequant cpu60-huffman-dequant-imdct cpu60-huffman-dequant-imdct-fdct32 cpu60-audit-stages poly60-ref-test
 
 all: $(TARGET) decoder-modules
 
@@ -504,6 +509,18 @@ cpu60-audit-stages: cpu60-baseline cpu60-huffman cpu60-huffman-dequant cpu60-huf
 			--baseline $(CPU60_PREFIX)-baseline \
 			--candidate $(CPU60_PREFIX)-$$c || exit $$?; \
 	done
+
+# Host correctness test for the 68060 polyphase kernel. Builds with the native
+# compiler (not the m68k cross-compiler) because MulShift68060 is portable C and
+# gives identical results on any platform; it compares the kernel's PCM output
+# against the bit-exact 64-bit reference polyphase and fails if the error
+# exceeds its documented bound. The separate "no emulated muls.l" check is done
+# by disassembling an -m68060 build with tools/audit_68060_instructions.py.
+HOSTCC ?= cc
+poly60-ref-test:
+	$(HOSTCC) -O2 -Ipub -Ireal -DAMIGA_M68K \
+		tests/polyphase60_ref_test.c real/trigtabs.c -o polyphase60_ref_test
+	./polyphase60_ref_test
 
 # Build all decoder modules (FLAC and AAC) — requires upstream decoder libraries.
 # CPU is forwarded as the same numeric 00/20/30/40/60 code used above so
