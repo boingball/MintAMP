@@ -7975,9 +7975,17 @@ static void AmigaAudioCommitOne(AmigaAudioPlayer *player, int index, int ch)
 			(signed char *)player->req[index][ch]->ioa_Data,
 			(unsigned long)player->req[index][ch]->ioa_Length);
 	}
-	BeginIO((struct IORequest *)player->req[index][ch]);
+	/* Use Exec's asynchronous submission entry point rather than calling the
+	 * device vector directly.  SendIO() clears IOF_QUICK before BeginIO(), so
+	 * every accepted write has exactly one reply-message lifecycle and can be
+	 * paired with CheckIO()/WaitIO().  Calling BeginIO() directly left the
+	 * request flags dependent on the preceding OpenDevice()/WaitIO() use of the
+	 * cloned request.  A quick completion could consequently omit the reply
+	 * which drives this shared-port ring, an especially visible race when a fast
+	 * CPU queues all mono slots before Paula consumes the first one. */
+	SendIO((struct IORequest *)player->req[index][ch]);
 	if (player->debugPlay)
-		printf("debug-play: BeginIO called buffer=%s ch=%d result=unavailable(void) io_Error=%ld\n",
+		printf("debug-play: SendIO called buffer=%s ch=%d result=unavailable(void) io_Error=%ld\n",
 			PlaybackBufferName(index), ch,
 			(long)player->req[index][ch]->ioa_Request.io_Error);
 }
