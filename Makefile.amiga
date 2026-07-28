@@ -36,8 +36,23 @@ ASM60_GROUPS ?=
 ifeq ($(CPU),00)
 CPU_ASM_CPPFLAGS :=
 CPU_ASM_SOURCES :=
+
 else ifeq ($(CPU),60)
+
+# Normal CPU=60 build: exact hardware-proven all-C configuration.
+ifeq ($(strip $(ASM60_GROUPS)),)
+CPU_ASM_CPPFLAGS :=
+CPU_ASM_SOURCES :=
+
+# Experimental CPU=60 build: enable only explicitly requested groups.
+else
 CPU_ASM_CPPFLAGS := \
+	$(if $(filter fastc,$(ASM60_GROUPS)),\
+		-DAMIGA_FAST_POLYPHASE \
+		-DAMIGA_FAST_REDUCED_TAPS \
+		-DAMIGA_FAST_FDCT32_QUARTER \
+		-DAMIGA_FAST_SUBBAND_CAP \
+		-DAMIGA_M68K_IMDCT_THIN_OUTPUT) \
 	$(if $(filter core,$(ASM60_GROUPS)),-DAMIGA_M68K_ASM) \
 	$(if $(filter fdct32,$(ASM60_GROUPS)),-DAMIGA_M68K_ASM_FDCT32 -DAMIGA_M68K_ASM_FDCT32_UNROLL) \
 	$(if $(filter polyphase,$(ASM60_GROUPS)),-DAMIGA_M68K_ASM_POLYPHASE) \
@@ -48,13 +63,13 @@ CPU_ASM_CPPFLAGS := \
 	$(if $(filter dequant,$(ASM60_GROUPS)),-DAMIGA_M68K_ASM_DEQUANT) \
 	$(if $(filter huffman,$(ASM60_GROUPS)),-DAMIGA_M68K_ASM_HUFFMAN) \
 	$(if $(filter jpeg,$(ASM60_GROUPS)),-DAMIGA_M68K_ASM_JPEG_GREY) \
-	$(if $(filter planars8,$(ASM60_GROUPS)),-DAMIGA_M68K_ASM_PLANARS8) \
-	-DAMIGA_FAST_POLYPHASE -DAMIGA_FAST_REDUCED_TAPS \
-	-DAMIGA_FAST_FDCT32_QUARTER -DAMIGA_FAST_SUBBAND_CAP \
-	-DAMIGA_M68K_IMDCT_THIN_OUTPUT
+	$(if $(filter planars8,$(ASM60_GROUPS)),-DAMIGA_M68K_ASM_PLANARS8)
+
 CPU_ASM_SOURCES := \
 	$(if $(filter polyphase,$(ASM60_GROUPS)),real/amiga_m68k_polyphase.S) \
 	$(if $(filter planars8,$(ASM60_GROUPS)),amiga_m68k_planars8.S)
+endif
+
 else
 CPU_ASM_CPPFLAGS := \
 	-DAMIGA_M68K_ASM \
