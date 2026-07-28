@@ -8067,17 +8067,27 @@ static int AmigaAudioCommit(AmigaAudioPlayer *player, int index)
 	return 0;
 }
 
-static int AmigaAudioDone(AmigaAudioPlayer *player, int index)
+/* Completion of the oldest slot is the normal refill handoff, not by itself
+ * an underrun: later requests in the mono/stereo queue may still be feeding
+ * Paula.  Report an underrun only when every request currently owned by
+ * audio.device has completed, leaving no queued audio behind the active slot. */
+static int AmigaAudioRingDrained(AmigaAudioPlayer *player)
 {
-	if (player->stereo) {
-		if (!player->sent[index][0] || !player->sent[index][1])
-			return 0;
-		return CheckIO((struct IORequest *)player->req[index][0]) != 0 &&
-			CheckIO((struct IORequest *)player->req[index][1]) != 0;
+	int i;
+	int ch;
+	int submitted;
+
+	submitted = 0;
+	for (i = 0; i < AmigaAudioLiveSlots(player->stereo); i++) {
+		for (ch = 0; ch < (player->stereo ? 2 : 1); ch++) {
+			if (!player->sent[i][ch])
+				continue;
+			submitted = 1;
+			if (!CheckIO((struct IORequest *)player->req[i][ch]))
+				return 0;
+		}
 	}
-	if (!player->sent[index][0])
-		return 0;
-	return CheckIO((struct IORequest *)player->req[index][0]) != 0;
+	return submitted;
 }
 
 static int AmigaAudioAbortOutstanding(AmigaAudioPlayer *player);
@@ -8281,8 +8291,8 @@ static int AmigaAudioCommit(AmigaAudioPlayer *player, int index)
 	player->prepared[index] = 0;
 	return 0;
 }
-static int AmigaAudioDone(AmigaAudioPlayer *player, int index)
-{ (void)player; (void)index; return 1; }
+static int AmigaAudioRingDrained(AmigaAudioPlayer *player)
+{ (void)player; return 1; }
 static int AmigaAudioWait(AmigaAudioPlayer *player, int index)
 { player->sent[index][0] = 0; player->sent[index][1] = 0; return 0; }
 static int AmigaAudioAllocWorkBuffers(AmigaAudioPlayer *player, int stereo,
@@ -10531,7 +10541,7 @@ static int AmigaPlayStreamingGeneric(InputSource *input,
 		waitStartedAt = clock();
 		if (gPlaybackInterrupted)
 			break;
-		underrun = AmigaAudioDone(&player, active);
+		underrun = AmigaAudioRingDrained(&player);
 		if (AmigaAudioWait(&player, active) != 0) {
 			err = -1;
 			break;
@@ -11106,7 +11116,7 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 		waitStartedAt = clock();
 		if (gPlaybackInterrupted)
 			break;
-		underrun = AmigaAudioDone(&player, active);
+		underrun = AmigaAudioRingDrained(&player);
 		if (AmigaAudioWait(&player, active) != 0) {
 			fprintf(stderr, "audio.device write failed\n");
 			err = -1;

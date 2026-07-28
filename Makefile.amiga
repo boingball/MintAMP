@@ -15,13 +15,11 @@ endif
 # inconsistently-propagated notions of "target CPU" here; this replaces
 # both.
 #
-# The hand-written asm in this project (real/amiga_m68k_polyphase.S and
-# the AMIGA_M68K_ASM_* inline asm throughout real/*.c) uses 32x32->64
-# MULS.L, which does not exist on 68000 -- so CPU=00 excludes that .S file
-# entirely (the assembler would hard-fail on it otherwise) and leaves the
-# ASM_* defines off, falling back to the C reference paths throughout.
-# CPU=20/30/40/60 all get the full asm path; -mCPU alone can't express the
-# 68000 asm gap, hence gating CPU_ASM_CPPFLAGS/CPU_ASM_SOURCES on CPU too.
+# The hand-written asm uses register-pair MULS.L extensively.  A 68060 traps
+# those instructions into the software emulation package, even though GCC's
+# own -m68060 output avoids them.  CPU=60 therefore keeps -m68060 but defaults
+# to the C reference paths.  ASM60_GROUPS can re-enable named groups for A/B
+# isolation on hardware; every such build should be followed by audit60.
 CPU ?= 30
 CPU_MFLAG_00 := -m68000
 CPU_MFLAG_20 := -m68020
@@ -33,9 +31,30 @@ ifeq ($(CPU_MFLAG),)
 $(error Unknown CPU=$(CPU) -- expected one of: 00 20 30 40 60)
 endif
 
+ASM60_GROUPS ?=
+
 ifeq ($(CPU),00)
 CPU_ASM_CPPFLAGS :=
 CPU_ASM_SOURCES :=
+else ifeq ($(CPU),60)
+CPU_ASM_CPPFLAGS := \
+	$(if $(filter core,$(ASM60_GROUPS)),-DAMIGA_M68K_ASM) \
+	$(if $(filter fdct32,$(ASM60_GROUPS)),-DAMIGA_M68K_ASM_FDCT32 -DAMIGA_M68K_ASM_FDCT32_UNROLL) \
+	$(if $(filter polyphase,$(ASM60_GROUPS)),-DAMIGA_M68K_ASM_POLYPHASE) \
+	$(if $(filter imdct,$(ASM60_GROUPS)),-DAMIGA_M68K_ASM_IMDCT) \
+	$(if $(filter antialias,$(ASM60_GROUPS)),-DAMIGA_M68K_ASM_ANTIALIAS) \
+	$(if $(filter midside,$(ASM60_GROUPS)),-DAMIGA_M68K_ASM_MIDSIDE) \
+	$(if $(filter intensity,$(ASM60_GROUPS)),-DAMIGA_M68K_ASM_INTENSITY) \
+	$(if $(filter dequant,$(ASM60_GROUPS)),-DAMIGA_M68K_ASM_DEQUANT) \
+	$(if $(filter huffman,$(ASM60_GROUPS)),-DAMIGA_M68K_ASM_HUFFMAN) \
+	$(if $(filter jpeg,$(ASM60_GROUPS)),-DAMIGA_M68K_ASM_JPEG_GREY) \
+	$(if $(filter planars8,$(ASM60_GROUPS)),-DAMIGA_M68K_ASM_PLANARS8) \
+	-DAMIGA_FAST_POLYPHASE -DAMIGA_FAST_REDUCED_TAPS \
+	-DAMIGA_FAST_FDCT32_QUARTER -DAMIGA_FAST_SUBBAND_CAP \
+	-DAMIGA_M68K_IMDCT_THIN_OUTPUT
+CPU_ASM_SOURCES := \
+	$(if $(filter polyphase,$(ASM60_GROUPS)),real/amiga_m68k_polyphase.S) \
+	$(if $(filter planars8,$(ASM60_GROUPS)),amiga_m68k_planars8.S)
 else
 CPU_ASM_CPPFLAGS := \
 	-DAMIGA_M68K_ASM \
@@ -206,7 +225,7 @@ HALFASM_TEST_CPPFLAGS := -DAMIGA_M68K_ASM_FDCT32
 FAST030_ASM_SOURCES := $(CPU_ASM_SOURCES)
 AMIGA_HUNK_FAST_PREFERRED := python3 tools/amiga_fast_preferred_hunks.py
 
-.PHONY: all fast030 radio030 sslradio030 amissl-get-test amissl-free-repro-test amissl-spawn-repro-test amissl-exec-repro-test rb-stream-probe-test prof030 gui guir miniamp3 minimp3r sslgui sslguir fast030-halfasm-test gui-halfasm-test decoder-modules release release-clean clean print-command print-fast030-command print-gui-command print-guir-command
+.PHONY: all fast030 cpu60-safe cpu60-group audit60 radio030 sslradio030 amissl-get-test amissl-free-repro-test amissl-spawn-repro-test amissl-exec-repro-test rb-stream-probe-test prof030 gui guir miniamp3 minimp3r sslgui sslguir fast030-halfasm-test gui-halfasm-test decoder-modules release release-clean clean print-command print-fast030-command print-gui-command print-guir-command
 
 all: $(TARGET) decoder-modules
 
@@ -215,6 +234,22 @@ $(TARGET): $(SOURCES)
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
 
 fast030: $(FAST030_TARGET) decoder-modules
+
+# Baseline 68060 build: -m68060, no AMIGA_M68K_ASM_* define and no handwritten
+# assembly source.  Use cpu60-group ASM60_GROUPS=fdct32 (etc.) to bisect kernels.
+cpu60-safe:
+	$(MAKE) -f Makefile.amiga amiga_mp3dec.060c CPU=60 ASM60_GROUPS= FAST030_TARGET=amiga_mp3dec.060c
+	$(MAKE) -f Makefile.amiga audit60 AUDIT60_BINARY=amiga_mp3dec.060c
+
+cpu60-group:
+	@test -n "$(ASM60_GROUPS)" || { echo "set ASM60_GROUPS (core fdct32 polyphase imdct antialias midside intensity dequant huffman jpeg planars8)" >&2; exit 2; }
+	$(MAKE) -f Makefile.amiga amiga_mp3dec.060-asm CPU=60 ASM60_GROUPS="$(ASM60_GROUPS)" FAST030_TARGET=amiga_mp3dec.060-asm
+	$(MAKE) -f Makefile.amiga audit60 AUDIT60_BINARY=amiga_mp3dec.060-asm
+
+AUDIT60_BINARY ?= amiga_mp3dec.060c
+OBJDUMP ?= m68k-amigaos-objdump
+audit60:
+	python3 tools/audit_68060_instructions.py --objdump "$(OBJDUMP)" "$(AUDIT60_BINARY)"
 
 radio030:
 	$(MAKE) -f Makefile.amiga fast030 RADIO=1
