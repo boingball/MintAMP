@@ -105,6 +105,53 @@ Verified here (host + `m68k-linux-gnu` `-m68060`):
 What is NOT yet verified: real-hardware throughput and responsiveness on the
 physical ~75 MHz 68060. A zero static count is necessary but not sufficient.
 
+## Per-group 68060 map (decoder core, verified)
+
+Each group built alone at `-m68060` and audited. "Emulated muls" is the count of
+register-pair long multiplies the group introduces into the decoder core:
+
+| Group                 | emulated muls | on the 68060 |
+|-----------------------|--------------:|--------------|
+| `poly060`             |             0 | dedicated 68060 kernel — big win |
+| `huffman`             |             0 | clean; safe to enable |
+| `midside`             |             0 | clean; safe to enable |
+| `fast_subband_cap`    |             0 | clean; low-rate work reduction |
+| `fast_reduced_taps`   |             0 | clean, but a no-op alongside poly060 |
+| `dequant`             |            12 | AVOID — swaps hardware C for emulated asm |
+| `antialias`           |             8 | AVOID |
+| `intensity`           |            10 | AVOID |
+| `imdct`               |            43 | AVOID (`IMDCT36_AMIGA_M68K_ASM`) |
+| `fdct32`              |           112 | AVOID (`xmp3_FDCT32` + passes) |
+| `asm_core`            |           141 | AVOID (flips MULSHIFT32 global to emulated) |
+| `fast_fdct32_quarter` |           528 | AVOID (pulls in fast-C polyphase muls) |
+| `imdct_thin_output`   |           528 | AVOID (pulls in fast-C polyphase muls) |
+
+Crucially, the clean C baseline decoder has **zero** register-pair muls AND
+zero `__muldi3` calls at `-m68060`: GCC compiles the C `MULSHIFT32` to hardware
+2-operand `muls.l`. So imdct/dct32/dequant in plain C are already
+emulation-free on the 060 -- enabling their asm groups only makes things worse.
+
+## Recommended experimental 68060 config
+
+```
+make -f Makefile.amiga fast030 CPU=60 ASM60_GROUPS="poly060 huffman midside"
+```
+
+`poly060` removes the one catastrophic emulation source (polyphase). `huffman`
+and `midside` are emulation-free and target exactly the throughput-bound cases
+(high bitrate -> huffman; stereo -> mid/side), though whether they beat GCC's
+`-m68060` C is an on-hardware A/B call, not a static one. Everything else in
+the decode path is already emulation-free C; the remaining limit at 44.1 kHz /
+stereo / high bitrate is raw compute on a 75 MHz 060, not emulated
+instructions.
+
+To find the next thing worth hand-optimising, build the profiling decoder
+(`make -f Makefile.amiga prof030 CPU=60 ASM60_GROUPS="poly060"`) and read the
+per-bucket split (huffman / dequant / imdct / subband-dct32 / polyphase /
+stereo). Hand-writing a 68060 kernel for a stage only pays off where the C is
+the measured bottleneck -- it will not remove emulation there is none left to
+remove, only improve scheduling.
+
 ## Status
 
 No config here is release-safe on the strength of a static count alone. A low
