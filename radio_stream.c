@@ -16,6 +16,18 @@
 #ifndef RADIO_RING_BYTES
 #define RADIO_RING_BYTES 65536UL
 #endif
+/* Per-read chunk for the worker pump. A TLS record holds up to 16 KiB of
+ * application data, and SSL_read() returns at most one record's worth per call
+ * with the remainder buffered inside AmiSSL. Reading in 1 KiB slices therefore
+ * throttled HTTPS to a fraction of a record per pump while the rest sat in the
+ * SSL buffer (the socket looked "empty" to the worker), so higher-bitrate HTTPS
+ * streams starved even though the identical HTTP stream -- where recv() reflects
+ * the kernel buffer directly -- kept up. Sizing the chunk to a full TLS record
+ * lets one SSL_read() drain a whole record, which is what higher-bitrate HTTPS
+ * needs. The worker task has a 128 KiB stack, so a 16 KiB read buffer is safe. */
+#ifndef RADIO_READ_CHUNK
+#define RADIO_READ_CHUNK 16384
+#endif
 #ifndef RADIO_START_THRESHOLD
 #define RADIO_START_THRESHOLD (RADIO_RING_BYTES / 4)
 #endif
@@ -4493,7 +4505,7 @@ void Radio_NetworkShutdown(void)
  * those builds. Non-AmiSSL builds still call it directly, unchanged. */
 static int radio_pump_body(RadioStream *rs)
 {
-    unsigned char b[1024];
+    unsigned char b[RADIO_READ_CHUNK];
     int n, wb, requested, consumed;
     unsigned long usedSnapshot, sizeSnapshot, ringFreeSnapshot;
     int headerDoneSnapshot, parseStateSnapshot, audioUntilMetaSnapshot, metaLeftSnapshot;
