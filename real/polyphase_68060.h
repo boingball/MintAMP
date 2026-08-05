@@ -36,6 +36,15 @@
 #ifndef _POLYPHASE_68060_H
 #define _POLYPHASE_68060_H
 
+/* The full-rate standalone kernels below are unused when the fast/stride path
+ * is also compiled in (AMIGA_FAST_POLYPHASE), which then supplies the full-rate
+ * entry itself. Mark them unused so that configuration does not warn. */
+#if defined(__GNUC__)
+#define POLY60_MAYBE_UNUSED __attribute__((unused))
+#else
+#define POLY60_MAYBE_UNUSED
+#endif
+
 /* Match the polyphase.c fixed-point layout. Guarded so including this after
  * polyphase.c's own #defines does not redefine them. */
 #ifndef POLY60_CSHIFT
@@ -138,7 +147,7 @@ static __inline short Poly60Finalize(int acc)
 	sum2 += PolyphaseMulShift26_68060(vHi,  c1); \
 }
 
-static void PolyphaseMono68060(short *pcm, int *vbuf, const int *coefBase)
+static POLY60_MAYBE_UNUSED void PolyphaseMono68060(short *pcm, int *vbuf, const int *coefBase)
 {
 	int i;
 	const int *coef;
@@ -208,7 +217,7 @@ static void PolyphaseMono68060(short *pcm, int *vbuf, const int *coefBase)
 	sum2R += PolyphaseMulShift26_68060(vHi,  c1); \
 }
 
-static void PolyphaseStereo68060(short *pcm, int *vbuf, const int *coefBase)
+static POLY60_MAYBE_UNUSED void PolyphaseStereo68060(short *pcm, int *vbuf, const int *coefBase)
 {
 	int i;
 	const int *coef;

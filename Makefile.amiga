@@ -125,6 +125,16 @@ ASM60_FLAGS_asm_polyphase       := -DAMIGA_FAST_POLYPHASE -DAMIGA_M68K_ASM_POLYP
 # hardware-only muls (Warren mulhs) instead of the emulated register pair.
 # Correctness is covered by tests/polyphase60_ref_test.c. Experimental.
 ASM60_FLAGS_poly060             := -DAMIGA_M68K_POLYPHASE_68060
+# lowrate060: the 68060 polyphase kernel PLUS the whole downsampling fast path
+# (stride synthesis, reduced taps, subband cap, fdct32 quarter, imdct thin) --
+# the same work-reduction the CPU=30 fast build uses, but with poly060 making
+# every per-tap multiply hardware-clean instead of the emulated register pair.
+# This is what cuts real work when output rate < source rate (e.g. 22050 from a
+# 44100 source), which the profiler shows dominates. Drop fast_reduced_taps for
+# a longer (higher quality) polyphase filter at a little more cost.
+ASM60_FLAGS_lowrate060          := -DAMIGA_M68K_POLYPHASE_68060 -DAMIGA_FAST_POLYPHASE \
+	-DAMIGA_FAST_REDUCED_TAPS -DAMIGA_FAST_SUBBAND_CAP \
+	-DAMIGA_FAST_FDCT32_QUARTER -DAMIGA_M68K_IMDCT_THIN_OUTPUT
 # Meta group: reproduce the entire 030 bundle on CPU=60 (the known-bad
 # "assembly-heavy" config) purely for A/B and audit baselining.
 ASM60_FLAGS_full030             := $(CPU_ASM_CPPFLAGS_FULL030)
@@ -137,7 +147,7 @@ ASM60_SRC_full030         := $(CPU_ASM_SOURCES_FULL030)
 ASM60_KNOWN := huffman dequant imdct fdct32 antialias midside intensity \
 	jpeg_grey planars8 asm_core fast_polyphase fast_reduced_taps \
 	fast_subband_cap fast_fdct32_quarter imdct_thin_output asm_polyphase \
-	poly060 full030
+	poly060 lowrate060 full030
 
 ifeq ($(CPU),00)
 CPU_ASM_CPPFLAGS :=

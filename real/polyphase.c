@@ -651,6 +651,15 @@ static POLYPHASE_REF_UNUSED void PolyphaseStereoReference(short *pcm, int *vbuf,
 
 #if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE)
 
+#if defined(AMIGA_M68K_POLYPHASE_68060)
+/* Pull in MulShift68060 so the fast path's per-tap multiply can be made
+ * 68060-clean below. This is the "decouple": AMIGA_FAST_POLYPHASE supplies the
+ * downsampling work reductions (stride, reduced taps, subband cap, fdct32
+ * quarter, imdct thin), and poly060 swaps their emulated muls.l for hardware
+ * multiplies, so the whole fast/lowrate path runs without emulation on a 060. */
+#include "polyphase_68060.h"
+#endif
+
 /*
  * Optional Amiga/m68k fast polyphase path.
  *
@@ -682,7 +691,12 @@ static __inline int PolyphaseMulShift26(int x, int coef)
 	/* Need (x * coef) >> (32 - CSHIFT + DEF_NFRACBITS) == >> 26.
 	 * Shift the coefficient left by DEF_NFRACBITS and take the high word.
 	 */
-#if defined(__GNUC__) && \
+#if defined(AMIGA_M68K_POLYPHASE_68060)
+	/* 68060: the register-pair muls.l below is emulated in software. Compute
+	 * the identical value with hardware-only multiplies. Bit-for-bit equal to
+	 * the muls.l result, so the fast/lowrate PCM output is unchanged. */
+	return MulShift68060(x, coef << DEF_NFRACBITS);
+#elif defined(__GNUC__) && \
 	(defined(__mc68020__) || defined(__mc68030__) || defined(__mc68040__) || \
 	 defined(__mc68060__) || defined(mc68020))
 	int hi;
@@ -2425,10 +2439,12 @@ int PolyphaseStereoFastLowrate(short *pcm, int *vbuf, const int *coefBase, int s
 
 void PolyphaseMono(short *pcm, int *vbuf, const int *coefBase)
 {
-#if defined(AMIGA_M68K) && defined(AMIGA_M68K_POLYPHASE_68060)
-	/* Dedicated 68060 kernel: hardware-only multiplies, no emulated muls.l
-	 * register pair. Selected first so every established 030 branch below is
-	 * left byte-for-byte unchanged when this is not enabled. */
+#if defined(AMIGA_M68K) && defined(AMIGA_M68K_POLYPHASE_68060) && !defined(AMIGA_FAST_POLYPHASE)
+	/* poly060 alone: dedicated 68060 full-rate kernel (hardware-only multiplies).
+	 * When AMIGA_FAST_POLYPHASE is also enabled the fast/lowrate path below is
+	 * used instead -- it handles stride downsampling and reduced taps and is now
+	 * 68060-clean too (PolyphaseMulShift26 uses MulShift68060). Selected first so
+	 * every established 030 branch is left byte-for-byte unchanged when off. */
 	PolyphaseMono68060(pcm, vbuf, coefBase);
 #elif defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_M68K_ASM_POLYPHASE)
 	if (AmigaM68KPolyphaseMonoFast_IsActive()) {
@@ -2445,7 +2461,7 @@ void PolyphaseMono(short *pcm, int *vbuf, const int *coefBase)
 
 void PolyphaseStereo(short *pcm, int *vbuf, const int *coefBase)
 {
-#if defined(AMIGA_M68K) && defined(AMIGA_M68K_POLYPHASE_68060)
+#if defined(AMIGA_M68K) && defined(AMIGA_M68K_POLYPHASE_68060) && !defined(AMIGA_FAST_POLYPHASE)
 	PolyphaseStereo68060(pcm, vbuf, coefBase);
 	return;
 #endif

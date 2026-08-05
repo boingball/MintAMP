@@ -152,6 +152,54 @@ stereo). Hand-writing a 68060 kernel for a stage only pays off where the C is
 the measured bottleneck -- it will not remove emulation there is none left to
 remove, only improve scheduling.
 
+## Decoupling the downsampling fast path for the 68060 (`lowrate060`)
+
+Real-hardware profiling (A1200, 68060 @ 75 MHz, decode-only, `poly060`, a
+320 kbps 44.1 kHz stereo file) put the core cost at:
+
+| stage            |    time | share |
+|------------------|--------:|------:|
+| polyphase        | 242.7 s |   36% |
+| subband / dct32  | 153.8 s |   23% |
+| imdct            | 120.6 s |   18% |
+| huffman          |  19.9 s |    3% |
+| dequant          |  16.8 s |  2.5% |
+| bitstream        |  10.4 s |  1.5% |
+| stereo / post    |   2.2 s |  0.3% |
+
+polyphase + dct32 + imdct are 77% of the work, and the profile's stride
+counters were all zero: `poly060` alone runs the **full-rate** 512-tap
+synthesis and full dct32/imdct even when the output rate is below the source
+rate. MintAMP already has a downsampling fast path -- stride synthesis, reduced
+taps, subband cap, fdct32 quarter, imdct thin -- that skips the work above the
+output Nyquist, but it was gated behind `AMIGA_FAST_POLYPHASE` and its polyphase
+multiply used the emulated `muls.l` register pair (~540 in the decoder core).
+
+The decouple: under `AMIGA_M68K_POLYPHASE_68060`, `PolyphaseMulShift26` (the one
+multiply every fast/stride/reduced polyphase variant funnels through) computes
+its result with `MulShift68060` instead of the register pair. `FDCT32FastLowrate`
+was already emulation-free. So enabling the fast path together with `poly060`
+now runs the entire downsampling path with hardware-only multiplies:
+
+* `lowrate060` decoder core: **0** register-pair multiplies (was ~540);
+* the `muls.l` result and `MulShift68060` are bit-identical, so the decoded PCM
+  is the same as the established CPU=30 fast build -- this de-emulates, it does
+  not change output;
+* without `poly060` the fast path is byte-for-byte unchanged (still emulated),
+  so CPU=30 behaviour is untouched.
+
+Recommended for output rates below the source (e.g. 22050 from 44100), where
+the stride path roughly halves polyphase/dct32/imdct work:
+
+```
+make -f Makefile.amiga fast030 CPU=60 ASM60_GROUPS="lowrate060"
+```
+
+Drop `fast_reduced_taps` (build the groups explicitly) for a longer, higher
+quality polyphase filter at a little more cost. Full-rate 44100 output gets no
+stride benefit -- that ceiling is raw compute, addressed only by a faster
+dct32/imdct, which the profiler should drive.
+
 ## Status
 
 No config here is release-safe on the strength of a static count alone. A low
