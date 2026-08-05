@@ -6800,6 +6800,15 @@ static int MrMainReal(int argc, char **argv)
 			PollPlaybackStatus(&app);
 			UpdateAlbumHover(&app);
 			ScrollAlbumHover(&app);
+			/* The Internet Radio and Playlist windows overlap the artwork
+			 * panel. ReAction refreshes the placeholder gadget beneath them
+			 * without repainting our hand-drawn art (RA_HandleInput consumes
+			 * IDCMP_REFRESHWINDOW itself), so the art was wiped on overlap and
+			 * stayed blank. Re-blit it on the timer while such a window is open
+			 * -- bounded to that case, so normal playback with no sub-window
+			 * open pays nothing. Restores within one tick of any overlap. */
+			if (app.rbWinObj || app.plWinObj)
+				DrawArtPanel(&app);
 			ArmTimer(&app, MR_TICK_MICROS);
 		}
 
