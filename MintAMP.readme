@@ -1,0 +1,194 @@
+Short:        Multiformat player and net radio
+Author:       Darren Banfi (boingball)
+Uploader:     boingball@gmail.com (Darren Banfi)
+Type:         mus/play
+Version:      1.1.0
+Architecture: m68k-amigaos >= 3.1.0
+Requires:     68030+; matching 68030/68060 build; TCP/IP stack for radio;
+              util/libs/AmiSSL-v5-OS3.lha for HTTPS
+
+MintAMP - Mini Internet Amiga Media Player
+==========================================
+
+MintAMP is a lightweight multiformat audio player and internet radio client
+for classic Amiga computers. It uses fixed-point decoders designed for m68k
+systems and outputs directly through Paula using audio.device, so AHI and a
+sound card are not required.
+
+Version 1.1 is supplied in separate 68030 and 68060 archives:
+
+  MintAMP-v1.1-68030  For 68030 and 68040 systems
+  MintAMP-v1.1-68060  Dedicated build for 68060 systems
+
+Use the archive which matches the processor in your Amiga. The 68060 edition
+contains a dedicated 68060-safe and 68060-optimised MP3 path; it is not
+intended for 68030 or 68040 processors.
+
+Three player editions are included:
+
+  MintAMP                 ReAction/ClassAct edition
+  MintAMP-GT              GadTools edition for systems without ReAction
+  amiga_mp3dec.fastexp    Command-line edition
+
+Features
+--------
+
+  - Local MP3 playback using the Helix fixed-point decoder
+  - Dedicated 68060 MP3 build with optimised low-rate synthesis, Huffman,
+    mid/side stereo and planar sample conversion paths
+  - Local and streamed AAC-LC ADTS/AAC+ playback
+  - Local FLAC playback
+  - Local Ogg Vorbis playback using the fixed-point Tremor decoder
+  - Experimental classic WMA playback (WMAv1/WMAv2 in ASF containers)
+  - Uncompressed PCM WAV playback (8/16/24/32-bit, mono or stereo)
+  - Amiga IFF-8SVX playback, including Fibonacci-delta compression
+  - Bundled modular AAC, FLAC, Ogg, WMA, WAV and IFF decoders
+  - HTTP and HTTPS internet radio
+  - Radio Browser station search and favourites
+  - Live ICY station, artist and title information
+  - Station artwork using JPEG, PNG, WebP, ICO and a subset of SVG
+  - Playlist loading and saving
+  - ID3 tag display and track ratings
+  - Configurable output rate, quality, channel mode and buffering
+  - Reduced-rate and reduced-subband modes for slower systems
+  - Direct Paula audio output; no AHI installation required
+
+Requirements
+------------
+
+  - AmigaOS 3.1 or later
+  - Motorola 68030 or better
+  - The correct MintAMP archive for the installed processor
+  - Fast RAM is strongly recommended
+  - A running TCP/IP stack providing bsdsocket.library for internet radio
+  - AmiSSL v5 for HTTPS streams
+  - ReAction/ClassAct v44 classes for the MintAMP ReAction edition
+
+Use MintAMP-GT if ReAction/ClassAct is not installed. Local playback does not
+need a TCP/IP stack or AmiSSL.
+
+Installation
+------------
+
+Extract the complete archive to a drawer and keep the decoders drawer beside
+the player executables:
+
+  MintAMP/
+    MintAMP
+    MintAMP.info
+    MintAMP-GT
+    MintAMP-GT.info
+    amiga_mp3dec.fastexp
+    ArtCache/
+    decoders/
+      aac.decoder
+      flac.decoder
+      ogg.decoder
+      wma.decoder
+      wav.decoder
+      iff.decoder
+
+Start MintAMP or MintAMP-GT from Workbench. The command-line edition can be
+started from Shell.
+
+For internet radio, start the TCP/IP stack first. Install AmiSSL from
+util/libs/AmiSSL-v5-OS3.lha to play HTTPS stations.
+
+68060 Edition
+-------------
+
+The 68060 archive contains a dedicated MP3 build created for real 68060
+hardware. The new path avoids expensive instructions which require software
+emulation on the 68060 and adds selected 68060-clean assembly optimisations.
+
+The 68060 build includes:
+
+  - Dedicated 68060 polyphase synthesis
+  - Fast reduced-rate playback paths
+  - Optimised MP3 Huffman decoding
+  - Optimised mid/side stereo processing
+  - Optimised planar 8-bit sample conversion
+
+The original 68030 decoder path remains available in the separate 68030
+archive.
+
+Internet Radio Notes
+--------------------
+
+MintAMP supports direct HTTP and HTTPS MP3 and ADTS AAC/AAC+ streams. Radio
+Browser search, favourites, ICY metadata and station artwork are available in
+both GUI editions.
+
+Version 1.1 increases the compressed radio input buffer and improves network
+worker scheduling, rebuffer handling and HTTP/HTTPS read throughput.
+
+Very high bitrate streams can still depend on the radio server, TCP/IP stack,
+network conditions, processor speed and selected output settings. A 128 kbit
+MP3 station is the safest choice for uninterrupted playback on classic
+hardware. Streams at 192, 256 or 320 kbit may require a lower output rate or
+may occasionally rebuffer.
+
+HLS/M3U8 streams are not supported. Internet stations must provide a direct
+MP3 or ADTS AAC/AAC+ stream URL.
+
+Format Notes
+------------
+
+AAC support is for ADTS files and direct ADTS/AAC+ streams.
+
+FLAC decoding is considerably more demanding than MP3. Usable settings depend
+on the processor, file complexity and selected output rate.
+
+WMA support covers the classic WMAv1 and WMAv2 codecs in ASF containers. This
+includes compatible WMA Standard files, but not WMA Pro, Lossless or Voice.
+
+Source Code
+-----------
+
+Source code, build instructions and development information:
+
+  https://github.com/boingball/MintAMP
+
+Credits
+-------
+
+Amiga port, GUI front-ends, decoder integration, internet radio, artwork and
+m68k/68060 optimisation by Darren Banfi (boingball).
+
+Audio decoder components:
+
+  - MP3: Helix fixed-point decoder from RealNetworks
+  - AAC: Helix AAC through ESP8266Audio by Earle F. Philhower III
+  - FLAC: libfoxenflac by Alexander Stoeckel
+  - Ogg Vorbis: Xiph.Org Tremor via Phil Schatzmann's Arduino port,
+    together with Xiph.Org libogg
+  - WMA: Rockbox fixed-point libwma, derived from FFmpeg's WMA decoder
+
+Artwork decoder components:
+
+  - JPEG: picojpeg-compatible decoder; picojpeg was created by Rich Geldreich
+  - PNG: LodePNG by Lode Vandevenne
+  - WebP: compact implementation using parts of Google's libwebp reference
+    decoder under its BSD licence
+
+The MintAMP-specific ASF/WMA integration, WAV/PCM and IFF-8SVX decoders, and
+ICO, SVG and compact WebP artwork handlers were developed with assistance from
+Anthropic Claude and OpenAI Codex.
+
+These components remain under their respective licences, including the Helix
+RPSL, LGPL, BSD-style and LodePNG terms. See the licence files and source
+repository for the complete terms and source code.
+
+History
+-------
+
+1.1.0  Added a dedicated 68060 release with 68060-safe MP3 synthesis and
+       selected Huffman, mid/side and planar conversion optimisations.
+       Improved HTTP and HTTPS radio throughput, worker scheduling, input
+       buffering and rebuffer behaviour.
+       Increased the radio input ring to 256 KiB.
+       Improved station artwork refresh when windows overlap the player.
+       Restored station artwork when replaying the previous radio stream.
+       Retained the established 68030 decoder path in a separate archive.
+
+1.0.0  Initial Aminet release.
