@@ -669,6 +669,10 @@ typedef struct MrApp {
 	char            rbFavouriteUrls[MR_RADIO_FAV_MAX][RB_MAX_URL];
 	char            currentRadioStationName[RB_MAX_NAME];
 	char            currentRadioFavicon[RB_MAX_FAVICON];
+	/* Final URL the current station name/favicon belong to, so a Play/replay
+	 * (which passes no station name) can tell "same stream, keep the artwork"
+	 * from "a different URL, reset it". */
+	char            currentRadioArtUrl[MR_MAX_PATH];
 	RadioBrowserController rbController;
 
 	struct MsgPort   *timerPort;
@@ -5398,9 +5402,26 @@ static void RadioProbeUrlAndStart(MrApp *app, const char *url, const char *stati
 	SafeCopy(app->inputName, sizeof(app->inputName), info.final_url);
 	app->haveRadioHostAddr = info.have_host_addr;
 	app->radioHostAddrBe = info.host_addr_be;
-	app->currentRadioFavicon[0] = '\0';
-	name = (stationName && stationName[0]) ? stationName : "Internet Radio";
-	SafeCopy(app->currentRadioStationName, sizeof(app->currentRadioStationName), name);
+	/* Preserve the station name and favicon when this is a Play/replay of the
+	 * same stream (no station name supplied and the probed URL matches the one
+	 * the current artwork belongs to). Otherwise -- a named start, or a
+	 * different URL typed in -- establish a fresh art context. Without this,
+	 * hitting Play after Stop reset the name to "Internet Radio" and cleared the
+	 * favicon, so the artwork never reloaded (cache key no longer matched and
+	 * there was no favicon URL to re-fetch). */
+	if ((stationName && stationName[0]) ||
+	    !app->currentRadioStationName[0] ||
+	    !app->currentRadioArtUrl[0] ||
+	    strcmp(info.final_url, app->currentRadioArtUrl) != 0) {
+		app->currentRadioFavicon[0] = '\0';
+		SafeCopy(app->currentRadioStationName,
+			sizeof(app->currentRadioStationName),
+			(stationName && stationName[0]) ? stationName : "Internet Radio");
+		SafeCopy(app->currentRadioArtUrl,
+			sizeof(app->currentRadioArtUrl), info.final_url);
+	}
+	name = app->currentRadioStationName[0] ?
+		app->currentRadioStationName : "Internet Radio";
 	UpdateFileGadget(app);
 	RefreshFileInfoAndTags(app);
 	sprintf(msg, "Buffering - %.140s", name);
@@ -5834,6 +5855,9 @@ static void RadioDoProbeAndPlay(MrApp *app)
 	}
 #endif
 	SafeCopy(app->inputName, sizeof(app->inputName), info.final_url);
+	/* This station's name/favicon (set just below) belong to this URL, so a
+	 * later Play/replay can recognise it and keep the artwork. */
+	SafeCopy(app->currentRadioArtUrl, sizeof(app->currentRadioArtUrl), info.final_url);
 	{
 		int artworkDisabled = rb_probe_artwork_disabled();
 		RADIO_DBG(printf("radio-art: flag check MP3_NO_ARTWORK enabled=%d testEnable=%d before favicon/artwork fetch\n", artworkDisabled, rb_probe_artwork_test_enabled());)
