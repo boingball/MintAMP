@@ -4,7 +4,7 @@ Uploader:     boingball@gmail.com (Darren Banfi)
 Type:         mus/play
 Version:      1.1.0
 Architecture: m68k-amigaos >= 3.1.0
-Requires:     68030+; matching 68030/68060 build; TCP/IP stack for radio;
+Requires:     68030+; TCP/IP stack for radio;
               util/libs/AmiSSL-v5-OS3.lha for HTTPS
 
 MintAMP - Mini Internet Amiga Media Player
@@ -15,16 +15,16 @@ for classic Amiga computers. It uses fixed-point decoders designed for m68k
 systems and outputs directly through Paula using audio.device, so AHI and a
 sound card are not required.
 
-Version 1.1 is supplied in separate 68030 and 68060 archives:
+This archive contains two complete MintAMP drawers:
 
   MintAMP-v1.1-68030  For 68030 and 68040 systems
   MintAMP-v1.1-68060  Dedicated build for 68060 systems
 
-Use the archive which matches the processor in your Amiga. The 68060 edition
-contains a dedicated 68060-safe and 68060-optimised MP3 path; it is not
-intended for 68030 or 68040 processors.
+Open or copy the drawer which matches the processor installed in your Amiga.
+The 68060 edition contains a dedicated 68060-safe and 68060-optimised MP3
+path. It is not intended for 68030 or 68040 processors.
 
-Three player editions are included:
+Each drawer contains three player editions:
 
   MintAMP                 ReAction/ClassAct edition
   MintAMP-GT              GadTools edition for systems without ReAction
@@ -58,7 +58,6 @@ Requirements
 
   - AmigaOS 3.1 or later
   - Motorola 68030 or better
-  - The correct MintAMP archive for the installed processor
   - Fast RAM is strongly recommended
   - A running TCP/IP stack providing bsdsocket.library for internet radio
   - AmiSSL v5 for HTTPS streams
@@ -70,10 +69,27 @@ need a TCP/IP stack or AmiSSL.
 Installation
 ------------
 
-Extract the complete archive to a drawer and keep the decoders drawer beside
-the player executables:
+Extract the complete archive. Its root contains:
 
-  MintAMP/
+  MintAMP-v1.1-68030/
+  MintAMP-v1.1-68060/
+  MintAMP-v1.1-68030.info
+  MintAMP-v1.1-68060.info
+
+Choose the drawer matching your processor:
+
+  68030 or 68040:
+    Use MintAMP-v1.1-68030
+
+  68060:
+    Use MintAMP-v1.1-68060
+
+You may leave both drawers together or copy only the required drawer to your
+preferred location.
+
+Keep every file inside the selected drawer together. Its layout is:
+
+  MintAMP-v1.1-68xxx/
     MintAMP
     MintAMP.info
     MintAMP-GT
@@ -88,16 +104,56 @@ the player executables:
       wav.decoder
       iff.decoder
 
-Start MintAMP or MintAMP-GT from Workbench. The command-line edition can be
-started from Shell.
+Start MintAMP or MintAMP-GT from Workbench. For internet radio, start the
+TCP/IP stack first. Install AmiSSL from util/libs/AmiSSL-v5-OS3.lha to play
+HTTPS stations.
 
-For internet radio, start the TCP/IP stack first. Install AmiSSL from
-util/libs/AmiSSL-v5-OS3.lha to play HTTPS stations.
+Command-Line Edition
+--------------------
+
+amiga_mp3dec.fastexp is the command-line edition. Open a Shell, change to the
+selected MintAMP drawer and use --play followed by a local filename or direct
+stream URL.
+
+Examples:
+
+  amiga_mp3dec.fastexp --play "Work:Music/example.mp3"
+  amiga_mp3dec.fastexp --play "Work:Music/example.aac"
+  amiga_mp3dec.fastexp --play "Work:Music/example.flac"
+  amiga_mp3dec.fastexp --play "Work:Music/example.ogg"
+  amiga_mp3dec.fastexp --play "Work:Music/example.wma"
+  amiga_mp3dec.fastexp --play "Work:Music/example.wav"
+  amiga_mp3dec.fastexp --play "Work:Music/example.iff"
+
+Direct internet radio:
+
+  amiga_mp3dec.fastexp --play "http://example.com/direct-stream"
+  amiga_mp3dec.fastexp --play "https://example.com/direct-stream"
+
+Useful options include:
+
+  --rate 22050
+  --mono
+  --stereo
+  --fast-lowrate
+  --fast-mem
+  --quality 0
+  --subband-cap 16
+  --buffer-seconds 4
+  --volume 80
+
+Example reduced-rate playback:
+
+  amiga_mp3dec.fastexp --play "Work:Music/example.mp3" --rate 22050
+  --stereo --fast-lowrate --fast-mem
+
+Run amiga_mp3dec.fastexp without arguments to display the complete option
+list.
 
 68060 Edition
 -------------
 
-The 68060 archive contains a dedicated MP3 build created for real 68060
+The 68060 drawer contains a dedicated MP3 build created for real 68060
 hardware. The new path avoids expensive instructions which require software
 emulation on the 68060 and adds selected 68060-clean assembly optimisations.
 
@@ -109,8 +165,7 @@ The 68060 build includes:
   - Optimised mid/side stereo processing
   - Optimised planar 8-bit sample conversion
 
-The original 68030 decoder path remains available in the separate 68030
-archive.
+The established 68030 decoder path remains available in the 68030 drawer.
 
 Internet Radio Notes
 --------------------
@@ -182,13 +237,14 @@ repository for the complete terms and source code.
 History
 -------
 
-1.1.0  Added a dedicated 68060 release with 68060-safe MP3 synthesis and
+1.1.0  Added a dedicated 68060 drawer with 68060-safe MP3 synthesis and
        selected Huffman, mid/side and planar conversion optimisations.
+       Added both 68030/68040 and 68060 editions to one distribution archive.
        Improved HTTP and HTTPS radio throughput, worker scheduling, input
        buffering and rebuffer behaviour.
        Increased the radio input ring to 256 KiB.
        Improved station artwork refresh when windows overlap the player.
        Restored station artwork when replaying the previous radio stream.
-       Retained the established 68030 decoder path in a separate archive.
+       Retained the established 68030 decoder path in its own drawer.
 
 1.0.0  Initial Aminet release.
