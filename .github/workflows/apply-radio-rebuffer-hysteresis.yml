@@ -1,0 +1,112 @@
+name: Apply radio rebuffer hysteresis patch
+
+on:
+  push:
+    branches:
+      - fix/radio-rebuffer-hysteresis
+
+permissions:
+  contents: write
+
+jobs:
+  apply-patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/radio-rebuffer-hysteresis
+          fetch-depth: 0
+
+      - name: Apply focused rebuffer fix
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("radio_stream.c")
+          text = path.read_text()
+
+          old_gate = '''\tif(stopping || status==RADIO_STATUS_STOPPING || status==RADIO_STATUS_CLOSED || status==RADIO_STATUS_ERROR)
+          \t\treturn 0;
+          \tif(!headerDone || !decoderStarted || used==0) {
+          \t\tif(status==RADIO_STATUS_PLAYING || status==RADIO_STATUS_BUFFERING || status==RADIO_STATUS_CONNECTING || status==RADIO_STATUS_RECONNECTING)
+          \t\t\tRADIO_DBG(printf("radio-read: transient zero session=%lu status=%d used=%lu headerDone=%d decoderStarted=%d everPlayed=%d stopping=%d\\n",
+          \t\t\t\trs->session_id, (int)status, used, headerDone, decoderStarted, everPlayed, stopping);)
+          \t\treturn 0;
+          \t}
+          '''
+
+          new_gate = '''\tif(stopping || status==RADIO_STATUS_STOPPING || status==RADIO_STATUS_CLOSED || status==RADIO_STATUS_ERROR)
+          \t\treturn 0;
+          \tif(!headerDone || !decoderStarted) {
+          \t\tif(status==RADIO_STATUS_PLAYING || status==RADIO_STATUS_BUFFERING || status==RADIO_STATUS_CONNECTING || status==RADIO_STATUS_RECONNECTING)
+          \t\t\tRADIO_DBG(printf("radio-read: transient zero session=%lu status=%d used=%lu headerDone=%d decoderStarted=%d everPlayed=%d stopping=%d\\n",
+          \t\t\t\trs->session_id, (int)status, used, headerDone, decoderStarted, everPlayed, stopping);)
+          \t\treturn 0;
+          \t}
+          \t/* Do not nibble newly-arrived packets immediately after an underrun.
+          \t * Once the stream enters BUFFERING, wait for the normal start threshold
+          \t * before handing compressed bytes back to the decoder.  This gives the
+          \t * 256 KiB ring real hysteresis instead of repeated play/pause bursts. */
+          \tif(status==RADIO_STATUS_BUFFERING) {
+          \t\tif(used<RADIO_START_THRESHOLD)
+          \t\t\treturn 0;
+          \t\tRADIO_DBG(printf("radio-read: rebuffer complete session=%lu fill=%lu threshold=%lu\\n",
+          \t\t\trs->session_id, used, (unsigned long)RADIO_START_THRESHOLD);)
+          \t\tset_status(rs,RADIO_STATUS_PLAYING);
+          \t\tstatus=RADIO_STATUS_PLAYING;
+          \t}
+          \tif(used==0) {
+          \t\tif(everPlayed && status==RADIO_STATUS_PLAYING) {
+          \t\t\tRADIO_DBG(printf("radio-read: underrun session=%lu fill=0 entering buffering\\n",
+          \t\t\t\trs->session_id);)
+          \t\t\tset_status(rs,RADIO_STATUS_BUFFERING);
+          \t\t}
+          \t\treturn 0;
+          \t}
+          '''
+
+          old_low_water = '''\tgot=ring_read(rs,buf,maxBytes);
+          \tif(!rs->everPlayed && rs->status==RADIO_STATUS_PLAYING && rs->used<RADIO_LOW_WATER_BYTES) set_status(rs,RADIO_STATUS_BUFFERING);
+          \tif(rs->status==RADIO_STATUS_BUFFERING && rs->used>=RADIO_START_THRESHOLD) set_status(rs,RADIO_STATUS_PLAYING);
+          \treturn got;
+          '''
+
+          new_low_water = '''\tgot=ring_read(rs,buf,maxBytes);
+          \t/* everPlayed is true after the first successful prebuffer.  The old
+          \t * !everPlayed test therefore disabled low-water rebuffering for the
+          \t * entire steady-state stream and caused rapid stop/start playback. */
+          \tif(rs->everPlayed && rs->status==RADIO_STATUS_PLAYING && rs->used<RADIO_LOW_WATER_BYTES) {
+          \t\tRADIO_DBG(printf("radio-read: low water session=%lu fill=%lu threshold=%lu entering buffering\\n",
+          \t\t\trs->session_id, rs->used, (unsigned long)RADIO_LOW_WATER_BYTES);)
+          \t\tset_status(rs,RADIO_STATUS_BUFFERING);
+          \t}
+          \tif(rs->status==RADIO_STATUS_BUFFERING && rs->used>=RADIO_START_THRESHOLD)
+          \t\tset_status(rs,RADIO_STATUS_PLAYING);
+          \treturn got;
+          '''
+
+          if text.count(old_gate) != 1:
+              raise SystemExit(f"expected one AmiSSL read gate, found {text.count(old_gate)}")
+          if text.count(old_low_water) != 1:
+              raise SystemExit(f"expected one low-water block, found {text.count(old_low_water)}")
+
+          text = text.replace(old_gate, new_gate, 1)
+          text = text.replace(old_low_water, new_low_water, 1)
+          path.write_text(text)
+          PY
+
+          git diff --check
+          grep -F 'if(rs->everPlayed && rs->status==RADIO_STATUS_PLAYING' radio_stream.c
+          grep -F 'if(status==RADIO_STATUS_BUFFERING)' radio_stream.c
+
+      - name: Commit patch and remove one-shot workflow
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add radio_stream.c
+          git rm .github/workflows/apply-radio-rebuffer-hysteresis.yml
+          git commit -m "Fix radio rebuffer hysteresis after underruns"
+          git push origin HEAD:fix/radio-rebuffer-hysteresis
