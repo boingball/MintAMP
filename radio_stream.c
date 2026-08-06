@@ -13,8 +13,14 @@
 #include <time.h>
 #include "miniamp_memguard.h"
 
+/* Network input ring (compressed stream bytes buffered ahead of the decoder).
+ * Its size in seconds is bitrate-dependent: the old 64 KiB was ~4 s at 128 kbit
+ * but only ~1.6 s at 320 kbit, so high-bitrate internet streams ran out of
+ * buffer on any network jitter -- while the identical file offline (no jitter)
+ * played fine. 256 KiB gives ~6.4 s at 320 kbit / ~16 s at 128 kbit, enough to
+ * ride out typical stalls. Override -DRADIO_RING_BYTES for tight-RAM machines. */
 #ifndef RADIO_RING_BYTES
-#define RADIO_RING_BYTES 65536UL
+#define RADIO_RING_BYTES 262144UL
 #endif
 /* Per-read chunk for the worker pump. A TLS record holds up to 16 KiB of
  * application data, and SSL_read() returns at most one record's worth per call
@@ -28,8 +34,11 @@
 #ifndef RADIO_READ_CHUNK
 #define RADIO_READ_CHUNK 16384
 #endif
+/* Prebuffer before playback starts. Keep it a small fraction of the (now
+ * larger) ring so channel changes still start quickly (~0.8 s at 320 kbit,
+ * ~2 s at 128 kbit); the rest of the ring then fills as headroom during play. */
 #ifndef RADIO_START_THRESHOLD
-#define RADIO_START_THRESHOLD (RADIO_RING_BYTES / 4)
+#define RADIO_START_THRESHOLD (RADIO_RING_BYTES / 8)
 #endif
 #ifndef RADIO_LOW_WATER_BYTES
 #define RADIO_LOW_WATER_BYTES 4096UL
