@@ -471,7 +471,10 @@ static void radio_net_worker_entry(void)
             }
             if (shuttingDown) break;
             radio_worker_pump_active_streams();
-            Delay(2);
+            /* Service an active stream once per Amiga tick. The pump itself
+             * does not sleep on WANT_READ/EWOULDBLOCK in this worker path,
+             * avoiding the old double-delay throughput ceiling. */
+            Delay(radio_net_worker_streams ? 1 : 2);
         }
     }
 
@@ -4657,7 +4660,12 @@ static int radio_pump_body(RadioStream *rs)
         }
     /* non-blocking socket (or SSL WANT_READ): no data yet — yield */
     if (n < 0 && wb) {
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
+        /* The autonomous worker loop yields after this pump pass. Sleeping
+         * here as well caused two delays after every empty socket read. */
+#else
         radio_backoff_sleep();
+#endif
         if (radio_note_start_wait(rs, rs->isSSL ? "HTTPS stream start timeout" : "radio stream start timed out") < 0) return -1;
         if (rs->everPlayed && ++rs->stallPumps >= RADIO_STALL_TIMEOUT_PUMPS) {
             /* Fail the stream through the same set_error/close path as the
