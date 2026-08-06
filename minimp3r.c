@@ -2987,6 +2987,14 @@ static int MrOpenWindow(MrApp *app)
 		WA_DragBar, TRUE,
 		WA_CloseGadget, TRUE,
 		WA_SizeGadget, TRUE,
+		/* SMART_REFRESH so Intuition preserves the hand-drawn artwork panel when
+		 * another window (the Internet Radio browser especially) overlaps it.
+		 * Without this the window is simple-refresh: overlapping deletes the art
+		 * and it never comes back, because RA_HandleInput consumes
+		 * IDCMP_REFRESHWINDOW itself and nothing repaints the custom drawing.
+		 * The GadTools frontend already uses WFLG_SMART_REFRESH for the same
+		 * reason. Costs a per-window backing store but no CPU on the hot path. */
+		WA_SmartRefresh, TRUE,
 		WA_IDCMP, IDCMP_GADGETUP | IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
 			IDCMP_IDCMPUPDATE | IDCMP_MENUPICK | IDCMP_NEWSIZE | IDCMP_MOUSEMOVE,
 		WA_NewLookMenus, TRUE,
