@@ -4811,10 +4811,30 @@ int Radio_ReadAudio(RadioStream *rs,unsigned char *buf,int maxBytes)
 	radio_stream_unlock(rs);
 	if(stopping || status==RADIO_STATUS_STOPPING || status==RADIO_STATUS_CLOSED || status==RADIO_STATUS_ERROR)
 		return 0;
-	if(!headerDone || !decoderStarted || used==0) {
+	if(!headerDone || !decoderStarted) {
 		if(status==RADIO_STATUS_PLAYING || status==RADIO_STATUS_BUFFERING || status==RADIO_STATUS_CONNECTING || status==RADIO_STATUS_RECONNECTING)
 			RADIO_DBG(printf("radio-read: transient zero session=%lu status=%d used=%lu headerDone=%d decoderStarted=%d everPlayed=%d stopping=%d\n",
 				rs->session_id, (int)status, used, headerDone, decoderStarted, everPlayed, stopping);)
+		return 0;
+	}
+	/* Do not nibble newly-arrived packets immediately after an underrun.
+	 * Once the stream enters BUFFERING, wait for the normal start threshold
+	 * before handing compressed bytes back to the decoder.  This gives the
+	 * 256 KiB ring real hysteresis instead of repeated play/pause bursts. */
+	if(status==RADIO_STATUS_BUFFERING) {
+		if(used<RADIO_START_THRESHOLD)
+			return 0;
+		RADIO_DBG(printf("radio-read: rebuffer complete session=%lu fill=%lu threshold=%lu\n",
+			rs->session_id, used, (unsigned long)RADIO_START_THRESHOLD);)
+		set_status(rs,RADIO_STATUS_PLAYING);
+		status=RADIO_STATUS_PLAYING;
+	}
+	if(used==0) {
+		if(everPlayed && status==RADIO_STATUS_PLAYING) {
+			RADIO_DBG(printf("radio-read: underrun session=%lu fill=0 entering buffering\n",
+				rs->session_id);)
+			set_status(rs,RADIO_STATUS_BUFFERING);
+		}
 		return 0;
 	}
 #else
@@ -4834,8 +4854,16 @@ int Radio_ReadAudio(RadioStream *rs,unsigned char *buf,int maxBytes)
 	if(radio_is_stopping(rs)||!rs->headerDone||!rs->decoderStarted||rs->status==RADIO_STATUS_ERROR) return 0;
 #endif
 	got=ring_read(rs,buf,maxBytes);
-	if(!rs->everPlayed && rs->status==RADIO_STATUS_PLAYING && rs->used<RADIO_LOW_WATER_BYTES) set_status(rs,RADIO_STATUS_BUFFERING);
-	if(rs->status==RADIO_STATUS_BUFFERING && rs->used>=RADIO_START_THRESHOLD) set_status(rs,RADIO_STATUS_PLAYING);
+	/* everPlayed is true after the first successful prebuffer.  The old
+	 * !everPlayed test therefore disabled low-water rebuffering for the
+	 * entire steady-state stream and caused rapid stop/start playback. */
+	if(rs->everPlayed && rs->status==RADIO_STATUS_PLAYING && rs->used<RADIO_LOW_WATER_BYTES) {
+		RADIO_DBG(printf("radio-read: low water session=%lu fill=%lu threshold=%lu entering buffering\n",
+			rs->session_id, rs->used, (unsigned long)RADIO_LOW_WATER_BYTES);)
+		set_status(rs,RADIO_STATUS_BUFFERING);
+	}
+	if(rs->status==RADIO_STATUS_BUFFERING && rs->used>=RADIO_START_THRESHOLD)
+		set_status(rs,RADIO_STATUS_PLAYING);
 	return got;
 }
 int Radio_ReadStartupAudio(RadioStream *rs,unsigned char *buf,int maxBytes,unsigned long timeoutMs){ clock_t start; int got; if(!rs||!buf||maxBytes<=0)return 0; start=clock(); while(!radio_is_stopping(rs)&&rs->used==0&&rs->status!=RADIO_STATUS_ERROR){ if(Radio_Pump(rs)<0)break; if(timeoutMs>0 && (unsigned long)((clock()-start)*1000UL/CLOCKS_PER_SEC)>=timeoutMs){ set_error(rs,"AAC stream start timeout"); close_current_socket(rs); break; } } if(radio_is_stopping(rs)||!rs->headerDone||!rs->decoderStarted||rs->status==RADIO_STATUS_ERROR) return 0; got=ring_read(rs,buf,maxBytes); if(!rs->everPlayed&&rs->headerDone&&rs->status!=RADIO_STATUS_PLAYING&&rs->status!=RADIO_STATUS_ERROR) set_status(rs,RADIO_STATUS_BUFFERING); return got; }
