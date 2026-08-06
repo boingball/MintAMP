@@ -1,0 +1,208 @@
+# 68060 register-pair multiply/divide audit
+
+The Motorola 68060 does not implement the 64-bit-result long multiply
+(`muls.l Dn,Dl:Dh`) or the 64-bit-dividend long divide (`divs.l <ea>,Dr:Dq`)
+in hardware. Each execution traps into OS software emulation. In MintAMP's hot
+MP3 decode loops this is the root cause of the mouse lag, audio starvation and
+dropouts observed on a real ~75 MHz 68060 with the assembly-heavy build.
+
+`tools/audit_68060_instructions.py` finds these instructions in a compiled
+binary. GNU m68k objdump prints them in a three-operand form
+(`mulsl %d1,%d2,%d0`), which the script recognises in addition to the older
+colon form (`muls.l %d1,%d2:%d0`). It counts multiplies and divides
+separately, groups by symbol, and separates decoder hot-path functions from
+unrelated application/library code. In diff mode it compares a clean baseline
+binary against a candidate.
+
+## How GCC helps, and where the offenders come from
+
+At `-m68060`, GCC's own codegen avoids the emulated instruction: the C
+`MULSHIFT32` reference (`(int)(((long long)x*y)>>32)`) compiles to a `__muldi3`
+call rather than a register-pair `muls.l`. So a clean C `CPU=60` build has
+essentially zero emulated multiplies in the decoder. The offenders are the
+hand-written `.S` kernels and the inline asm that force `muls.l Dn,Dl:Dh`
+regardless of `-mcpu`.
+
+## Symbol-level comparison (decoder core)
+
+Numbers below are for the portable Helix decoder core
+(`mp3dec.c mp3tabs.c real/*.c` plus the relevant `.S`) compiled at `-m68060`.
+
+> Toolchain note: these were produced with `m68k-linux-gnu-gcc 13` /
+> `m68k-linux-gnu-objdump` as a stand-in for `m68k-amigaos-gcc`. GCC's decision
+> to emit or avoid the register-pair `muls.l` is a shared m68k-backend property,
+> so the C-path counts are representative, but the **absolute** numbers differ
+> from a full `m68k-amigaos` application build (which also links GUI,
+> networking, PNG and libnix/CRT code). Re-run the audit against the real Amiga
+> binaries with `m68k-amigaos-objdump` before drawing release conclusions.
+
+| Config (`ASM60_GROUPS`)        | reg-pair mul | of which hot-path | div |
+|--------------------------------|-------------:|------------------:|----:|
+| baseline (clean C)             |            0 |                 0 |   0 |
+| `huffman`                      |            0 |                 0 |   0 |
+| `huffman dequant imdct`        |           55 |                55 |   0 |
+| `asm_polyphase`                |         8337 |              8281 |   0 |
+| `full030` (whole 030 bundle)   |         8543 |              8487 |   0 |
+
+The existing 68030 polyphase `.S` kernel accounts for ~97% of all emulated
+multiplies. Everything else in the decoder is comparatively minor: the huffman
+asm kernel adds none, and dequant+imdct together add ~55. This is why the
+68060 work starts with a dedicated polyphase rewrite and why `huffman`,
+`dequant` and `imdct` are the first groups worth hardware-testing.
+
+The per-symbol breakdown shows the count spread across every stride/phase
+variant of the polyphase kernel, e.g.:
+
+```
+504  AmigaM68KPolyphaseMonoFast
+496  StereoFastPolyphaseStride2Phase0_Amiga_m68k
+352  StereoFastPolyphaseStride3Phase0_Amiga_m68k
+...
+```
+
+## Reproducing
+
+Build the candidate binaries with the CPU=60 audit targets and diff them:
+
+```sh
+make -f Makefile.amiga cpu60-audit-stages OBJDUMP=m68k-amigaos-objdump
+make -f Makefile.amiga cpu60-audit-asm_polyphase OBJDUMP=m68k-amigaos-objdump
+```
+
+Or point the script directly at any two binaries:
+
+```sh
+tools/audit_68060_instructions.py --objdump m68k-amigaos-objdump \
+    --baseline amiga_mp3dec.cpu60-baseline \
+    --candidate amiga_mp3dec.cpu60-group-asm_polyphase
+```
+
+`tools/audit_68060_instructions.py --self-test` validates the instruction
+classifier (three-operand and colon forms, 32-bit vs 64-bit divide) offline.
+
+## Dedicated 68060 polyphase kernel (`poly060`)
+
+`real/polyphase_68060.h` is a distinct 68060 polyphase implementation
+(`ASM60_GROUPS=poly060`, define `AMIGA_M68K_POLYPHASE_68060`). It computes the
+same per-tap high multiply as the fast path -- the high 32 bits of a signed
+32x32 product, `MULSHIFT32(x, y)` -- but with Warren's signed `mulhs`: four
+hardware 32x32->32 `muls.l <ea>,Dn` partial products, shifts and adds. No
+register pair, no 64-bit libgcc call. A small guard-bit accumulator recovers
+the precision the plain fast path throws away.
+
+Verified here (host + `m68k-linux-gnu` `-m68060`):
+
+* `MulShift68060` is bit-exact vs `(int)(((long long)x*y)>>32)` over an
+  exhaustive probe set plus 2,000,000 random pairs;
+* the kernel's PCM output is within **1 LSB** of the bit-exact 64-bit reference
+  polyphase, mono and stereo (`tests/polyphase60_ref_test.c`,
+  `make -f Makefile.amiga poly60-ref-test`);
+* `MulShift68060` emits exactly four hardware `muls.l %dn,%dm` and zero libgcc
+  calls;
+* the whole decoder core built with `poly060` shows **0** register-pair
+  multiplies in the polyphase hot path, versus **8281** for `asm_polyphase`.
+
+What is NOT yet verified: real-hardware throughput and responsiveness on the
+physical ~75 MHz 68060. A zero static count is necessary but not sufficient.
+
+## Per-group 68060 map (decoder core, verified)
+
+Each group built alone at `-m68060` and audited. "Emulated muls" is the count of
+register-pair long multiplies the group introduces into the decoder core:
+
+| Group                 | emulated muls | on the 68060 |
+|-----------------------|--------------:|--------------|
+| `poly060`             |             0 | dedicated 68060 kernel — big win |
+| `huffman`             |             0 | clean; safe to enable |
+| `midside`             |             0 | clean; safe to enable |
+| `fast_subband_cap`    |             0 | clean; low-rate work reduction |
+| `fast_reduced_taps`   |             0 | clean, but a no-op alongside poly060 |
+| `dequant`             |            12 | AVOID — swaps hardware C for emulated asm |
+| `antialias`           |             8 | AVOID |
+| `intensity`           |            10 | AVOID |
+| `imdct`               |            43 | AVOID (`IMDCT36_AMIGA_M68K_ASM`) |
+| `fdct32`              |           112 | AVOID (`xmp3_FDCT32` + passes) |
+| `asm_core`            |           141 | AVOID (flips MULSHIFT32 global to emulated) |
+| `fast_fdct32_quarter` |           528 | AVOID (pulls in fast-C polyphase muls) |
+| `imdct_thin_output`   |           528 | AVOID (pulls in fast-C polyphase muls) |
+
+Crucially, the clean C baseline decoder has **zero** register-pair muls AND
+zero `__muldi3` calls at `-m68060`: GCC compiles the C `MULSHIFT32` to hardware
+2-operand `muls.l`. So imdct/dct32/dequant in plain C are already
+emulation-free on the 060 -- enabling their asm groups only makes things worse.
+
+## Recommended experimental 68060 config
+
+```
+make -f Makefile.amiga fast030 CPU=60 ASM60_GROUPS="poly060 huffman midside"
+```
+
+`poly060` removes the one catastrophic emulation source (polyphase). `huffman`
+and `midside` are emulation-free and target exactly the throughput-bound cases
+(high bitrate -> huffman; stereo -> mid/side), though whether they beat GCC's
+`-m68060` C is an on-hardware A/B call, not a static one. Everything else in
+the decode path is already emulation-free C; the remaining limit at 44.1 kHz /
+stereo / high bitrate is raw compute on a 75 MHz 060, not emulated
+instructions.
+
+To find the next thing worth hand-optimising, build the profiling decoder
+(`make -f Makefile.amiga prof030 CPU=60 ASM60_GROUPS="poly060"`) and read the
+per-bucket split (huffman / dequant / imdct / subband-dct32 / polyphase /
+stereo). Hand-writing a 68060 kernel for a stage only pays off where the C is
+the measured bottleneck -- it will not remove emulation there is none left to
+remove, only improve scheduling.
+
+## Decoupling the downsampling fast path for the 68060 (`lowrate060`)
+
+Real-hardware profiling (A1200, 68060 @ 75 MHz, decode-only, `poly060`, a
+320 kbps 44.1 kHz stereo file) put the core cost at:
+
+| stage            |    time | share |
+|------------------|--------:|------:|
+| polyphase        | 242.7 s |   36% |
+| subband / dct32  | 153.8 s |   23% |
+| imdct            | 120.6 s |   18% |
+| huffman          |  19.9 s |    3% |
+| dequant          |  16.8 s |  2.5% |
+| bitstream        |  10.4 s |  1.5% |
+| stereo / post    |   2.2 s |  0.3% |
+
+polyphase + dct32 + imdct are 77% of the work, and the profile's stride
+counters were all zero: `poly060` alone runs the **full-rate** 512-tap
+synthesis and full dct32/imdct even when the output rate is below the source
+rate. MintAMP already has a downsampling fast path -- stride synthesis, reduced
+taps, subband cap, fdct32 quarter, imdct thin -- that skips the work above the
+output Nyquist, but it was gated behind `AMIGA_FAST_POLYPHASE` and its polyphase
+multiply used the emulated `muls.l` register pair (~540 in the decoder core).
+
+The decouple: under `AMIGA_M68K_POLYPHASE_68060`, `PolyphaseMulShift26` (the one
+multiply every fast/stride/reduced polyphase variant funnels through) computes
+its result with `MulShift68060` instead of the register pair. `FDCT32FastLowrate`
+was already emulation-free. So enabling the fast path together with `poly060`
+now runs the entire downsampling path with hardware-only multiplies:
+
+* `lowrate060` decoder core: **0** register-pair multiplies (was ~540);
+* the `muls.l` result and `MulShift68060` are bit-identical, so the decoded PCM
+  is the same as the established CPU=30 fast build -- this de-emulates, it does
+  not change output;
+* without `poly060` the fast path is byte-for-byte unchanged (still emulated),
+  so CPU=30 behaviour is untouched.
+
+Recommended for output rates below the source (e.g. 22050 from 44100), where
+the stride path roughly halves polyphase/dct32/imdct work:
+
+```
+make -f Makefile.amiga fast030 CPU=60 ASM60_GROUPS="lowrate060"
+```
+
+Drop `fast_reduced_taps` (build the groups explicitly) for a longer, higher
+quality polyphase filter at a little more cost. Full-rate 44100 output gets no
+stride benefit -- that ceiling is raw compute, addressed only by a faster
+dct32/imdct, which the profiler should drive.
+
+## Status
+
+No config here is release-safe on the strength of a static count alone. A low
+count is necessary but not sufficient; every candidate must still be validated
+on the physical 68060 for both correctness and real-time behaviour. No
+dedicated 68060 binary ships until then.

@@ -8,6 +8,10 @@ ifeq ($(origin CC),default)
 CC := m68k-amigaos-gcc
 endif
 
+# objdump used by the CPU=60 audit targets below. Override for a different
+# toolchain, e.g. OBJDUMP=m68k-linux-gnu-objdump for codegen inspection.
+OBJDUMP ?= m68k-amigaos-objdump
+
 # CPU selects the target processor: 00=68000, 20=68020, 30=68030 (default),
 # 40=68040, 60=68060. This is the single source of truth for both the main
 # build below AND decoders/Makefile (see decoder-modules further down,
@@ -33,11 +37,19 @@ ifeq ($(CPU_MFLAG),)
 $(error Unknown CPU=$(CPU) -- expected one of: 00 20 30 40 60)
 endif
 
-ifeq ($(CPU),00)
-CPU_ASM_CPPFLAGS :=
-CPU_ASM_SOURCES :=
-else
-CPU_ASM_CPPFLAGS := \
+# The full 68020/030/040 assembly bundle. This is the established,
+# hardware-validated path for 68030-class machines and MUST stay bit-for-bit
+# what it was -- do not add/remove/reorder defines here without a matching
+# 68030 hardware retest. CPU=20/30/40 use it verbatim; CPU=60 does NOT (see
+# below). AMIGA_M68K_ASM_PLANARS8 was previously disabled here after
+# real-hardware testing found true-stereo playback corrupted at both 11025 and
+# 22050 with it on. Root cause was a wrong byte offset for the right channel in
+# PlanarS8FromInterleavedStereo_Amiga_m68k (amiga_m68k_planars8.S) -- it read
+# offset+1 (pcm[2i]'s own low byte) instead of offset+2 (pcm[2i+1]'s high
+# byte). Fixed and hardware-confirmed clean with the flag off (C-only path);
+# re-enabled here now that the asm kernel itself is ready for its own
+# hardware retest.
+CPU_ASM_CPPFLAGS_FULL030 := \
 	-DAMIGA_M68K_ASM \
 	-DAMIGA_M68K_ASM_FDCT32 \
 	-DAMIGA_M68K_ASM_FDCT32_UNROLL \
@@ -55,15 +67,105 @@ CPU_ASM_CPPFLAGS := \
 	-DAMIGA_M68K_ASM_HUFFMAN \
 	-DAMIGA_M68K_ASM_JPEG_GREY \
 	-DAMIGA_M68K_ASM_PLANARS8
-# AMIGA_M68K_ASM_PLANARS8 was previously disabled here after real-hardware
-# testing found true-stereo playback corrupted at both 11025 and 22050 with
-# it on. Root cause was a wrong byte offset for the right channel in
-# PlanarS8FromInterleavedStereo_Amiga_m68k (amiga_m68k_planars8.S) -- it read
-# offset+1 (pcm[2i]'s own low byte) instead of offset+2 (pcm[2i+1]'s high
-# byte). Fixed and hardware-confirmed clean with the flag off (C-only path);
-# re-enabled here now that the asm kernel itself is ready for its own
-# hardware retest.
-CPU_ASM_SOURCES := real/amiga_m68k_polyphase.S amiga_m68k_planars8.S
+CPU_ASM_SOURCES_FULL030 := real/amiga_m68k_polyphase.S amiga_m68k_planars8.S
+
+# ---------------------------------------------------------------------------
+# 68060 feature groups (ASM60_GROUPS)
+# ---------------------------------------------------------------------------
+# On a real ~75 MHz 68060 the full030 bundle above is actively harmful: it is
+# full of register-pair long multiplies (muls.l Dn,Dl:Dh) which the 68060 does
+# not implement in hardware and traps into software emulation. In hot decoder
+# loops (polyphase especially) that causes mouse-pointer lag, audio-buffer
+# starvation and periodic dropouts -- worse than the plain C decoder.
+#
+# GCC's own -m68060 codegen already AVOIDS the emulated 64-bit muls.l for the C
+# MULSHIFT32 reference (it calls __muldi3 instead), so a clean C CPU=60 build is
+# the responsive-but-slow baseline. Every one of the flags in full030 above
+# reintroduces the emulated instruction via hand-written .S / inline asm.
+#
+# Therefore CPU=60 does NOT inherit full030. It starts from the clean C
+# baseline and lets each optimisation be enabled individually so it can be
+# built, audited (tools/audit_68060_instructions.py) and hardware-tested on its
+# own. Select groups with, e.g.:
+#     make -f Makefile.amiga fast030 CPU=60 ASM60_GROUPS="huffman dequant"
+# Nothing here is a public-release default; all CPU=60 asm groups are
+# EXPERIMENTAL until validated on the physical 68060.
+ASM60_GROUPS ?=
+
+# group name -> extra -D defines
+ASM60_FLAGS_huffman             := -DAMIGA_M68K_ASM_HUFFMAN
+ASM60_FLAGS_dequant             := -DAMIGA_M68K_ASM_DEQUANT
+ASM60_FLAGS_imdct               := -DAMIGA_M68K_ASM_IMDCT
+ASM60_FLAGS_fdct32              := -DAMIGA_M68K_ASM_FDCT32 -DAMIGA_M68K_ASM_FDCT32_UNROLL
+ASM60_FLAGS_antialias           := -DAMIGA_M68K_ASM_ANTIALIAS
+ASM60_FLAGS_midside             := -DAMIGA_M68K_ASM_MIDSIDE
+ASM60_FLAGS_intensity           := -DAMIGA_M68K_ASM_INTENSITY
+ASM60_FLAGS_jpeg_grey           := -DAMIGA_M68K_ASM_JPEG_GREY
+ASM60_FLAGS_planars8            := -DAMIGA_M68K_ASM_PLANARS8
+# asm_core flips MULSHIFT32/CLZ/LOADBE16 globally to inline asm -- this alone
+# reintroduces emulated muls.l everywhere MULSHIFT32 is used. Heavy; opt-in.
+ASM60_FLAGS_asm_core            := -DAMIGA_M68K_ASM
+# The five "fast" defines the earlier CPU=60 branch always enabled -- the ones
+# responsible for the ~430 -> 3000+ jump in suspect instructions. Each is its
+# own group here. Note the source-level dependencies (see real/polyphase.c,
+# real/dct32.c, real/imdct.c): FDCT32_QUARTER and IMDCT_THIN_OUTPUT only take
+# effect when AMIGA_FAST_POLYPHASE is also defined, so those groups pull it in
+# to remain individually meaningful.
+ASM60_FLAGS_fast_polyphase      := -DAMIGA_FAST_POLYPHASE
+ASM60_FLAGS_fast_reduced_taps   := -DAMIGA_FAST_REDUCED_TAPS
+ASM60_FLAGS_fast_subband_cap    := -DAMIGA_FAST_SUBBAND_CAP
+ASM60_FLAGS_fast_fdct32_quarter := -DAMIGA_FAST_POLYPHASE -DAMIGA_FAST_FDCT32_QUARTER
+ASM60_FLAGS_imdct_thin_output   := -DAMIGA_FAST_POLYPHASE -DAMIGA_M68K_IMDCT_THIN_OUTPUT
+# asm_polyphase swaps the C fast-polyphase for the existing 68030 .S kernel.
+# The task is explicit: do NOT re-enable this unchanged for CPU=60. It exists
+# only as an opt-in A/B/audit knob, never in a default build.
+ASM60_FLAGS_asm_polyphase       := -DAMIGA_FAST_POLYPHASE -DAMIGA_M68K_ASM_POLYPHASE
+# poly060: the dedicated 68060 polyphase kernel (real/polyphase_68060.h). A
+# distinct implementation that computes the same high multiply with
+# hardware-only muls (Warren mulhs) instead of the emulated register pair.
+# Correctness is covered by tests/polyphase60_ref_test.c. Experimental.
+ASM60_FLAGS_poly060             := -DAMIGA_M68K_POLYPHASE_68060
+# lowrate060: the 68060 polyphase kernel PLUS the whole downsampling fast path
+# (stride synthesis, reduced taps, subband cap, fdct32 quarter, imdct thin) --
+# the same work-reduction the CPU=30 fast build uses, but with poly060 making
+# every per-tap multiply hardware-clean instead of the emulated register pair.
+# This is what cuts real work when output rate < source rate (e.g. 22050 from a
+# 44100 source), which the profiler shows dominates. Drop fast_reduced_taps for
+# a longer (higher quality) polyphase filter at a little more cost.
+ASM60_FLAGS_lowrate060          := -DAMIGA_M68K_POLYPHASE_68060 -DAMIGA_FAST_POLYPHASE \
+	-DAMIGA_FAST_REDUCED_TAPS -DAMIGA_FAST_SUBBAND_CAP \
+	-DAMIGA_FAST_FDCT32_QUARTER -DAMIGA_M68K_IMDCT_THIN_OUTPUT
+# Meta group: reproduce the entire 030 bundle on CPU=60 (the known-bad
+# "assembly-heavy" config) purely for A/B and audit baselining.
+ASM60_FLAGS_full030             := $(CPU_ASM_CPPFLAGS_FULL030)
+
+# group name -> extra .S sources
+ASM60_SRC_planars8        := amiga_m68k_planars8.S
+ASM60_SRC_asm_polyphase   := real/amiga_m68k_polyphase.S
+ASM60_SRC_full030         := $(CPU_ASM_SOURCES_FULL030)
+
+ASM60_KNOWN := huffman dequant imdct fdct32 antialias midside intensity \
+	jpeg_grey planars8 asm_core fast_polyphase fast_reduced_taps \
+	fast_subband_cap fast_fdct32_quarter imdct_thin_output asm_polyphase \
+	poly060 lowrate060 full030
+
+ifeq ($(CPU),00)
+CPU_ASM_CPPFLAGS :=
+CPU_ASM_SOURCES :=
+else ifeq ($(CPU),60)
+# Validate requested groups.
+ASM60_BAD := $(filter-out $(ASM60_KNOWN),$(ASM60_GROUPS))
+ifneq ($(ASM60_BAD),)
+$(error Unknown ASM60_GROUPS: $(ASM60_BAD) -- valid groups: $(ASM60_KNOWN))
+endif
+# $(sort ...) both de-duplicates (groups sharing a define, or implied deps) and
+# orders deterministically, so ASM60_GROUPS order never changes the flags.
+CPU_ASM_CPPFLAGS := $(sort $(foreach g,$(ASM60_GROUPS),$(ASM60_FLAGS_$(g))))
+CPU_ASM_SOURCES := $(sort $(foreach g,$(ASM60_GROUPS),$(ASM60_SRC_$(g))))
+else
+# 68020 / 68030 / 68040 -- established path, unchanged.
+CPU_ASM_CPPFLAGS := $(CPU_ASM_CPPFLAGS_FULL030)
+CPU_ASM_SOURCES := $(CPU_ASM_SOURCES_FULL030)
 endif
 
 STD ?= -std=gnu89
@@ -206,7 +308,7 @@ HALFASM_TEST_CPPFLAGS := -DAMIGA_M68K_ASM_FDCT32
 FAST030_ASM_SOURCES := $(CPU_ASM_SOURCES)
 AMIGA_HUNK_FAST_PREFERRED := python3 tools/amiga_fast_preferred_hunks.py
 
-.PHONY: all fast030 radio030 sslradio030 amissl-get-test amissl-free-repro-test amissl-spawn-repro-test amissl-exec-repro-test rb-stream-probe-test prof030 gui guir miniamp3 minimp3r sslgui sslguir fast030-halfasm-test gui-halfasm-test decoder-modules release release-clean clean print-command print-fast030-command print-gui-command print-guir-command
+.PHONY: all fast030 radio030 sslradio030 amissl-get-test amissl-free-repro-test amissl-spawn-repro-test amissl-exec-repro-test rb-stream-probe-test prof030 gui guir miniamp3 minimp3r sslgui sslguir fast030-halfasm-test gui-halfasm-test decoder-modules release release-clean clean print-command print-fast030-command print-gui-command print-guir-command cpu60-baseline cpu60-huffman cpu60-huffman-dequant cpu60-huffman-dequant-imdct cpu60-huffman-dequant-imdct-fdct32 cpu60-audit-stages poly60-ref-test
 
 all: $(TARGET) decoder-modules
 
@@ -357,6 +459,78 @@ print-guir-command:
 print-fast030-command:
 	@printf '%s\n' '$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(EXTRA_CFLAGS) -o $(FAST030_TARGET) $(SOURCES) $(FAST030_ASM_SOURCES)'
 	@printf '%s\n' '$(AMIGA_HUNK_FAST_PREFERRED) $(FAST030_TARGET)'
+
+# ---------------------------------------------------------------------------
+# CPU=60 audit / experiment build targets
+# ---------------------------------------------------------------------------
+# Repeatable, separately-named CPU=60 decoder binaries so each optimisation can
+# be built and audited on its own against the clean C baseline. These build the
+# fast030 command-line decoder (SOURCES only, no decoder-modules) so the audit
+# focuses on the MP3 decode hot path. NONE of these is a public-release default
+# -- they are experimental until validated on the physical 68060.
+#
+# Each target overrides FAST030_TARGET so the output filename is distinct, and
+# passes CPU=60 with the matching ASM60_GROUPS. Example manual form:
+#     make -f Makefile.amiga fast030 CPU=60 ASM60_GROUPS="huffman" \
+#          FAST030_TARGET=amiga_mp3dec.cpu60-huffman
+#
+# tools/audit_68060_instructions.py consumes these binaries; run e.g.
+#     make -f Makefile.amiga cpu60-audit-huffman OBJDUMP=m68k-amigaos-objdump
+CPU60_PREFIX ?= amiga_mp3dec.cpu60
+
+# $(call cpu60_build,<suffix>,<groups>) -- recursively build one CPU=60 config.
+define cpu60_build
+$(MAKE) -f Makefile.amiga CPU=60 ASM60_GROUPS="$(2)" \
+	FAST030_TARGET=$(CPU60_PREFIX)-$(1) $(CPU60_PREFIX)-$(1)
+endef
+
+cpu60-baseline:
+	$(call cpu60_build,baseline,)
+
+cpu60-huffman:
+	$(call cpu60_build,huffman,huffman)
+
+cpu60-huffman-dequant:
+	$(call cpu60_build,huffman-dequant,huffman dequant)
+
+cpu60-huffman-dequant-imdct:
+	$(call cpu60_build,huffman-dequant-imdct,huffman dequant imdct)
+
+cpu60-huffman-dequant-imdct-fdct32:
+	$(call cpu60_build,huffman-dequant-imdct-fdct32,huffman dequant imdct fdct32)
+
+# Build a single named optimisation group in isolation, e.g.
+#     make -f Makefile.amiga cpu60-group-fast_polyphase
+cpu60-group-%:
+	$(MAKE) -f Makefile.amiga CPU=60 ASM60_GROUPS="$*" \
+		FAST030_TARGET=$(CPU60_PREFIX)-group-$* $(CPU60_PREFIX)-group-$*
+
+# Build the clean baseline + one isolated group and diff them symbol-for-symbol.
+cpu60-audit-%: cpu60-baseline cpu60-group-%
+	python3 tools/audit_68060_instructions.py --objdump "$(OBJDUMP)" \
+		--baseline $(CPU60_PREFIX)-baseline \
+		--candidate $(CPU60_PREFIX)-group-$*
+
+# Audit the staged huffman/dequant/imdct progression against the baseline.
+cpu60-audit-stages: cpu60-baseline cpu60-huffman cpu60-huffman-dequant cpu60-huffman-dequant-imdct
+	@for c in huffman huffman-dequant huffman-dequant-imdct; do \
+		echo "===== $(CPU60_PREFIX)-$$c vs baseline ====="; \
+		python3 tools/audit_68060_instructions.py --objdump "$(OBJDUMP)" \
+			--baseline $(CPU60_PREFIX)-baseline \
+			--candidate $(CPU60_PREFIX)-$$c || exit $$?; \
+	done
+
+# Host correctness test for the 68060 polyphase kernel. Builds with the native
+# compiler (not the m68k cross-compiler) because MulShift68060 is portable C and
+# gives identical results on any platform; it compares the kernel's PCM output
+# against the bit-exact 64-bit reference polyphase and fails if the error
+# exceeds its documented bound. The separate "no emulated muls.l" check is done
+# by disassembling an -m68060 build with tools/audit_68060_instructions.py.
+HOSTCC ?= cc
+poly60-ref-test:
+	$(HOSTCC) -O2 -Ipub -Ireal -DAMIGA_M68K \
+		tests/polyphase60_ref_test.c real/trigtabs.c -o polyphase60_ref_test
+	./polyphase60_ref_test
 
 # Build all decoder modules (FLAC and AAC) — requires upstream decoder libraries.
 # CPU is forwarded as the same numeric 00/20/30/40/60 code used above so
