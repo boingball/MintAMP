@@ -6547,7 +6547,7 @@ static void HandleMenu(MrApp *app, UWORD code, int *done)
 				es.es_StructSize = sizeof(es);
 				es.es_Flags = 0;
 				es.es_Title = (UBYTE *)"About MintAMP";
-				es.es_TextFormat = (UBYTE *)"MintAMP\nMini Internet Amiga Media Player\nReAction Edition\nMade by boingball\n(C)2026 - v1.0\nTo support this application visit:\nhttps://buymeacoffee.com/boingball\n-----\nMade with decoders from\nHelix MP3 / ACC\nby Real Networks\nlibfoxenflac\nby astoeckel\n\nESP8266Audio\nby earlephilhower\n-----\nAI Used\nClaude and Codex\nLate Nights\nMany";
+				es.es_TextFormat = (UBYTE *)"MintAMP\nMini Internet Amiga Media Player\nReAction Edition\nMade by boingball\n(C)2026 - v1.1\nTo support this application visit:\nhttps://buymeacoffee.com/boingball\n-----\nMade with decoders from\nHelix MP3 / ACC\nby Real Networks\nlibfoxenflac\nby astoeckel\n\nESP8266Audio\nby earlephilhower\n-----\nAI Used\nClaude and Codex\nLate Nights\nMany";
 				es.es_GadgetFormat = (UBYTE *)"OK";
 				EasyRequest(app->win, &es, NULL, TAG_DONE);
 			}
