@@ -1,7 +1,7 @@
 name: Build
 
-# Compile the two MintAMP release configurations for AmigaOS (m68k).
-# The all-in-one image adds the AmiSSL SDK needed by the normal radio/HTTPS build.
+# Compile the two MintAMP CPU configurations for AmigaOS (m68k).
+# CI is a compile sanity check. Release packaging remains a local/release task.
 
 on:
   push:
@@ -29,37 +29,25 @@ jobs:
       - name: Check out the code
         uses: actions/checkout@v4
 
-      - name: Compile release with the Amiga cross-compiler
+      - name: Compile with the Amiga cross-compiler
         env:
           CPU: ${{ matrix.cpu }}
           ASM60_GROUPS: ${{ matrix.asm60 }}
-          RELEASE_NAME: MintAMP-CI-${{ matrix.label }}
         run: |
           docker run --rm \
-            -e CPU -e ASM60_GROUPS -e RELEASE_NAME \
+            -e CPU -e ASM60_GROUPS \
             -v "$PWD":/src -w /src \
-            sacredbanana/amiga-compiler:m68k-amigaos \
-            bash -c '
-              set -e
-              echo "Compiler: $(command -v m68k-amigaos-gcc)"
-              m68k-amigaos-gcc --version | head -1
-              make -f Makefile.amiga release \
-                CPU="$CPU" \
-                ASM60_GROUPS="$ASM60_GROUPS" \
-                RADIO=1 SSL=1 SSLCERTS=1 \
-                RELEASE_NAME="$RELEASE_NAME"
-            '
+            amigadev/crosstools:m68k-amigaos \
+            bash -c 'make -f Makefile.amiga fast030 CPU="$CPU" ASM60_GROUPS="$ASM60_GROUPS"'
 
-      - name: Confirm the release drawer was produced
+      - name: Confirm the binary was produced
         run: |
-          find "release/MintAMP-CI-${{ matrix.label }}" -maxdepth 2 -type f -print | sort
-          file "release/MintAMP-CI-${{ matrix.label }}/MintAMP" || true
-          file "release/MintAMP-CI-${{ matrix.label }}/MintAMP-GT" || true
-          file "release/MintAMP-CI-${{ matrix.label }}/amiga_mp3dec.fastexp" || true
+          ls -la amiga_mp3dec.fastexp
+          file amiga_mp3dec.fastexp || true
 
-      - name: Upload release drawer
+      - name: Upload compiled binary
         uses: actions/upload-artifact@v4
         with:
           name: MintAMP-${{ matrix.label }}-AmigaOS
-          path: release/MintAMP-CI-${{ matrix.label }}/
+          path: amiga_mp3dec.fastexp
           if-no-files-found: error
