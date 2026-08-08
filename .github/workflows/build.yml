@@ -2,7 +2,6 @@ name: Build
 
 # Compile the two MintAMP release configurations for AmigaOS (m68k).
 # The all-in-one image adds the AmiSSL SDK needed by the normal radio/HTTPS build.
-# CI debug trigger.
 
 on:
   push:
@@ -27,8 +26,10 @@ jobs:
             asm60: "lowrate060 huffman midside planars8"
 
     steps:
-      - name: Check out the code
+      - name: Check out the code and decoder submodules
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Compile release with the Amiga cross-compiler
         env:
