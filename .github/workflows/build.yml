@@ -2,6 +2,7 @@ name: Build
 
 # Compile the two MintAMP release configurations for AmigaOS (m68k).
 # The all-in-one image adds the AmiSSL SDK needed by the normal radio/HTTPS build.
+# CI debug trigger.
 
 on:
   push:
