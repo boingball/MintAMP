@@ -2,6 +2,7 @@ name: Build
 
 # Compile the two MintAMP CPU configurations for AmigaOS (m68k).
 # CI is a compile sanity check. Release packaging remains a local/release task.
+# Verification-only trigger for the current workflow.
 
 on:
   push:
