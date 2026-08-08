@@ -39,7 +39,7 @@ jobs:
             -e CPU -e ASM60_GROUPS -e RELEASE_NAME \
             -v "$PWD":/src -w /src \
             sacredbanana/amiga-compiler:m68k-amigaos \
-            bash -lc '
+            bash -c '
               set -e
               echo "Compiler: $(command -v m68k-amigaos-gcc)"
               m68k-amigaos-gcc --version | head -1
