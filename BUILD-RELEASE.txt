@@ -1,0 +1,43 @@
+MintAMP v1.1 release build recipe
+================================
+
+These are the release commands used for MintAMP v1.1.
+Run them from the MintAMP repository root.
+
+68030 release
+-------------
+
+make -f Makefile.amiga release-clean
+make -f Makefile.amiga clean
+
+make -f Makefile.amiga release \
+  CPU=30 \
+  RADIO=1 \
+  SSL=1 \
+  SSLCERTS=1 \
+  RELEASE_NAME=MintAMP-v1.1-68030
+
+68060 release
+-------------
+
+make -f Makefile.amiga clean
+
+make -f Makefile.amiga release \
+  CPU=60 \
+  ASM60_GROUPS="lowrate060 huffman midside planars8" \
+  RADIO=1 \
+  SSL=1 \
+  SSLCERTS=1 \
+  RELEASE_NAME=MintAMP-v1.1-68060
+
+Notes
+-----
+
+- The 68030 build uses the established 68020/68030/68040 assembly path.
+- The 68060 build deliberately does not inherit the full 68030 assembly bundle.
+- The v1.1 68060 release uses: lowrate060 huffman midside planars8.
+- RADIO=1 enables internet radio support.
+- SSL=1 enables HTTPS through AmiSSL.
+- SSLCERTS=1 enables TLS certificate and hostname verification.
+- TASKSAFEMALLOC is enabled by default in normal builds; do not disable it for releases.
+- release-clean removes previous release drawers before starting a fresh release build.
