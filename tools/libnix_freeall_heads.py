@@ -6,9 +6,8 @@ import argparse, re, subprocess, sys
 #
 #  1. three direct absolute movea.l loads, historically annotated by objdump as
 #     _errno+offset; and
-#  2. a newer/older libnix layout that does one absolute lea into an address
-#     register, loads two heads as 8(reg)/12(reg), then loads the third head
-#     directly with movea.l.
+#  2. a libnix layout that does one absolute lea into an address register,
+#     loads two heads as 8(reg)/12(reg), then loads the third head directly.
 #
 # Support both. The addresses are discovered from the exact binary being
 # relinked, so this remains safer than hard-coding libnix internals.
@@ -18,7 +17,7 @@ MOVEA_ABS_A0_RE = re.compile(
 LEA_ABS_RE = re.compile(
     r'\blea\s+(?:0x)?([0-9a-fA-F]+)(?:\s+[^,]*)?,a([0-7])\b')
 MOVEA_OFFSET_A0_RE = re.compile(
-    r'\bmovea\.l\s+([0-9a-fA-F]+)\(a([0-7])\),a0\b')
+    r'\bmovea\.l\s+(-?(?:0x[0-9a-fA-F]+|[0-9]+))\(a([0-7])\),a0\b')
 FUNC_LABEL_RE = re.compile(r'\b___free_all:\s*$')
 RTS_RE = re.compile(r'\brts\b')
 
@@ -47,6 +46,13 @@ def free_all_lines(text):
 def append_unique(vals, value):
     if value not in vals:
         vals.append(value)
+
+
+def parse_objdump_displacement(value):
+    """objdump prints address-register displacements in decimal by default."""
+    if value.lower().startswith(('0x', '-0x')):
+        return int(value, 0)
+    return int(value, 10)
 
 
 def heads(binary):
@@ -86,7 +92,9 @@ def heads(binary):
         if m:
             reg = int(m.group(2))
             if reg in bases:
-                append_unique(vals, bases[reg] + int(m.group(1), 16))
+                append_unique(
+                    vals,
+                    bases[reg] + parse_objdump_displacement(m.group(1)))
             continue
 
         m = MOVEA_ABS_A0_RE.search(line)
