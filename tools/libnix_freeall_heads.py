@@ -11,11 +11,11 @@ import argparse, re, subprocess, sys
 #
 # Support both. The addresses are discovered from the exact binary being
 # relinked, so this remains safer than hard-coding libnix internals.
-MOVEA_RE = re.compile(r'\bmovea\.l\s+(?:0x)?([0-9a-fA-F]+)')
+MOVEA_RE = re.compile(r'\bmovea\.l\s+(?:0x)?([0-9][0-9a-fA-F]*)')
 MOVEA_ABS_A0_RE = re.compile(
-    r'\bmovea\.l\s+(?:0x)?([0-9a-fA-F]+)(?:\s+[^,]*)?,a0\b')
+    r'\bmovea\.l\s+(?:0x)?([0-9][0-9a-fA-F]*)(?:\s+[^,]*)?,a0\b')
 LEA_ABS_RE = re.compile(
-    r'\blea\s+(?:0x)?([0-9a-fA-F]+)(?:\s+[^,]*)?,a([0-7])\b')
+    r'\blea\s+(?:0x)?([0-9][0-9a-fA-F]*)(?:\s+[^,]*)?,a([0-7])\b')
 MOVEA_OFFSET_A0_RE = re.compile(
     r'\bmovea\.l\s+(-?(?:0x[0-9a-fA-F]+|[0-9]+))\(a([0-7])\),a0\b')
 FUNC_LABEL_RE = re.compile(r'\b___free_all:\s*$')
