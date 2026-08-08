@@ -26,8 +26,10 @@ jobs:
             asm60: "lowrate060 huffman midside planars8"
 
     steps:
-      - name: Check out the code
+      - name: Check out the code and decoder submodules
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Compile with the Amiga cross-compiler
         env:
