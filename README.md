@@ -102,7 +102,7 @@ amiga_mp3dec.fastexp --play "https://example.com/direct-stream"
 
 Useful playback controls include `--rate`, `--quality`, `--subband-cap`, `--mono`, `--stereo`, `--fake-stereo`, `--buffer-seconds`, `--volume` and `--fast-mem`. Run the binary without arguments to display the complete option list.
 
-The `fast030` target name is retained for compatibility. The actual target CPU is selected with `CPU=00`, `20`, `30`, `40` or `60`; the release build uses the 68030-optimised path.
+The `fast030` target name is retained for compatibility. The actual target CPU is selected with `CPU=00`, `20`, `30`, `40` or `60`. MintAMP v1.1 release drawers are produced for the established 68030 path and a separately tuned 68060 path.
 
 ## Supported formats
 
@@ -269,6 +269,36 @@ That document covers:
 - copying files to Amiga/WinUAE
 - runtime tests
 - Git hygiene
+
+## MintAMP v1.1 release builds
+
+The exact v1.1 release recipe is also kept in [`BUILD-RELEASE.txt`](BUILD-RELEASE.txt).
+
+Build both release drawers from a clean release area:
+
+```sh
+make -f Makefile.amiga release-clean
+make -f Makefile.amiga clean
+
+make -f Makefile.amiga release \
+  CPU=30 \
+  RADIO=1 \
+  SSL=1 \
+  SSLCERTS=1 \
+  RELEASE_NAME=MintAMP-v1.1-68030
+
+make -f Makefile.amiga clean
+
+make -f Makefile.amiga release \
+  CPU=60 \
+  ASM60_GROUPS="lowrate060 huffman midside planars8" \
+  RADIO=1 \
+  SSL=1 \
+  SSLCERTS=1 \
+  RELEASE_NAME=MintAMP-v1.1-68060
+```
+
+The 68030 release uses the established 030-class assembly path. The v1.1 68060 release deliberately uses the tuned `lowrate060 huffman midside planars8` group rather than inheriting the full 68030 assembly bundle. The process-wide task-safe allocator remains enabled by default for normal release builds.
 
 ## Quick build
 
