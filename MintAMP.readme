@@ -2,7 +2,7 @@ Short:        Multiformat player and net radio
 Author:       Darren Banfi (boingball)
 Uploader:     boingball@gmail.com (Darren Banfi)
 Type:         mus/play
-Version:      1.1.0
+Version:      1.2.0
 Architecture: m68k-amigaos >= 3.1.0
 Requires:     68030+; TCP/IP stack for radio;
               util/libs/AmiSSL-v5-OS3.lha for HTTPS
@@ -17,8 +17,8 @@ sound card are not required.
 
 This archive contains two complete MintAMP drawers:
 
-  MintAMP-v1.1-68030  For 68030 and 68040 systems
-  MintAMP-v1.1-68060  Dedicated build for 68060 systems
+  MintAMP-v1.2-68030  For 68030 and 68040 systems
+  MintAMP-v1.2-68060  Dedicated build for 68060 systems
 
 Open or copy the drawer which matches the processor installed in your Amiga.
 The 68060 edition contains a dedicated 68060-safe and 68060-optimised MP3
@@ -48,6 +48,7 @@ Features
   - Live ICY station, artist and title information
   - Station artwork using JPEG, PNG, WebP, ICO and a subset of SVG
   - Playlist loading and saving
+  - Iconify to a Workbench AppIcon while playback continues
   - ID3 tag display and track ratings
   - Configurable output rate, quality, channel mode and buffering
   - Reduced-rate and reduced-subband modes for slower systems
@@ -71,25 +72,25 @@ Installation
 
 Extract the complete archive. Its root contains:
 
-  MintAMP-v1.1-68030/
-  MintAMP-v1.1-68060/
-  MintAMP-v1.1-68030.info
-  MintAMP-v1.1-68060.info
+  MintAMP-v1.2-68030/
+  MintAMP-v1.2-68060/
+  MintAMP-v1.2-68030.info
+  MintAMP-v1.2-68060.info
 
 Choose the drawer matching your processor:
 
   68030 or 68040:
-    Use MintAMP-v1.1-68030
+    Use MintAMP-v1.2-68030
 
   68060:
-    Use MintAMP-v1.1-68060
+    Use MintAMP-v1.2-68060
 
 You may leave both drawers together or copy only the required drawer to your
 preferred location.
 
 Keep every file inside the selected drawer together. Its layout is:
 
-  MintAMP-v1.1-68xxx/
+  MintAMP-v1.2-68xxx/
     MintAMP
     MintAMP.info
     MintAMP-GT
@@ -236,6 +237,14 @@ repository for the complete terms and source code.
 
 History
 -------
+
+1.2.0  Added Workbench AppIcon iconification to both ReAction and GadTools.
+       Expanded and repaired the GadTools Internet Radio browser, including
+       selection highlighting, list scrolling and persistent searches.
+       Refined the GadTools player and radio layouts and combined Stereo,
+       Mono and Fake stereo into one output selector.
+       Fixed Fast RAM input preload for modular local decoder formats and
+       exposed the actual Fast RAM and Paula buffer usage during playback.
 
 1.1.0  Added a dedicated 68060 drawer with 68060-safe MP3 synthesis and
        selected Huffman, mid/side and planar conversion optimisations.

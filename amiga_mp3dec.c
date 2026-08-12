@@ -49,6 +49,15 @@ struct SignalSemaphore radio_console_lock;
 #include "assembly.h"
 #include "statname.h"
 
+#define MINTAMP_CLI_VERSION "1.2.0"
+#if defined(AMIGA_M68K) && !defined(MINTAMP_EMBEDDED_FRONTEND)
+/* Version metadata for the standalone amiga_mp3dec.fastexp edition.  GUI
+ * translation units define MINTAMP_EMBEDDED_FRONTEND before including this
+ * source so their binaries expose only the frontend-specific Version tag. */
+static const char gMintAmpCliVersionTag[] __attribute__((used)) =
+	"\0$VER: amiga_mp3dec.fastexp " MINTAMP_CLI_VERSION " (12.08.2026)";
+#endif
+
 /*
  * AmigaOS priority for the playback child process (minimp3r.c's radio
  * player and amiga_mp3gui.c's file player both create theirs with this).
@@ -6601,6 +6610,7 @@ typedef struct GuiPlaybackStatus {
 	volatile unsigned long decodedFrames;    /* MP3 frames decoded so far */
 	volatile int           sampleRate;       /* source/decoder-input rate (Hz) for the progress clock */
 	volatile unsigned long halfBufferMs;     /* selected playback half-buffer duration */
+	volatile unsigned long fastInputBytes;   /* compressed local input copied to Fast RAM */
 	volatile unsigned long runId;          /* playback generation that owns this status */
 	volatile int           cleanupComplete;/* audio.device and buffers fully released */
 	volatile int           cleanupStage;   /* GUIPLAY_CLEANUP_* diagnostic stage */
@@ -10670,6 +10680,26 @@ static int AmigaGenericInputPlay(const char *sourceName, InputSource *input, con
 			ext ? ext : "(null)", (ext && StrCaseCmp(ext, "mp3") == 0) ? "internal-mp3" : "external-module");
 	if (opt->debugDecoder && ext && StrCaseCmp(ext, "aac") == 0)
 		fprintf(stderr, "AAC: selected\n");
+	/* Local modular formats used to branch here before main() reached the
+	 * common MP3 Fast RAM preload, so --fast-mem was silently ignored for AAC,
+	 * FLAC, Ogg, WMA, WAV and every other decoder module.  Preload the shared
+	 * InputSource before validation/module callbacks; those callbacks already
+	 * understand memory-backed input.  Live radio remains deliberately excluded
+	 * because it is neither finite nor seekable. */
+	if (opt->fastMem && !input->radio && !input->memory) {
+		int preloadResult;
+
+		GuiSetPlaybackPhase(GUIPLAY_PHASE_BUFFERING);
+		GuiPublishStartupStage(GUISTART_INPUT_PRELOAD_FASTMEM);
+		preloadResult = InputSourcePreloadFastMemory(input);
+		if (preloadResult != 0) {
+			if (preloadResult < 0)
+				fprintf(stderr, "cannot preload input into Fast RAM: %s\n",
+					sourceName ? sourceName : "(unknown)");
+			goto done_input;
+		}
+		gGuiPlaybackStatus.fastInputBytes = input->memorySize;
+	}
 	if (!input->radio && ext && StrCaseCmp(ext, "aac") == 0 && !ValidateAacAdtsInput(input, opt->debugDecoder)) {
 		GuiSetPlaybackPhase(GUIPLAY_PHASE_ERROR);
 		gGuiPlaybackStatus.startupStage = GUISTART_FAILED;
@@ -11835,6 +11865,7 @@ int main(int argc, char **argv)
 			AmigaFreeNormalizedArgs(&normalized);
 			return 1;
 		}
+		gGuiPlaybackStatus.fastInputBytes = input.memorySize;
 	}
 	if (opt.play && AmigaPlaybackStopRequested(&opt, "after input preload")) {
 		InputSourceClose(&input);

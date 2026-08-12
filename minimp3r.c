@@ -37,9 +37,11 @@
  * InitSemaphore() radio_console_lock itself -- this file's own real main()
  * does that exactly once, before any child/worker task exists to race it. */
 #define RADIO_CONSOLE_LOCK_INIT_ELSEWHERE 1
+#define MINTAMP_EMBEDDED_FRONTEND 1
 #define main HelixAmp3CliMain
 #include "amiga_mp3dec.c"
 #undef main
+#undef MINTAMP_EMBEDDED_FRONTEND
 #undef printf
 #undef fprintf
 #undef fputs
@@ -57,6 +59,7 @@
 #include <intuition/intuition.h>
 #include <intuition/gadgetclass.h>
 #include <intuition/icclass.h>
+#include <workbench/workbench.h>
 #include <hardware/cia.h>
 #include "picojpeg.h"
 #include "lodepng.h"
@@ -72,8 +75,13 @@
  * in here doubled up into a malformed path that silently failed to persist
  * across reboots while the plain ENV: (RAM) write kept working. */
 #define MR_ENV_PREFIX "MintAMP"
+#define MINTAMP_VERSION "1.2.0"
 #define MR_SETTINGS_VERSION 1
 #define MR_RADIO_FAV_MAX 20
+
+/* AmigaOS Version command metadata; unrelated to MR_SETTINGS_VERSION. */
+static const char gMintAmpVersionTag[] __attribute__((used)) =
+	"\0$VER: MintAMP " MINTAMP_VERSION " (12.08.2026)";
 #if !defined(__AROS__) && !defined(MR_DISABLE_CIA_FILTER)
 #define MR_ENABLE_CIA_FILTER 1
 #endif
@@ -111,6 +119,7 @@
 #include <proto/string.h>
 #include <proto/label.h>
 #include <proto/graphics.h>
+#include <proto/icon.h>
 
 /* ------------------------------------------------------------------------- */
 /* Tunables                                                                  */
@@ -380,7 +389,8 @@ static const int kFakeStereoDelays[] = { 48, 64, 96, 128, 192 };
 #define MENUNUM_PLAYBACK  1
 #define ITEMNUM_ABOUT     0
 #define ITEMNUM_RADIO     1
-#define ITEMNUM_QUIT      2
+#define ITEMNUM_ICONIFY   2
+#define ITEMNUM_QUIT      3
 #define ITEMNUM_DTP       0
 #define ITEMNUM_BENCH     1
 #define ITEMNUM_ARTWORK   2
@@ -406,12 +416,12 @@ static const char * const kHttpsWaitDesc[HTTPS_WAIT_COUNT] = {
 };
 
 static struct Menu kMenus[2];
-static struct MenuItem kProjectItems[3];
+static struct MenuItem kProjectItems[4];
 static struct MenuItem kPlaybackItems[PLAYBACK_ITEM_COUNT];
-static struct IntuiText kProjectText[3];
+static struct IntuiText kProjectText[4];
 static struct IntuiText kPlaybackText[PLAYBACK_ITEM_COUNT];
-static const char * const kProjectLabels[3] = {
-	"About MintAMP...", "Internet Radio", "Quit"
+static const char * const kProjectLabels[4] = {
+	"About MintAMP...", "Internet Radio", "Iconify", "Quit"
 };
 static const char * const kPlaybackLabels[PLAYBACK_ITEM_COUNT] = {
 	"Decode-then-play", "Bench mode", "Artwork", "Artwork Cache",
@@ -444,7 +454,7 @@ static void MrInitMenuStrip(void)
 	kMenus[1].Flags = MENUENABLED;
 	kMenus[1].MenuName = (STRPTR)"Playback";
 	kMenus[1].FirstItem = &kPlaybackItems[0];
-	for (i = 0; i < 3; i++) {
+	for (i = 0; i < 4; i++) {
 		/* Pen 0 is the screen's light/background pen, pen 1 is black on
 		 * the standard 4-colour Workbench palette -- these were swapped,
 		 * so JAM1 (which only uses FrontPen) drew the item text in the
@@ -455,7 +465,7 @@ static void MrInitMenuStrip(void)
 		kProjectText[i].LeftEdge = 2;
 		kProjectText[i].TopEdge = 1;
 		kProjectText[i].IText = (STRPTR)kProjectLabels[i];
-		kProjectItems[i].NextItem = (i < 2) ? &kProjectItems[i + 1] : NULL;
+		kProjectItems[i].NextItem = (i < 3) ? &kProjectItems[i + 1] : NULL;
 		kProjectItems[i].LeftEdge = 0;
 		kProjectItems[i].TopEdge = i * 10;
 		kProjectItems[i].Width = 152;
@@ -508,6 +518,7 @@ static void MrInitMenuStrip(void)
 struct IntuitionBase *IntuitionBase;
 struct Library *UtilityBase;
 struct Library *AslBase;
+struct Library *IconBase;
 struct Library *WindowBase;
 struct Library *LayoutBase;
 struct Library *ButtonBase;
@@ -679,6 +690,7 @@ typedef struct MrApp {
 	struct timerequest *timerReq;
 	int               timerRunning;
 	struct MsgPort   *donePort;
+	struct MsgPort   *appPort;
 
 	char  inputName[MR_MAX_PATH];
 	char  lastDrawer[MR_MAX_PATH];
@@ -2143,6 +2155,7 @@ static void PollPlaybackStatus(MrApp *app)
 	int rate;
 	long spareMs;
 	unsigned long halfMs;
+	unsigned long fastInputBytes;
 	char buf[96];
 	long audioSecs;
 	int updates = 0;
@@ -2223,6 +2236,7 @@ static void PollPlaybackStatus(MrApp *app)
 	rate    = gGuiPlaybackStatus.sampleRate;
 	spareMs = gGuiPlaybackStatus.spareMs;
 	halfMs  = gGuiPlaybackStatus.halfBufferMs;
+	fastInputBytes = gGuiPlaybackStatus.fastInputBytes;
 
 	if (!MrIsRadioInput(app->inputName) && rate > 0 && frames > 0 &&
 		frames != app->lastFrames &&
@@ -2248,15 +2262,22 @@ static void PollPlaybackStatus(MrApp *app)
 		app->lastPhaseShown = phase;
 		switch (phase) {
 		case GUIPLAY_PHASE_BUFFERING:
-			if (!isRadioInput) { SetStatus(app, "Buffering..."); updates++; }
+			if (!isRadioInput) {
+				SetStatus(app, gGuiPlaybackStatus.startupStage == GUISTART_INPUT_PRELOAD_FASTMEM ?
+					"Copying file to Fast RAM..." : "Buffering...");
+				updates++;
+			}
 			break;
 		case GUIPLAY_PHASE_PLAYING:
 			if (!isRadioInput) {
-				if (frames > 0 && rate > 0) {
-					sprintf(buf, "Playing - %lu frames @ %d Hz", frames, rate);
-					SetStatus(app, buf);
-				} else
-					SetStatus(app, "Playing...");
+				if (fastInputBytes)
+					sprintf(buf, "Playing - Fast RAM: %luK, buffer: %lu.%03lu sec",
+						(fastInputBytes + 1023UL) / 1024UL,
+						halfMs / 1000UL, halfMs % 1000UL);
+				else
+					sprintf(buf, "Playing - buffer: %lu.%03lu sec",
+						halfMs / 1000UL, halfMs % 1000UL);
+				SetStatus(app, buf);
 				updates++;
 			}
 			break;
@@ -2357,6 +2378,24 @@ static long DrainMsgPortForClose(struct MsgPort *port, const char *reason)
 	while ((msg = GetMsg(port)) != NULL)
 		drained++;
 	RADIO_DBG(printf("app-close-drain: reason=\"%s\" port=%p drained=%ld\n",
+		reason ? reason : "", port, drained);)
+	return drained;
+}
+
+/* Workbench owns AppMessages and requires every one to be replied before the
+ * AppPort is deleted.  Unlike the private done/timer ports above, simply
+ * removing these messages would leave Workbench waiting on stale storage. */
+static long DrainReplyMsgPortForClose(struct MsgPort *port, const char *reason)
+{
+	long drained = 0;
+	struct Message *msg;
+	if (!port)
+		return 0;
+	while ((msg = GetMsg(port)) != NULL) {
+		ReplyMsg(msg);
+		drained++;
+	}
+	RADIO_DBG(printf("app-close-drain: reason=\"%s\" appPort=%p replied=%ld\n",
 		reason ? reason : "", port, drained);)
 	return drained;
 }
@@ -2493,6 +2532,11 @@ static void DisposeGuiObjectsBeforeCloseLibs(MrApp *app)
 	MrCloseWindow(app);
 	RADIO_DBG(printf("app-dispose: after DisposeObject mainWinObj\n");)
 	Radio_CheckMiniMem("after DisposeObject mainWinObj");
+	if (app->appPort) {
+		DrainReplyMsgPortForClose(app->appPort, "before DeleteMsgPort appPort");
+		DeleteMsgPort(app->appPort);
+		app->appPort = NULL;
+	}
 	if (app->donePort) {
 		DrainMsgPortForClose(app->donePort, "before DeleteMsgPort donePort");
 		DeleteMsgPort(app->donePort);
@@ -2547,6 +2591,7 @@ static void CloseLibs(void)
 		if (WindowBase)    { CloseLibrary(WindowBase);    WindowBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Window done\n");) Radio_CheckMiniMem("after CloseLibrary Window"); }
 	}
 	if (AslBase)       { CloseLibrary(AslBase);       AslBase = NULL; RADIO_DBG(printf("app-close: CloseLibs ASL done\n");) Radio_CheckMiniMem("after CloseLibrary ASL"); }
+	if (IconBase)      { CloseLibrary(IconBase);      IconBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Icon done\n");) Radio_CheckMiniMem("after CloseLibrary Icon"); }
 	if (UtilityBase)   { CloseLibrary(UtilityBase);   UtilityBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Utility done\n");) Radio_CheckMiniMem("after CloseLibrary Utility"); }
 	if (IntuitionBase) { CloseLibrary((struct Library *)IntuitionBase); IntuitionBase = NULL; RADIO_DBG(printf("app-close: CloseLibs Intuition done\n");) Radio_CheckMiniMem("after CloseLibrary Intuition"); }
 	RADIO_DBG(printf("app-close: CloseLibs exit\n");)
@@ -2569,6 +2614,7 @@ static int OpenLibs(void)
 		fprintf(stderr, "MintAMP needs asl.library V39+.\n");
 		return 0;
 	}
+	IconBase = OpenLibrary("icon.library", 39);
 
 	WindowBase    = OpenLibrary("window.class",            MINIMP3R_CLASS_VERSION);
 	LayoutBase    = OpenLibrary("gadgets/layout.gadget",   MINIMP3R_CLASS_VERSION);
@@ -2622,6 +2668,7 @@ static int CheckGadget(Object *obj, const char *name)
 static int MrOpenWindow(MrApp *app)
 {
 	Object *root;
+	struct DiskObject *windowIcon = NULL;
 
 	app->fileGad = (Object *)NewObject(GETFILE_GetClass(), NULL,
 		GA_ID, GID_FILE,
@@ -2983,6 +3030,11 @@ static int MrOpenWindow(MrApp *app)
 		return 0;
 	}
 
+	MrInitMenuStrip();
+	app->menuStrip = &kMenus[0];
+	SyncMenuChecks(app);
+	if (IconBase)
+		windowIcon = GetDiskObject((STRPTR)"PROGDIR:MintAMP");
 	app->winObj = (Object *)NewObject(WINDOW_GetClass(), NULL,
 		WA_Title, (ULONG)MR_WINDOW_TITLE,
 		WA_ScreenTitle, (ULONG)MR_WINDOW_TITLE,
@@ -2991,6 +3043,11 @@ static int MrOpenWindow(MrApp *app)
 		WA_DragBar, TRUE,
 		WA_CloseGadget, TRUE,
 		WA_SizeGadget, TRUE,
+		WINDOW_AppPort, (ULONG)app->appPort,
+		WINDOW_IconifyGadget, TRUE,
+		WINDOW_IconTitle, (ULONG)MR_WINDOW_TITLE,
+		windowIcon ? WINDOW_Icon : TAG_IGNORE, (ULONG)windowIcon,
+		WINDOW_MenuStrip, (ULONG)app->menuStrip,
 		/* SMART_REFRESH so Intuition preserves the hand-drawn artwork panel when
 		 * another window (the Internet Radio browser especially) overlaps it.
 		 * Without this the window is simple-refresh: overlapping deletes the art
@@ -3025,10 +3082,6 @@ static int MrOpenWindow(MrApp *app)
 		SetGadgetAttrs((struct Gadget *)app->bufferGad, app->win, NULL,
 			GA_Disabled, app->decodeThenPlay,
 			TAG_DONE);
-	MrInitMenuStrip();
-	app->menuStrip = &kMenus[0];
-	SyncMenuChecks(app);
-	SetMenuStrip(app->win, app->menuStrip);
 	if (!app->hasNetwork)
 		OffMenu(app->win, FULLMENUNUM(MENUNUM_PROJECT, ITEMNUM_RADIO, NOSUB));
 	return 1;
@@ -3042,13 +3095,6 @@ static void MrCloseWindow(MrApp *app)
 	RADIO_DBG(printf("app-close: CloseRadioWindow done\n");)
 	ClosePlaylistWindow(app);
 	RADIO_DBG(printf("app-close: ClosePlaylistWindow done\n");)
-	if (app->win && app->menuStrip) {
-		RADIO_DBG(printf("app-dispose: before ClearMenuStrip win=%p menuStrip=%p\n", app->win, app->menuStrip);)
-		ClearMenuStrip(app->win);
-		RADIO_DBG(printf("app-dispose: after ClearMenuStrip\n");)
-		Radio_CheckMiniMem("after ClearMenuStrip");
-	}
-	app->menuStrip = NULL;
 	if (app->winObj) {
 		RADIO_DBG(printf("app-dispose: before DisposeObject mainWinObj=%p\n", app->winObj);)
 		DisposeObject(app->winObj);	/* disposes the whole gadget tree too */
@@ -3065,6 +3111,7 @@ static void MrCloseWindow(MrApp *app)
 		RADIO_DBG(printf("app-dispose: after DisposeObject mainWinObj\n");)
 		Radio_CheckMiniMem("after DisposeObject mainWinObj");
 	}
+	app->menuStrip = NULL;
 	RADIO_DBG(printf("app-close: MrCloseWindow exit\n");)
 }
 
@@ -6520,6 +6567,30 @@ static void SyncMenuChecks(MrApp *app)
 	}
 }
 
+static void MrIconify(MrApp *app)
+{
+	if (!app || !app->winObj || !app->win)
+		return;
+	/* Do not leave utility windows floating after the player becomes an
+	 * AppIcon.  Playback/timer/done ports remain alive and audio continues. */
+	CloseRadioWindow(app);
+	ClosePlaylistWindow(app);
+	if (RA_Iconify(app->winObj))
+		app->win = NULL;
+}
+
+static void MrUniconify(MrApp *app)
+{
+	if (!app || !app->winObj || app->win)
+		return;
+	app->win = (struct Window *)RA_OpenWindow(app->winObj);
+	if (!app->win)
+		return;
+	DrawArtPanel(app);
+	WindowToFront(app->win);
+	ActivateWindow(app->win);
+}
+
 static void SetDecodeThenPlay(MrApp *app, int enabled)
 {
 	app->decodeThenPlay = enabled ? 1 : 0;
@@ -6547,12 +6618,14 @@ static void HandleMenu(MrApp *app, UWORD code, int *done)
 				es.es_StructSize = sizeof(es);
 				es.es_Flags = 0;
 				es.es_Title = (UBYTE *)"About MintAMP";
-				es.es_TextFormat = (UBYTE *)"MintAMP\nMini Internet Amiga Media Player\nReAction Edition\nMade by boingball\n(C)2026 - v1.1\nTo support this application visit:\nhttps://buymeacoffee.com/boingball\n-----\nMade with decoders from\nHelix MP3 / ACC\nby Real Networks\nlibfoxenflac\nby astoeckel\n\nESP8266Audio\nby earlephilhower\n-----\nAI Used\nClaude and Codex\nLate Nights\nMany";
+				es.es_TextFormat = (UBYTE *)"MintAMP\nMini Internet Amiga Media Player\nReAction Edition\nMade by boingball\n(C)2026 - v" MINTAMP_VERSION "\nTo support this application visit:\nhttps://buymeacoffee.com/boingball\n-----\nMade with decoders from\nHelix MP3 / AAC\nby Real Networks\nlibfoxenflac\nby astoeckel\n\nESP8266Audio\nby earlephilhower\n-----\nAI Used\nClaude and Codex\nLate Nights\nMany";
 				es.es_GadgetFormat = (UBYTE *)"OK";
 				EasyRequest(app->win, &es, NULL, TAG_DONE);
 			}
 			else if (mn == MENUNUM_PROJECT && it == ITEMNUM_RADIO)
 				OpenRadioWindow(app);
+			else if (mn == MENUNUM_PROJECT && it == ITEMNUM_ICONIFY)
+				MrIconify(app);
 			else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_DTP)
 				SetDecodeThenPlay(app, !app->decodeThenPlay);
 			else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_BENCH) {
@@ -6701,6 +6774,7 @@ static int MrMainReal(int argc, char **argv)
 {
 	static MrApp app;
 	ULONG winSig = 0;
+	ULONG appSig = 0;
 	ULONG timerSig = 0;
 	ULONG doneSig = 0;
 	int done = 0;
@@ -6780,11 +6854,23 @@ static int MrMainReal(int argc, char **argv)
 		return 1;
 	}
 
+	app.appPort = CreateMsgPort();
+	if (!app.appPort) {
+		fprintf(stderr, "MintAMP: could not create the Workbench AppPort.\n");
+		CloseTimer(&app);
+		DeleteMsgPort(app.donePort);
+		CloseLibs();
+		return 1;
+	}
+
 	if (!MrOpenWindow(&app)) {
 		SyncFromGadgets(&app);
 		SaveSettings(&app);
 		MrCloseWindow(&app);
 		CloseTimer(&app);
+		DrainReplyMsgPortForClose(app.appPort, "open failure");
+		DeleteMsgPort(app.appPort);
+		app.appPort = NULL;
 		DeleteMsgPort(app.donePort);
 		CloseLibs();
 		return 1;
@@ -6800,6 +6886,7 @@ static int MrMainReal(int argc, char **argv)
 	UpdateChannelGadgetState(&app);
 
 	GetAttr(WINDOW_SigMask, app.winObj, &winSig);
+	appSig   = 1UL << app.appPort->mp_SigBit;
 	timerSig = 1UL << app.timerPort->mp_SigBit;
 	doneSig  = 1UL << app.donePort->mp_SigBit;
 
@@ -6816,7 +6903,8 @@ static int MrMainReal(int argc, char **argv)
 			GetAttr(WINDOW_SigMask, app.plWinObj, &plSig);
 		if (app.rbWinObj)
 			GetAttr(WINDOW_SigMask, app.rbWinObj, &rbSig);
-		sigs = Wait(winSig | timerSig | doneSig | plSig | rbSig | SIGBREAKF_CTRL_C);
+		sigs = Wait(winSig | appSig | timerSig | doneSig | plSig | rbSig |
+			SIGBREAKF_CTRL_C);
 
 		if (sigs & SIGBREAKF_CTRL_C)
 			done = 1;
@@ -6840,13 +6928,20 @@ static int MrMainReal(int argc, char **argv)
 		if (rbSig && (sigs & rbSig))
 			HandleRadioWindow(&app);
 
-		if (sigs & winSig) {
+		if (sigs & (winSig | appSig)) {
 			ULONG result;
 			UWORD code = 0;
 			while ((result = RA_HandleInput(app.winObj, &code)) != WMHI_LASTMSG) {
 				switch (result & WMHI_CLASSMASK) {
 				case WMHI_CLOSEWINDOW:
 					done = 1;
+					break;
+				case WMHI_ICONIFY:
+					MrIconify(&app);
+					break;
+				case WMHI_UNICONIFY:
+					MrUniconify(&app);
+					GetAttr(WINDOW_SigMask, app.winObj, &winSig);
 					break;
 				case WMHI_MENUPICK:
 					if (app.menuStrip)

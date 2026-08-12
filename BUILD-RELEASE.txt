@@ -1,7 +1,7 @@
-MintAMP v1.1 release build recipe
+MintAMP v1.2 release build recipe
 ================================
 
-These are the release commands used for MintAMP v1.1.
+These are the release commands used for MintAMP v1.2.
 Run them from the MintAMP repository root.
 
 68030 release
@@ -15,7 +15,7 @@ make -f Makefile.amiga release \
   RADIO=1 \
   SSL=1 \
   SSLCERTS=1 \
-  RELEASE_NAME=MintAMP-v1.1-68030
+  RELEASE_NAME=MintAMP-v1.2-68030
 
 68060 release
 -------------
@@ -28,14 +28,14 @@ make -f Makefile.amiga release \
   RADIO=1 \
   SSL=1 \
   SSLCERTS=1 \
-  RELEASE_NAME=MintAMP-v1.1-68060
+  RELEASE_NAME=MintAMP-v1.2-68060
 
 Notes
 -----
 
 - The 68030 build uses the established 68020/68030/68040 assembly path.
 - The 68060 build deliberately does not inherit the full 68030 assembly bundle.
-- The v1.1 68060 release uses: lowrate060 huffman midside planars8.
+- The v1.2 68060 release uses: lowrate060 huffman midside planars8.
 - RADIO=1 enables internet radio support.
 - SSL=1 enables HTTPS through AmiSSL.
 - SSLCERTS=1 enables TLS certificate and hostname verification.

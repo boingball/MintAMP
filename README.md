@@ -25,6 +25,7 @@ Classic AmigaOS • m68k • Paula • MP3 • AAC • FLAC • Ogg Vorbis • W
 - Modular decoder loading
 - ReAction/ClassAct GUI: `MintAMP`
 - GadTools GUI: `MintAMP-GT`
+- Iconify while playback continues (native ReAction AppIcon; Project/Iconify in GadTools)
 - CLI playback mode: `amiga_mp3dec.fastexp`
 - Direct HTTP and HTTPS internet radio with `RADIO=1 SSL=1`
 - Optional AmiSSL certificate verification with `SSLCERTS=1`
@@ -102,7 +103,7 @@ amiga_mp3dec.fastexp --play "https://example.com/direct-stream"
 
 Useful playback controls include `--rate`, `--quality`, `--subband-cap`, `--mono`, `--stereo`, `--fake-stereo`, `--buffer-seconds`, `--volume` and `--fast-mem`. Run the binary without arguments to display the complete option list.
 
-The `fast030` target name is retained for compatibility. The actual target CPU is selected with `CPU=00`, `20`, `30`, `40` or `60`. MintAMP v1.1 release drawers are produced for the established 68030 path and a separately tuned 68060 path.
+The `fast030` target name is retained for compatibility. The actual target CPU is selected with `CPU=00`, `20`, `30`, `40` or `60`. MintAMP v1.2 release drawers are produced for the established 68030 path and a separately tuned 68060 path.
 
 ## Supported formats
 
@@ -270,9 +271,9 @@ That document covers:
 - runtime tests
 - Git hygiene
 
-## MintAMP v1.1 release builds
+## MintAMP v1.2 release builds
 
-The exact v1.1 release recipe is also kept in [`BUILD-RELEASE.txt`](BUILD-RELEASE.txt).
+The exact v1.2 release recipe is also kept in [`BUILD-RELEASE.txt`](BUILD-RELEASE.txt).
 
 Build both release drawers from a clean release area:
 
@@ -285,7 +286,7 @@ make -f Makefile.amiga release \
   RADIO=1 \
   SSL=1 \
   SSLCERTS=1 \
-  RELEASE_NAME=MintAMP-v1.1-68030
+  RELEASE_NAME=MintAMP-v1.2-68030
 
 make -f Makefile.amiga clean
 
@@ -295,10 +296,10 @@ make -f Makefile.amiga release \
   RADIO=1 \
   SSL=1 \
   SSLCERTS=1 \
-  RELEASE_NAME=MintAMP-v1.1-68060
+  RELEASE_NAME=MintAMP-v1.2-68060
 ```
 
-The 68030 release uses the established 030-class assembly path. The v1.1 68060 release deliberately uses the tuned `lowrate060 huffman midside planars8` group rather than inheriting the full 68030 assembly bundle. The process-wide task-safe allocator remains enabled by default for normal release builds.
+The 68030 release uses the established 030-class assembly path. The v1.2 68060 release deliberately uses the tuned `lowrate060 huffman midside planars8` group rather than inheriting the full 68030 assembly bundle. The process-wide task-safe allocator remains enabled by default for normal release builds.
 
 ## Quick build
 

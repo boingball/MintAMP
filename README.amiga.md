@@ -188,8 +188,9 @@ be `audio/mpeg` for the Groove Salad MP3 stream.
 `MintAMP-GT` opens the MintAMP-GT window with an ASL file requester whose pattern is
 expanded from built-in MP3 plus discovered decoder-module extensions such as
 FLAC and AAC.  Internet radio URLs can be entered from
-Project/Internet Stream.  The main window includes speed-mode, channel-mode,
-fake-stereo, fast-mem, sample-rate, quality, buffer, and volume controls;
+Project/Internet Stream.  The main window includes a speed-mode control; an
+output selector for Stereo, Mono, or Fake stereo; fast-mem, sample-rate,
+quality, buffer, and volume controls;
 metadata/artwork fields; progress and time displays; transport buttons for Play,
 Next, Stop, the Paula hardware filter, and the playlist window; a status bar;
 and a file-info row.  The GUI uses `gadtools.library` through the AmigaOS m68k
@@ -209,7 +210,16 @@ Fast-mem is always obeyed.  When an internet stream is selected the GadTools
 frontend clears Fast-mem and omits `--fast-mem`, matching the ReAction frontend,
 because stream inputs are live sockets rather than finite seekable files.
 
-The buffer slider chooses the `--buffer-seconds` value from 1 to 30 seconds. The Volume slider stores `ENVARC:MintAMP/Volume` as 0-100% and maps it to `audio.device` `ioa_Volume` 0-64, so 0% is silent and 100% preserves the previous full-volume request value. Volume changes are shared with the embedded playback subprocess and applied to the next safe `CMD_WRITE` submission without changing PCM samples. The GUI rate selector cycles through 8287, 8820, 11025, 14700, 22050, and 28600 Hz.
+The buffer slider chooses the requested `--buffer-seconds` value from 1 to 10
+seconds. Paula's per-write limit can shorten it at higher sample rates; once
+playback begins both GUIs show the actual selected half-buffer duration rather
+than implying the full request was possible. The Volume slider stores
+`ENVARC:MintAMP/Volume` as 0-100% and maps it to `audio.device` `ioa_Volume`
+0-64, so 0% is silent and 100% preserves the previous full-volume request
+value. Volume changes are shared with the embedded playback subprocess and
+applied to the next safe `CMD_WRITE` submission without changing PCM samples.
+The GUI rate selector cycles through 8287, 8820, 11025, 14700, 22050, and
+28600 Hz.
 Superfast is a fast-lowrate variant rather than a separate exclusive mode; when
 Superfast is ticked the rate selector narrows to its supported 11025 and 22050 Hz
 choices. Playback still
@@ -224,6 +234,13 @@ The GadTools Internet Radio dialog now exposes the same practical Radio Browser
 controls as the ReAction version: name/codec/country search, preset country
 codes, HTTP/HTTPS/all URL filtering, 10/25/50/100 result limits, maximum bitrate
 filtering, favourites, playable-result selection, and Up/Down selection buttons.
+The Up/Down buttons follow the selected result and keep it visible, while the
+listview's own scrollbar remains independent.  Closing and reopening Internet
+Radio preserves the last search, filters, results and selection for the current
+MintAMP session.  Project/Iconify hides the GadTools window as a Workbench
+AppIcon; double-click the AppIcon to restore the player while playback continues.
+The ReAction edition provides the native title-bar iconify gadget, uses the
+program's own icon, and offers the same Project/Iconify menu action.
 For Internet radio streams, both GUI frontends show a stable `Streaming` status
 while audio is flowing and only change it for connection, dropped-stream
 reconnect, stop, or error states. The GUI file-info row reports the first MPEG frame channel mode
@@ -369,8 +386,10 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   reports total underruns,
   per-buffer underruns, late-buffer count, and the
   minimum measured spare time before a playing buffer ended at exit.
-- `--fast-mem` preloads the complete compressed MP3 into Fast RAM before decoding
-  or playback starts. On AmigaOS builds it requests `MEMF_FAST`, so the input
+- `--fast-mem` preloads the complete compressed local input into Fast RAM before
+  decoding or playback starts. It applies to the built-in MP3 decoder and to
+  modular AAC, FLAC, Ogg, WMA, WAV and other local decoder formats. On AmigaOS
+  builds it requests `MEMF_FAST`, so the input
   does not consume chip RAM needed by Paula buffers. MintAMP disables the
   checkbox when the selected file will not fit in available Fast RAM. During
   startup it reports that it is copying the input to Fast RAM. This removes

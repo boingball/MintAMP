@@ -27,9 +27,11 @@
  * block and instead InitSemaphore() once in this file's own main() below,
  * mirroring minimp3r.c. */
 #define RADIO_CONSOLE_LOCK_INIT_ELSEWHERE 1
+#define MINTAMP_EMBEDDED_FRONTEND 1
 #define main HelixAmp3CliMain
 #include "amiga_mp3dec.c"
 #undef main
+#undef MINTAMP_EMBEDDED_FRONTEND
 #undef printf
 #undef fprintf
 #undef fputs
@@ -48,6 +50,7 @@ typedef struct GuiPlaybackStatus {
 	volatile unsigned long decodedFrames;
 	volatile int           sampleRate;
 	volatile unsigned long halfBufferMs;
+	volatile unsigned long fastInputBytes;
 	volatile unsigned long runId;
 	volatile int           cleanupComplete;
 	volatile int           cleanupStage;
@@ -187,6 +190,7 @@ static char gSupportedExtPattern[512];
 #include <exec/ports.h>
 #include <dos/dos.h>
 #include <dos/dostags.h>
+#include <workbench/workbench.h>
 #include <proto/exec.h>
 #include <proto/intuition.h>
 #include <proto/asl.h>
@@ -195,6 +199,8 @@ static char gSupportedExtPattern[512];
 #include <proto/graphics.h>
 #include <proto/diskfont.h>
 #include <proto/timer.h>
+#include <proto/icon.h>
+#include <proto/wb.h>
 /* #include <graphics/colormap.h> */
 #include "picojpeg.h"
 #include "lodepng.h"
@@ -254,11 +260,17 @@ static void GuiTaskIdentityLog(const char *phase)
 
 #define HELIXAMP3_MAX_PATH 256
 #define HELIXAMP3_ARGC_MAX 28
+#define MINTAMP_GT_VERSION "1.2.0"
 #define HELIXAMP3_SETTINGS_VERSION 2
 #define HELIXAMP3_RADIO_FAV_MAX 20
 #define HELIXAMP3_QUALITY_MIN 0
 #define HELIXAMP3_QUALITY_MAX 3
 #define HELIXAMP3_SIGMASK(gui) (1UL << (gui)->win->UserPort->mp_SigBit)
+
+/* AmigaOS Version command metadata.  Keep this independent of the settings
+ * schema version above: release numbering does not imply a settings migration. */
+static const char gMintAmpGtVersionTag[] __attribute__((used)) =
+	"\0$VER: MintAMP-GT " MINTAMP_GT_VERSION " (12.08.2026)";
 /* Bare name, no explicit "ENV:"/"ENVARC:" device prefix -- SaveEnvString()
  * below passes this through SetVar() with GVF_GLOBAL_ONLY (writes ENV:) and
  * separately with GVF_SAVE_VAR (which internally constructs the persistent
@@ -271,7 +283,7 @@ static void GuiTaskIdentityLog(const char *phase)
 #define GUI_STARTUP_STACK_SIZE 262144UL
 
 #define GUI_WIN_W       560    /* inner width; wide enough for all controls */
-#define GUI_WIN_H       (ROW_FILEINFO + GUI_GADGET_HEIGHT + 3)  /* snug to the last row with a 3px bottom margin: no dead space (forward-refs the ROW_* block below; all resolved before first use) */
+#define GUI_WIN_H       (ROW_FILEINFO + GUI_GADGET_HEIGHT + 10) /* two more pixels clear File info from the bottom border */
 
 #define GUI_MARGIN           6
 #define GUI_ROW_HEIGHT       16
@@ -279,7 +291,6 @@ static void GuiTaskIdentityLog(const char *phase)
 #define GUI_SECTION_GAP      2
 #define GUI_LABEL_HEIGHT     8
 #define GUI_GADGET_HEIGHT    14
-#define GUI_CHECKBOX_GAP     5
 #define GUI_CONTROL_GAP      7
 #define GUI_TOP_Y           18     /* leave breathing room below the title bar */
 #define GUI_LABEL_WIDTH     78     /* wide enough for the longest left label ("File info:") in topaz 8 */
@@ -308,22 +319,15 @@ static void GuiTaskIdentityLog(const char *phase)
 #define BROWSE_X            (META_RIGHT - BROWSE_W)
 #define FILE_W              (BROWSE_X - GUI_FIELD_X - GUI_CONTROL_GAP)
 
-#define CYCLE_H             GUI_GADGET_HEIGHT
-#define CYCLE_W_SMALL       74
-#define CYCLE_W_MED         92
 #define CYCLE_W_LARGE       122
 #define CHECK_W             20
 #define CHECK_H             12
-#define CHECK_TEXT_W        82
-#define CHECK_STEP          (CHECK_W + CHECK_TEXT_W + GUI_CHECKBOX_GAP)
-#define OPTION1_X           GUI_FIELD_X
-#define OPTION2_X           (OPTION1_X + CHECK_STEP)
 #define SPEED_X             GUI_FIELD_X
 #define SPEED_W             190    /* holds the longest cycle label "22050 Mono Ultrafast" plus the arrow image */
 #define FASTMEM_X          (SPEED_X + SPEED_W + GUI_CONTROL_GAP + 8)
 #define STEREO_X           GUI_FIELD_X
-#define FAKE_X             (STEREO_X + CYCLE_W_SMALL + GUI_CONTROL_GAP + 8)
-#define WIDTH_X            (FAKE_X + CHECK_STEP + 40)
+#define CHANNEL_MODE_W     CYCLE_W_LARGE  /* fits "Fake stereo" plus the cycle arrow */
+#define WIDTH_X            (GUI_FIELD_X + 212)  /* keep fake-stereo tuning close to the output selector */
 #define WIDTH_W            96     /* holds "Very wide" without spilling into the Delay label */
 #define DELAY_X            (WIDTH_X + WIDTH_W + GUI_CONTROL_GAP + 60)
 #define DELAY_W            56
@@ -343,7 +347,7 @@ static void GuiTaskIdentityLog(const char *phase)
 #define BUFFER_W            150
 #define BUFFER_VALUE_W      48      /* "10 sec" (6 chars) in topaz 8 */
 #define VOLUME_LABEL_W      56      /* "Volume:" in topaz 8 */
-#define BUFVOL_GAP          16
+#define BUFVOL_GAP          24      /* visible gap between "10 sec" and "Volume:" */
 #define VOLUME_X            (BUFFER_X + BUFFER_W + BUFFER_VALUE_W + BUFVOL_GAP + VOLUME_LABEL_W)
 #define VOLUME_W            150
 #define VOLUME_VALUE_W      32      /* "100%" (4 chars) */
@@ -367,7 +371,7 @@ static void GuiTaskIdentityLog(const char *phase)
  * mirroring Filter/Playlist on the right. */
 #define RADIO_BTN_W         64
 #define RADIO_BTN_X         GUI_MARGIN
-#define FILTER_W            54
+#define FILTER_W            62
 #define PL_OPEN_W           70
 #define PL_OPEN_X           (GUI_RIGHT_X - PL_OPEN_W)
 #define FILTER_X            (PL_OPEN_X - GUI_CONTROL_GAP - FILTER_W)
@@ -381,8 +385,7 @@ static void GuiTaskIdentityLog(const char *phase)
 #define ROW_GENRE           (ROW_TRACK + 14)
 #define ROW_SPEED           (ROW_GENRE + GUI_ROW_HEIGHT + GUI_SECTION_GAP)
 #define ROW_PLAYBACK        (ROW_SPEED + GUI_ROW_HEIGHT + GUI_ROW_GAP)
-#define ROW_DECODER         (ROW_PLAYBACK + GUI_ROW_HEIGHT + GUI_ROW_GAP)
-#define ROW_CYCLES          (ROW_DECODER + GUI_ROW_HEIGHT + GUI_ROW_GAP)
+#define ROW_CYCLES          (ROW_PLAYBACK + GUI_ROW_HEIGHT + GUI_ROW_GAP)
 #define ROW_BUFVOL          (ROW_CYCLES + GUI_ROW_HEIGHT + GUI_SECTION_GAP)
 #define ROW_PROGRESS        (ROW_BUFVOL + GUI_ROW_HEIGHT + GUI_SECTION_GAP)
 #define ROW_BUTTONS         (ROW_PROGRESS + 18)
@@ -471,7 +474,8 @@ static void GuiTaskIdentityLog(const char *phase)
 #define MENUNUM_PLAYBACK  1
 #define ITEMNUM_ABOUT     0
 #define ITEMNUM_STREAM    1
-#define ITEMNUM_QUIT      2
+#define ITEMNUM_ICONIFY   2
+#define ITEMNUM_QUIT      3
 #define ITEMNUM_DTP       0
 #define ITEMNUM_BENCH     1
 #define ITEMNUM_ARTWORK   2
@@ -491,7 +495,6 @@ enum {
 	GID_SPEED_MODE,
 	GID_FAST_MEM,
 	GID_CHANNEL_MODE,
-	GID_FAKE_STEREO,
 	GID_FAKE_STEREO_WIDTH,
 	GID_FAKE_STEREO_DELAY,
 	GID_RATE,
@@ -540,6 +543,18 @@ enum {
 #define RB_GID_DOWN         313
 #define RB_GID_CLOSE        314
 #define RB_GID_STATUS       315
+
+/* Compact GadTools Internet Radio layout.  Coordinates are relative to the
+ * complete window (including its title bar), matching NewGadget semantics. */
+#define RB_WIN_W            548
+#define RB_WIN_H            262
+#define RB_FILTER_ROW1_Y     20
+#define RB_FILTER_ROW2_Y     42
+#define RB_FILTER_ROW3_Y     64
+#define RB_RESULTS_Y         88
+#define RB_RESULTS_H        116
+#define RB_BUTTONS_Y        210
+#define RB_STATUS_Y         234
 
 /* Playlist window gadget IDs (separate range to avoid main window conflicts) */
 #define PL_GID_LIST      200
@@ -634,7 +649,6 @@ typedef struct HelixAmp3Gui {
 	struct Gadget  *gadRate;
 	struct Gadget  *gadFastMem;
 	struct Gadget  *gadChannelMode;
-	struct Gadget  *gadFakeStereo;
 	struct Gadget  *gadFakeStereoWidth;
 	struct Gadget  *gadFakeStereoDelay;
 	struct Gadget  *gadRewind;
@@ -703,6 +717,10 @@ typedef struct HelixAmp3Gui {
 	ArtDecodeState artDecode;
 	struct MsgPort *timerPort;
 	struct MsgPort *donePort;
+	struct MsgPort *appPort;
+	struct AppIcon *appIcon;
+	struct DiskObject *appIconDiskObject;
+	struct DiskObject appIconObject;
 	struct timerequest *timerReq;
 	struct TextFont *smallFont;
 	int timerOpen;
@@ -738,6 +756,9 @@ typedef struct HelixAmp3Gui {
 	int   decodeThenPlay;
 	int   bench;
 	int   closeRequested;
+	int   iconified;
+	WORD  iconifyLeft;
+	WORD  iconifyTop;
 	int   playbackActive;
 	int   playbackDonePending;
 	int   playbackStoppedByUser;
@@ -788,6 +809,8 @@ extern struct CIA ciaa;
 struct Library *AslBase;
 struct Library *GadToolsBase;
 struct Library *DiskfontBase;
+struct Library *IconBase;
+struct Library *WorkbenchBase;
 struct GfxBase *GfxBase;
 static HelixAmp3Player gGuiPlayer;
 static HelixAmp3Args gGuiArgs;
@@ -869,6 +892,7 @@ static const STRPTR kSpeedModeLabels[] = {
 static const STRPTR kChannelModeLabels[] = {
 	(STRPTR)"Stereo",
 	(STRPTR)"Mono",
+	(STRPTR)"Fake stereo",
 	NULL
 };
 
@@ -883,6 +907,7 @@ static int SpeedModeIndex(const HelixAmp3Gui *gui)
 
 static int ChannelModeIndex(const HelixAmp3Gui *gui)
 {
+	if (gui->fakeStereo) return 2;
 	return gui->mono ? 1 : 0;
 }
 
@@ -942,6 +967,8 @@ static struct NewMenu myNewMenus[] = {
 		(APTR)(MENUNUM_PROJECT * 100 + ITEMNUM_ABOUT) },
 	{ NM_ITEM,  (STRPTR)"Internet Radio...",0, 0, 0,
 		(APTR)(MENUNUM_PROJECT * 100 + ITEMNUM_STREAM) },
+	{ NM_ITEM,  (STRPTR)"Iconify",          (STRPTR)"I", 0, 0,
+		(APTR)(MENUNUM_PROJECT * 100 + ITEMNUM_ICONIFY) },
 	{ NM_ITEM,  (STRPTR)"Quit",             0, 0, 0,
 		(APTR)(MENUNUM_PROJECT * 100 + ITEMNUM_QUIT) },
 	{ NM_TITLE, (STRPTR)"Playback",         0, 0, 0, 0 },
@@ -2580,27 +2607,16 @@ static void DrawFilterButton(HelixAmp3Gui *gui)
 	if (!gui || !gui->win || !gui->gadHardwareFilter)
 		return;
 	rp = gui->win->RPort;
-	x = gui->gadHardwareFilter->LeftEdge + 8;
-	y = gui->gadHardwareFilter->TopEdge + 5;
+	x = gui->gadHardwareFilter->LeftEdge + 10;
+	y = gui->gadHardwareFilter->TopEdge + 14;
 	SetAPen(rp, 1);
 	Move(rp, x, y);
-	Draw(rp, x, y + 9);
-	Move(rp, x, y);
-	Draw(rp, x + 9, y);
-	Move(rp, x, y + 4);
-	Draw(rp, x + 7, y + 4);
-	Move(rp, x + 14, y);
-	Draw(rp, x + 14, y + 9);
-	Draw(rp, x + 23, y + 9);
-	Move(rp, x + 28, y);
-	Draw(rp, x + 39, y);
-	Move(rp, x + 33, y);
-	Draw(rp, x + 33, y + 9);
+	Text(rp, (STRPTR)"Filter", 6);
 	if (gui->hardwareFilter) {
-		RectFill(rp, gui->gadHardwareFilter->LeftEdge + 2,
-			gui->gadHardwareFilter->TopEdge + 2,
-			gui->gadHardwareFilter->LeftEdge + 5,
-			gui->gadHardwareFilter->TopEdge + 5);
+		RectFill(rp, gui->gadHardwareFilter->LeftEdge + 3,
+			gui->gadHardwareFilter->TopEdge + 3,
+			gui->gadHardwareFilter->LeftEdge + 6,
+			gui->gadHardwareFilter->TopEdge + 6);
 	}
 }
 
@@ -4864,6 +4880,7 @@ static void HandleTimerSignal(HelixAmp3Gui *gui)
 		unsigned long underruns = gGuiPlaybackStatus.underruns;
 		long spareMs = gGuiPlaybackStatus.spareMs;
 		unsigned long halfBufferMs = gGuiPlaybackStatus.halfBufferMs;
+		unsigned long fastInputBytes = gGuiPlaybackStatus.fastInputBytes;
 		int phaseChanged = (phase != gui->lastDisplayedPhase);
 		int isRadioInput = IsRadioInputName(gui->inputName);
 
@@ -5018,8 +5035,17 @@ static void HandleTimerSignal(HelixAmp3Gui *gui)
 					CopyVolatileGuiString(station, sizeof(station), gGuiPlaybackStatus.radioStationName);
 					FormatRadioStreamingStatus(gui, station, status, sizeof(status));
 					SetStatus(gui, status);
-				} else
-					SetStatus(gui, "Playing");
+				} else {
+					char status[128];
+					if (fastInputBytes)
+						sprintf(status, "Playing - Fast RAM: %luK, buffer: %lu.%03lu sec",
+							(fastInputBytes + 1023UL) / 1024UL,
+							halfBufferMs / 1000UL, halfBufferMs % 1000UL);
+					else
+						sprintf(status, "Playing - buffer: %lu.%03lu sec",
+							halfBufferMs / 1000UL, halfBufferMs % 1000UL);
+					SetStatus(gui, status);
+				}
 			}
 #endif
 			break;
@@ -5141,7 +5167,7 @@ static void ShowAbout(HelixAmp3Gui *gui)
 	es.es_StructSize = sizeof(es);
 	es.es_Flags = 0;
 	es.es_Title = (UBYTE *)"About MintAMP-GT";
-	es.es_TextFormat = (UBYTE *)"MintAMP-GT\nMini Internet Amiga Media Player\nGadTools Edition\nMade by boingball\n(C)2026 - v1.1\nTo support this application visit:\nhttps://buymeacoffee.com/boingball\n-----\nMade with decoders from\nHelix MP3 / ACC\nby Real Networks\nlibfoxenflac\nby astoeckel\n\nESP8266Audio\nby earlephilhower\n-----\nAI Used\nClaude and Codex\nLate Nights\nMany";
+	es.es_TextFormat = (UBYTE *)"MintAMP-GT\nMini Internet Amiga Media Player\nGadTools Edition\nMade by boingball\n(C)2026 - v" MINTAMP_GT_VERSION "\nTo support this application visit:\nhttps://buymeacoffee.com/boingball\n-----\nMade with decoders from\nHelix MP3 / AAC\nby Real Networks\nlibfoxenflac\nby astoeckel\n\nESP8266Audio\nby earlephilhower\n-----\nAI Used\nClaude and Codex\nLate Nights\nMany";
 	es.es_GadgetFormat = (UBYTE *)"OK";
 	EasyRequest(gui->win, &es, NULL, TAG_DONE);
 }
@@ -5230,12 +5256,11 @@ static void UpdateChannelGadgetState(HelixAmp3Gui *gui)
 {
 	if (!gui->win)
 		return;
-	/* The Stereo/Mono cycle is locked (greyed) whenever the output channel
-	 * count is forced: fake-stereo overrides it, and 22050 Mono Ultrafast
-	 * (cd32Ultrafast) is mono-only, so neither may be switched to Stereo. */
+	/* 22050 Mono Ultrafast is mono-only.  Fake stereo is now a normal choice
+	 * in this cycle, so it must not lock its own selector. */
 	if (gui->gadChannelMode)
 		GT_SetGadgetAttrs(gui->gadChannelMode, gui->win, NULL,
-			GA_Disabled, (gui->fakeStereo || gui->cd32Ultrafast), TAG_DONE);
+			GA_Disabled, gui->cd32Ultrafast, TAG_DONE);
 	if (gui->gadFakeStereoWidth)
 		GT_SetGadgetAttrs(gui->gadFakeStereoWidth, gui->win, NULL,
 			GA_Disabled, !gui->fakeStereo, TAG_DONE);
@@ -5369,17 +5394,8 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadFastMem = gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_FAST_MEM,
-		FASTMEM_X, ROW_SPEED + 1, CHECK_W, CHECK_H, "Fast-mem",
+		FASTMEM_X, ROW_SPEED + 1, CHECK_W, CHECK_H, "Fast-mem decoding",
 		GTCB_Checked, gui->fastMem,
-		TAG_IGNORE, 0,
-		TAG_IGNORE, 0,
-		TAG_IGNORE, 0);
-	if (!gad)
-		return -1;
-
-	gad = MakeGadget(gui, gad, TEXT_KIND, GID_COUNT,
-		GUI_MARGIN, ROW_DECODER, GUI_LABEL_WIDTH, GUI_GADGET_HEIGHT, "",
-		GTTX_Text, (ULONG)"",
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0);
@@ -5394,20 +5410,10 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 	 * silently overridden at "Faster"), so they have been removed. */
 
 	gui->gadChannelMode = gad = MakeGadget(gui, gad, CYCLE_KIND, GID_CHANNEL_MODE,
-		STEREO_X, ROW_PLAYBACK, CYCLE_W_SMALL, GUI_GADGET_HEIGHT, "Stereo:",
+		STEREO_X, ROW_PLAYBACK, CHANNEL_MODE_W, GUI_GADGET_HEIGHT, "Output:",
 		GTCY_Labels, (ULONG)kChannelModeLabels,
 		GTCY_Active, ChannelModeIndex(gui),
-		GA_Disabled, (gui->fakeStereo || gui->cd32Ultrafast),
-		TAG_IGNORE, 0);
-	if (!gad)
-		return -1;
-
-	gui->gadFakeStereo = gad = MakeGadget(gui, gad,
-		CHECKBOX_KIND, GID_FAKE_STEREO,
-		FAKE_X, ROW_PLAYBACK + 1, CHECK_W, CHECK_H, "Fake-st",
-		GTCB_Checked, gui->fakeStereo,
-		TAG_IGNORE, 0,
-		TAG_IGNORE, 0,
+		GA_Disabled, gui->cd32Ultrafast,
 		TAG_IGNORE, 0);
 	if (!gad)
 		return -1;
@@ -5617,6 +5623,190 @@ static void DrainWindowMessages(HelixAmp3Gui *gui)
 		GT_ReplyIMsg(msg);
 }
 
+static void DrainAppPortMessages(HelixAmp3Gui *gui)
+{
+	struct Message *msg;
+	if (!gui || !gui->appPort)
+		return;
+	while ((msg = GetMsg(gui->appPort)) != NULL)
+		ReplyMsg(msg);
+}
+
+static struct Window *GuiOpenMainWindow(HelixAmp3Gui *gui, WORD left, WORD top)
+{
+	struct NewWindow nw;
+	memset(&nw, 0, sizeof(nw));
+	nw.LeftEdge = left;
+	nw.TopEdge = top;
+	nw.Width = GUI_WIN_W;
+	nw.Height = GUI_WIN_H;
+	nw.DetailPen = 0;
+	nw.BlockPen = 1;
+	nw.IDCMPFlags = IDCMP_GADGETUP | IDCMP_MOUSEMOVE | IDCMP_MOUSEBUTTONS |
+		IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW | IDCMP_ACTIVEWINDOW |
+		IDCMP_MENUPICK;
+	nw.Flags = WFLG_CLOSEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET |
+		WFLG_SIZEGADGET | WFLG_SIZEBBOTTOM | WFLG_ACTIVATE |
+		WFLG_SMART_REFRESH;
+	nw.FirstGadget = NULL;
+	nw.Title = (UBYTE *)"MintAMP-GT";
+	nw.MinWidth = GUI_WIN_W;
+	nw.MinHeight = GUI_WIN_H;
+	nw.MaxWidth = 680;
+	nw.MaxHeight = 440;
+	nw.Type = WBENCHSCREEN;
+	gui->win = OpenWindowTags(&nw,
+		WA_InnerWidth, GUI_WIN_W,
+		WA_Height, GUI_WIN_H,
+		TAG_DONE);
+	if (!gui->win)
+		return NULL;
+	if (gui->smallFont)
+		SetFont(gui->win->RPort, gui->smallFont);
+	WindowLimits(gui->win, gui->win->Width, gui->win->Height,
+		gui->win->Width, gui->win->Height);
+	if (gui->gadgets) {
+		AddGList(gui->win, gui->gadgets, (UWORD)-1, -1, NULL);
+		RefreshGList(gui->gadgets, gui->win, NULL, -1);
+	}
+	if (gui->menuStrip)
+		SetMenuStrip(gui->win, gui->menuStrip);
+	return gui->win;
+}
+
+static void GuiRemoveAppIcon(HelixAmp3Gui *gui)
+{
+	if (!gui)
+		return;
+	/* Workbench owns AppMessages.  Reply anything already delivered before
+	 * removing the AppIcon, then drain once more for a message that raced the
+	 * removal. */
+	DrainAppPortMessages(gui);
+	if (gui->appIcon) {
+		RemoveAppIcon(gui->appIcon);
+		gui->appIcon = NULL;
+	}
+	DrainAppPortMessages(gui);
+	if (gui->appIconDiskObject) {
+		FreeDiskObject(gui->appIconDiskObject);
+		gui->appIconDiskObject = NULL;
+	}
+}
+
+static void GuiPrepareAppIconObject(HelixAmp3Gui *gui)
+{
+	struct DiskObject *appIcon;
+	if (!gui || !gui->appIconDiskObject)
+		return;
+	/* Keep the loaded tool DiskObject intact so FreeDiskObject() can release
+	 * all of its strings/tooltypes later.  The shallow copy borrows only its
+	 * render images and is sanitised to the WBAPPICON contract. */
+	gui->appIconObject = *gui->appIconDiskObject;
+	appIcon = &gui->appIconObject;
+	appIcon->do_Magic = 0;
+	appIcon->do_Version = 0;
+	appIcon->do_Type = 0;
+	appIcon->do_DefaultTool = NULL;
+	appIcon->do_ToolTypes = NULL;
+	appIcon->do_CurrentX = NO_ICON_POSITION;
+	appIcon->do_CurrentY = NO_ICON_POSITION;
+	appIcon->do_DrawerData = NULL;
+	appIcon->do_ToolWindow = NULL;
+	appIcon->do_StackSize = 0;
+	appIcon->do_Gadget.NextGadget = NULL;
+	appIcon->do_Gadget.LeftEdge = 0;
+	appIcon->do_Gadget.TopEdge = 0;
+	appIcon->do_Gadget.Flags &= GFLG_GADGHIMAGE;
+	appIcon->do_Gadget.Activation = 0;
+	appIcon->do_Gadget.GadgetType = 0;
+	appIcon->do_Gadget.GadgetText = NULL;
+	appIcon->do_Gadget.MutualExclude = 0;
+	appIcon->do_Gadget.SpecialInfo = NULL;
+	appIcon->do_Gadget.GadgetID = 0;
+	appIcon->do_Gadget.UserData = NULL;
+}
+
+static void GuiRestoreFromAppIcon(HelixAmp3Gui *gui)
+{
+	if (!gui || !gui->iconified)
+		return;
+	GuiRemoveAppIcon(gui);
+	if (!GuiOpenMainWindow(gui, gui->iconifyLeft, gui->iconifyTop)) {
+		/* Keep a recovery route if Workbench is temporarily unable to reopen
+		 * the player window (for example during a public-screen transition). */
+		gui->appIconDiskObject = GetDiskObject((STRPTR)"PROGDIR:MintAMP-GT");
+		if (gui->appIconDiskObject) {
+			GuiPrepareAppIconObject(gui);
+			gui->appIcon = AddAppIconA(0, 0, (STRPTR)"MintAMP-GT",
+				gui->appPort, (BPTR)0, &gui->appIconObject, NULL);
+		}
+		return;
+	}
+	gui->iconified = 0;
+	GT_RefreshWindow(gui->win, NULL);
+	UpdateChannelGadgetState(gui);
+	ApplyHardwareAudioFilter(gui);
+	GuiRefresh(gui);
+	DrawTransportIcons(gui);
+	DrawFilterButton(gui);
+	WindowToFront(gui->win);
+	ActivateWindow(gui->win);
+}
+
+static void GuiHandleAppIcon(HelixAmp3Gui *gui)
+{
+	struct Message *msg;
+	int restore = 0;
+	if (!gui || !gui->appPort)
+		return;
+	while ((msg = GetMsg(gui->appPort)) != NULL) {
+		restore = 1;
+		ReplyMsg(msg);
+	}
+	if (restore)
+		GuiRestoreFromAppIcon(gui);
+}
+
+static void GuiIconify(HelixAmp3Gui *gui)
+{
+	if (!gui || !gui->win || gui->iconified)
+		return;
+	if (!gui->appPort || !WorkbenchBase || !IconBase) {
+		SetStatus(gui, "Workbench AppIcon support is unavailable.");
+		return;
+	}
+	gui->appIconDiskObject = GetDiskObject((STRPTR)"PROGDIR:MintAMP-GT");
+	if (!gui->appIconDiskObject) {
+		SetStatus(gui, "Could not load PROGDIR:MintAMP-GT.info.");
+		return;
+	}
+	GuiPrepareAppIconObject(gui);
+	/* V36/V37 Workbench requires a NULL taglist; AddAppIconA keeps this path
+	 * compatible with the OS 2.x/3.1 systems targeted by MintAMP-GT. */
+	gui->appIcon = AddAppIconA(0, 0, (STRPTR)"MintAMP-GT", gui->appPort,
+		(BPTR)0, &gui->appIconObject, NULL);
+	if (!gui->appIcon) {
+		FreeDiskObject(gui->appIconDiskObject);
+		gui->appIconDiskObject = NULL;
+		SetStatus(gui, "Could not create the MintAMP-GT AppIcon.");
+		return;
+	}
+
+	CloseRadioWindow(gui);
+	ClosePlaylistWindow(gui);
+	gui->iconifyLeft = gui->win->LeftEdge;
+	gui->iconifyTop = gui->win->TopEdge;
+	if (gui->menuStrip)
+		ClearMenuStrip(gui->win);
+	if (gui->gadgets)
+		RemoveGList(gui->win, gui->gadgets, -1);
+	DrainWindowMessages(gui);
+	ModifyIDCMP(gui->win, 0);
+	CloseWindow(gui->win);
+	gui->win = NULL;
+	gui->iconified = 1;
+}
+
 /*
  * ScanDecoderModules — find all *.decoder files in PROGDIR:decoders/, load
  * each one briefly to read its extension list, then build:
@@ -5735,8 +5925,6 @@ static void ScanDecoderModules(void)
 
 static int GuiOpen(HelixAmp3Gui *gui)
 {
-	struct NewWindow nw;
-
 	/* Discover decoder modules and build the ASL file-browser pattern first,
 	 * so gSupportedExtPattern and gDecoderModulesPath are ready for playback. */
 	ScanDecoderModules();
@@ -5856,32 +6044,17 @@ static int GuiOpen(HelixAmp3Gui *gui)
 		GuiClose(gui);
 		return -1;
 	}
+	/* Iconification is optional on the OS 2.x/3.x GadTools build.  Keep the
+	 * player usable if Workbench is not running or either library is absent;
+	 * the Project/Iconify item is disabled below in that case. */
+	WorkbenchBase = OpenLibrary("workbench.library", 37);
+	IconBase = OpenLibrary("icon.library", 37);
+	if (WorkbenchBase && IconBase)
+		gui->appPort = CreateMsgPort();
 	DiskfontBase = OpenLibrary("diskfont.library", 36);
 	gui->smallFont = OpenBestFont();
 
-	memset(&nw, 0, sizeof(nw));
-	nw.LeftEdge = 40;
-	nw.TopEdge = 30;
-	nw.Width = GUI_WIN_W;
-	nw.Height = GUI_WIN_H;
-	nw.DetailPen = 0;
-	nw.BlockPen = 1;
-	nw.IDCMPFlags = IDCMP_GADGETUP | IDCMP_MOUSEMOVE | IDCMP_MOUSEBUTTONS | IDCMP_CLOSEWINDOW |
-		IDCMP_REFRESHWINDOW | IDCMP_ACTIVEWINDOW | IDCMP_MENUPICK;
-	nw.Flags = WFLG_CLOSEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET |
-		WFLG_SIZEGADGET | WFLG_SIZEBBOTTOM | WFLG_ACTIVATE |
-		WFLG_SMART_REFRESH;
-	nw.FirstGadget = NULL;
-	nw.Title = (UBYTE *)"MintAMP-GT";
-	nw.MinWidth = GUI_WIN_W;
-	nw.MinHeight = GUI_WIN_H;
-	nw.MaxWidth = 680;
-	nw.MaxHeight = 440;
-	nw.Type = WBENCHSCREEN;
-	gui->win = OpenWindowTags(&nw,
-		WA_InnerWidth, GUI_WIN_W,
-		WA_InnerHeight, GUI_WIN_H,
-		TAG_DONE);
+	gui->win = GuiOpenMainWindow(gui, 40, 30);
 	if (!gui->win) {
 		fprintf(stderr, "cannot open MintAMP-GT window\n");
 		GuiClose(gui);
@@ -5889,14 +6062,6 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	}
 	if (gui->smallFont)
 		SetFont(gui->win->RPort, gui->smallFont);
-
-	/* Every gadget is placed at a fixed offset, so a larger window only
-	 * exposes empty grey at the bottom/right (and a smaller one clips
-	 * controls). Pin the window to the size it opened at so the resize
-	 * gadget can't drag dead space into view. */
-	WindowLimits(gui->win,
-		gui->win->Width, gui->win->Height,
-		gui->win->Width, gui->win->Height);
 
 	gui->visualInfo = GetVisualInfo(gui->win->WScreen,
 		TAG_DONE);
@@ -5929,6 +6094,8 @@ static int GuiOpen(HelixAmp3Gui *gui)
 		SetMenuStrip(gui->win, gui->menuStrip);
 		if (!gui->hasNetwork)
 			OffMenu(gui->win, FULLMENUNUM(MENUNUM_PROJECT, ITEMNUM_STREAM, NOSUB));
+		if (!gui->appPort)
+			OffMenu(gui->win, FULLMENUNUM(MENUNUM_PROJECT, ITEMNUM_ICONIFY, NOSUB));
 	}
 	gui->timerPort = CreateMsgPort();
 	if (gui->timerPort)
@@ -5976,6 +6143,7 @@ static void GuiClose(HelixAmp3Gui *gui)
 	if (gui->rbWin)
 		CloseRadioWindow(gui);
 	RADIO_DBG(printf("gui-close: after CloseRadioWindow\n");)
+	GuiRemoveAppIcon(gui);
 	if (gui->win) {
 		/* Reply anything already pending, THEN stop Intuition queuing new IDCMP
 		 * traffic.  Drain first: ModifyIDCMP(win, 0) frees an Intuition-allocated
@@ -6012,6 +6180,11 @@ static void GuiClose(HelixAmp3Gui *gui)
 			;
 		DeleteMsgPort(gui->donePort);
 		gui->donePort = NULL;
+	}
+	if (gui->appPort) {
+		DrainAppPortMessages(gui);
+		DeleteMsgPort(gui->appPort);
+		gui->appPort = NULL;
 	}
 	RADIO_DBG(printf("gui-close: before ClosePlaylistWindow\n");)
 	ClosePlaylistWindow(gui);
@@ -6052,6 +6225,14 @@ static void GuiClose(HelixAmp3Gui *gui)
 	if (DiskfontBase) {
 		CloseLibrary(DiskfontBase);
 		DiskfontBase = NULL;
+	}
+	if (IconBase) {
+		CloseLibrary(IconBase);
+		IconBase = NULL;
+	}
+	if (WorkbenchBase) {
+		CloseLibrary(WorkbenchBase);
+		WorkbenchBase = NULL;
 	}
 	if (GfxBase) {
 		CloseLibrary((struct Library *)GfxBase);
@@ -6174,6 +6355,23 @@ static void GuiDisableFastMemForRadio(HelixAmp3Gui *gui)
 static const int kRadioSearchLimits[] = { 10, 25, 50, 100 };
 static STRPTR kRadioSearchLimitLabels[] = { (STRPTR)"10", (STRPTR)"25", (STRPTR)"50", (STRPTR)"100", NULL };
 #define GT_RADIO_SEARCH_LIMIT_COUNT ((int)(sizeof(kRadioSearchLimits) / sizeof(kRadioSearchLimits[0])))
+
+static int RadioSearchLimitIndex(int limit)
+{
+	int best = 0, bestDist, i;
+	bestDist = limit > kRadioSearchLimits[0] ?
+		limit - kRadioSearchLimits[0] : kRadioSearchLimits[0] - limit;
+	for (i = 1; i < GT_RADIO_SEARCH_LIMIT_COUNT; i++) {
+		int dist = limit > kRadioSearchLimits[i] ?
+			limit - kRadioSearchLimits[i] : kRadioSearchLimits[i] - limit;
+		if (dist < bestDist) {
+			bestDist = dist;
+			best = i;
+		}
+	}
+	return best;
+}
+
 static const int kRadioBitrateMax[] = { -1, 56, 64, 96, 128 };
 static STRPTR kRadioBitrateLabels[] = { (STRPTR)"Any", (STRPTR)"<=56", (STRPTR)"<=64", (STRPTR)"<=96", (STRPTR)"<=128", NULL };
 static STRPTR kRadioSchemeLabels[] = { (STRPTR)"HTTP", (STRPTR)"HTTPS", (STRPTR)"All", NULL };
@@ -6220,6 +6418,15 @@ static const char *RadioCodecFromIndex(int idx)
 	}
 }
 
+static int RadioCodecToIndex(const char *codec)
+{
+	if (!codec || !codec[0]) return 0;
+	if (!strcmp(codec, "MP3")) return 1;
+	if (!strcmp(codec, "AAC")) return 2;
+	if (!strcmp(codec, "AAC+")) return 3;
+	return 0;
+}
+
 static const char *ProbeCodecName(RbStreamCodec codec)
 {
 	if (codec == RB_STREAM_CODEC_MP3) return "MP3";
@@ -6241,8 +6448,8 @@ static void RadioSetStatus(HelixAmp3Gui *app, const char *text)
 	while (gad && gad->GadgetID != RB_GID_STATUS) gad = gad->NextGadget;
 	if (gad) {
 		GT_SetGadgetAttrs(gad, app->rbWin, NULL,
-			GTST_String, (ULONG)app->rbStatusText, TAG_DONE);
-		/* GadTools does not always redraw a string gadget immediately when the
+			GTTX_Text, (ULONG)app->rbStatusText, TAG_DONE);
+		/* GadTools does not always redraw a text gadget immediately when the
 		 * next step is a synchronous Radio Browser network request.  Force the
 		 * status line out before that request so the dialog does not look frozen
 		 * on search/probe like the button press was ignored. */
@@ -6389,6 +6596,73 @@ static void RadioSetSearchBusy(HelixAmp3Gui *app, int busy)
 	}
 }
 
+/* Preserve the controls even when the user closes the radio window without
+ * running another search.  The result set already lives in rbController; only
+ * the temporary GadTools gadgets are destroyed by CloseRadioWindow(). */
+static void RadioRememberSearchState(HelixAmp3Gui *app)
+{
+	struct Gadget *gad;
+	STRPTR text = NULL;
+	ULONG value = 0;
+	if (!app || !app->rbWin)
+		return;
+	gad = FindRadioGadget(app, RB_GID_SEARCH_TEXT);
+	if (gad) {
+		GT_GetGadgetAttrs(gad, app->rbWin, NULL,
+			GTST_String, (ULONG)(void *)&text, TAG_DONE);
+		SafeCopy(app->rbController.name, sizeof(app->rbController.name),
+			text ? (const char *)text : "");
+	}
+	gad = FindRadioGadget(app, RB_GID_CODEC);
+	if (gad) {
+		value = 0;
+		GT_GetGadgetAttrs(gad, app->rbWin, NULL,
+			GTCY_Active, (ULONG)(void *)&value, TAG_DONE);
+		SafeCopy(app->rbController.codec, sizeof(app->rbController.codec),
+			RadioCodecFromIndex((int)value));
+	}
+	gad = FindRadioGadget(app, RB_GID_COUNTRY);
+	if (gad) {
+		text = NULL;
+		GT_GetGadgetAttrs(gad, app->rbWin, NULL,
+			GTST_String, (ULONG)(void *)&text, TAG_DONE);
+		SafeCopy(app->rbController.countrycode,
+			sizeof(app->rbController.countrycode),
+			text ? (const char *)text : "");
+	}
+	gad = FindRadioGadget(app, RB_GID_COUNTRY_CODE);
+	if (gad) {
+		value = 0;
+		GT_GetGadgetAttrs(gad, app->rbWin, NULL,
+			GTCY_Active, (ULONG)(void *)&value, TAG_DONE);
+		app->rbCountryMode = ClampInt((int)value, 0, 6);
+	}
+	gad = FindRadioGadget(app, RB_GID_SCHEME);
+	if (gad) {
+		value = 0;
+		GT_GetGadgetAttrs(gad, app->rbWin, NULL,
+			GTCY_Active, (ULONG)(void *)&value, TAG_DONE);
+		app->rbSchemeMode = ClampInt((int)value, 0, 2);
+		app->rbShowHttps = app->rbSchemeMode != 0;
+	}
+	gad = FindRadioGadget(app, RB_GID_LIMIT);
+	if (gad) {
+		value = 1;
+		GT_GetGadgetAttrs(gad, app->rbWin, NULL,
+			GTCY_Active, (ULONG)(void *)&value, TAG_DONE);
+		app->rbController.limit = kRadioSearchLimits[
+			ClampInt((int)value, 0, GT_RADIO_SEARCH_LIMIT_COUNT - 1)];
+	}
+	gad = FindRadioGadget(app, RB_GID_BITRATE);
+	if (gad) {
+		value = 0;
+		GT_GetGadgetAttrs(gad, app->rbWin, NULL,
+			GTCY_Active, (ULONG)(void *)&value, TAG_DONE);
+		app->rbController.max_bitrate = kRadioBitrateMax[
+			ClampInt((int)value, 0, 4)];
+	}
+}
+
 static void RadioDoSearch(HelixAmp3Gui *app)
 {
 	struct Gadget *nameGad = FindRadioGadget(app, RB_GID_SEARCH_TEXT);
@@ -6501,7 +6775,8 @@ static void RadioSelectResult(HelixAmp3Gui *app, ULONG eventSelected)
 	selected = (ULONG)app->rbVisibleToController[row];
 	if (app->rbShowingFavourites) {
 		app->rbSelectedFavourite = (int)selected;
-		GT_SetGadgetAttrs(app->rbGadList, app->rbWin, NULL, GTLV_Selected, (ULONG)row, TAG_DONE);
+		GT_SetGadgetAttrs(app->rbGadList, app->rbWin, NULL,
+			GTLV_Selected, (ULONG)row, TAG_DONE);
 		sprintf(msg, "Selected favourite: %.120s", app->rbFavouriteNames[app->rbSelectedFavourite]);
 		RadioSetStatus(app, msg);
 		return;
@@ -6541,6 +6816,7 @@ static int RadioCurrentSelectedRow(HelixAmp3Gui *app)
 static void RadioMoveSelection(HelixAmp3Gui *app, int delta)
 {
 	int row;
+	ULONG top = 0;
 	if (!app || !app->rbWin || !app->rbGadList) return;
 	if (app->rbVisibleCount <= 0) {
 		RadioSetStatus(app, "No stations to select.");
@@ -6552,6 +6828,16 @@ static void RadioMoveSelection(HelixAmp3Gui *app, int delta)
 	if (row < 0) row = 0;
 	if (row >= app->rbVisibleCount) row = app->rbVisibleCount - 1;
 	RadioSelectResult(app, (ULONG)row);
+	/* Button-driven selection has to keep the new row visible.  Do this here,
+	 * not in the listview-click handler: the listview's built-in scrollbar uses
+	 * the same composite gadget, and forcing GTLV_Top while it is processing an
+	 * arrow click cancels the scroll and jumps back to the first result. */
+	GT_GetGadgetAttrs(app->rbGadList, app->rbWin, NULL,
+		GTLV_Top, (ULONG)(void *)&top, TAG_DONE);
+	if ((ULONG)row < top) top = (ULONG)row;
+	else if ((ULONG)row >= top + 8) top = (ULONG)row - 7;
+	GT_SetGadgetAttrs(app->rbGadList, app->rbWin, NULL,
+		GTLV_Selected, (ULONG)row, GTLV_Top, top, TAG_DONE);
 }
 
 static void RadioAddFavourite(HelixAmp3Gui *app)
@@ -6810,6 +7096,7 @@ static void CloseRadioWindow(HelixAmp3Gui *app)
 	struct IntuiMessage *msg;
 	struct MsgPort *port;
 	if (!app->rbWin) return;
+	RadioRememberSearchState(app);
 	RADIO_DBG(printf("radio-close: enter rbWin=%p gadgets=%p visualInfo=%p\n",
 		(void *)app->rbWin, (void *)app->rbGadgets, (void *)app->rbVisualInfo);)
 	/* Snapshot the UserPort BEFORE ModifyIDCMP(win, 0): with an
@@ -6860,14 +7147,16 @@ static void OpenRadioWindow(HelixAmp3Gui *app)
 	}
 	if (!app->win || !GadToolsBase || !app->hasNetwork)
 		return;
-	rb_controller_init(&app->rbController);
-	app->rbShowHttps = FALSE;
-	app->rbSchemeMode = 0;
+	if (app->rbController.limit <= 0) {
+		rb_controller_init(&app->rbController);
+		app->rbShowHttps = FALSE;
+		app->rbSchemeMode = 0;
+		app->rbCountryMode = 0;
+	}
 	app->rbCountryMode = RadioCountryToIndex(app->rbController.countrycode);
 	app->rbShowingFavourites = FALSE;
 	app->rbSelectedFavourite = -1;
 	app->rbSearchInProgress = 0;
-	app->rbVisibleCount = 0;
 	app->rbVisualInfo = GetVisualInfoA(app->win->WScreen, NULL);
 	if (!app->rbVisualInfo) return;
 	app->rbGadContext = CreateContext(&app->rbGadgets);
@@ -6876,32 +7165,35 @@ static void OpenRadioWindow(HelixAmp3Gui *app)
 	gad = app->rbGadContext;
 	memset(&ng, 0, sizeof(ng));
 	ng.ng_VisualInfo = app->rbVisualInfo; ng.ng_Flags = PLACETEXT_LEFT;
-	/* Keep the radio dialog arranged as a clear vertical stack with generous
-	 * outer/inner spacing: search+codec row, country row, results, buttons,
-	 * and a bottom status line.  The larger top margin prevents the first row
-	 * from clipping into the draggable title bar on ReAction/ClassAct systems.
-	 */
-	ng.ng_LeftEdge = 88; ng.ng_TopEdge = 24; ng.ng_Width = 220; ng.ng_Height = 18; ng.ng_GadgetText = (UBYTE *)"Search";
-	ng.ng_GadgetID = RB_GID_SEARCH_TEXT; gad = CreateGadget(STRING_KIND, gad, &ng, GTST_MaxChars, RB_MAX_NAME, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 390; ng.ng_TopEdge = 24; ng.ng_Width = 90; ng.ng_GadgetText = (UBYTE *)"Codec"; ng.ng_GadgetID = RB_GID_CODEC;
-	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)codecs, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 88; ng.ng_TopEdge = 52; ng.ng_Width = 150; ng.ng_GadgetText = (UBYTE *)"Country";
-	ng.ng_GadgetID = RB_GID_COUNTRY; gad = CreateGadget(STRING_KIND, gad, &ng, GTST_MaxChars, RB_MAX_COUNTRY, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 304; ng.ng_TopEdge = 52; ng.ng_Width = 70; ng.ng_GadgetText = (UBYTE *)"Code"; ng.ng_GadgetID = RB_GID_COUNTRY_CODE; ng.ng_Flags = PLACETEXT_LEFT;
+	/* Compact vertical stack: three filter rows, results, actions and status.
+	 * Four pixels between filter gadgets and six around the larger sections
+	 * preserve the native GadTools separation without wasting a full row. */
+	ng.ng_LeftEdge = 88; ng.ng_TopEdge = RB_FILTER_ROW1_Y; ng.ng_Width = 220; ng.ng_Height = 18; ng.ng_GadgetText = (UBYTE *)"Search";
+	ng.ng_GadgetID = RB_GID_SEARCH_TEXT; gad = CreateGadget(STRING_KIND, gad, &ng, GTST_MaxChars, RB_MAX_NAME, GTST_String, (ULONG)app->rbController.name, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 390; ng.ng_TopEdge = RB_FILTER_ROW1_Y; ng.ng_Width = 90; ng.ng_GadgetText = (UBYTE *)"Codec"; ng.ng_GadgetID = RB_GID_CODEC;
+	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)codecs, GTCY_Active, RadioCodecToIndex(app->rbController.codec), TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 88; ng.ng_TopEdge = RB_FILTER_ROW2_Y; ng.ng_Width = 150; ng.ng_GadgetText = (UBYTE *)"Country";
+	ng.ng_GadgetID = RB_GID_COUNTRY; gad = CreateGadget(STRING_KIND, gad, &ng, GTST_MaxChars, RB_MAX_COUNTRY, GTST_String, (ULONG)app->rbController.countrycode, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 304; ng.ng_TopEdge = RB_FILTER_ROW2_Y; ng.ng_Width = 70; ng.ng_GadgetText = (UBYTE *)"Code"; ng.ng_GadgetID = RB_GID_COUNTRY_CODE; ng.ng_Flags = PLACETEXT_LEFT;
 	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)kRadioCountryLabels, GTCY_Active, app->rbCountryMode, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 430; ng.ng_TopEdge = 52; ng.ng_Width = 55; ng.ng_GadgetText = (UBYTE *)"URL"; ng.ng_GadgetID = RB_GID_SCHEME; ng.ng_Flags = PLACETEXT_LEFT;
+	ng.ng_LeftEdge = 430; ng.ng_TopEdge = RB_FILTER_ROW2_Y; ng.ng_Width = 55; ng.ng_GadgetText = (UBYTE *)"URL"; ng.ng_GadgetID = RB_GID_SCHEME; ng.ng_Flags = PLACETEXT_LEFT;
 	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)kRadioSchemeLabels, GTCY_Active, app->rbSchemeMode,
 		GA_Disabled, !app->hasHttps, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 88; ng.ng_TopEdge = 80; ng.ng_Width = 90; ng.ng_GadgetText = (UBYTE *)"Limit"; ng.ng_GadgetID = RB_GID_LIMIT; ng.ng_Flags = PLACETEXT_LEFT;
-	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)kRadioSearchLimitLabels, GTCY_Active, 1, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 288; ng.ng_TopEdge = 80; ng.ng_Width = 90; ng.ng_GadgetText = (UBYTE *)"Max kbps"; ng.ng_GadgetID = RB_GID_BITRATE; ng.ng_Flags = PLACETEXT_LEFT;
-	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)kRadioBitrateLabels, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 8; ng.ng_TopEdge = 110; ng.ng_Width = 524; ng.ng_Height = 116; ng.ng_GadgetText = NULL; ng.ng_GadgetID = RB_GID_RADIO_RESULTS; ng.ng_Flags = 0;
+	ng.ng_LeftEdge = 88; ng.ng_TopEdge = RB_FILTER_ROW3_Y; ng.ng_Width = 90; ng.ng_GadgetText = (UBYTE *)"Limit"; ng.ng_GadgetID = RB_GID_LIMIT; ng.ng_Flags = PLACETEXT_LEFT;
+	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)kRadioSearchLimitLabels, GTCY_Active, RadioSearchLimitIndex(app->rbController.limit), TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 288; ng.ng_TopEdge = RB_FILTER_ROW3_Y; ng.ng_Width = 90; ng.ng_GadgetText = (UBYTE *)"Max kbps"; ng.ng_GadgetID = RB_GID_BITRATE; ng.ng_Flags = PLACETEXT_LEFT;
+	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)kRadioBitrateLabels,
+		GTCY_Active, app->rbController.max_bitrate <= 0 ? 0 :
+			(app->rbController.max_bitrate <= 56 ? 1 :
+			(app->rbController.max_bitrate <= 64 ? 2 :
+			(app->rbController.max_bitrate <= 96 ? 3 : 4))), TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 8; ng.ng_TopEdge = RB_RESULTS_Y; ng.ng_Width = 524; ng.ng_Height = RB_RESULTS_H; ng.ng_GadgetText = NULL; ng.ng_GadgetID = RB_GID_RADIO_RESULTS; ng.ng_Flags = 0;
 	app->rbGadList = gad = CreateGadget(LISTVIEW_KIND, gad, &ng,
 		GTLV_Labels, (ULONG)&app->rbList,
 		GTLV_Selected, (ULONG)~0,
-		GA_RelVerify, TRUE, TAG_DONE); if (!gad) goto fail;
-	ng.ng_TopEdge = 236; ng.ng_Width = 86; ng.ng_Height = 18; ng.ng_Flags = PLACETEXT_IN;
+		GTLV_ShowSelected, (ULONG)NULL,
+		TAG_DONE); if (!gad) goto fail;
+	ng.ng_TopEdge = RB_BUTTONS_Y; ng.ng_Width = 86; ng.ng_Height = 18; ng.ng_Flags = PLACETEXT_IN;
 	ng.ng_LeftEdge = 8; ng.ng_GadgetText = (UBYTE *)"Search"; ng.ng_GadgetID = RB_GID_SEARCH; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
 	ng.ng_LeftEdge = 100; ng.ng_GadgetText = (UBYTE *)"Play"; ng.ng_GadgetID = RB_GID_PROBE; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
 	ng.ng_LeftEdge = 192; ng.ng_GadgetText = (UBYTE *)"Add Fav"; ng.ng_GadgetID = RB_GID_ADD_FAV; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
@@ -6909,21 +7201,28 @@ static void OpenRadioWindow(HelixAmp3Gui *app)
 	ng.ng_LeftEdge = 376; ng.ng_Width = 40; ng.ng_GadgetText = (UBYTE *)"Up"; ng.ng_GadgetID = RB_GID_UP; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
 	ng.ng_LeftEdge = 420; ng.ng_GadgetText = (UBYTE *)"Down"; ng.ng_GadgetID = RB_GID_DOWN; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
 	ng.ng_LeftEdge = 464; ng.ng_GadgetText = (UBYTE *)"Close"; ng.ng_GadgetID = RB_GID_CLOSE; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 8; ng.ng_TopEdge = 264; ng.ng_Width = 524; ng.ng_GadgetText = NULL; ng.ng_GadgetID = RB_GID_STATUS; ng.ng_Flags = 0;
-	gad = CreateGadget(STRING_KIND, gad, &ng, GTST_String, (ULONG)"Ready.", GTST_MaxChars, 512, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 8; ng.ng_TopEdge = RB_STATUS_Y; ng.ng_Width = 524; ng.ng_GadgetText = NULL; ng.ng_GadgetID = RB_GID_STATUS; ng.ng_Flags = 0;
+	gad = CreateGadget(TEXT_KIND, gad, &ng,
+		GTTX_Text, (ULONG)(app->rbStatusText[0] ? app->rbStatusText : "Ready."),
+		GTTX_Border, TRUE, TAG_DONE); if (!gad) goto fail;
 	memset(&nw, 0, sizeof(nw));
 	nw.LeftEdge = app->win->LeftEdge + 30; nw.TopEdge = app->win->TopEdge + 30;
-	nw.Width = 548; nw.Height = 306;
-	nw.IDCMPFlags = IDCMP_GADGETUP | IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW | IDCMP_VANILLAKEY;
+	nw.Width = RB_WIN_W; nw.Height = RB_WIN_H;
+	/* LISTVIEWIDCMP includes the gadget-down, mouse, and IntuiTicks events
+	 * consumed by GadTools' composite scroller and auto-repeat arrow gadgets.
+	 * Requesting only GADGETUP leaves the arrows drawn but unable to scroll. */
+	nw.IDCMPFlags = LISTVIEWIDCMP | IDCMP_CLOSEWINDOW |
+		IDCMP_REFRESHWINDOW | IDCMP_VANILLAKEY;
 	nw.Flags = WFLG_CLOSEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET | WFLG_SMART_REFRESH;
 	nw.Title = (UBYTE *)"Internet Radio";
-	nw.MinWidth = nw.MaxWidth = 548; nw.MinHeight = nw.MaxHeight = 306;
+	nw.MinWidth = nw.MaxWidth = RB_WIN_W; nw.MinHeight = nw.MaxHeight = RB_WIN_H;
 	nw.Type = WBENCHSCREEN;
 	app->rbWin = OpenWindowTags(&nw, TAG_DONE);
 	if (!app->rbWin) goto fail;
 	AddGList(app->rbWin, app->rbGadgets, (UWORD)-1, -1, NULL);
 	RefreshGList(app->rbGadgets, app->rbWin, NULL, -1);
 	GT_RefreshWindow(app->rbWin, NULL);
+	RadioRefreshResults(app);
 	return;
 fail:
 	CloseRadioWindow(app);
@@ -8443,6 +8742,7 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 		gui->fastLowrate = ((code >= 1 && code <= 2) || code == 4) ? 1 : 0;
 		gui->superfastLowrate = (code == 2 || code == 4) ? 1 : 0;
 		if (gui->cd32Ultrafast) {
+			gui->fakeStereo = 0;
 			gui->mono = 1;
 			gui->rateIndex = 4;
 		}
@@ -8457,7 +8757,7 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 		if (gui->gadChannelMode)
 			GT_SetGadgetAttrs(gui->gadChannelMode, gui->win, NULL,
 				GTCY_Active, ChannelModeIndex(gui), TAG_DONE);
-		/* 22050 Mono Ultrafast forces mono, so grey the Stereo/Mono cycle
+		/* 22050 Mono Ultrafast forces mono, so grey the output cycle
 		 * (and re-enable it when switching back to any other speed mode). */
 		UpdateChannelGadgetState(gui);
 		SetStatus(gui, code == 4 ?
@@ -8482,15 +8782,16 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 		SaveGuiSettings(gui);
 		break;
 	case GID_CHANNEL_MODE:
-		if (gui->fakeStereo)
-			break;
 		if (gui->playbackActive || gui->playbackDonePending) {
 			GT_SetGadgetAttrs(gad, gui->win, NULL,
 				GTCY_Active, ChannelModeIndex(gui), TAG_DONE);
 			SetStatus(gui, "Stop playback before changing channel mode.");
 			break;
 		}
-		/* code: 0=Stereo, 1=Mono */
+		/* code: 0=Stereo, 1=Mono, 2=Fake stereo */
+		if (code > 2)
+			code = 0;
+		gui->fakeStereo = (code == 2) ? 1 : 0;
 		gui->mono = (code == 1) ? 1 : 0;
 		if (gui->superfastLowrate && !RateIndexSupportsSuperfast(gui->rateIndex, ChannelUsesMonoCost(gui)))
 			gui->rateIndex = DefaultSuperfastRateIndex(ChannelUsesMonoCost(gui));
@@ -8499,30 +8800,9 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 				GTCY_Labels, (ULONG)kRateLabels,
 				GTCY_Active, gui->rateIndex,
 				TAG_DONE);
-		SetStatus(gui, gui->mono ? "Mono output enabled." : "Stereo output enabled.");
-		SaveGuiSettings(gui);
-		break;
-	case GID_FAKE_STEREO:
-		if (gui->playbackActive || gui->playbackDonePending) {
-			GT_SetGadgetAttrs(gad, gui->win, NULL,
-				GTCB_Checked, gui->fakeStereo, TAG_DONE);
-			SetStatus(gui, "Stop playback before changing channel mode.");
-			break;
-		}
-		gui->fakeStereo = !gui->fakeStereo;
-		if (gui->superfastLowrate &&
-			!RateIndexSupportsSuperfast(gui->rateIndex, ChannelUsesMonoCost(gui)))
-			gui->rateIndex = DefaultSuperfastRateIndex(ChannelUsesMonoCost(gui));
-		GT_SetGadgetAttrs(gad, gui->win, NULL, GTCB_Checked, gui->fakeStereo, TAG_DONE);
 		UpdateChannelGadgetState(gui);
-		if (gui->gadRate)
-			GT_SetGadgetAttrs(gui->gadRate, gui->win, NULL,
-				GTCY_Labels, (ULONG)kRateLabels,
-				GTCY_Active, gui->rateIndex,
-				TAG_DONE);
-		SetStatus(gui, gui->fakeStereo ?
-			"Fake-stereo enabled; Mono is temporarily ignored." :
-			"Fake-stereo disabled; Mono selection restored.");
+		SetStatus(gui, gui->fakeStereo ? "Fake-stereo output enabled." :
+			gui->mono ? "Mono output enabled." : "Stereo output enabled.");
 		SaveGuiSettings(gui);
 		break;
 	case GID_FAKE_STEREO_WIDTH:
@@ -8717,6 +8997,8 @@ static void GuiPoll(HelixAmp3Gui *gui)
 						ShowAbout(gui);
 					else if (mn == MENUNUM_PROJECT && it == ITEMNUM_STREAM)
 						OpenRadioWindow(gui);
+					else if (mn == MENUNUM_PROJECT && it == ITEMNUM_ICONIFY)
+						GuiIconify(gui);
 					else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_DTP)
 						SetDecodeThenPlay(gui, !gui->decodeThenPlay);
 					else if (mn == MENUNUM_PLAYBACK && it == ITEMNUM_BENCH) {
@@ -8831,11 +9113,14 @@ static int GuiMainReal(int argc, char **argv)
 		return 1;
 	GUI_TASK_IDENTITY("gui-event-loop");
 	while (!gui.closeRequested) {
+		ULONG winMask = (gui.win && gui.win->UserPort) ?
+			(1UL << gui.win->UserPort->mp_SigBit) : 0;
+		ULONG appMask = gui.appPort ? (1UL << gui.appPort->mp_SigBit) : 0;
 		ULONG timerMask = gui.timerPort ? (1UL << gui.timerPort->mp_SigBit) : 0;
 		ULONG doneMask = gui.donePort ? (1UL << gui.donePort->mp_SigBit) : 0;
 		ULONG plMask = gui.plWin ? (1UL << gui.plWin->UserPort->mp_SigBit) : 0;
 		ULONG rbMask = gui.rbWin ? (1UL << gui.rbWin->UserPort->mp_SigBit) : 0;
-		ULONG sigs = Wait(HELIXAMP3_SIGMASK(&gui) | timerMask |
+		ULONG sigs = Wait(winMask | appMask | timerMask |
 			doneMask | plMask | rbMask | SIGBREAKF_CTRL_C);
 		if (sigs & SIGBREAKF_CTRL_C)
 			gui.closeRequested = 1;
@@ -8843,6 +9128,8 @@ static int GuiMainReal(int argc, char **argv)
 			HandleDoneSignal(&gui);
 		if (timerMask && (sigs & timerMask))
 			HandleTimerSignal(&gui);
+		if (appMask && (sigs & appMask))
+			GuiHandleAppIcon(&gui);
 		HandlePlaylistPoll(&gui);
 		HandleRadioWindow(&gui);
 		GuiPoll(&gui);
