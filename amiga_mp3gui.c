@@ -7176,7 +7176,7 @@ static void OpenRadioWindow(HelixAmp3Gui *app)
 	ng.ng_GadgetID = RB_GID_COUNTRY; gad = CreateGadget(STRING_KIND, gad, &ng, GTST_MaxChars, RB_MAX_COUNTRY, GTST_String, (ULONG)app->rbController.countrycode, TAG_DONE); if (!gad) goto fail;
 	ng.ng_LeftEdge = 304; ng.ng_TopEdge = RB_FILTER_ROW2_Y; ng.ng_Width = 70; ng.ng_GadgetText = (UBYTE *)"Code"; ng.ng_GadgetID = RB_GID_COUNTRY_CODE; ng.ng_Flags = PLACETEXT_LEFT;
 	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)kRadioCountryLabels, GTCY_Active, app->rbCountryMode, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 430; ng.ng_TopEdge = RB_FILTER_ROW2_Y; ng.ng_Width = 55; ng.ng_GadgetText = (UBYTE *)"URL"; ng.ng_GadgetID = RB_GID_SCHEME; ng.ng_Flags = PLACETEXT_LEFT;
+	ng.ng_LeftEdge = 430; ng.ng_TopEdge = RB_FILTER_ROW2_Y; ng.ng_Width = 90; ng.ng_GadgetText = (UBYTE *)"URL"; ng.ng_GadgetID = RB_GID_SCHEME; ng.ng_Flags = PLACETEXT_LEFT;
 	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)kRadioSchemeLabels, GTCY_Active, app->rbSchemeMode,
 		GA_Disabled, !app->hasHttps, TAG_DONE); if (!gad) goto fail;
 	ng.ng_LeftEdge = 88; ng.ng_TopEdge = RB_FILTER_ROW3_Y; ng.ng_Width = 90; ng.ng_GadgetText = (UBYTE *)"Limit"; ng.ng_GadgetID = RB_GID_LIMIT; ng.ng_Flags = PLACETEXT_LEFT;
