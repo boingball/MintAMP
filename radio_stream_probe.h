@@ -38,6 +38,9 @@ static struct hostent *radio_gethostbyname_scoped(const char *host)
     return result;
 }
 
+#ifdef gethostbyname
+#undef gethostbyname
+#endif
 #define gethostbyname(host) radio_gethostbyname_scoped((host))
 #endif
 
