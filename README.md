@@ -1,5 +1,7 @@
 # MintAMP — Mini Internet Amiga Media Player
 
+![AI](https://img.shields.io/badge/AI-assisted%20coding-6e7781)
+
 Classic AmigaOS m68k audio player with two GUI editions: MintAMP for ReAction/ClassAct and MintAMP-GT for GadTools. Both editions use the same Helix-based playback engine and support local media and HTTP/HTTPS internet radio, with modular AAC, FLAC, Ogg Vorbis, WMA, WAV and IFF decoders, Radio Browser search, ICY metadata, station artwork, and Paula audio output.
 
 This started as an Amiga port of the Helix fixed-point MP3 decoder. It has grown into a small but surprisingly capable classic Amiga audio player for real hardware and emulators.
