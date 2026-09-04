@@ -515,7 +515,11 @@ AMIGA_M68K_ASM_AAC_STEREO
 AMIGA_M68K_ASM_AAC_IMDCT
 ```
 
-The plain C fallback remains available by building without `AACASM=1`.
+The helpers are enabled by default. The 68020/030/040 path uses full-result
+`MULS.L`; CPU=60 selects a bit-exact implementation made from hardware
+two-operand `MULS.L`/`MULU.L` partial products instead, avoiding the emulated
+register-pair form. The
+plain C fallback remains available with `AACASM=0`.
 
 ## FLAC notes
 
