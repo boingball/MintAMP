@@ -158,8 +158,8 @@ AAC_CFLAGS := $(CFLAGS) -I. -I$(AAC_SHIM_DIR) -Iaac -DARDUINO
 # The Helix AAC sources have optional stage-level m68k helpers.  Keep the
 # single full-result MULS.L on 68020/030/040; the forced-include MintAMP
 # wrapper selects a 68060-safe, bit-exact partial-product implementation using
-# only the hardware two-operand (low-result) multiply form
-# when CPU=60.  AACASM=0 remains the portable-C comparison/fallback build.
+# only the hardware two-operand (low-result) multiply form when CPU=60.
+# AACASM=0 remains the portable-C comparison/fallback build.
 ifneq ($(filter 1 yes true on,$(AACASM)),)
 AAC_CFLAGS += -include aac_m68k_aac_optimized.h \
 	-DAMIGA_M68K_ASM_AAC_HUFFMAN \
