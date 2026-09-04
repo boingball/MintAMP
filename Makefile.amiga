@@ -27,6 +27,9 @@ OBJDUMP ?= m68k-amigaos-objdump
 # CPU=20/30/40/60 all get the full asm path; -mCPU alone can't express the
 # 68000 asm gap, hence gating CPU_ASM_CPPFLAGS/CPU_ASM_SOURCES on CPU too.
 CPU ?= 30
+# Decoder-module AAC helpers are on by default; pass AACASM=0 for the portable
+# C A/B build. Forwarded explicitly by decoder-modules below.
+AACASM ?= 1
 CPU_MFLAG_00 := -m68000
 CPU_MFLAG_20 := -m68020
 CPU_MFLAG_30 := -m68030
@@ -310,7 +313,7 @@ HALFASM_TEST_CPPFLAGS := -DAMIGA_M68K_ASM_FDCT32
 FAST030_ASM_SOURCES := $(CPU_ASM_SOURCES)
 AMIGA_HUNK_FAST_PREFERRED := python3 tools/amiga_fast_preferred_hunks.py
 
-.PHONY: all fast030 radio030 sslradio030 amissl-get-test amissl-free-repro-test amissl-spawn-repro-test amissl-exec-repro-test rb-stream-probe-test prof030 gui guir miniamp3 minimp3r sslgui sslguir fast030-halfasm-test gui-halfasm-test decoder-modules release release-clean clean print-command print-fast030-command print-gui-command print-guir-command cpu60-baseline cpu60-huffman cpu60-huffman-dequant cpu60-huffman-dequant-imdct cpu60-huffman-dequant-imdct-fdct32 cpu60-audit-stages poly60-ref-test
+.PHONY: all fast030 radio030 sslradio030 amissl-get-test amissl-free-repro-test amissl-spawn-repro-test amissl-exec-repro-test rb-stream-probe-test prof030 gui guir miniamp3 minimp3r sslgui sslguir fast030-halfasm-test gui-halfasm-test decoder-modules release release-clean clean print-command print-fast030-command print-gui-command print-guir-command cpu60-baseline cpu60-huffman cpu60-huffman-dequant cpu60-huffman-dequant-imdct cpu60-huffman-dequant-imdct-fdct32 cpu60-audit-stages poly60-ref-test aac-mulshift60-ref-test
 
 all: $(TARGET) decoder-modules
 
@@ -534,6 +537,14 @@ poly60-ref-test:
 		tests/polyphase60_ref_test.c real/trigtabs.c -o polyphase60_ref_test
 	./polyphase60_ref_test
 
+# Host bit-exactness test for the 68060 AAC high-half multiply.  The test-mode
+# multiply primitives are portable C; production CPU=60 builds substitute the
+# hardware two-operand MULS.L/MULU.L form for precisely those operations.
+aac-mulshift60-ref-test:
+	$(HOSTCC) -O2 -std=gnu99 tests/aac_mulshift60_ref_test.c \
+		-o aac_mulshift60_ref_test
+	./aac_mulshift60_ref_test
+
 # Build all decoder modules (FLAC and AAC) — requires upstream decoder libraries.
 # CPU is forwarded as the same numeric 00/20/30/40/60 code used above so
 # decoders/Makefile derives the matching -mCPU flag itself; CFLAGS is
@@ -546,7 +557,8 @@ poly60-ref-test:
 decoder-modules:
 	$(MAKE) -C decoders \
 		CC="$(CC)" \
-		CPU="$(CPU)"
+		CPU="$(CPU)" \
+		AACASM="$(AACASM)"
 
 # Build a self-contained Amiga application drawer suitable for LhA/Aminet
 # packaging. MintAMP is the ReAction frontend; MintAMP-GT is the GadTools
