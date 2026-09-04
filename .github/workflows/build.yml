@@ -31,6 +31,9 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Check the 68060 AAC multiply arithmetic
+        run: make -f Makefile.amiga aac-mulshift60-ref-test
+
       - name: Compile with the Amiga cross-compiler
         env:
           CPU: ${{ matrix.cpu }}
