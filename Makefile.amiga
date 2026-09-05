@@ -30,6 +30,8 @@ CPU ?= 30
 # Decoder-module AAC helpers are on by default; pass AACASM=0 for the portable
 # C A/B build. Forwarded explicitly by decoder-modules below.
 AACASM ?= 1
+# Rockbox WMA fixed-point helpers follow the same opt-out convention.
+WMAASM ?= 1
 CPU_MFLAG_00 := -m68000
 CPU_MFLAG_20 := -m68020
 CPU_MFLAG_30 := -m68030
@@ -313,7 +315,7 @@ HALFASM_TEST_CPPFLAGS := -DAMIGA_M68K_ASM_FDCT32
 FAST030_ASM_SOURCES := $(CPU_ASM_SOURCES)
 AMIGA_HUNK_FAST_PREFERRED := python3 tools/amiga_fast_preferred_hunks.py
 
-.PHONY: all fast030 radio030 sslradio030 amissl-get-test amissl-free-repro-test amissl-spawn-repro-test amissl-exec-repro-test rb-stream-probe-test prof030 gui guir miniamp3 minimp3r sslgui sslguir fast030-halfasm-test gui-halfasm-test decoder-modules release release-clean clean print-command print-fast030-command print-gui-command print-guir-command cpu60-baseline cpu60-huffman cpu60-huffman-dequant cpu60-huffman-dequant-imdct cpu60-huffman-dequant-imdct-fdct32 cpu60-audit-stages poly60-ref-test aac-mulshift60-ref-test ogg-mulshift60-ref-test
+.PHONY: all fast030 radio030 sslradio030 amissl-get-test amissl-free-repro-test amissl-spawn-repro-test amissl-exec-repro-test rb-stream-probe-test prof030 gui guir miniamp3 minimp3r sslgui sslguir fast030-halfasm-test gui-halfasm-test decoder-modules release release-clean clean print-command print-fast030-command print-gui-command print-guir-command cpu60-baseline cpu60-huffman cpu60-huffman-dequant cpu60-huffman-dequant-imdct cpu60-huffman-dequant-imdct-fdct32 cpu60-audit-stages poly60-ref-test aac-mulshift60-ref-test ogg-mulshift60-ref-test wma-mulshift-ref-test
 
 all: $(TARGET) decoder-modules
 
@@ -551,6 +553,15 @@ ogg-mulshift60-ref-test:
 		-o ogg_mulshift60_ref_test
 	./ogg_mulshift60_ref_test
 
+# Verify both WMA CPU backends against the exact signed 64-bit reference.
+wma-mulshift-ref-test:
+	$(HOSTCC) -O2 -std=gnu99 -DMINTAMP_WMA_TEST_030 \
+		tests/wma_mulshift_ref_test.c -o wma_mulshift030_ref_test
+	./wma_mulshift030_ref_test
+	$(HOSTCC) -O2 -std=gnu99 -DMINTAMP_WMA_TEST_060 \
+		tests/wma_mulshift_ref_test.c -o wma_mulshift060_ref_test
+	./wma_mulshift060_ref_test
+
 # Build all decoder modules (FLAC and AAC) — requires upstream decoder libraries.
 # CPU is forwarded as the same numeric 00/20/30/40/60 code used above so
 # decoders/Makefile derives the matching -mCPU flag itself; CFLAGS is
@@ -564,7 +575,8 @@ decoder-modules:
 	$(MAKE) -C decoders \
 		CC="$(CC)" \
 		CPU="$(CPU)" \
-		AACASM="$(AACASM)"
+		AACASM="$(AACASM)" \
+		WMAASM="$(WMAASM)"
 
 # Build a self-contained Amiga application drawer suitable for LhA/Aminet
 # packaging. MintAMP is the ReAction frontend; MintAMP-GT is the GadTools
@@ -609,5 +621,6 @@ release-clean:
 
 clean:
 	rm -f $(TARGET) $(FAST030_TARGET) $(PROF030_TARGET) $(FAST030_HALFASM_TEST_TARGET) $(GUI_TARGET) $(GUIR_TARGET) $(GUI_TARGET).freeall-discovery $(GUIR_TARGET).freeall-discovery $(GUI_TARGET).freeall-heads $(GUIR_TARGET).freeall-heads $(GUI_HALFASM_TEST_TARGET) \
-		amissl_https_get amissl_ssl_free_repro amissl_spawn_repro amissl_exec_repro amissl_child_worker_repro rb_stream_probe_test
+		amissl_https_get amissl_ssl_free_repro amissl_spawn_repro amissl_exec_repro amissl_child_worker_repro rb_stream_probe_test \
+		aac_mulshift60_ref_test ogg_mulshift60_ref_test wma_mulshift030_ref_test wma_mulshift060_ref_test
 	$(MAKE) -C decoders clean
