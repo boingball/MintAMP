@@ -104,7 +104,25 @@ rm -f decoders/*.decoder.map
 Build the FLAC decoder module:
 
 ```sh
-make -C decoders flac
+make -C decoders flac CPU=30
+```
+
+FLAC ASM is enabled by default. The 68020/030/040 build uses a hardware
+register-pair `MULS.L` plus `ADD/ADDX` for every LPC predictor tap. CPU=60
+uses exact hardware-only partial products and does not invoke the emulated
+register-pair instruction:
+
+```sh
+make -C decoders clean
+make -C decoders flac CPU=60
+```
+
+The original portable libfoxenflac loop remains available for comparison:
+
+```sh
+make -C decoders clean
+make -C decoders flac CPU=60 FLACASM=0
+make -f Makefile.amiga flac-lpc-ref-test
 ```
 
 Verify the module entrypoint:
