@@ -21,6 +21,7 @@
 #include <stdint.h>
 #include "asm_arm.h"
 #include "asm_mcf5249.h"
+#include "asm_m68k.h"
 
 #ifndef  _LOW_ACCURACY_
 /* 64 bit multiply */
@@ -307,4 +308,3 @@ static inline int32_t VFLOAT_ADD(int32_t a,int32_t ap,
 }
 
 #endif
-
