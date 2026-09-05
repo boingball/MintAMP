@@ -43,6 +43,9 @@ jobs:
       - name: Check the 68030 and 68060 FLAC LPC arithmetic
         run: make -f Makefile.amiga flac-lpc-ref-test
 
+      - name: Check ICY RadioInfo metadata handling
+        run: make -f Makefile.amiga radio-metadata-test
+
       - name: Compile with the Amiga cross-compiler
         env:
           CPU: ${{ matrix.cpu }}

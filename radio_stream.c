@@ -6,6 +6,7 @@
 #include "radio_stream_probe.h"
 #include "radio_runtime_flags.h"
 #include "amiga_display_text.h"
+#include "radio_metadata.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,7 +51,12 @@
 #define RADIO_RECONNECT_BACKOFF_PUMPS 16
 #endif
 #define RADIO_HEADER_MAX 4096
-#define RADIO_META_MAX 512
+/* The ICY length byte describes up to 255 * 16 = 4080 payload bytes. Some
+ * Bauer streams use nearly that allowance for a complete RadioInfo XML
+ * document; retaining only the old first 511 bytes discarded DB_SONG_NAME
+ * before it could be extracted. */
+#define RADIO_META_MAX RADIO_METADATA_ICY_MAX
+#define RADIO_META_TEXT_MAX 512
 #ifndef RADIO_ZERO_BYTE_PUMP_MAX
 #define RADIO_ZERO_BYTE_PUMP_MAX 64
 #endif
@@ -3160,7 +3166,7 @@ static void radio_copy_metadata_string(char *dst, size_t dstSize, const char *sr
 static void radio_copy_metadata_bytes(char *dst, size_t dstSize, const unsigned char *src, int srcLen, const char *label)
 {
     size_t rawLen, safeLen;
-    char raw[RADIO_META_MAX];
+    char raw[RADIO_META_TEXT_MAX];
     if (!dst || dstSize == 0)
         return;
     rawLen = (src && srcLen > 0) ? (size_t)srcLen : 0;
@@ -3811,28 +3817,25 @@ static void parse_headers(RadioStream *rs,char *h){ if (radio_stream_magic_valid
 
 static void parse_meta(RadioStream *rs,const unsigned char *m,int n)
 {
-    static const char key[] = "StreamTitle='";
-    const unsigned char *p, *end;
     char oldTitle[128];
-    int i, keyLen = (int)sizeof(key) - 1;
+    char parsedTitle[128];
+    int result;
     if (!rs || !m || n <= 0)
         return;
     if (!radio_stream_magic_valid(rs, "parse_meta"))
         return;
     if (n >= RADIO_META_MAX)
         RADIO_DBG(printf("radio-icy: metadata truncated session=%lu metaLen=%d capacity=%lu station=\"%s\" url=\"%s\"\n", rs->session_id, n, (unsigned long)RADIO_META_MAX, rs->stationName, rs->url););
-    end = m + n;
-    for (i = 0; i + keyLen <= n; i++) {
-        if (!memcmp(m + i, key, (size_t)keyLen)) {
-            p = m + i + keyLen;
-            for (i = 0; p + i < end && p[i] != '\''; i++)
-                ;
-            radio_copy_string(oldTitle, sizeof(oldTitle), rs->title);
-            radio_copy_metadata_bytes(rs->title, sizeof(rs->title), p, i, "StreamTitle");
-            if (strcmp(oldTitle, rs->title) != 0)
-                RADIO_DBG(printf("radio-resource: session=%lu ICY metadata updated (fixed buffer, active_icy_metadata_count=%ld)\n", rs->session_id, radio_active_icy_metadata_count););
-            break;
-        }
+    result = RadioMetadata_ExtractIcyTitle(
+        parsedTitle, sizeof(parsedTitle), m, (size_t)n);
+    if (result == RADIO_METADATA_TITLE) {
+        radio_copy_string(oldTitle, sizeof(oldTitle), rs->title);
+        radio_copy_metadata_string(rs->title, sizeof(rs->title), parsedTitle,
+                                   "StreamTitle");
+        if (strcmp(oldTitle, rs->title) != 0)
+            RADIO_DBG(printf("radio-resource: session=%lu ICY metadata updated title=\"%s\" (fixed buffer, active_icy_metadata_count=%ld)\n", rs->session_id, rs->title, radio_active_icy_metadata_count););
+    } else if (result == RADIO_METADATA_XML_IGNORED) {
+        RADIO_DBG(printf("radio-icy: ignored XML StreamTitle without recognised song fields session=%lu station=\"%s\"\n", rs->session_id, rs->stationName););
     }
 }
 
