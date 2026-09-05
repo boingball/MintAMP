@@ -2,7 +2,7 @@ Short:        Multiformat player and net radio
 Author:       Darren Banfi (boingball)
 Uploader:     boingball@gmail.com (Darren Banfi)
 Type:         mus/play
-Version:      1.2.0
+Version:      1.3.0
 Requires:     68030+; TCP/IP stack for radio; util/libs/AmiSSL-v5-OS3.lha for HTTPS
 Architecture: m68k-amigaos >= 3.0.0
 
@@ -17,8 +17,8 @@ sound card are not required.
 
 This archive contains two complete MintAMP drawers:
 
-  MintAMP-v1.2-68030  For 68030 and 68040 systems
-  MintAMP-v1.2-68060  Dedicated build for 68060 systems
+  MintAMP-v1.3-68030  For 68030 and 68040 systems
+  MintAMP-v1.3-68060  Dedicated build for 68060 systems
 
 Open or copy the drawer which matches the processor installed in your Amiga.
 The 68060 edition contains a dedicated 68060-safe and 68060-optimised MP3
@@ -72,25 +72,25 @@ Installation
 
 Extract the complete archive. Its root contains:
 
-  MintAMP-v1.2-68030/
-  MintAMP-v1.2-68060/
-  MintAMP-v1.2-68030.info
-  MintAMP-v1.2-68060.info
+  MintAMP-v1.3-68030/
+  MintAMP-v1.3-68060/
+  MintAMP-v1.3-68030.info
+  MintAMP-v1.3-68060.info
 
 Choose the drawer matching your processor:
 
   68030 or 68040:
-    Use MintAMP-v1.2-68030
+    Use MintAMP-v1.3-68030
 
   68060:
-    Use MintAMP-v1.2-68060
+    Use MintAMP-v1.3-68060
 
 You may leave both drawers together or copy only the required drawer to your
 preferred location.
 
 Keep every file inside the selected drawer together. Its layout is:
 
-  MintAMP-v1.2-68xxx/
+  MintAMP-v1.3-68xxx/
     MintAMP
     MintAMP.info
     MintAMP-GT
@@ -237,6 +237,12 @@ repository for the complete terms and source code.
 
 History
 -------
+
+1.3.0  Added CPU-specific AAC and Ogg Vorbis fixed-point multiply helpers.
+       The 68030/68040 editions retain the fast full-result MULS.L path.
+       The 68060 edition now uses hardware-only partial products, avoiding
+       software emulation of register-pair MULS.L in both decoders.
+       Corrected the AACASM build wiring and added bit-exact arithmetic tests.
 
 1.2.0  Added Workbench AppIcon iconification to both ReAction and GadTools.
        Expanded and repaired the GadTools Internet Radio browser, including
