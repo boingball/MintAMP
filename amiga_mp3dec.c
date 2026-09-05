@@ -49,13 +49,13 @@ struct SignalSemaphore radio_console_lock;
 #include "assembly.h"
 #include "statname.h"
 
-#define MINTAMP_CLI_VERSION "1.2.0"
+#define MINTAMP_CLI_VERSION "1.3.0"
 #if defined(AMIGA_M68K) && !defined(MINTAMP_EMBEDDED_FRONTEND)
 /* Version metadata for the standalone amiga_mp3dec.fastexp edition.  GUI
  * translation units define MINTAMP_EMBEDDED_FRONTEND before including this
  * source so their binaries expose only the frontend-specific Version tag. */
 static const char gMintAmpCliVersionTag[] __attribute__((used)) =
-	"\0$VER: amiga_mp3dec.fastexp " MINTAMP_CLI_VERSION " (12.08.2026)";
+	"\0$VER: amiga_mp3dec.fastexp " MINTAMP_CLI_VERSION " (05.09.2026)";
 #endif
 
 /*

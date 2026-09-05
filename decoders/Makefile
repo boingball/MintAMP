@@ -303,8 +303,9 @@ ogg_entry.o ogg_alloc.o ogg_module.o: %.o: %.c
 # _impure_ptr (see ogg_alloc.c) for the same reason -- referenced from an
 # errno check in that same dead code, and pulling in the real one cascades
 # into the entire stdio implementation and DOSBase.
-tremor/src/tremor/%.o: tremor/src/tremor/%.c $(OGG_ASM_MARKER)
+tremor/src/tremor/%.o: tremor/src/tremor/%.c $(OGG_ASM_MARKER) ogg_m68k_68060.h
 	$(CC) $(OGG_CFLAGS) \
+	    -include ogg_m68k_68060.h \
 	    -include ogg_standalone.h \
 	    -Dmalloc=OggModuleMalloc \
 	    -Dcalloc=OggModuleCalloc \
