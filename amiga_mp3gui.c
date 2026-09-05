@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 75873)
-Total output lines: 9237
-
 /*
  * MintAMP-GT - Mini Internet Amiga Media Player GadTools frontend for the Helix
  * fixed-point MP3 decoder.  The GUI wraps the existing amiga_mp3dec playback
@@ -1905,7 +1902,5549 @@ static void TryFolderArt(const char *inputName, Mp3Tags *tags)
 			sz = ftell(af);
 			fseek(af, 0, SEEK_SET);
 			if (sz > 4 && sz <= 512L * 1024L) {
-				tags->artData = (unsigned char *)AllocMem(…45873 tokens truncated…_LeftEdge = bx;
+				tags->artData = (unsigned char *)AllocMem((unsigned long)sz,
+					MEMF_ANY);
+				if (tags->artData) {
+					if (fread(tags->artData, 1, (size_t)sz, af) ==
+						(size_t)sz) {
+						tags->artBytes = (unsigned long)sz;
+					} else {
+						/* Short read: free the just-allocated buffer and clear
+						 * artData so neither this loop's !tags->artData guard nor
+						 * a later FreeTags() can see and re-free this dead
+						 * pointer. */
+						GUI_FREE_BEGIN("TryFolderArt", "folder-artData(short-read)", tags->artData, (unsigned long)sz);
+						FreeMem(tags->artData, (unsigned long)sz);
+						tags->artData = NULL;
+						tags->artBytes = 0;
+						GUI_FREE_END("TryFolderArt", "folder-artData(short-read)", tags->artData, 0);
+					}
+				}
+			}
+			fclose(af);
+		}
+	}
+}
+
+static void ReadMp3Tags(const char *path, Mp3Tags *tags, int loadArt)
+{
+	FILE *f;
+	unsigned char hdr[10];
+	long firstFrameOffset;
+	int hadId3v2;
+
+	if (!tags)
+		return;
+	FreeTags(tags);
+	memset(tags, 0, sizeof(*tags));
+	if (is_url_path(path))
+		return;
+	GuiLogPathOp("ReadMp3Tags/fopen", path);
+	f = fopen(path, "rb");
+	if (!f)
+		return;
+	hadId3v2 = 0;
+	firstFrameOffset = -1L;
+	if (fread(hdr, 1, sizeof(hdr), f) == sizeof(hdr) && memcmp(hdr, "ID3", 3) == 0) {
+		hadId3v2 = 1;
+		ReadId3v2Frames(f, tags, hdr, loadArt);
+	} else {
+		fseek(f, 0, SEEK_SET);
+	}
+	ReadMpegInfo(f, tags, &firstFrameOffset);
+	if (tags->bitrateKbps > 0 && firstFrameOffset >= 0) {
+		long fileSize;
+		long audioBytes;
+
+		if (fseek(f, 0, SEEK_END) == 0) {
+			fileSize = ftell(f);
+			tags->fileSize = fileSize > 0 ? (unsigned long)fileSize : 0;
+			audioBytes = fileSize - firstFrameOffset;
+			if (audioBytes > 0)
+				tags->durationSecs = (int)(audioBytes * 8L /
+					((long)tags->bitrateKbps * 1000L));
+		}
+	}
+	if (tags->fileSize == 0 && fseek(f, 0, SEEK_END) == 0) {
+		long fileSize = ftell(f);
+		tags->fileSize = fileSize > 0 ? (unsigned long)fileSize : 0;
+	}
+	if (!hadId3v2)
+		ReadId3v1(f, tags);
+	fclose(f);
+	if (loadArt)
+		TryFolderArt(path, tags);
+}
+
+static void FormatReadyStatus(const Mp3Tags *tags, char *buf, size_t bufSize)
+{
+	if (tags && tags->bitrateKbps > 0 && tags->sampleRate > 0)
+		sprintf(buf, "%d kbps / %d Hz - Ready.", tags->bitrateKbps,
+			tags->sampleRate);
+	else
+		SafeCopy(buf, bufSize, "Ready.");
+}
+
+static void SetStatus(HelixAmp3Gui *gui, const char *text)
+{
+	if (!text)
+		text = "";
+	if (strcmp(gui->statusText, text) == 0)
+		return;
+	SafeCopy(gui->statusText, sizeof(gui->statusText), text);
+	if (gui->win && gui->gadStatus) {
+		GT_SetGadgetAttrs(gui->gadStatus, gui->win, NULL,
+			GTTX_Text, (ULONG)gui->statusText,
+			TAG_DONE);
+	}
+}
+
+static void SetFileDisplay(HelixAmp3Gui *gui, const char *text)
+{
+	if (!text || !text[0])
+		text = "<choose a file>";
+	SafeCopy(gui->fileText, sizeof(gui->fileText), text);
+	if (gui->win && gui->gadFile) {
+		GT_SetGadgetAttrs(gui->gadFile, gui->win, NULL,
+			GTTX_Text, (ULONG)gui->fileText,
+			TAG_DONE);
+	}
+}
+
+static int IsRadioInputName(const char *name)
+{
+	return is_url_path(name);
+}
+
+static void SetInternetStreamMetadata(HelixAmp3Gui *gui)
+{
+	if (!gui)
+		return;
+	FreeTags(&gui->tags);
+	memset(&gui->tags, 0, sizeof(gui->tags));
+	SafeCopy(gui->tags.title, sizeof(gui->tags.title), "Internet Radio");
+	SafeCopy(gui->tags.artist, sizeof(gui->tags.artist), "-");
+	SafeCopy(gui->tags.album, sizeof(gui->tags.album), "Internet Radio");
+	SafeCopy(gui->tags.track, sizeof(gui->tags.track), "Live");
+	SafeCopy(gui->fileInfoText, sizeof(gui->fileInfoText), "Internet Radio MP3/AAC/AAC+");
+	if (gui->gadFileInfo)
+		GT_SetGadgetAttrs(gui->gadFileInfo, gui->win, NULL,
+			GTTX_Text, (ULONG)gui->fileInfoText, TAG_DONE);
+	gui->totalSecs = 0;
+}
+
+
+static void CopyVolatileGuiString(char *dst, unsigned long dstSize, volatile const char *src)
+{
+	unsigned long i;
+	char raw[256];
+	if (!dst || dstSize == 0)
+		return;
+	if (!src) {
+		dst[0] = 0;
+		return;
+	}
+	for (i = 0; i + 1 < sizeof(raw) && src[i]; i++)
+		raw[i] = (char)src[i];
+	raw[i] = 0;
+	AmigaUtf8ToDisplay(dst, dstSize, raw);
+}
+
+static void SplitRadioStreamTitle(const char *streamTitle, char *artist, unsigned long artistSize, char *title, unsigned long titleSize)
+{
+	const char *sep;
+	char tmp[128];
+	if (artist && artistSize) artist[0] = 0;
+	if (title && titleSize) title[0] = 0;
+	if (!streamTitle || !streamTitle[0])
+		return;
+	sep = strstr(streamTitle, " - ");
+	if (!sep) {
+		SafeCopy(title, titleSize, streamTitle);
+		return;
+	}
+	SafeCopy(tmp, sizeof(tmp), streamTitle);
+	sep = strstr(tmp, " - ");
+	if (sep) {
+		((char *)sep)[0] = 0;
+		SafeCopy(artist, artistSize, tmp);
+		SafeCopy(title, titleSize, sep + 3);
+	}
+}
+
+
+static int RadioPlaybackHasStarted(void)
+{
+	return gGuiPlaybackStatus.phase == GUIPLAY_PHASE_PLAYING ||
+		gGuiPlaybackStatus.decodedFrames > 0;
+}
+
+static void FormatRadioStreamingStatus(HelixAmp3Gui *gui, const char *station, char *status, unsigned long statusSize)
+{
+	const char *name = station;
+	char streamUrl[128];
+
+	if (!status || statusSize == 0)
+		return;
+	if (!name || !name[0]) {
+		CopyVolatileGuiString(streamUrl, sizeof(streamUrl), gGuiPlaybackStatus.radioStreamUrl);
+		name = (gui && gui->currentRadioStationName[0]) ? gui->currentRadioStationName :
+			(streamUrl[0] ? streamUrl : (gui && gui->inputName[0] ? gui->inputName : "Internet Radio"));
+	}
+	sprintf(status, "Streaming %.140s", name);
+}
+
+static void SetRadioFailureStatus(HelixAmp3Gui *gui, const char *fallback)
+{
+	char radioError[128], status[160];
+
+	CopyVolatileGuiString(radioError, sizeof(radioError), gGuiPlaybackStatus.radioError);
+	sprintf(status, "Stream failed: %s", radioError[0] ? radioError : fallback);
+	SetStatus(gui, status);
+	RadioSetStatus(gui, status);
+}
+
+static void UpdateRadioTagDisplay(HelixAmp3Gui *gui)
+{
+	char streamTitle[128], station[128], genre[64], contentType[64], artist[64], title[64], info[128], status[160];
+	CopyVolatileGuiString(streamTitle, sizeof(streamTitle), gGuiPlaybackStatus.radioTitle);
+	CopyVolatileGuiString(station, sizeof(station), gGuiPlaybackStatus.radioStationName);
+	CopyVolatileGuiString(genre, sizeof(genre), gGuiPlaybackStatus.radioGenre);
+	CopyVolatileGuiString(contentType, sizeof(contentType), gGuiPlaybackStatus.radioContentType);
+	SetFileDisplay(gui, gui->inputName);
+	SplitRadioStreamTitle(streamTitle, artist, sizeof(artist), title, sizeof(title));
+	SafeCopy(gui->tags.title, sizeof(gui->tags.title), title[0] ? title : "-");
+	SafeCopy(gui->tags.artist, sizeof(gui->tags.artist), artist[0] ? artist : "-");
+	SafeCopy(gui->tags.album, sizeof(gui->tags.album), station[0] ? station : "Internet Radio");
+	SafeCopy(gui->tags.track, sizeof(gui->tags.track), "Live");
+	SafeCopy(gui->tags.genre, sizeof(gui->tags.genre), genre[0] ? genre : "-");
+	gui->tags.bitrateKbps = gGuiPlaybackStatus.radioBitrateKbps;
+	gui->tags.durationSecs = 0;
+	gui->totalSecs = 0;
+	if (gGuiPlaybackStatus.radioBitrateKbps > 0)
+		sprintf(info, "Internet Radio MP3, %d kbps, %s", gGuiPlaybackStatus.radioBitrateKbps, contentType[0] ? contentType : "audio/mpeg");
+	else
+		sprintf(info, "Internet Radio MP3, %s", contentType[0] ? contentType : "audio/mpeg");
+	UpdateTagDisplay(gui);
+	SafeCopy(gui->fileInfoText, sizeof(gui->fileInfoText), info);
+	if (gui->gadFileInfo)
+		GT_SetGadgetAttrs(gui->gadFileInfo, gui->win, NULL,
+			GTTX_Text, (ULONG)gui->fileInfoText, TAG_DONE);
+	if (gGuiPlaybackStatus.radioStatus == RADIO_STATUS_ERROR) {
+		SetRadioFailureStatus(gui, "radio error");
+		return;
+	}
+	if (gGuiPlaybackStatus.radioStatus == RADIO_STATUS_BUFFERING &&
+		!RadioPlaybackHasStarted()) {
+		sprintf(status, "Buffering - %.140s", station[0] ? station :
+			(gui->currentRadioStationName[0] ? gui->currentRadioStationName : "Internet Radio"));
+		SetStatus(gui, status);
+		RadioSetStatus(gui, status);
+	} else if (gGuiPlaybackStatus.radioStatus == RADIO_STATUS_PLAYING ||
+		(gGuiPlaybackStatus.radioStatus == RADIO_STATUS_BUFFERING && RadioPlaybackHasStarted())) {
+		FormatRadioStreamingStatus(gui, station, status, sizeof(status));
+		SetStatus(gui, status);
+		RadioSetStatus(gui, status);
+	}
+}
+
+
+static void FormatRatingText(HelixAmp3Gui *gui)
+{
+	int i;
+
+	for (i = 0; i < 5; i++)
+		gui->ratingText[i] = (i < gui->tags.rating) ? '*' : '-';
+	sprintf(gui->ratingText + 5, " %d/5", gui->tags.rating);
+}
+
+static const char *MpegChannelModeName(const Mp3Tags *tags)
+{
+	if (!tags || tags->channels <= 0)
+		return "?";
+	if (tags->channelMode == 3 || tags->channels == 1)
+		return "mono";
+	if (tags->channelMode == 1) {
+		/* In MPEG Layer III joint-stereo, mode-extension bit 1 denotes
+		 * mid/side stereo.  Bit 0 denotes intensity stereo. */
+		if (tags->modeExtension & 0x02)
+			return "M/S";
+		return "joint-stereo";
+	}
+	return "stereo";
+}
+
+static void FormatFileInfo(HelixAmp3Gui *gui)
+{
+	const char *ch = MpegChannelModeName(&gui->tags);
+	unsigned long kb = (gui->tags.fileSize + 1023UL) / 1024UL;
+
+	if (gui->tags.bitrateKbps > 0 || gui->tags.sampleRate > 0 ||
+		gui->tags.fileSize > 0)
+		sprintf(gui->fileInfoText, "%d kbps, %s, %d Hz, %lu KB",
+			gui->tags.bitrateKbps, ch, gui->tags.sampleRate, kb);
+	else
+		SafeCopy(gui->fileInfoText, sizeof(gui->fileInfoText), "-");
+}
+
+static void SetRating(HelixAmp3Gui *gui, int rating)
+{
+	int i;
+
+	if (rating < 0)
+		rating = 0;
+	if (rating > 5)
+		rating = 5;
+	gui->tags.rating = rating;
+	FormatRatingText(gui);
+	for (i = 0; i < 5; i++) {
+		if (gui->win && gui->gadStars[i])
+			GT_SetGadgetAttrs(gui->gadStars[i], gui->win, NULL,
+				GA_Text, (ULONG)(i < rating ? "*" : "-"),
+				TAG_DONE);
+	}
+	if (gui->win && gui->gadRatingValue)
+		GT_SetGadgetAttrs(gui->gadRatingValue, gui->win, NULL,
+			GTTX_Text, (ULONG)gui->ratingText,
+			TAG_DONE);
+}
+
+static void UpdateTagDisplay(HelixAmp3Gui *gui)
+{
+	if (!gui->win)
+		return;
+	if (gui->gadTitle) {
+		GT_SetGadgetAttrs(gui->gadTitle, gui->win, NULL,
+			GTTX_Text, (ULONG)(gui->tags.title[0] ? gui->tags.title : "-"),
+			TAG_DONE);
+	}
+	if (gui->gadArtist) {
+		GT_SetGadgetAttrs(gui->gadArtist, gui->win, NULL,
+			GTTX_Text, (ULONG)(gui->tags.artist[0] ? gui->tags.artist : "-"),
+			TAG_DONE);
+	}
+	if (gui->gadAlbum) {
+		GT_SetGadgetAttrs(gui->gadAlbum, gui->win, NULL,
+			GTTX_Text, (ULONG)(gui->tags.album[0] ? gui->tags.album : "-"),
+			TAG_DONE);
+	}
+	if (gui->gadTrack) {
+		GT_SetGadgetAttrs(gui->gadTrack, gui->win, NULL,
+			GTTX_Text, (ULONG)(gui->tags.track[0] ? gui->tags.track : "-"),
+			TAG_DONE);
+	}
+	if (gui->gadGenre) {
+		GT_SetGadgetAttrs(gui->gadGenre, gui->win, NULL,
+			GTTX_Text, (ULONG)(gui->tags.genre[0] ? gui->tags.genre : "-"),
+			TAG_DONE);
+	}
+	SetRating(gui, gui->tags.rating);
+	FormatFileInfo(gui);
+	if (gui->gadFileInfo) {
+		GT_SetGadgetAttrs(gui->gadFileInfo, gui->win, NULL,
+			GTTX_Text, (ULONG)gui->fileInfoText,
+			TAG_DONE);
+	}
+}
+
+
+static const unsigned char kBayer8x8[8][8] = {
+	{  0, 32,  8, 40,  2, 34, 10, 42 },
+	{ 48, 16, 56, 24, 50, 18, 58, 26 },
+	{ 12, 44,  4, 36, 14, 46,  6, 38 },
+	{ 60, 28, 52, 20, 62, 30, 54, 22 },
+	{  3, 35, 11, 43,  1, 33,  9, 41 },
+	{ 51, 19, 59, 27, 49, 17, 57, 25 },
+	{ 15, 47,  7, 39, 13, 45,  5, 37 },
+	{ 63, 31, 55, 23, 61, 29, 53, 21 }
+};
+
+static int PeekJpegDimensions(const unsigned char *data, unsigned long size,
+	int *outW, int *outH)
+{
+	unsigned long pos = 2;
+	if (size < 4 || data[0] != 0xFF || data[1] != 0xD8)
+		return 0;
+	while (pos + 4 <= size) {
+		unsigned int segLen;
+		unsigned char marker;
+		if (data[pos] != 0xFF)
+			return 0;
+		marker = data[pos + 1];
+		segLen = ((unsigned int)data[pos + 2] << 8) | data[pos + 3];
+		if ((marker >= 0xC0 && marker <= 0xC3) ||
+			(marker >= 0xC5 && marker <= 0xC7) ||
+			(marker >= 0xC9 && marker <= 0xCB) ||
+			(marker >= 0xCD && marker <= 0xCF)) {
+			if (pos + 9 <= size) {
+				*outH = ((int)data[pos + 5] << 8) | data[pos + 6];
+				*outW = ((int)data[pos + 7] << 8) | data[pos + 8];
+				return (*outW > 0 && *outH > 0) ? 1 : 0;
+			}
+		}
+		if (segLen < 2)
+			return 0;
+		pos += 2 + segLen;
+	}
+	return 0;
+}
+
+static unsigned char pjpeg_cb(unsigned char *buf, unsigned char buf_size,
+	unsigned char *bytes_actually_read, void *ud)
+{
+	PjpegSrc *src = (PjpegSrc *)ud;
+	unsigned long left;
+	unsigned char n;
+
+	left = src->size - src->pos;
+	n = (unsigned char)(left < (unsigned long)buf_size ? left :
+		(unsigned long)buf_size);
+	if (n) {
+		memcpy(buf, src->data + src->pos, n);
+		src->pos += n;
+	}
+	*bytes_actually_read = n;
+	return 0;
+}
+
+
+static void ArtNow(unsigned long *secs, unsigned long *micros)
+{
+#if defined(AMIGA_M68K)
+	ULONG s;
+	ULONG u;
+	CurrentTime(&s, &u);
+	*secs = (unsigned long)s;
+	*micros = (unsigned long)u;
+#else
+	*secs = 0;
+	*micros = 0;
+#endif
+}
+
+static unsigned long ArtElapsedMicros(unsigned long startSecs, unsigned long startMicros)
+{
+	unsigned long secs;
+	unsigned long micros;
+	ArtNow(&secs, &micros);
+	if (secs < startSecs)
+		return 0;
+	if (micros < startMicros) {
+		if (secs == startSecs)
+			return 0;
+		secs--;
+		micros += 1000000UL;
+	}
+	return (secs - startSecs) * 1000000UL + (micros - startMicros);
+}
+
+static const char *JpegScanTypeName(int scanType)
+{
+	switch (scanType) {
+	case PJPG_GRAYSCALE: return "grayscale";
+	case PJPG_YH1V1: return "YH1V1";
+	case PJPG_YH2V1: return "YH2V1";
+	case PJPG_YH1V2: return "YH1V2";
+	case PJPG_YH2V2: return "YH2V2";
+	default: return "?";
+	}
+}
+
+static void ArtAccumSample(unsigned long *accum, unsigned short *count,
+	int dst, int grey, unsigned long weight)
+{
+	if (!weight)
+		return;
+	accum[dst] += (unsigned long)grey * weight;
+	if ((unsigned long)count[dst] + weight > 0xffffUL)
+		count[dst] = 0xffff;
+	else
+		count[dst] = (unsigned short)(count[dst] + weight);
+}
+
+static void ArtAccumReducedBlock(const pjpeg_image_info_t *info,
+	unsigned long *accum, unsigned short *count, int outW, int outH,
+	int srcX0, int srcY0, int blockW, int blockH, int grey)
+{
+	int srcX1 = srcX0 + blockW;
+	int srcY1 = srcY0 + blockH;
+	int dstX0;
+	int dstX1;
+	int dstY0;
+	int dstY1;
+	int dy;
+	if (srcX0 >= info->m_width || srcY0 >= info->m_height)
+		return;
+	if (srcX1 > info->m_width)
+		srcX1 = info->m_width;
+	if (srcY1 > info->m_height)
+		srcY1 = info->m_height;
+	dstX0 = (srcX0 * outW) / info->m_width;
+	dstX1 = ((srcX1 * outW) + info->m_width - 1) / info->m_width;
+	dstY0 = (srcY0 * outH) / info->m_height;
+	dstY1 = ((srcY1 * outH) + info->m_height - 1) / info->m_height;
+	if (dstX1 > outW) dstX1 = outW;
+	if (dstY1 > outH) dstY1 = outH;
+	for (dy = dstY0; dy < dstY1; dy++) {
+		int cellY0 = (dy * info->m_height + outH - 1) / outH;
+		int cellY1 = ((dy + 1) * info->m_height + outH - 1) / outH;
+		int oy0 = cellY0 > srcY0 ? cellY0 : srcY0;
+		int oy1 = cellY1 < srcY1 ? cellY1 : srcY1;
+		int dx;
+		if (oy1 <= oy0)
+			continue;
+		for (dx = dstX0; dx < dstX1; dx++) {
+			int cellX0 = (dx * info->m_width + outW - 1) / outW;
+			int cellX1 = ((dx + 1) * info->m_width + outW - 1) / outW;
+			int ox0 = cellX0 > srcX0 ? cellX0 : srcX0;
+			int ox1 = cellX1 < srcX1 ? cellX1 : srcX1;
+			if (ox1 > ox0)
+				ArtAccumSample(accum, count, dy * outW + dx, grey,
+					(unsigned long)(ox1 - ox0) * (unsigned long)(oy1 - oy0));
+		}
+	}
+}
+
+static void ArtAccumSampleColor(unsigned long *greyAcc,
+	unsigned long *rAcc, unsigned long *gAcc, unsigned long *bAcc,
+	unsigned short *count, int dst,
+	int grey, unsigned char r, unsigned char g, unsigned char b,
+	unsigned long weight)
+{
+	if (!weight)
+		return;
+	greyAcc[dst] += (unsigned long)grey * weight;
+	rAcc[dst] += (unsigned long)r * weight;
+	gAcc[dst] += (unsigned long)g * weight;
+	bAcc[dst] += (unsigned long)b * weight;
+	if ((unsigned long)count[dst] + weight > 0xffffUL)
+		count[dst] = 0xffff;
+	else
+		count[dst] = (unsigned short)(count[dst] + weight);
+}
+
+static void ArtAccumReducedBlockColor(const pjpeg_image_info_t *info,
+	unsigned long *greyAcc, unsigned long *rAcc, unsigned long *gAcc,
+	unsigned long *bAcc, unsigned short *count, int outW, int outH,
+	int srcX0, int srcY0, int blockW, int blockH,
+	int grey, unsigned char r, unsigned char g, unsigned char b)
+{
+	int srcX1 = srcX0 + blockW;
+	int srcY1 = srcY0 + blockH;
+	int dstX0, dstX1, dstY0, dstY1;
+	int dy;
+	if (srcX0 >= info->m_width || srcY0 >= info->m_height)
+		return;
+	if (srcX1 > info->m_width)  srcX1 = info->m_width;
+	if (srcY1 > info->m_height) srcY1 = info->m_height;
+	dstX0 = (srcX0 * outW) / info->m_width;
+	dstX1 = ((srcX1 * outW) + info->m_width - 1) / info->m_width;
+	dstY0 = (srcY0 * outH) / info->m_height;
+	dstY1 = ((srcY1 * outH) + info->m_height - 1) / info->m_height;
+	if (dstX1 > outW) dstX1 = outW;
+	if (dstY1 > outH) dstY1 = outH;
+	for (dy = dstY0; dy < dstY1; dy++) {
+		int cellY0 = (dy * info->m_height + outH - 1) / outH;
+		int cellY1 = ((dy + 1) * info->m_height + outH - 1) / outH;
+		int oy0 = cellY0 > srcY0 ? cellY0 : srcY0;
+		int oy1 = cellY1 < srcY1 ? cellY1 : srcY1;
+		int dx;
+		if (oy1 <= oy0)
+			continue;
+		for (dx = dstX0; dx < dstX1; dx++) {
+			int cellX0 = (dx * info->m_width + outW - 1) / outW;
+			int cellX1 = ((dx + 1) * info->m_width + outW - 1) / outW;
+			int ox0 = cellX0 > srcX0 ? cellX0 : srcX0;
+			int ox1 = cellX1 < srcX1 ? cellX1 : srcX1;
+			if (ox1 > ox0)
+				ArtAccumSampleColor(greyAcc, rAcc, gAcc, bAcc, count,
+					dy * outW + dx, grey, r, g, b,
+					(unsigned long)(ox1 - ox0) *
+					(unsigned long)(oy1 - oy0));
+		}
+	}
+}
+
+static int McuSampleOffset(const pjpeg_image_info_t *info, int x, int y)
+{
+	int blockX = x / 8;
+	int blockY = y / 8;
+	int blocksPerRow = info->m_MCUWidth / 8;
+	int block = blockY * blocksPerRow + blockX;
+
+	return block * 64 + (y & 7) * 8 + (x & 7);
+}
+
+static int JpegGreySample(const pjpeg_image_info_t *info, int off);
+static int JpegSampleRGB(const pjpeg_image_info_t *info, int off,
+	unsigned char *r, unsigned char *g, unsigned char *b);
+
+static int DecodeJpegToGreyMode(const unsigned char *jpegData, unsigned long jpegBytes,
+	unsigned char *greyOut, int outW, int outH, int isPng, int reduce,
+	unsigned long *elapsedMicros)
+{
+	pjpeg_image_info_t info;
+	PjpegSrc src;
+	unsigned char status;
+	unsigned char xMap[MAX_JPEG_DIM];
+	unsigned char yMap[MAX_JPEG_DIM];
+	static unsigned long greyAccum[ART_W * ART_H];
+	static unsigned short greyCount[ART_W * ART_H];
+	unsigned long t0s;
+	unsigned long t0u;
+	int mcuIndex;
+	int i;
+
+	if (elapsedMicros)
+		*elapsedMicros = 0;
+	if (isPng || !jpegData || jpegBytes <= 4 || !greyOut ||
+		outW <= 0 || outW > ART_W || outH <= 0 || outH > ART_H)
+		return -1;
+	ArtNow(&t0s, &t0u);
+	src.data = jpegData;
+	src.pos = 0;
+	src.size = jpegBytes;
+	memset(greyOut, 0x80, (size_t)(outW * outH));
+	memset(greyAccum, 0, sizeof(greyAccum));
+	memset(greyCount, 0, sizeof(greyCount));
+	status = pjpeg_decode_init(&info, pjpeg_cb, &src, reduce ? 1 : 0);
+	if (status != 0 || info.m_width <= 0 || info.m_height <= 0 ||
+		info.m_width > MAX_JPEG_DIM || info.m_height > MAX_JPEG_DIM) {
+		pjpeg_decode_free();
+		return -1;
+	}
+	for (i = 0; i < info.m_width; i++)
+		xMap[i] = (unsigned char)((i * outW) / info.m_width);
+	for (i = 0; i < info.m_height; i++)
+		yMap[i] = (unsigned char)((i * outH) / info.m_height);
+
+	for (mcuIndex = 0; mcuIndex < info.m_MCUSPerRow * info.m_MCUSPerCol;
+		mcuIndex++) {
+		int mcuX;
+		int mcuY;
+		int y;
+
+		status = pjpeg_decode_mcu();
+		if (status == PJPG_NO_MORE_BLOCKS)
+			break;
+		if (status != 0) {
+			pjpeg_decode_free();
+			return -1;
+		}
+		mcuX = (mcuIndex % info.m_MCUSPerRow) * info.m_MCUWidth;
+		mcuY = (mcuIndex / info.m_MCUSPerRow) * info.m_MCUHeight;
+		if (reduce) {
+			int by;
+			int bx;
+			for (by = 0; by < info.m_MCUHeight; by += 8) {
+				for (bx = 0; bx < info.m_MCUWidth; bx += 8) {
+					int off = McuSampleOffset(&info, bx, by);
+					ArtAccumReducedBlock(&info, greyAccum, greyCount, outW, outH,
+						mcuX + bx, mcuY + by, 8, 8, JpegGreySample(&info, off));
+				}
+			}
+		} else for (y = 0; y < info.m_MCUHeight; y++) {
+			int srcY = mcuY + y;
+			int dstY;
+			int x;
+
+			if (srcY >= info.m_height)
+				continue;
+			dstY = yMap[srcY];
+			for (x = 0; x < info.m_MCUWidth; x++) {
+				int srcX = mcuX + x;
+				if (srcX >= info.m_width)
+					continue;
+				ArtAccumSample(greyAccum, greyCount, dstY * outW + xMap[srcX],
+					JpegGreySample(&info, McuSampleOffset(&info, x, y)), 1);
+			}
+		}
+	}
+	for (i = 0; i < outW * outH; i++) {
+		if (greyCount[i])
+			greyOut[i] = (unsigned char)((greyAccum[i] +
+				(greyCount[i] / 2)) / greyCount[i]);
+	}
+	pjpeg_decode_free();
+	if (elapsedMicros)
+		*elapsedMicros = ArtElapsedMicros(t0s, t0u);
+	return 0;
+}
+
+static int DecodeJpegToGrey(const unsigned char *jpegData, unsigned long jpegBytes,
+	unsigned char *greyOut, int outW, int outH, int isPng)
+{
+	return DecodeJpegToGreyMode(jpegData, jpegBytes, greyOut, outW, outH,
+		isPng, MINIAMP3_ART_REDUCED_JPEG, NULL);
+}
+
+
+
+
+static void ApplyHardwareAudioFilter(HelixAmp3Gui *gui)
+{
+#if defined(AMIGA_M68K)
+	/* The Amiga/CD32 analogue audio filter is controlled through CIA-A port A,
+	 * bit 1, the same bit used for the power LED brightness.  It is global to
+	 * the machine and independent of audio.device's Paula channel ownership.
+	 * Low bit enables the filter/bright LED; high bit disables it/dims LED. */
+	Forbid();
+	if (gui && gui->hardwareFilter)
+		ciaa.ciapra &= (UBYTE)~CIAF_LED;
+	else
+		ciaa.ciapra |= CIAF_LED;
+	Permit();
+#else
+	(void)gui;
+#endif
+}
+
+static void DrawFilterButton(HelixAmp3Gui *gui)
+{
+	struct RastPort *rp;
+	int x, y;
+
+	if (!gui || !gui->win || !gui->gadHardwareFilter)
+		return;
+	rp = gui->win->RPort;
+	x = gui->gadHardwareFilter->LeftEdge + 10;
+	y = gui->gadHardwareFilter->TopEdge + 14;
+	SetAPen(rp, 1);
+	Move(rp, x, y);
+	Text(rp, (STRPTR)"Filter", 6);
+	if (gui->hardwareFilter) {
+		RectFill(rp, gui->gadHardwareFilter->LeftEdge + 3,
+			gui->gadHardwareFilter->TopEdge + 3,
+			gui->gadHardwareFilter->LeftEdge + 6,
+			gui->gadHardwareFilter->TopEdge + 6);
+	}
+}
+
+static void DrawArtPanel(HelixAmp3Gui *gui);
+static void DrawTransportIcons(HelixAmp3Gui *gui);
+static void DrawFilterButton(HelixAmp3Gui *gui);
+static void ApplyHardwareAudioFilter(HelixAmp3Gui *gui);
+static void HandleDoneSignal(HelixAmp3Gui *gui);
+static void SaveArtworkCache(HelixAmp3Gui *gui);
+static void BuildArtColorPens(HelixAmp3Gui *gui);
+static void ReleaseArtColorPens(HelixAmp3Gui *gui);
+static void StartPlayback(HelixAmp3Gui *gui);
+static void ClosePlaylistWindow(HelixAmp3Gui *gui);
+static void OpenPlaylistWindow(HelixAmp3Gui *gui);
+static void RefreshPlaylistView(HelixAmp3Gui *gui);
+static void HandlePlaylistPoll(HelixAmp3Gui *gui);
+static void PlaylistLoadM3U(HelixAmp3Gui *gui);
+static void PlaylistSaveM3U(HelixAmp3Gui *gui);
+
+static int JpegGreySample(const pjpeg_image_info_t *info, int off)
+{
+	unsigned long r;
+	unsigned long g;
+	unsigned long b;
+
+	if (info->m_comps == 1)
+		return info->m_pMCUBufR[off];
+	r = info->m_pMCUBufR[off];
+	g = info->m_pMCUBufG[off];
+	b = info->m_pMCUBufB[off];
+#if defined(AMIGA_M68K) && defined(AMIGA_M68K_ASM_JPEG_GREY)
+	/* Approximate Rec.601 luma as (77R + 150G + 29B + 128) >> 8.
+	 * This removes the previous DIVU-by-100 from the per-pixel artwork hot path. */
+	__asm__ volatile (
+		"mulu.w #77,%0\n\t"
+		"mulu.w #150,%1\n\t"
+		"mulu.w #29,%2\n\t"
+		"add.l %1,%0\n\t"
+		"add.l %2,%0\n\t"
+		"add.l #128,%0\n\t"
+		"lsr.l #8,%0"
+		: "+d" (r), "+d" (g), "+d" (b));
+	return (int)r;
+#else
+	return (int)((77UL * r + 150UL * g + 29UL * b + 128UL) >> 8);
+#endif
+}
+
+static int JpegSampleRGB(const pjpeg_image_info_t *info, int off,
+	unsigned char *r, unsigned char *g, unsigned char *b)
+{
+	if (info->m_comps == 1) {
+		unsigned char y = info->m_pMCUBufR[off];
+		*r = *g = *b = y;
+		return (int)y;
+	}
+	*r = info->m_pMCUBufR[off];
+	*g = info->m_pMCUBufG[off];
+	*b = info->m_pMCUBufB[off];
+#if defined(AMIGA_M68K) && defined(AMIGA_M68K_ASM_JPEG_GREY)
+	{
+		unsigned long rv = *r;
+		unsigned long gv = *g;
+		unsigned long bv = *b;
+		__asm__ volatile (
+			"mulu.w #77,%0\n\t"
+			"mulu.w #150,%1\n\t"
+			"mulu.w #29,%2\n\t"
+			"add.l %1,%0\n\t"
+			"add.l %2,%0\n\t"
+			"add.l #128,%0\n\t"
+			"lsr.l #8,%0"
+			: "+d" (rv), "+d" (gv), "+d" (bv));
+		return (int)rv;
+	}
+#else
+	return (int)((77UL * *r + 150UL * *g + 29UL * *b + 128UL) >> 8);
+#endif
+}
+
+static void FinishArtDecode(HelixAmp3Gui *gui, int ok)
+{
+	ArtDecodeState *st = &gui->artDecode;
+	int i;
+
+	pjpeg_decode_free();
+	if (ok) {
+#ifdef MINIAMP3_DEBUG
+		unsigned long totalMicros = ArtElapsedMicros(st->startSecs, st->startMicros);
+		Printf("artwork done: reduce=%s pumps=%lu decode_us=%lu process_us=%lu total_us=%lu cache=miss\n",
+			MINIAMP3_DEBUG_FMT_PTR(st->reduce ? "yes" : "no"),
+			st->pumpCount, st->decodeMicros, st->processMicros, totalMicros);
+#endif
+		for (i = 0; i < ART_W * ART_H; i++) {
+			if (st->greyCount[i]) {
+				unsigned short c = st->greyCount[i];
+				unsigned long half = (unsigned long)c >> 1;
+#if defined(AMIGA_M68K) && defined(AMIGA_M68K_ASM_JPEG_GREY)
+				/* DIVU.W (32/16) is ~2x faster than DIVU.L (32/32) on 68020.
+				 * Safe here: max quotient is 255, fits in the 16-bit result. */
+				{
+					unsigned long d = st->greyAccum[i] + half;
+					__asm__ volatile ("divu.w %1,%0" : "+d"(d) : "dm"(c));
+					st->greyOut[i] = (unsigned char)(unsigned short)d;
+				}
+				if (st->wantColor) {
+					unsigned long d;
+					d = st->rAccum[i] + half;
+					__asm__ volatile ("divu.w %1,%0" : "+d"(d) : "dm"(c));
+					gui->artRGBBuf[i * 3    ] = (unsigned char)(unsigned short)d;
+					d = st->gAccum[i] + half;
+					__asm__ volatile ("divu.w %1,%0" : "+d"(d) : "dm"(c));
+					gui->artRGBBuf[i * 3 + 1] = (unsigned char)(unsigned short)d;
+					d = st->bAccum[i] + half;
+					__asm__ volatile ("divu.w %1,%0" : "+d"(d) : "dm"(c));
+					gui->artRGBBuf[i * 3 + 2] = (unsigned char)(unsigned short)d;
+				} else {
+					gui->artRGBBuf[i * 3    ] =
+					gui->artRGBBuf[i * 3 + 1] =
+					gui->artRGBBuf[i * 3 + 2] = st->greyOut[i];
+				}
+#else
+				st->greyOut[i] = (unsigned char)((st->greyAccum[i] + half) / c);
+				if (st->wantColor) {
+					gui->artRGBBuf[i * 3    ] = (unsigned char)((st->rAccum[i] + half) / c);
+					gui->artRGBBuf[i * 3 + 1] = (unsigned char)((st->gAccum[i] + half) / c);
+					gui->artRGBBuf[i * 3 + 2] = (unsigned char)((st->bAccum[i] + half) / c);
+				} else {
+					gui->artRGBBuf[i * 3    ] =
+					gui->artRGBBuf[i * 3 + 1] =
+					gui->artRGBBuf[i * 3 + 2] = st->greyOut[i];
+				}
+#endif
+			}
+		}
+		memcpy(gui->artGreyBuf, st->greyOut, ART_W * ART_H);
+		gui->artValid = 1;
+		if (gui->artColorEnabled)
+			BuildArtColorPens(gui);
+		/* The GUI and playback child share the same AmigaDOS/C runtime state.
+		 * Avoid overlapping artwork-cache writes with playback startup. */
+		if (gui->playbackActive)
+			gui->artCacheSavePending = 1;
+		else
+			SaveArtworkCache(gui);
+	}
+	st->active = 0;
+	gui->artLoading = 0;
+	DrawArtPanel(gui);
+	DrawTransportIcons(gui);
+	DrawFilterButton(gui);
+}
+
+static void CancelArtDecode(HelixAmp3Gui *gui)
+{
+	ArtDecodeState *st = &gui->artDecode;
+
+	if (!st->active && !gui->artLoading)
+		return;
+	st->active = 0;
+	gui->artLoading = 0;
+	pjpeg_decode_free();
+	ReleaseArtColorPens(gui);
+	DrawArtPanel(gui);
+}
+
+static void PumpArtDecode(HelixAmp3Gui *gui)
+{
+	ArtDecodeState *st = &gui->artDecode;
+	int pumped;
+
+	if (!st->active)
+		return;
+	st->pumpCount++;
+	for (pumped = 0; pumped < ART_MCUS_PER_PUMP && st->active; pumped++) {
+		unsigned char status;
+		int mcuX;
+		int mcuY;
+		int y;
+		unsigned long t0s;
+		unsigned long t0u;
+
+		if (st->mcuIndex >= st->totalMcus) {
+			FinishArtDecode(gui, 1);
+			break;
+		}
+		ArtNow(&t0s, &t0u);
+		status = pjpeg_decode_mcu();
+		st->decodeMicros += ArtElapsedMicros(t0s, t0u);
+		if (status == PJPG_NO_MORE_BLOCKS) {
+			FinishArtDecode(gui, 1);
+			break;
+		}
+		if (status != 0) {
+			FinishArtDecode(gui, 0);
+			break;
+		}
+		mcuX = (st->mcuIndex % st->info.m_MCUSPerRow) * st->info.m_MCUWidth;
+		mcuY = (st->mcuIndex / st->info.m_MCUSPerRow) * st->info.m_MCUHeight;
+		st->mcuIndex++;
+		ArtNow(&t0s, &t0u);
+		if (st->reduce) {
+			int by;
+			int bx;
+			for (by = 0; by < st->info.m_MCUHeight; by += 8) {
+				for (bx = 0; bx < st->info.m_MCUWidth; bx += 8) {
+					int off = McuSampleOffset(&st->info, bx, by);
+					if (st->wantColor) {
+						unsigned char r, g, b;
+						int grey = JpegSampleRGB(&st->info, off, &r, &g, &b);
+						ArtAccumReducedBlockColor(&st->info,
+							st->greyAccum, st->rAccum, st->gAccum, st->bAccum,
+							st->greyCount, ART_W, ART_H,
+							mcuX + bx, mcuY + by, 8, 8, grey, r, g, b);
+					} else {
+						ArtAccumReducedBlock(&st->info,
+							st->greyAccum, st->greyCount, ART_W, ART_H,
+							mcuX + bx, mcuY + by, 8, 8,
+							JpegGreySample(&st->info, off));
+					}
+				}
+			}
+		} else for (y = 0; y < st->info.m_MCUHeight; y++) {
+			int srcY = mcuY + y;
+			int dstY;
+			int x;
+
+			if (srcY >= st->info.m_height)
+				continue;
+			dstY = st->yMap[srcY];
+			for (x = 0; x < st->info.m_MCUWidth; x++) {
+				int srcX = mcuX + x;
+				int dst;
+
+				if (srcX >= st->info.m_width)
+					continue;
+				dst = dstY * ART_W + st->xMap[srcX];
+				if (st->wantColor) {
+					unsigned char r, g, b;
+					int grey = JpegSampleRGB(&st->info,
+						McuSampleOffset(&st->info, x, y), &r, &g, &b);
+					ArtAccumSampleColor(st->greyAccum, st->rAccum,
+						st->gAccum, st->bAccum, st->greyCount,
+						dst, grey, r, g, b, 1);
+				} else {
+					ArtAccumSample(st->greyAccum, st->greyCount, dst,
+						JpegGreySample(&st->info,
+							McuSampleOffset(&st->info, x, y)), 1);
+				}
+			}
+		}
+		st->processMicros += ArtElapsedMicros(t0s, t0u);
+	}
+}
+
+static void ArtworkCacheName(HelixAmp3Gui *gui, char *dst, size_t dstSize)
+{
+	const char *source, *base, *end;
+	char safe[80];
+	int i;
+	int j;
+
+	/* Artwork cache lives beside the executable (PROGDIR:ArtCache), not under
+	 * ENV:/ENVARC: -- these are 16-20 KB .grey64 image files, and PROGDIR: is
+	 * persistent and launch-location independent (ENVARC: is for small config
+	 * vars, not image blobs). */
+	SafeCopy(dst, dstSize, "PROGDIR:ArtCache");
+	/* Radio input has no local path to key the cache off of; key it by the
+	 * station favicon URL instead so the fetch is skipped on the next visit
+	 * to the same station, matching minimp3r's ArtworkCacheName(). */
+	source = (is_url_path(gui->inputName) && gui->currentRadioFavicon[0]) ?
+		gui->currentRadioFavicon : gui->inputName;
+	end = strchr(source, '?');
+	if (!end)
+		end = source + strlen(source);
+	base = end;
+	while (base > source && base[-1] != '/' && base[-1] != ':')
+		base--;
+	for (i = 0, j = 0; base + i < end && base[i] && j < (int)sizeof(safe) - 1; i++) {
+		unsigned char c = (unsigned char)base[i];
+		if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+			(c >= '0' && c <= '9'))
+			safe[j++] = (char)c;
+		else if (c == '.')
+			safe[j++] = '_';
+	}
+	safe[j] = '\0';
+	if (!safe[0])
+		SafeCopy(safe, sizeof(safe), "art");
+	strncat(dst, "/", dstSize - strlen(dst) - 1);
+	strncat(dst, safe, dstSize - strlen(dst) - 1);
+	strncat(dst, ".grey64", dstSize - strlen(dst) - 1);
+}
+
+static int LoadArtworkCache(HelixAmp3Gui *gui)
+{
+	char path[HELIXAMP3_MAX_PATH];
+	FILE *f;
+	unsigned char hdr[8];
+
+	if (!gui->artCacheEnabled || gui->artCacheBypass || !gui->inputName[0])
+		return 0;
+	ArtworkCacheName(gui, path, sizeof(path));
+	GuiLogPathOp("LoadArtworkCache/fopen", path);
+	f = fopen(path, "rb");
+	if (!f)
+		return 0;
+	if (fread(hdr, 1, sizeof(hdr), f) == sizeof(hdr) &&
+		memcmp(hdr, "M3AG64\0", 7) == 0 &&
+		(hdr[7] == 1 || hdr[7] == 2) &&
+		fread(gui->artGreyBuf, 1, ART_W * ART_H, f) == ART_W * ART_H) {
+		int i;
+		if (hdr[7] == 2 &&
+			fread(gui->artRGBBuf, 1, ART_W * ART_H * 3, f) == ART_W * ART_H * 3) {
+			/* v2: grey + RGB loaded */
+		} else {
+			/* v1 or partial: derive RGB from grey */
+			for (i = 0; i < ART_W * ART_H; i++) {
+				unsigned char g = gui->artGreyBuf[i];
+				gui->artRGBBuf[i * 3    ] = g;
+				gui->artRGBBuf[i * 3 + 1] = g;
+				gui->artRGBBuf[i * 3 + 2] = g;
+			}
+		}
+		fclose(f);
+		gui->artValid = 1;
+		gui->artLoading = 0;
+		return 1;
+	}
+	fclose(f);
+	return 0;
+}
+
+static void SaveArtworkCache(HelixAmp3Gui *gui)
+{
+	char dir[64];
+	char path[HELIXAMP3_MAX_PATH];
+	FILE *f;
+	static const unsigned char hdr[8] = { 'M','3','A','G','6','4','\0', 2 };
+
+	if (!gui->artCacheEnabled || !gui->inputName[0] || !gui->artValid)
+		return;
+	SafeCopy(dir, sizeof(dir), "PROGDIR:ArtCache");
+	CreateDir((STRPTR)dir);
+	ArtworkCacheName(gui, path, sizeof(path));
+	f = fopen(path, "wb");
+	if (!f)
+		return;
+	fwrite(hdr, 1, sizeof(hdr), f);
+	fwrite(gui->artGreyBuf, 1, ART_W * ART_H, f);
+	fwrite(gui->artRGBBuf, 1, ART_W * ART_H * 3, f);
+	fclose(f);
+}
+
+static void CleanArtworkCache(HelixAmp3Gui *gui)
+{
+	char dir[64];
+	BPTR lock;
+	struct FileInfoBlock *fib;
+	int removed = 0;
+
+	SafeCopy(dir, sizeof(dir), "PROGDIR:ArtCache");
+	lock = SafeLockPath("CleanArtworkCache/Lock", dir, ACCESS_READ);
+	if (!lock) {
+		SetStatus(gui, "Artwork cache is empty.");
+		return;
+	}
+	fib = (struct FileInfoBlock *)AllocDosObject(DOS_FIB, NULL);
+	if (fib && Examine(lock, fib)) {
+		while (ExNext(lock, fib)) {
+			char path[HELIXAMP3_MAX_PATH];
+			int len = strlen(fib->fib_FileName);
+
+			if (fib->fib_DirEntryType >= 0 || len < 7 ||
+				strcmp(fib->fib_FileName + len - 7, ".grey64") != 0)
+				continue;
+			SafeCopy(path, sizeof(path), dir);
+			strncat(path, "/", sizeof(path) - strlen(path) - 1);
+			strncat(path, fib->fib_FileName, sizeof(path) - strlen(path) - 1);
+			if (DeleteFile((STRPTR)path))
+				removed++;
+		}
+	}
+	if (fib)
+		FreeDosObject(DOS_FIB, fib);
+	UnLock(lock);
+	if (removed) {
+		char msg[64];
+		sprintf(msg, "Removed %d cached artwork file(s).", removed);
+		SetStatus(gui, msg);
+	} else
+		SetStatus(gui, "No cached artwork files to remove.");
+}
+
+#if ENABLE_RADIO_ARTWORK
+static int GuiIsJpegMagic(const unsigned char *data, int bytes)
+{
+	return bytes >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF;
+}
+
+/* Detects the 8-byte PNG signature.  Used both to dispatch a standalone
+ * PNG favicon to DecodeFaviconPngToGrey() and to recognise a PNG-encoded
+ * ICO entry so it can be decoded (or, if ENABLE_PNG_ARTWORK is off,
+ * skipped) rather than mis-fed to the DIB decoder. */
+static int GuiIsPngMagic(const unsigned char *data, int bytes)
+{
+	static const unsigned char sig[8] = { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
+	return bytes >= 8 && memcmp(data, sig, sizeof(sig)) == 0;
+}
+
+static int GuiIsIcoMagic(const unsigned char *data, int bytes)
+{
+	/* ICONDIR: 2 bytes reserved (0), 2 bytes type (1 = icon, 2 = cursor). */
+	return bytes >= 6 && data[0] == 0 && data[1] == 0 &&
+		data[2] == 1 && data[3] == 0;
+}
+
+static unsigned GuiIcoLE16(const unsigned char *p)
+{
+	return (unsigned)p[0] | ((unsigned)p[1] << 8);
+}
+
+static unsigned long GuiIcoLE32(const unsigned char *p)
+{
+	return (unsigned long)p[0] | ((unsigned long)p[1] << 8) |
+		((unsigned long)p[2] << 16) | ((unsigned long)p[3] << 24);
+}
+
+typedef struct GuiIcoEntry {
+	unsigned width, height, bitCount;
+	unsigned long size, offset;
+} GuiIcoEntry;
+
+/* Decodes a favicon JPEG straight into the grey+RGB thumbnail buffers in
+ * one call (unlike StartArtDecode()'s chunked MCU-by-MCU pump for local
+ * ID3/folder art): favicons are small and bounded by
+ * HELIXAMP3_FAVICON_MAX_BYTES, and this only ever runs once per station
+ * selection, so there is no need to spread the decode across GUI ticks. */
+static int DecodeFaviconJpegToGrey(const unsigned char *jpegData, unsigned long jpegBytes,
+	unsigned char *greyOut, unsigned char *rgbOut, int outW, int outH)
+{
+	pjpeg_image_info_t info;
+	PjpegSrc src;
+	unsigned char status;
+	unsigned char xMap[MAX_JPEG_DIM];
+	unsigned char yMap[MAX_JPEG_DIM];
+	static unsigned long greyAccum[ART_W * ART_H];
+	static unsigned long rAccum[ART_W * ART_H];
+	static unsigned long gAccum[ART_W * ART_H];
+	static unsigned long bAccum[ART_W * ART_H];
+	static unsigned short greyCount[ART_W * ART_H];
+	int mcuIndex;
+	int i;
+
+	if (!jpegData || jpegBytes <= 4 || !greyOut ||
+		outW <= 0 || outW > ART_W || outH <= 0 || outH > ART_H)
+		return -1;
+	src.data = jpegData;
+	src.pos = 0;
+	src.size = jpegBytes;
+	memset(greyOut, 0x80, (size_t)(outW * outH));
+	if (rgbOut)
+		memset(rgbOut, 0x80, (size_t)(outW * outH * 3));
+	memset(greyAccum, 0, sizeof(greyAccum));
+	memset(rAccum, 0, sizeof(rAccum));
+	memset(gAccum, 0, sizeof(gAccum));
+	memset(bAccum, 0, sizeof(bAccum));
+	memset(greyCount, 0, sizeof(greyCount));
+	/* pjpeg_decode_init() free()s any previous gJpegData and realloc()s a fresh
+	 * buffer for the whole JPEG -- the first heap operations of the decode.
+	 * Bracket them so the log shows whether the free list is still intact when
+	 * the decoder starts and after it has (re)allocated: if "before" is OK and
+	 * "after" reports CORRUPT, the fault is inside picojpeg, not upstream. */
+	Radio_CheckMiniMem("favicon-jpeg: before pjpeg_decode_init");
+	status = pjpeg_decode_init(&info, pjpeg_cb, &src, 0);
+	Radio_CheckMiniMem("favicon-jpeg: after pjpeg_decode_init");
+	if (status != 0 || info.m_width <= 0 || info.m_height <= 0 ||
+		info.m_width > MAX_JPEG_DIM || info.m_height > MAX_JPEG_DIM) {
+		pjpeg_decode_free();
+		return -1;
+	}
+	RADIO_DBG(printf("radio-art: favicon jpeg dims=%dx%d comps=%d MCU=%dx%d perRow=%d perCol=%d\n",
+		(int)info.m_width, (int)info.m_height, (int)info.m_comps,
+		(int)info.m_MCUWidth, (int)info.m_MCUHeight,
+		(int)info.m_MCUSPerRow, (int)info.m_MCUSPerCol);)
+	for (i = 0; i < info.m_width; i++)
+		xMap[i] = (unsigned char)((i * outW) / info.m_width);
+	for (i = 0; i < info.m_height; i++)
+		yMap[i] = (unsigned char)((i * outH) / info.m_height);
+	for (mcuIndex = 0; mcuIndex < info.m_MCUSPerRow * info.m_MCUSPerCol; mcuIndex++) {
+		int mcuX, mcuY, y;
+
+		status = pjpeg_decode_mcu();
+		if (status == PJPG_NO_MORE_BLOCKS)
+			break;
+		if (status != 0) {
+			pjpeg_decode_free();
+			return -1;
+		}
+		mcuX = (mcuIndex % info.m_MCUSPerRow) * info.m_MCUWidth;
+		mcuY = (mcuIndex / info.m_MCUSPerRow) * info.m_MCUHeight;
+		for (y = 0; y < info.m_MCUHeight; y++) {
+			int srcY = mcuY + y;
+			int dstY;
+			int x;
+
+			if (srcY >= info.m_height)
+				continue;
+			dstY = yMap[srcY];
+			for (x = 0; x < info.m_MCUWidth; x++) {
+				int srcX = mcuX + x;
+				unsigned char r, g, b;
+				int grey;
+
+				if (srcX >= info.m_width)
+					continue;
+				grey = JpegSampleRGB(&info, McuSampleOffset(&info, x, y), &r, &g, &b);
+				ArtAccumSampleColor(greyAccum, rAccum, gAccum, bAccum, greyCount,
+					dstY * outW + xMap[srcX], grey, r, g, b, 1);
+			}
+		}
+	}
+	pjpeg_decode_free();
+	Radio_CheckMiniMem("favicon-jpeg: after pjpeg_decode_free");
+	for (i = 0; i < outW * outH; i++) {
+		if (greyCount[i]) {
+			unsigned short c = greyCount[i];
+			unsigned long half = (unsigned long)c >> 1;
+
+			greyOut[i] = (unsigned char)((greyAccum[i] + half) / c);
+			if (rgbOut) {
+				rgbOut[i * 3    ] = (unsigned char)((rAccum[i] + half) / c);
+				rgbOut[i * 3 + 1] = (unsigned char)((gAccum[i] + half) / c);
+				rgbOut[i * 3 + 2] = (unsigned char)((bAccum[i] + half) / c);
+			}
+		}
+	}
+	return 0;
+}
+
+#if ENABLE_PNG_ARTWORK
+/* Decodes a PNG favicon via lodepng into the same downsampled grey/RGB
+ * thumbnail buffers DecodeFaviconJpegToGrey() produces, so the rest of the
+ * artwork pipeline (cache, dithered/colour rendering) doesn't need to know
+ * which decoder ran.  Ported from minimp3r's DecodePngToGrey().
+ *
+ * lodepng_inspect() reads just the IHDR header first so an oversized PNG is
+ * rejected before lodepng_decode32() would malloc width*height*4 bytes for
+ * it -- the 256KB download cap bounds the compressed input, but a small PNG
+ * can still declare huge dimensions.  lodepng_decode32() normalises every
+ * PNG colour type / bit depth (palette, greyscale, RGB, 16-bit, alpha) to
+ * 8-bit RGBA, so all the favicon variants seen in the wild decode through
+ * this one path; alpha is then ignored (treated as opaque), matching the
+ * JPEG path -- favicons are rarely meaningfully transparent. */
+static int DecodeFaviconPngToGrey(const unsigned char *pngData, unsigned long pngBytes,
+	unsigned char *greyOut, unsigned char *rgbOut, int outW, int outH)
+{
+	LodePNGState state;
+	unsigned pw = 0, ph = 0, err;
+	unsigned char *image;
+	unsigned char xMap[MAX_JPEG_DIM];
+	unsigned char yMap[MAX_JPEG_DIM];
+	static unsigned long greyAccum[ART_W * ART_H];
+	static unsigned long rAccum[ART_W * ART_H];
+	static unsigned long gAccum[ART_W * ART_H];
+	static unsigned long bAccum[ART_W * ART_H];
+	static unsigned short greyCount[ART_W * ART_H];
+	unsigned x, y;
+	int i;
+
+	if (!pngData || pngBytes <= 8 || !greyOut ||
+		outW <= 0 || outW > ART_W || outH <= 0 || outH > ART_H)
+		return -1;
+
+	lodepng_state_init(&state);
+	err = lodepng_inspect(&pw, &ph, &state, pngData, (size_t)pngBytes);
+	lodepng_state_cleanup(&state);
+	if (err) {
+		RADIO_DBG(printf("radio-art: lodepng_inspect failed err=%u (%s)\n",
+			err, lodepng_error_text(err));)
+		return -1;
+	}
+	if (pw == 0 || ph == 0 || pw > MAX_JPEG_DIM || ph > MAX_JPEG_DIM) {
+		RADIO_DBG(printf("radio-art: png dimensions out of range %ux%u (max %d)\n",
+			pw, ph, MAX_JPEG_DIM);)
+		return -1;
+	}
+
+	Radio_CheckMiniMem("favicon-png: before lodepng_decode32");
+	image = NULL;
+	err = lodepng_decode32(&image, &pw, &ph, pngData, (size_t)pngBytes);
+	Radio_CheckMiniMem("favicon-png: after lodepng_decode32");
+	if (err || !image) {
+		RADIO_DBG(printf("radio-art: lodepng_decode32 failed err=%u (%s)\n",
+			err, lodepng_error_text(err));)
+		if (image) {
+			/* image is malloc()'d inside lodepng.c (a separate translation
+			 * unit) and released with the matching free(); it is a private
+			 * decode buffer owned only here. */
+			free(image);
+			image = NULL;
+		}
+		return -1;
+	}
+	RADIO_DBG(printf("radio-art: png %ux%u decoded ok\n", pw, ph);)
+
+	memset(greyOut, 0x80, (size_t)(outW * outH));
+	if (rgbOut)
+		memset(rgbOut, 0x80, (size_t)(outW * outH * 3));
+	memset(greyAccum, 0, sizeof(greyAccum));
+	memset(rAccum, 0, sizeof(rAccum));
+	memset(gAccum, 0, sizeof(gAccum));
+	memset(bAccum, 0, sizeof(bAccum));
+	memset(greyCount, 0, sizeof(greyCount));
+
+	for (x = 0; x < pw; x++)
+		xMap[x] = (unsigned char)(((unsigned long)x * (unsigned long)outW) / pw);
+	for (y = 0; y < ph; y++)
+		yMap[y] = (unsigned char)(((unsigned long)y * (unsigned long)outH) / ph);
+
+	for (y = 0; y < ph; y++) {
+		const unsigned char *row = image + 4UL * (unsigned long)y * (unsigned long)pw;
+		int dstY = yMap[y];
+
+		for (x = 0; x < pw; x++) {
+			const unsigned char *px = row + 4 * x;
+			unsigned char r = px[0], g = px[1], b = px[2];
+			unsigned char a = px[3];
+			int dst = dstY * outW + xMap[x];
+
+			/* Composite over the panel's neutral grey so transparent favicon
+			 * areas blend into the recessed panel instead of showing raw RGB
+			 * (usually a black or white box).  0x80 matches the buffer fill and
+			 * the mid "background" dither band.  Opaque pixels (a==255) are left
+			 * untouched, so fully opaque images decode exactly as before. */
+			if (a != 255) {
+				r = (unsigned char)((r * a + 0x80 * (255 - a) + 127) / 255);
+				g = (unsigned char)((g * a + 0x80 * (255 - a) + 127) / 255);
+				b = (unsigned char)((b * a + 0x80 * (255 - a) + 127) / 255);
+			}
+
+			greyAccum[dst] += (77UL * r + 150UL * g + 29UL * b + 128UL) >> 8;
+			rAccum[dst] += r; gAccum[dst] += g; bAccum[dst] += b;
+			if (greyCount[dst] != 0xffff) greyCount[dst]++;
+		}
+	}
+	free(image);
+	image = NULL;
+	Radio_CheckMiniMem("favicon-png: after free");
+
+	for (i = 0; i < outW * outH; i++) {
+		if (greyCount[i]) {
+			unsigned short c = greyCount[i];
+			unsigned long half = (unsigned long)c >> 1;
+
+			greyOut[i] = (unsigned char)((greyAccum[i] + half) / c);
+			if (rgbOut) {
+				rgbOut[i * 3    ] = (unsigned char)((rAccum[i] + half) / c);
+				rgbOut[i * 3 + 1] = (unsigned char)((gAccum[i] + half) / c);
+				rgbOut[i * 3 + 2] = (unsigned char)((bAccum[i] + half) / c);
+			}
+		}
+	}
+	return 0;
+}
+#endif /* ENABLE_PNG_ARTWORK */
+
+#if ENABLE_WEBP_ARTWORK
+/* Decodes a WebP favicon via webpdec into the same downsampled grey/RGB
+ * thumbnail buffers the PNG/JPEG paths produce.  webp_get_info() reads only
+ * the container header so an oversized image is rejected before
+ * webp_decode_rgb() allocates width*height*3 for it (the 256KB download cap
+ * bounds the compressed input, not the declared canvas).  webp_decode_rgb()
+ * handles both the lossless (VP8L) and lossy (VP8) bitstreams and returns a
+ * packed 24-bit RGB buffer we own and free(). */
+static int DecodeFaviconWebpToGrey(const unsigned char *webpData, unsigned long webpBytes,
+	unsigned char *greyOut, unsigned char *rgbOut, int outW, int outH)
+{
+	unsigned char *image = NULL;
+	unsigned pw = 0, ph = 0;
+	unsigned x, y;
+	int i, rc;
+	static unsigned long greyAccum[ART_W * ART_H];
+	static unsigned long rAccum[ART_W * ART_H];
+	static unsigned long gAccum[ART_W * ART_H];
+	static unsigned long bAccum[ART_W * ART_H];
+	static unsigned short greyCount[ART_W * ART_H];
+	unsigned char xMap[MAX_JPEG_DIM];
+	unsigned char yMap[MAX_JPEG_DIM];
+
+	if (!webpData || webpBytes <= 12 || !greyOut ||
+		outW <= 0 || outW > ART_W || outH <= 0 || outH > ART_H)
+		return -1;
+
+	if (webp_get_info(webpData, webpBytes, &pw, &ph) != WEBP_OK)
+		return -1;
+	if (pw == 0 || ph == 0 || pw > MAX_JPEG_DIM || ph > MAX_JPEG_DIM) {
+		RADIO_DBG(printf("radio-art: webp dimensions out of range %ux%u (max %d)\n",
+			pw, ph, MAX_JPEG_DIM);)
+		return -1;
+	}
+
+	Radio_CheckMiniMem("favicon-webp: before webp_decode_rgb");
+	rc = webp_decode_rgb(webpData, webpBytes, MAX_JPEG_DIM, &image, &pw, &ph);
+	Radio_CheckMiniMem("favicon-webp: after webp_decode_rgb");
+	if (rc != WEBP_OK || !image) {
+		RADIO_DBG(printf("radio-art: webp decode failed rc=%d\n", rc);)
+		if (image) free(image);
+		return -1;
+	}
+	RADIO_DBG(printf("radio-art: webp %ux%u decoded ok\n", pw, ph);)
+
+	memset(greyOut, 0x80, (size_t)(outW * outH));
+	if (rgbOut)
+		memset(rgbOut, 0x80, (size_t)(outW * outH * 3));
+	memset(greyAccum, 0, sizeof(greyAccum));
+	memset(rAccum, 0, sizeof(rAccum));
+	memset(gAccum, 0, sizeof(gAccum));
+	memset(bAccum, 0, sizeof(bAccum));
+	memset(greyCount, 0, sizeof(greyCount));
+
+	for (x = 0; x < pw; x++)
+		xMap[x] = (unsigned char)(((unsigned long)x * (unsigned long)outW) / pw);
+	for (y = 0; y < ph; y++)
+		yMap[y] = (unsigned char)(((unsigned long)y * (unsigned long)outH) / ph);
+
+	for (y = 0; y < ph; y++) {
+		const unsigned char *row = image + 3UL * (unsigned long)y * (unsigned long)pw;
+		int dstY = yMap[y];
+
+		for (x = 0; x < pw; x++) {
+			const unsigned char *px = row + 3 * x;
+			unsigned char r = px[0], g = px[1], b = px[2];
+			int dst = dstY * outW + xMap[x];
+
+			greyAccum[dst] += (77UL * r + 150UL * g + 29UL * b + 128UL) >> 8;
+			rAccum[dst] += r; gAccum[dst] += g; bAccum[dst] += b;
+			if (greyCount[dst] != 0xffff) greyCount[dst]++;
+		}
+	}
+	free(image);
+	image = NULL;
+	Radio_CheckMiniMem("favicon-webp: after free");
+
+	for (i = 0; i < outW * outH; i++) {
+		if (greyCount[i]) {
+			unsigned short c = greyCount[i];
+			unsigned long half = (unsigned long)c >> 1;
+
+			greyOut[i] = (unsigned char)((greyAccum[i] + half) / c);
+			if (rgbOut) {
+				rgbOut[i * 3    ] = (unsigned char)((rAccum[i] + half) / c);
+				rgbOut[i * 3 + 1] = (unsigned char)((gAccum[i] + half) / c);
+				rgbOut[i * 3 + 2] = (unsigned char)((bAccum[i] + half) / c);
+			}
+		}
+	}
+	return 0;
+}
+#endif /* ENABLE_WEBP_ARTWORK */
+
+/* Decodes the raw BITMAPINFOHEADER-style DIB embedded in a legacy
+ * (non-PNG) ICO entry.  Only the depths real-world icon tools actually
+ * emit are supported (32/24/8bpp, uncompressed); 4bpp/1bpp and
+ * RLE-compressed DIBs are rejected.  The AND (transparency) mask that
+ * follows the pixel data is ignored -- favicons are rarely meaningfully
+ * transparent.  Ported from minimp3r's DecodeIcoDibToGrey(). */
+static int DecodeIcoDibToGrey(const unsigned char *dib, unsigned long dibBytes,
+	unsigned char *greyOut, unsigned char *rgbOut, int outW, int outH)
+{
+	unsigned long headerSize;
+	long width, height;
+	unsigned bitCount;
+	unsigned long compression, paletteEntries, rowBytes;
+	const unsigned char *palette;
+	const unsigned char *pixels;
+	/* Indexed by source pixel column/row (0..width-1 / 0..height-1), not by
+	 * output size -- width/height are bounded to <=256 above, so size these
+	 * for the source range, not ART_W/ART_H (the downsampled output is only
+	 * written through xMap[]/yMap[]'s *values*, not their index range). */
+	unsigned char xMap[256], yMap[256];
+	static unsigned long greyAccum[ART_W * ART_H];
+	static unsigned long rAccum[ART_W * ART_H];
+	static unsigned long gAccum[ART_W * ART_H];
+	static unsigned long bAccum[ART_W * ART_H];
+	static unsigned short greyCount[ART_W * ART_H];
+	long x, y;
+	int i;
+
+	if (!dib || dibBytes < 40 || !greyOut || outW <= 0 || outW > ART_W ||
+		outH <= 0 || outH > ART_H)
+		return -1;
+	headerSize = GuiIcoLE32(dib);
+	if (headerSize < 40 || headerSize > dibBytes)
+		return -1;
+	width = (long)GuiIcoLE32(dib + 4);
+	/* Height counts the XOR colour rows plus the AND mask rows stacked
+	 * together, so the actual image height is half the field's value. */
+	height = (long)GuiIcoLE32(dib + 8) / 2;
+	bitCount = GuiIcoLE16(dib + 14);
+	compression = GuiIcoLE32(dib + 16);
+	if (width <= 0 || height <= 0 || width > 256 || height > 256 ||
+		compression != 0 /* BI_RGB, uncompressed */)
+		return -1;
+	if (bitCount != 32 && bitCount != 24 && bitCount != 8)
+		return -1;
+
+	paletteEntries = (bitCount == 8) ? 256UL : 0UL;
+	palette = dib + headerSize;
+	pixels = palette + paletteEntries * 4UL;
+	rowBytes = (((unsigned long)width * bitCount + 31UL) / 32UL) * 4UL;
+	if ((unsigned long)(pixels - dib) + rowBytes * (unsigned long)height > dibBytes)
+		return -1;
+
+	memset(greyOut, 0x80, (size_t)(outW * outH));
+	if (rgbOut)
+		memset(rgbOut, 0x80, (size_t)(outW * outH * 3));
+	memset(greyAccum, 0, sizeof(greyAccum));
+	memset(rAccum, 0, sizeof(rAccum));
+	memset(gAccum, 0, sizeof(gAccum));
+	memset(bAccum, 0, sizeof(bAccum));
+	memset(greyCount, 0, sizeof(greyCount));
+	for (x = 0; x < width; x++)
+		xMap[x] = (unsigned char)((x * outW) / width);
+	for (y = 0; y < height; y++)
+		yMap[y] = (unsigned char)((y * outH) / height);
+
+	/* DIB pixel rows are stored bottom-up. */
+	for (y = 0; y < height; y++) {
+		const unsigned char *row = pixels +
+			(unsigned long)(height - 1 - y) * rowBytes;
+		int dstY = yMap[y];
+
+		for (x = 0; x < width; x++) {
+			unsigned char r, g, b;
+			int dst;
+
+			if (bitCount == 8) {
+				const unsigned char *pal = palette + 4 * row[x];
+				b = pal[0]; g = pal[1]; r = pal[2];
+			} else {
+				const unsigned char *px = row + (bitCount == 32 ? 4 : 3) * x;
+				b = px[0]; g = px[1]; r = px[2];
+			}
+			dst = dstY * outW + xMap[x];
+			greyAccum[dst] += (77UL * r + 150UL * g + 29UL * b + 128UL) >> 8;
+			rAccum[dst] += r; gAccum[dst] += g; bAccum[dst] += b;
+			if (greyCount[dst] != 0xffff) greyCount[dst]++;
+		}
+	}
+	for (i = 0; i < outW * outH; i++)
+		if (greyCount[i]) {
+			unsigned short c = greyCount[i];
+			unsigned long half = (unsigned long)c >> 1;
+
+			greyOut[i] = (unsigned char)((greyAccum[i] + half) / c);
+			if (rgbOut) {
+				rgbOut[i * 3    ] = (unsigned char)((rAccum[i] + half) / c);
+				rgbOut[i * 3 + 1] = (unsigned char)((gAccum[i] + half) / c);
+				rgbOut[i * 3 + 2] = (unsigned char)((bAccum[i] + half) / c);
+			}
+		}
+	return 0;
+}
+
+static int GuiIcoEntryCompare(const void *pa, const void *pb)
+{
+	const GuiIcoEntry *a = (const GuiIcoEntry *)pa;
+	const GuiIcoEntry *b = (const GuiIcoEntry *)pb;
+	unsigned long areaA = (unsigned long)a->width * (unsigned long)a->height;
+	unsigned long areaB = (unsigned long)b->width * (unsigned long)b->height;
+
+	if (areaA != areaB) return areaA > areaB ? -1 : 1;
+	return (int)b->bitCount - (int)a->bitCount;
+}
+
+/* ICO files are a directory of one or more embedded images at different
+ * sizes/depths.  Entries are tried largest-first for the best quality once
+ * downsampled to the ART_W x ART_H thumbnail, falling through to a
+ * smaller/other entry if the chosen one can't be decoded -- e.g. a
+ * PNG-encoded entry (decoded via lodepng when ENABLE_PNG_ARTWORK is on,
+ * otherwise skipped) or a legacy 4bpp/1bpp DIB.  Ported from minimp3r's
+ * DecodeIcoToGrey(). */
+static int DecodeIcoToGrey(const unsigned char *icoData, unsigned long icoBytes,
+	unsigned char *greyOut, unsigned char *rgbOut, int outW, int outH)
+{
+	unsigned count, i, n;
+	GuiIcoEntry entries[64];
+
+	if (!icoData || icoBytes < 6 || !GuiIsIcoMagic(icoData, (int)icoBytes))
+		return -1;
+	count = GuiIcoLE16(icoData + 4);
+	if (count == 0)
+		return -1;
+	if (count > 64)
+		count = 64;
+	n = 0;
+	for (i = 0; i < count; i++) {
+		const unsigned char *e = icoData + 6 + (unsigned long)i * 16UL;
+		unsigned w, h;
+		unsigned long size, offset;
+
+		if (6UL + (unsigned long)(i + 1) * 16UL > icoBytes)
+			break;
+		w = e[0] ? e[0] : 256;
+		h = e[1] ? e[1] : 256;
+		size = GuiIcoLE32(e + 8);
+		offset = GuiIcoLE32(e + 12);
+		if (size < 8 || offset > icoBytes || size > icoBytes - offset)
+			continue;
+		entries[n].width = w;
+		entries[n].height = h;
+		entries[n].bitCount = GuiIcoLE16(e + 6);
+		entries[n].size = size;
+		entries[n].offset = offset;
+		n++;
+	}
+	if (n == 0)
+		return -1;
+	qsort(entries, n, sizeof(entries[0]), GuiIcoEntryCompare);
+	for (i = 0; i < n; i++) {
+		const unsigned char *payload = icoData + entries[i].offset;
+		unsigned long payloadBytes = entries[i].size;
+
+		if (GuiIsPngMagic(payload, (int)payloadBytes)) {
+#if ENABLE_PNG_ARTWORK
+			if (DecodeFaviconPngToGrey(payload, payloadBytes, greyOut,
+				rgbOut, outW, outH) == 0)
+				return 0;
+#endif
+			/* PNG entry we can't (or won't) decode -- fall through to a
+			 * smaller/legacy-DIB entry rather than mis-feeding PNG bytes
+			 * to the DIB decoder. */
+			continue;
+		}
+		if (DecodeIcoDibToGrey(payload, payloadBytes, greyOut, rgbOut,
+			outW, outH) == 0)
+			return 0;
+	}
+	return -1;
+}
+
+/* Favicon artwork is fetched from the Radio Browser station's "favicon"
+ * field only, never from the MP3/ICY stream, and only once playback has
+ * already picked a station (see RadioDoProbeAndPlay()/SelectInternetStream()).
+ * The fetch goes through rb_probe_fetch_binary(), which shares its
+ * HTTP/HTTPS/AmiSSL connection handling with the stream probe used to start
+ * playback but is a separate code path the probe's stream-playback logic
+ * never calls into.  Any failure here (bad URL, unsupported TLS, oversized
+ * body, unsupported format, broken decode) just leaves artValid 0 and never
+ * affects playback.  Ported from minimp3r's LoadRadioFaviconImage(). */
+static int LoadRadioFaviconImage(HelixAmp3Gui *gui)
+{
+	char contentType[64];
+	static unsigned char response[HELIXAMP3_FAVICON_MAX_BYTES];
+	int bytes = 0;
+	int rc;
+	int artworkDisabled;
+
+	if (!gui || !gui->currentRadioFavicon[0]) {
+		RADIO_DBG(printf("radio-art: no favicon URL for current station\n");)
+		return 0;
+	}
+	artworkDisabled = rb_probe_artwork_disabled();
+	RADIO_DBG(printf("radio-art: flag check MP3_NO_ARTWORK enabled=%d testEnable=%d before favicon/artwork fetch\n", artworkDisabled, rb_probe_artwork_test_enabled());)
+	if (artworkDisabled) {
+		if (radio_runtime_flag_enabled("MP3_NO_ARTWORK"))
+			RADIO_DBG(printf("radio-art: skipped by MP3_NO_ARTWORK\n");)
+		else
+			RADIO_DBG(printf("radio-art: disabled for run after fatal TLS/artwork transport fault\n");)
+		return 0;
+	}
+	if (Radio_PlaybackOwnsNetwork()) {
+		RADIO_DBG(printf("radio-art: skipped favicon fetch while radio playback child owns networking\n");)
+		return 0;
+	}
+	RADIO_DBG(printf("radio-art: fetching favicon url=%s\n", gui->currentRadioFavicon);)
+	rc = rb_probe_fetch_binary(gui->currentRadioFavicon, response, (int)sizeof(response),
+		&bytes, contentType, (int)sizeof(contentType));
+	if (rc != RB_STREAM_PROBE_OK) {
+		RADIO_DBG(printf("radio-art: fetch failed rc=%d (%s)\n", rc, rb_probe_error_text(rc));)
+		return 0;
+	}
+	RADIO_DBG(printf("radio-art: fetched %d bytes content-type=\"%s\"\n", bytes, contentType);)
+	if (bytes <= 8)
+		return 0;
+
+	/* Bisect the "AN_MemCorrupt at the favicon JPEG decode" dead-end guru: walk
+	 * the exec free list right after the fetch/SSL teardown and before the
+	 * decoder's first heap op (picojpeg realloc()s a buffer for the whole JPEG).
+	 * If the list is ALREADY corrupt here, the fault was planted upstream by the
+	 * station switch / SSL teardown, not the decoder.  Radio_CheckMiniMem() sets
+	 * the poison flag when it finds damage; when it does, skip the decode
+	 * entirely -- feeding a corrupt heap to picojpeg's realloc()/free() is what
+	 * turns the recoverable state into a dead-end guru that needs a reboot.
+	 * Degrade to "no artwork" instead. */
+	Radio_CheckMiniMem("favicon: after fetch, before decode");
+	if (Radio_IsMemoryPoisoned()) {
+		RADIO_DBG(printf("radio-art: heap already poisoned before favicon decode -- skipping decode to avoid a dead-end guru\n");)
+		return 0;
+	}
+
+	/* Dispatch purely on the actual bytes fetched, not the URL extension or
+	 * declared Content-Type -- plenty of real sites serve a different format
+	 * under a "favicon.ico" URL and/or a misleading Content-Type. */
+	if (GuiIsJpegMagic(response, bytes)) {
+		if (DecodeFaviconJpegToGrey(response, (unsigned long)bytes, gui->artGreyBuf,
+			gui->artRGBBuf, ART_W, ART_H) != 0) {
+			RADIO_DBG(printf("radio-art: jpeg decode failed\n");)
+			return 0;
+		}
+		gui->artValid = 1;
+		return 1;
+	}
+	if (GuiIsIcoMagic(response, bytes)) {
+		if (DecodeIcoToGrey(response, (unsigned long)bytes, gui->artGreyBuf,
+			gui->artRGBBuf, ART_W, ART_H) != 0) {
+			RADIO_DBG(printf("radio-art: ico decode failed\n");)
+			return 0;
+		}
+		gui->artValid = 1;
+		return 1;
+	}
+#if ENABLE_PNG_ARTWORK
+	if (GuiIsPngMagic(response, bytes)) {
+		if (DecodeFaviconPngToGrey(response, (unsigned long)bytes, gui->artGreyBuf,
+			gui->artRGBBuf, ART_W, ART_H) != 0) {
+			RADIO_DBG(printf("radio-art: png decode failed\n");)
+			return 0;
+		}
+		gui->artValid = 1;
+		return 1;
+	}
+#endif
+#if ENABLE_WEBP_ARTWORK
+	if (webp_is_webp(response, (unsigned long)bytes)) {
+		if (DecodeFaviconWebpToGrey(response, (unsigned long)bytes, gui->artGreyBuf,
+			gui->artRGBBuf, ART_W, ART_H) != 0) {
+			RADIO_DBG(printf("radio-art: webp decode failed\n");)
+			return 0;
+		}
+		gui->artValid = 1;
+		return 1;
+	}
+#endif
+#if ENABLE_SVG_ARTWORK
+	if (SvgLooksLikeSvg(response, bytes)) {
+		if (SvgDecodeToGrey(response, (unsigned long)bytes, gui->artGreyBuf,
+			gui->artRGBBuf, ART_W, ART_H) != 0) {
+			RADIO_DBG(printf("radio-art: svg decode failed\n");)
+			return 0;
+		}
+		gui->artValid = 1;
+		return 1;
+	}
+#endif
+	RADIO_DBG(printf("radio-art: rejected, unsupported favicon format (first bytes %02X %02X %02X %02X)\n",
+		response[0], response[1], response[2], response[3]);)
+	return 0;
+}
+#endif /* ENABLE_RADIO_ARTWORK */
+
+static void StartArtDecode(HelixAmp3Gui *gui)
+{
+	ArtDecodeState *st = &gui->artDecode;
+	unsigned char status;
+	int i;
+
+	ReleaseArtColorPens(gui);
+	memset(st, 0, sizeof(*st));
+	st->wantColor = gui->artColorEnabled;
+	gui->artValid = 0;
+	gui->artLoading = 0;
+	if (LoadArtworkCache(gui)) {
+#ifdef MINIAMP3_DEBUG
+		Printf("artwork cache=hit bytes=%lu\n", gui->tags.artBytes);
+#endif
+		if (gui->artColorEnabled)
+			BuildArtColorPens(gui);
+		DrawArtPanel(gui);
+		return;
+	}
+	if (!gui->tags.artData || gui->tags.artBytes <= 4 || gui->tags.artIsPng) {
+#if ENABLE_RADIO_ARTWORK
+		if (gui->artEnabled && is_url_path(gui->inputName) &&
+			gui->currentRadioFavicon[0] && LoadRadioFaviconImage(gui)) {
+			if (gui->artColorEnabled)
+				BuildArtColorPens(gui);
+			SaveArtworkCache(gui);
+			DrawArtPanel(gui);
+			return;
+		}
+#endif
+		DrawArtPanel(gui);
+		return;
+	}
+	memset(st->greyOut, 0x80, sizeof(st->greyOut));
+	{
+		int jpegW = 0, jpegH = 0;
+		PeekJpegDimensions(gui->tags.artData, gui->tags.artBytes, &jpegW, &jpegH);
+		if (jpegW <= 0 || jpegH <= 0)
+			st->reduce = MINIAMP3_ART_REDUCED_JPEG ? 1 : 0;
+		else
+			st->reduce = (jpegW > ART_W * 4 || jpegH > ART_H * 4) ? 1 : 0;
+	}
+	ArtNow(&st->startSecs, &st->startMicros);
+#if MINIAMP3_ART_COMPARE_JPEG
+	{
+		static unsigned char fullGrey[ART_W * ART_H];
+		static unsigned char reducedGrey[ART_W * ART_H];
+		unsigned long fullUs;
+		unsigned long reducedUs;
+		unsigned long sumDiff = 0;
+		int maxDiff = 0;
+		int diffPixels = 0;
+		int n;
+		if (DecodeJpegToGreyMode(gui->tags.artData, gui->tags.artBytes,
+			fullGrey, ART_W, ART_H, gui->tags.artIsPng, 0, &fullUs) == 0 &&
+			DecodeJpegToGreyMode(gui->tags.artData, gui->tags.artBytes,
+			reducedGrey, ART_W, ART_H, gui->tags.artIsPng, 1, &reducedUs) == 0) {
+			for (n = 0; n < ART_W * ART_H; n++) {
+				int d = (int)fullGrey[n] - (int)reducedGrey[n];
+				if (d < 0) d = -d;
+				if (d) diffPixels++;
+				if (d > maxDiff) maxDiff = d;
+				sumDiff += (unsigned long)d;
+			}
+#ifdef MINIAMP3_DEBUG
+			Printf("artwork compare: max_luma_diff=%d avg_luma_diff=%lu diff_pixels=%d full_us=%lu reduced_us=%lu\n",
+				maxDiff, (sumDiff + (ART_W * ART_H / 2)) / (ART_W * ART_H),
+				diffPixels, fullUs, reducedUs);
+#endif
+		}
+	}
+#endif
+	st->src.data = gui->tags.artData;
+	st->src.size = gui->tags.artBytes;
+	status = pjpeg_decode_init(&st->info, pjpeg_cb, &st->src, st->reduce);
+	if (status != 0 || st->info.m_width <= 0 || st->info.m_height <= 0 ||
+		st->info.m_width > MAX_JPEG_DIM || st->info.m_height > MAX_JPEG_DIM) {
+		pjpeg_decode_free();
+		DrawArtPanel(gui);
+		return;
+	}
+	for (i = 0; i < st->info.m_width; i++)
+		st->xMap[i] = (unsigned char)((i * ART_W) / st->info.m_width);
+	for (i = 0; i < st->info.m_height; i++)
+		st->yMap[i] = (unsigned char)((i * ART_H) / st->info.m_height);
+	st->totalMcus = st->info.m_MCUSPerRow * st->info.m_MCUSPerCol;
+#ifdef MINIAMP3_DEBUG
+	Printf("artwork JPEG: %dx%d bytes=%lu sampling=%s mcu=%dx%d total_mcus=%d reduce=%s cache=miss pump_limit=%d source_pixels=%lu reduced_blocks=%lu\n",
+		st->info.m_width, st->info.m_height, gui->tags.artBytes,
+		MINIAMP3_DEBUG_FMT_PTR(JpegScanTypeName(st->info.m_scanType)),
+		st->info.m_MCUWidth,
+		st->info.m_MCUHeight, st->totalMcus,
+		MINIAMP3_DEBUG_FMT_PTR(st->reduce ? "yes" : "no"),
+		ART_MCUS_PER_PUMP, (unsigned long)st->info.m_width *
+		(unsigned long)st->info.m_height, (unsigned long)st->totalMcus *
+		(unsigned long)(st->info.m_MCUWidth / 8) *
+		(unsigned long)(st->info.m_MCUHeight / 8));
+#endif
+	st->active = 1;
+	gui->artLoading = 1;
+	SetStatus(gui, "Loading artwork...");
+	DrawArtPanel(gui);
+	PumpArtDecode(gui);
+}
+
+static int ArtGreyPen(HelixAmp3Gui *gui, int level)
+{
+	/* retained for potential future use */
+	struct DrawInfo *dri;
+	int pen;
+
+	pen = level ? 1 : 0;
+	if (!gui || !gui->win || !gui->win->WScreen)
+		return pen;
+	dri = GetScreenDrawInfo(gui->win->WScreen);
+	if (dri) {
+		if (level <= 0)
+			pen = dri->dri_Pens[SHADOWPEN];
+		else if (level == 1)
+			pen = dri->dri_Pens[BACKGROUNDPEN];
+		else
+			pen = dri->dri_Pens[SHINEPEN];
+		FreeScreenDrawInfo(gui->win->WScreen, dri);
+	}
+	return pen;
+}
+
+static void DrawTransportIcons(HelixAmp3Gui *gui)
+{
+	struct RastPort *rp;
+	int playX;
+	int playY;
+	int stopX;
+	int stopY;
+	int nextX;
+	int nextY;
+	int i;
+
+	if (!gui || !gui->win || !gui->gadPlay || !gui->gadStop)
+		return;
+	rp = gui->win->RPort;
+	SetAPen(rp, 1);
+	playX = gui->gadPlay->LeftEdge + (gui->gadPlay->Width / 2) - 5;
+	playY = gui->gadPlay->TopEdge + (gui->gadPlay->Height / 2) - 5;
+	for (i = 0; i < 10; i++) {
+		int half = (9 - i) / 2;
+		RectFill(rp, playX + i, playY + 5 - half, playX + i,
+			playY + 5 + half);
+	}
+	stopX = gui->gadStop->LeftEdge + (gui->gadStop->Width / 2) - 5;
+	stopY = gui->gadStop->TopEdge + (gui->gadStop->Height / 2) - 5;
+	RectFill(rp, stopX, stopY, stopX + 9, stopY + 9);
+	/* Rewind: two left-pointing triangles (seek back). */
+	if (gui->gadRewind) {
+		int rwX = gui->gadRewind->LeftEdge + (gui->gadRewind->Width / 2) - 7;
+		int rwY = gui->gadRewind->TopEdge + (gui->gadRewind->Height / 2) - 4;
+		int t;
+		for (t = 0; t < 2; t++) {
+			int ox = rwX + t * 8;
+			for (i = 0; i < 7; i++) {
+				int half = i / 2;
+				RectFill(rp, ox + i, rwY + 3 - half,
+					ox + i, rwY + 3 + half);
+			}
+		}
+	}
+	/* Fast-forward: two right-pointing triangles (seek ahead). */
+	if (gui->gadFfwd) {
+		int ffX = gui->gadFfwd->LeftEdge + (gui->gadFfwd->Width / 2) - 7;
+		int ffY = gui->gadFfwd->TopEdge + (gui->gadFfwd->Height / 2) - 4;
+		int t;
+		for (t = 0; t < 2; t++) {
+			int ox = ffX + t * 8;
+			for (i = 0; i < 7; i++) {
+				int half = (6 - i) / 2;
+				RectFill(rp, ox + i, ffY + 3 - half,
+					ox + i, ffY + 3 + half);
+			}
+		}
+	}
+	/* Next: two right-pointing triangles plus a bar (>>|), the skip-to-next
+	 * glyph.  The trailing bar is what distinguishes it from the fast-forward
+	 * seek button above, which is a plain >> with no bar. */
+	if (gui->gadNext) {
+		nextX = gui->gadNext->LeftEdge + (gui->gadNext->Width / 2) - 8;
+		nextY = gui->gadNext->TopEdge + (gui->gadNext->Height / 2) - 4;
+		for (i = 0; i < 7; i++) {
+			int half = (6 - i) / 2;
+			RectFill(rp, nextX + i, nextY + 3 - half,
+				nextX + i, nextY + 3 + half);
+		}
+		nextX += 8;
+		for (i = 0; i < 7; i++) {
+			int half = (6 - i) / 2;
+			RectFill(rp, nextX + i, nextY + 3 - half,
+				nextX + i, nextY + 3 + half);
+		}
+		nextX += 8;
+		RectFill(rp, nextX, nextY, nextX + 1, nextY + 6);
+	}
+}
+
+static void ReleaseArtColorPens(HelixAmp3Gui *gui)
+{
+	GUI_TASK_IDENTITY("artwork-release-pens");
+	if (gui->artPensBuilt && gui->win) {
+		struct ColorMap *cm = gui->win->WScreen->ViewPort.ColorMap;
+		if (cm) {
+			int i;
+			for (i = 0; i < gui->artPenCacheUsed; i++)
+				if (gui->artPenCache[i].pen >= 0) {
+					/* Invalidate the slot the instant the pen is handed back: a
+					 * released pen index is stale exactly like a freed pointer,
+					 * so a slot left holding its old index could be released a
+					 * second time (the pen-cache form of AN_FreeTwice) if this
+					 * cache were walked again before BuildArtColorPens()
+					 * repopulated it. */
+					GUI_FREE_BEGIN("ReleaseArtColorPens", "art-color-pen",
+						(void *)(long)gui->artPenCache[i].pen, (unsigned long)i);
+					ReleasePen(cm, gui->artPenCache[i].pen);
+					gui->artPenCache[i].pen = -1;
+					GUI_FREE_END("ReleaseArtColorPens", "art-color-pen",
+						(void *)(long)gui->artPenCache[i].pen, (unsigned long)i);
+				}
+		}
+	}
+	gui->artPensBuilt = 0;
+	gui->artPenCacheUsed = 0;
+}
+
+static void BuildArtColorPens(HelixAmp3Gui *gui)
+{
+	struct ColorMap *cm;
+	int i;
+
+	ReleaseArtColorPens(gui);
+	if (!gui->win || !gui->artValid)
+		return;
+	cm = gui->win->WScreen->ViewPort.ColorMap;
+	if (!cm)
+		return;
+
+	/* Pass 1: build pen cache from unique undithered pixel colours. */
+	for (i = 0; i < ART_W * ART_H; i++) {
+		const unsigned char *p = &gui->artRGBBuf[i * 3];
+		unsigned long key = ((unsigned long)p[0] << 16) |
+		                    ((unsigned long)p[1] <<  8) | p[2];
+		int j;
+		for (j = 0; j < gui->artPenCacheUsed; j++)
+			if (gui->artPenCache[j].key == key)
+				break;
+		if (j == gui->artPenCacheUsed && gui->artPenCacheUsed < ART_COLOR_CACHE) {
+			ULONG r32 = (ULONG)p[0] | ((ULONG)p[0] << 8) | ((ULONG)p[0] << 16) | ((ULONG)p[0] << 24);
+			ULONG g32 = (ULONG)p[1] | ((ULONG)p[1] << 8) | ((ULONG)p[1] << 16) | ((ULONG)p[1] << 24);
+			ULONG b32 = (ULONG)p[2] | ((ULONG)p[2] << 8) | ((ULONG)p[2] << 16) | ((ULONG)p[2] << 24);
+			gui->artPenCache[j].key = key;
+			gui->artPenCache[j].pen = ObtainBestPen(cm, r32, g32, b32,
+				OBP_FailIfBad, (Tag)FALSE, TAG_DONE);
+			gui->artPenCacheUsed++;
+		}
+	}
+
+	if (!gui->artPenCacheUsed)
+		return;
+
+	/* Pass 2: assign per-pixel pen index using Bayer-dithered colour.
+	 * The dither offset pushes each pixel's colour toward lighter or darker,
+	 * causing adjacent pixels to snap to different pens across palette
+	 * boundaries — same technique as the greyscale path, extended to RGB. */
+	for (i = 0; i < ART_W * ART_H; i++) {
+		const unsigned char *p = &gui->artRGBBuf[i * 3];
+		int dv = (int)kBayer8x8[(i / ART_W) & 7][i & 7] - 32;
+		int dscale = dv * 3 / 4;
+		int rd = (int)p[0] + dscale;
+		int gd = (int)p[1] + dscale;
+		int bd = (int)p[2] + dscale;
+		int bestj = 0;
+		unsigned long bestDist = 0xffffffffUL;
+		int j;
+		if (rd < 0) rd = 0; else if (rd > 255) rd = 255;
+		if (gd < 0) gd = 0; else if (gd > 255) gd = 255;
+		if (bd < 0) bd = 0; else if (bd > 255) bd = 255;
+		for (j = 0; j < gui->artPenCacheUsed; j++) {
+			unsigned long k = gui->artPenCache[j].key;
+			int dr = (int)((k >> 16) & 0xff) - rd;
+			int dg = (int)((k >>  8) & 0xff) - gd;
+			int db = (int)( k        & 0xff) - bd;
+			unsigned long dist = (unsigned long)(dr*dr + dg*dg + db*db);
+			if (dist < bestDist) { bestDist = dist; bestj = j; }
+		}
+		gui->artPenIdx[i] = (unsigned char)bestj;
+	}
+	gui->artPensBuilt = 1;
+}
+
+/* djb2 hash of a C string, used to key the random fallback-icon tint to the
+ * current station/track name so the colour only re-rolls when it changes. */
+static unsigned long ArtFallbackHash(const char *s)
+{
+	unsigned long h = 5381;
+	if (s)
+		while (*s)
+			h = ((h << 5) + h) + (unsigned char)*s++;
+	return h ? h : 1; /* never 0: 0 means "no colour rolled yet" */
+}
+
+/* Rolls a fresh, vivid random colour.  Hue is fully random; saturation and
+ * value are pinned to the top so the icon always reads clearly against the
+ * grey/blue Workbench regardless of which hue comes up.  A tiny self-seeding
+ * xorshift PRNG keeps this dependency-free (no <stdlib.h> rand, no math). */
+static void ArtRollFallbackColor(unsigned long salt,
+	unsigned char *r, unsigned char *g, unsigned char *b)
+{
+	static unsigned long state = 2463534242UL;
+	static unsigned long bump = 0;
+	unsigned long hue, region, rem, q, t;
+
+	state ^= salt + 0x9E3779B9UL + (bump++ << 6);
+	state ^= state << 13;
+	state ^= state >> 17;
+	state ^= state << 5;
+
+	hue = state % 360UL;
+	region = hue / 60UL;
+	rem = ((hue % 60UL) * 255UL) / 60UL;
+	q = 255UL - rem;
+	t = rem;
+	switch (region) {
+	case 0:  *r = 255;        *g = (unsigned char)t; *b = 0;            break;
+	case 1:  *r = (unsigned char)q; *g = 255;        *b = 0;            break;
+	case 2:  *r = 0;          *g = 255;        *b = (unsigned char)t;   break;
+	case 3:  *r = 0;          *g = (unsigned char)q; *b = 255;          break;
+	case 4:  *r = (unsigned char)t; *g = 0;          *b = 255;          break;
+	default: *r = 255;        *g = 0;          *b = (unsigned char)q;   break;
+	}
+}
+
+/* Returns the fallback-icon tint for the current input, rolling a new colour
+ * only when the station/track (keyed on inputName) has changed since last time.
+ * Stable across the frequent redraws a single station triggers. */
+static void ArtFallbackColor(HelixAmp3Gui *gui,
+	unsigned char *r, unsigned char *g, unsigned char *b)
+{
+	unsigned long key = ArtFallbackHash(gui->inputName);
+	if (!gui->artFallbackHasColor || key != gui->artFallbackKey) {
+		ArtRollFallbackColor(key, &gui->artFallbackR,
+			&gui->artFallbackG, &gui->artFallbackB);
+		gui->artFallbackKey = key;
+		gui->artFallbackHasColor = 1;
+	}
+	*r = gui->artFallbackR;
+	*g = gui->artFallbackG;
+	*b = gui->artFallbackB;
+}
+
+/* Obtains a pen in the current fallback tint (rolled per station/track) for a
+ * drawn no-artwork icon.  Returns the pen to draw with -- the obtained best
+ * pen, or system pen 1 if none is available -- and reports via *obtained the
+ * pen the caller must ReleasePen() afterwards (-1 when there is nothing to
+ * free).  *cmOut receives the colour map used for the release. */
+static UWORD ArtFallbackPen(HelixAmp3Gui *gui, struct ColorMap **cmOut, LONG *obtained)
+{
+	struct ColorMap *cm = gui->win ? gui->win->WScreen->ViewPort.ColorMap : NULL;
+	unsigned char rr, gg, bb;
+
+	*cmOut = cm;
+	*obtained = -1;
+	ArtFallbackColor(gui, &rr, &gg, &bb);
+	if (cm) {
+		ULONG r32 = (ULONG)rr | ((ULONG)rr << 8) | ((ULONG)rr << 16) | ((ULONG)rr << 24);
+		ULONG g32 = (ULONG)gg | ((ULONG)gg << 8) | ((ULONG)gg << 16) | ((ULONG)gg << 24);
+		ULONG b32 = (ULONG)bb | ((ULONG)bb << 8) | ((ULONG)bb << 16) | ((ULONG)bb << 24);
+		LONG pen = ObtainBestPen(cm, r32, g32, b32,
+			OBP_FailIfBad, (Tag)FALSE, TAG_DONE);
+		if (pen >= 0) {
+			*obtained = pen;
+			return (UWORD)pen;
+		}
+	}
+	return 1;
+}
+
+/* Integer Newton's-method sqrt, used to plot filled circles for the
+ * fallback art icons below without pulling in <math.h>. */
+static int ArtIconIntSqrt(int n)
+{
+	int x, y;
+	if (n <= 0)
+		return 0;
+	x = n;
+	y = (x + 1) / 2;
+	while (y < x) {
+		x = y;
+		y = (x + n / x) / 2;
+	}
+	return x;
+}
+
+static void ArtIconFillCircle(struct RastPort *rp, int cx, int cy, int r)
+{
+	int dy;
+	for (dy = -r; dy <= r; dy++) {
+		int dx = ArtIconIntSqrt(r * r - dy * dy);
+		RectFill(rp, cx - dx, cy + dy, cx + dx, cy + dy);
+	}
+}
+
+/* Drawn when there's no station favicon (or it failed to load) for a
+ * radio stream: a boombox silhouette (handle, antenna, body, speaker
+ * ring, tuning dial), built entirely from RectFill/Move/Draw so it
+ * needs no bitmap asset. */
+static void DrawRadioIcon(HelixAmp3Gui *gui, struct RastPort *rp,
+	int originX, int originY)
+{
+	int bx0 = originX + 10, by0 = originY + 34;
+	int bx1 = originX + 54, by1 = originY + 58;
+	struct ColorMap *cm;
+	LONG obtained;
+	UWORD fgPen = ArtFallbackPen(gui, &cm, &obtained);
+
+	SetAPen(rp, fgPen);
+
+	Move(rp, bx0 + 10, by0);
+	Draw(rp, bx0 + 10, by0 - 12);
+	Draw(rp, bx1 - 10, by0 - 12);
+	Draw(rp, bx1 - 10, by0);
+
+	Move(rp, bx1 - 8, by0);
+	Draw(rp, bx1 + 4, by0 - 16);
+	RectFill(rp, bx1 + 2, by0 - 18, bx1 + 6, by0 - 14);
+
+	Move(rp, bx0, by0);
+	Draw(rp, bx1, by0);
+	Draw(rp, bx1, by1);
+	Draw(rp, bx0, by1);
+	Draw(rp, bx0, by0);
+
+	ArtIconFillCircle(rp, bx0 + 12, by0 + 12, 7);
+	SetAPen(rp, 0);
+	ArtIconFillCircle(rp, bx0 + 12, by0 + 12, 4);
+
+	SetAPen(rp, (UWORD)fgPen);
+	ArtIconFillCircle(rp, bx1 - 10, by0 + 12, 4);
+
+	if (obtained >= 0)
+		ReleasePen(cm, obtained);
+}
+
+/* Drawn when a local/offline file has no embedded artwork: a simple
+ * eighth note (filled head, stem, flag), same no-asset approach.  Tinted with
+ * the per-track random colour, matching the radio fallback icon. */
+static void DrawMusicNoteIcon(HelixAmp3Gui *gui, struct RastPort *rp,
+	int originX, int originY)
+{
+	int headCx = originX + 24;
+	int headCy = originY + 46;
+	int headR = 8;
+	int stemX = headCx + headR - 1;
+	int stemTopY = originY + 12;
+	struct ColorMap *cm;
+	LONG obtained;
+	UWORD fgPen = ArtFallbackPen(gui, &cm, &obtained);
+
+	SetAPen(rp, fgPen);
+	ArtIconFillCircle(rp, headCx, headCy, headR);
+
+	Move(rp, stemX, headCy);
+	Draw(rp, stemX, stemTopY);
+
+	Draw(rp, stemX + 12, stemTopY + 8);
+	Draw(rp, stemX, stemTopY + 16);
+	Draw(rp, stemX, stemTopY);
+
+	if (obtained >= 0)
+		ReleasePen(cm, obtained);
+}
+
+/* Upper-cased file extension of a URL's path (ignoring any query string),
+ * e.g. "http://x/icon.jpg?v=2" -> "JPG". The last dot in the final path
+ * segment wins, so ".../Logo.svg.png" is reported as PNG. Mirrors minimp3r.c's
+ * MrUrlExtensionUpper so both frontends report rejected favicon formats
+ * the same way. */
+static void ArtUrlExtensionUpper(const char *url, char *out, int outSize)
+{
+	const char *q, *hash, *end, *segment, *dot, *p;
+	int len, i, j;
+	if (!out || outSize <= 0)
+		return;
+	out[0] = '\0';
+	if (!url || !url[0])
+		return;
+	q = strchr(url, '?');
+	hash = strchr(url, '#');
+	end = url + strlen(url);
+	if (q && q < end)
+		end = q;
+	if (hash && hash < end)
+		end = hash;
+	len = (int)(end - url);
+	segment = url + len;
+	while (segment > url && segment[-1] != '/' && segment[-1] != ':')
+		segment--;
+	dot = (const char *)0;
+	for (p = segment; p < end; p++) {
+		if (*p == '.')
+			dot = p;
+	}
+	if (!dot || dot + 1 >= end)
+		return;
+	dot++;
+	for (i = 0, j = 0; dot + i < url + len && dot[i] && j < outSize - 1; i++) {
+		unsigned char c = (unsigned char)dot[i];
+		if (c >= 'a' && c <= 'z')
+			c = (unsigned char)(c - 'a' + 'A');
+		if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))
+			out[j++] = (char)c;
+		else
+			break;
+	}
+	out[j] = '\0';
+}
+
+/* Radio stream whose favicon was fetched but rejected (unsupported format
+ * or failed decode): show "No art" plus the rejected extension so a
+ * station icon swap is visibly noticed even when nothing renders. Same
+ * convention as minimp3r.c's DrawArtPanel. */
+static void DrawNoArtFormatLabel(struct RastPort *rp, int originX, int originY,
+	const char *favicon)
+{
+	char ext[16];
+	char line1[16];
+	char line2[16];
+	int line1Len, line2Len, line1W, line2W;
+
+	ArtUrlExtensionUpper(favicon, ext, sizeof(ext));
+	SafeCopy(line1, sizeof(line1), "No art");
+	line2[0] = '\0';
+	if (ext[0])
+		sprintf(line2, "(%s)", ext);
+
+	line1Len = (int)strlen(line1);
+	line2Len = (int)strlen(line2);
+	line1W = TextLength(rp, line1, line1Len);
+	line2W = line2Len > 0 ? TextLength(rp, line2, line2Len) : 0;
+
+	SetAPen(rp, 1);
+	if (line2Len > 0) {
+		Move(rp, originX + (ART_W - line1W) / 2, originY + ART_H / 2 - 2);
+		Text(rp, line1, line1Len);
+		Move(rp, originX + (ART_W - line2W) / 2, originY + ART_H / 2 + 9);
+		Text(rp, line2, line2Len);
+	} else {
+		Move(rp, originX + (ART_W - line1W) / 2, originY + ART_H / 2 + 2);
+		Text(rp, line1, line1Len);
+	}
+}
+
+static void DrawArtPanel(HelixAmp3Gui *gui)
+{
+	struct RastPort *rp;
+	int x;
+	int y;
+
+	if (!gui->win)
+		return;
+	rp = gui->win->RPort;
+	DrawBevelBox(rp, ART_FRAME_X, ART_FRAME_Y, ART_FRAME_W, ART_FRAME_H,
+		GT_VisualInfo, (ULONG)gui->visualInfo,
+		GTBB_Recessed, TRUE,
+		TAG_DONE);
+	if (gui->artValid) {
+		if (gui->artColorEnabled && gui->artPensBuilt) {
+			/* True colour path: pen indices pre-computed at load time —
+			 * no ObtainBestPen calls during draw, just fast run-length RectFills. */
+			for (y = 0; y < ART_H; y++) {
+				const unsigned char *idxRow = &gui->artPenIdx[y * ART_W];
+				int runStart = 0;
+				unsigned char runIdx = idxRow[0];
+
+				for (x = 1; x <= ART_W; x++) {
+					unsigned char idx = (x < ART_W) ? idxRow[x] : 0xff;
+					if (idx != runIdx) {
+						long pen = gui->artPenCache[runIdx].pen;
+						if (pen >= 0) {
+							SetAPen(rp, (UWORD)pen);
+							RectFill(rp, ART_X + runStart, ART_Y + y,
+								ART_X + x - 1, ART_Y + y);
+						}
+						runStart = x;
+						runIdx = idx;
+					}
+				}
+			}
+		} else {
+			/* Greyscale path: ordered dithering with 8x8 Bayer matrix and
+			 * three system pens (shadow / background / shine). */
+			int pens[3];
+			{
+				struct DrawInfo *dri =
+					GetScreenDrawInfo(gui->win->WScreen);
+				if (dri) {
+					pens[0] = dri->dri_Pens[SHADOWPEN];
+					pens[1] = dri->dri_Pens[BACKGROUNDPEN];
+					pens[2] = dri->dri_Pens[SHINEPEN];
+					FreeScreenDrawInfo(gui->win->WScreen, dri);
+				} else {
+					pens[0] = 0; pens[1] = 1; pens[2] = 1;
+				}
+			}
+
+			for (y = 0; y < ART_H; y++) {
+				int runStart = 0;
+				int runShade;
+				{
+					int g0 = gui->artGreyBuf[y * ART_W];
+					int dv = (int)kBayer8x8[y & 7][0] - 32;
+					int gd = g0 + dv * 3 / 4;
+					runShade = gd >= 171 ? 2 : (gd >= 85 ? 1 : 0);
+				}
+				for (x = 1; x <= ART_W; x++) {
+					int shade;
+					if (x < ART_W) {
+						int g = gui->artGreyBuf[y * ART_W + x];
+						int dv = (int)kBayer8x8[y & 7][x & 7] - 32;
+						int gd = g + dv * 3 / 4;
+						shade = gd >= 171 ? 2 : (gd >= 85 ? 1 : 0);
+					} else {
+						shade = -1; /* sentinel to flush last run */
+					}
+					if (shade != runShade) {
+						SetAPen(rp, pens[runShade]);
+						RectFill(rp, ART_X + runStart, ART_Y + y,
+							ART_X + x - 1, ART_Y + y);
+						runStart = x;
+						runShade = shade;
+					}
+				}
+			}
+		}
+	} else {
+		SetAPen(rp, 0);
+		RectFill(rp, ART_X, ART_Y, ART_X + ART_W - 1, ART_Y + ART_H - 1);
+		if (gui->artLoading) {
+			SetAPen(rp, 1);
+			Move(rp, ART_X + 10, ART_Y + ART_H / 2);
+			Text(rp, "Loading", 7);
+		} else if (IsRadioInputName(gui->inputName)) {
+			/* Any radio stream with no usable artwork gets the boombox
+			 * placeholder — whether the station advertised no favicon at all
+			 * or one was fetched and failed to load (404, unsupported/broken
+			 * format).  A failed favicon used to show a "No art (JPG)" style
+			 * label; the graphic reads better and still signals "no art".
+			 * (DrawNoArtFormatLabel is kept above if the diagnostic text is
+			 * ever wanted back.) */
+			DrawRadioIcon(gui, rp, ART_X, ART_Y);
+		} else {
+			DrawMusicNoteIcon(gui, rp, ART_X, ART_Y);
+		}
+	}
+}
+
+static void UpdateArtDisplay(HelixAmp3Gui *gui)
+{
+	StartArtDecode(gui);
+}
+
+static void DrawProgressFrame(HelixAmp3Gui *gui)
+{
+	if (!gui->win)
+		return;
+	DrawBevelBox(gui->win->RPort,
+		PROG_X - 4, PROG_TOP_Y - 4,
+		PROG_W + 8, PROG_H + 8,
+		GT_VisualInfo, (ULONG)gui->visualInfo,
+		GTBB_Recessed, TRUE,
+		TAG_DONE);
+}
+
+static void DrawProgress(HelixAmp3Gui *gui)
+{
+	struct RastPort *rp;
+	int fill, empty;
+	char timeBuf[32];
+	int elapsed, total, remaining;
+	int textWidth, textX;
+
+	if (!gui->win)
+		return;
+	rp = gui->win->RPort;
+	elapsed = gui->elapsedSecs - gui->launchBufferSecs;
+	total = gui->totalSecs;
+	if (elapsed < 0)
+		elapsed = 0;
+	if (total > 0 && elapsed > total)
+		elapsed = total;
+	fill = total > 0 ? (elapsed * PROG_W) / total : 0;
+	if (fill < 0)
+		fill = 0;
+	if (fill > PROG_W)
+		fill = PROG_W;
+	empty = PROG_W - fill;
+
+	if (gui->smallFont)
+		SetFont(rp, gui->smallFont);
+	if (fill > 0) {
+		int fillPen = (gui->playbackActive &&
+			gGuiPlaybackStatus.phase == GUIPLAY_PHASE_BUFFERING) ? 2 : 3;
+		SetAPen(rp, fillPen);
+		RectFill(rp, PROG_X, PROG_TOP_Y,
+			PROG_X + fill - 1, PROG_TOP_Y + PROG_H - 1);
+	}
+	if (empty > 0) {
+		SetAPen(rp, gui->win->DetailPen);
+		RectFill(rp, PROG_X + fill, PROG_TOP_Y,
+			PROG_X + PROG_W - 1, PROG_TOP_Y + PROG_H - 1);
+	}
+
+	if (IsRadioInputName(gui->inputName)) {
+		if (elapsed > 0)
+			sprintf(timeBuf, "%02d:%02d / Live", elapsed / 60, elapsed % 60);
+		else
+			sprintf(timeBuf, "Live / Live");
+	} else if (total > 0) {
+		remaining = total - elapsed;
+		if (remaining < 0)
+			remaining = 0;
+		sprintf(timeBuf, "-%02d:%02d / %02d:%02d",
+			remaining / 60, remaining % 60,
+			total / 60, total % 60);
+	} else {
+		sprintf(timeBuf, " 00:00 / %02d:%02d", elapsed / 60, elapsed % 60);
+	}
+
+	SetAPen(rp, gui->win->DetailPen);
+	/* Clear only the time band, not down to the transport row: the old
+	 * height (PROG_TOP_Y + GUI_GADGET_HEIGHT) reached ROW_BUTTONS and wiped
+	 * the top edge of the FLT/Playlist buttons on every clock tick. */
+	RectFill(rp, TIME_X, PROG_TOP_Y - 1,
+		TIME_X + TIME_W, PROG_TOP_Y + PROG_H + 3);
+	SetAPen(rp, 1);
+	textWidth = TextLength(rp, timeBuf, strlen(timeBuf));
+	textX = TIME_X + TIME_W - textWidth;
+	if (textX < TIME_X)
+		textX = TIME_X;
+	Move(rp, textX, PROG_TOP_Y + rp->TxBaseline);
+	Text(rp, timeBuf, strlen(timeBuf));
+}
+
+
+static void DrawProgressIfChanged(HelixAmp3Gui *gui)
+{
+	if (gui->elapsedSecs == gui->lastDrawnElapsedSecs &&
+		gui->totalSecs == gui->lastDrawnTotalSecs)
+		return;
+	DrawProgress(gui);
+	gui->lastDrawnElapsedSecs = gui->elapsedSecs;
+	gui->lastDrawnTotalSecs = gui->totalSecs;
+}
+
+/*
+ * Fast-forward / rewind: hand a target position to the playback child via the
+ * shared gSeek* channel.  Only meaningful for a local track of known length --
+ * live radio and unknown-duration inputs are rejected.  The read-out is nudged
+ * optimistically so the UI responds at once; the next timer tick re-derives the
+ * exact position from the decoder's frame count.
+ */
+static void GuiSeekRelative(HelixAmp3Gui *gui, int deltaSecs)
+{
+	int target;
+	char buf[48];
+
+	if (!gui->playbackActive || gui->playbackDonePending) {
+		SetStatus(gui, "Nothing playing to seek.");
+		return;
+	}
+	if (IsRadioInputName(gui->inputName)) {
+		SetStatus(gui, "Cannot seek a live radio stream.");
+		return;
+	}
+	if (gui->totalSecs <= 0) {
+		SetStatus(gui, "Track length unknown - cannot seek.");
+		return;
+	}
+
+	target = (gui->elapsedSecs - gui->launchBufferSecs) + deltaSecs;
+	if (target < 0)
+		target = 0;
+	if (target > gui->totalSecs)
+		target = gui->totalSecs;
+
+	gSeekTargetSecs = target;
+	gSeekRequest = 1;
+
+	gui->elapsedSecs = target + gui->launchBufferSecs;
+	DrawProgress(gui);
+	gui->lastDrawnElapsedSecs = gui->elapsedSecs;
+	gui->lastDrawnTotalSecs = gui->totalSecs;
+
+	sprintf(buf, "%s to %02d:%02d",
+		deltaSecs < 0 ? "Rewind" : "Fast-forward", target / 60, target % 60);
+	SetStatus(gui, buf);
+}
+
+static void SendTimerRequest(HelixAmp3Gui *gui, ULONG micros)
+{
+	if (!gui->timerReq)
+		return;
+	if (gui->timerPending) {
+		AbortIO((struct IORequest *)gui->timerReq);
+		WaitIO((struct IORequest *)gui->timerReq);
+		gui->timerPending = 0;
+	}
+	gui->timerReq->tr_node.io_Command = TR_ADDREQUEST;
+	gui->timerReq->tr_time.tv_secs = micros / 1000000UL;
+	gui->timerReq->tr_time.tv_micro = micros % 1000000UL;
+	SendIO((struct IORequest *)gui->timerReq);
+	gui->timerPending = 1;
+	gui->timerIsArt = (micros == ART_TIMER_MICROS);
+}
+
+static void ResetCliParser(void);
+static void ResetDecoderStatics(void);
+
+static int PlaybackProcessStillExists(void)
+{
+	struct Task *task;
+
+	/* The child posts its done message just before returning from PlaybackEntry.
+	 * Do not launch another decoder until DOS has actually removed that task. */
+	Forbid();
+	task = FindTask((STRPTR)"MintAMP-GT playback");
+	Permit();
+	return task != NULL;
+}
+
+static int PlaybackCanFinalize(HelixAmp3Gui *gui)
+{
+	/* Deliberately does NOT require gGuiPlaybackStatus.cleanupComplete: that
+	 * flag is set by the playback child itself right before it posts its
+	 * done message and exits, so it is normally already 1 by the time DOS
+	 * has actually removed the task.  But if the child ever dies through a
+	 * path that skips that final bookkeeping (a wedged decoder/network read
+	 * that never returns, an abnormal exit), cleanupComplete would never
+	 * become 1 and this front end would sit in "Stopping..." forever with
+	 * no way back short of quitting the app -- the "stuck stopping" symptom.
+	 * The ReAction front end (minimp3r.c) finalizes on
+	 * "playbackDonePending && !PlaybackProcessStillExists()" alone and is
+	 * the more battle-tested of the two; match it here. Once the task is
+	 * confirmed gone there is nothing left to wait for. */
+	return gui->playbackDonePending &&
+		gDoneRunId == gui->playbackRunId &&
+		gGuiPlaybackStatus.runId == gui->playbackRunId &&
+		!PlaybackProcessStillExists();
+}
+
+
+#if defined(AMIGA_M68K) && defined(MINIAMP3_DEBUG)
+static int GuiAmigaDosInputOpenReadClose(const char *path)
+{
+	BPTR handle;
+	unsigned char bytes[16];
+	LONG nRead;
+
+	if (!path || !path[0])
+		return -1;
+	handle = SafeOpenPath("GuiOpenRead/Open", path, MODE_OLDFILE);
+	if (!handle)
+		return -1;
+	nRead = Read(handle, bytes, sizeof(bytes));
+	Close(handle);
+	return nRead == (LONG)sizeof(bytes) ? 0 : -1;
+}
+
+static void GuiRunAmigaDosInputRegression(HelixAmp3Gui *gui, int afterInterrupted)
+{
+	int child1;
+	int child2;
+	char msg[128];
+
+	child1 = GuiAmigaDosInputOpenReadClose(gui->inputName);
+	child2 = GuiAmigaDosInputOpenReadClose(gui->inputName);
+	sprintf(msg, "DOS input self-test after %s: child1=%s child2=%s",
+		afterInterrupted ? "stop" : "finish",
+		child1 == 0 ? "ok" : "fail", child2 == 0 ? "ok" : "fail");
+	SetStatus(gui, msg);
+}
+#endif
+
+
+static const char *RadioStreamStateName(int phase)
+{
+	switch (phase) {
+	case GUIPLAY_PHASE_IDLE: return "IDLE";
+	case GUIPLAY_PHASE_BUFFERING: return "BUFFERING";
+	case GUIPLAY_PHASE_PLAYING: return "PLAYING";
+	case GUIPLAY_PHASE_UNDERRUN: return "UNDERRUN";
+	case GUIPLAY_PHASE_STOPPING: return "STOPPING";
+	case GUIPLAY_PHASE_DONE: return "DONE";
+	case GUIPLAY_PHASE_ERROR: return "ERROR";
+	default: return "UNKNOWN";
+	}
+}
+
+static void radio_debug_state_summary(HelixAmp3Gui *gui, const char *reason)
+{
+	RADIO_DBG(printf("radio-state: reason=%s active=%d pending=%d stopping=%d stopRequested=%d donePending=%d uiState=%s streamState=%s codec=%s session=%lu\n",
+		reason ? reason : "state",
+		gui ? gui->playbackActive : 0,
+		(gGuiPlayer.process != NULL),
+		(gui && (gui->playbackDonePending || gGuiPlayer.stopRequested)) ? 1 : 0,
+		gGuiPlayer.stopRequested,
+		gui ? gui->playbackDonePending : 0,
+		gui ? gui->statusText : "",
+		RadioStreamStateName(gGuiPlaybackStatus.phase),
+		gGuiPlaybackStatus.radioContentType,
+		gui ? gui->playbackRunId : gGuiPlaybackStatus.runId);)
+}
+
+static void radio_reset_playback_state_after_stop(HelixAmp3Gui *gui, const char *reason)
+{
+	if (gui) {
+		gui->playbackActive = 0;
+		gui->playbackDonePending = 0;
+		gui->playbackStoppedByUser = 0;
+		gui->queuedPlayPending = 0;
+		gui->queuedInputName[0] = '\0';
+		gui->queuedHaveRadioHostAddr = 0;
+		gui->queuedRadioHostAddrBe = 0;
+		gui->playlistNextPending = 0;
+		gui->lastCleanupStage = GUIPLAY_CLEANUP_NONE;
+		gui->lastStartupStage = GUISTART_NONE;
+		gui->startupStageStableTicks = 0;
+		gui->startupStallShown = 0;
+		gui->lastDisplayedPhase = GUIPLAY_PHASE_IDLE;
+		gui->stopWatchdogMicros = 0;
+		gui->stopWatchdogFired = 0;
+	}
+	gGuiPlayer.process = NULL;
+	gGuiPlayer.stopRequested = 0;
+	gPlaybackInterrupted = 0;
+	gDonePort = NULL;
+	gDoneRunId = 0;
+	gGuiPlaybackStatus.phase = GUIPLAY_PHASE_IDLE;
+	gGuiPlaybackStatus.radioStatus = RADIO_STATUS_CLOSED;
+	gGuiPlaybackStatus.radioActive = 0;
+	gGuiPlaybackStatus.radioBufferedBytes = 0;
+	gGuiPlaybackStatus.radioContentType[0] = '\0';
+	gGuiPlaybackStatus.cleanupStage = GUIPLAY_CLEANUP_COMPLETE;
+	gGuiPlaybackStatus.cleanupComplete = 1;
+	radio_debug_state_summary(gui, reason);
+}
+
+static int radio_validate_ready_to_play(HelixAmp3Gui *gui)
+{
+	if (PlaybackProcessStillExists()) {
+		RADIO_DBG(printf("Cannot start: previous stream still stopping\n");)
+		return 0;
+	}
+	if (gGuiPlayer.process) {
+		RADIO_DBG(printf("Cannot start: stale active session\n");)
+		return 0;
+	}
+	if (gGuiPlayer.stopRequested) {
+		RADIO_DBG(printf("Cannot start: previous stream still stopping\n");)
+		return 0;
+	}
+	if (gui && gui->playbackDonePending) {
+		RADIO_DBG(printf("Cannot start: donePending still set\n");)
+		return 0;
+	}
+	if (gui && gui->playbackActive) {
+		RADIO_DBG(printf("Cannot start: stale active session\n");)
+		return 0;
+	}
+	if (gGuiPlaybackStatus.phase != GUIPLAY_PHASE_IDLE &&
+		gGuiPlaybackStatus.phase != GUIPLAY_PHASE_DONE &&
+		gGuiPlaybackStatus.phase != GUIPLAY_PHASE_ERROR) {
+		RADIO_DBG(printf("Cannot start: previous stream still stopping\n");)
+		return 0;
+	}
+	return 1;
+}
+
+static void FinalizePlayback(HelixAmp3Gui *gui)
+{
+	int stoppedByUser = gui->playbackStoppedByUser;
+	int nextPending = gui->playlistNextPending;
+	int queuedPlayPending = gui->queuedPlayPending;
+	char queuedInputName[HELIXAMP3_MAX_PATH];
+	int queuedHaveRadioHostAddr = gui->queuedHaveRadioHostAddr;
+	unsigned long queuedRadioHostAddrBe = gui->queuedRadioHostAddrBe;
+	int failedRadioStart;
+
+	/* Stream completion runs on the GUI/main task (the playback child has
+	 * already posted its done message and is being reaped).  Log the task so
+	 * any parent-side RadioStream/art/tag free here is attributed to the same
+	 * task as the recoverable close alerts. */
+	GUI_TASK_IDENTITY("stream-completion-handling");
+
+	failedRadioStart = (!stoppedByUser && IsRadioInputName(gui->inputName) &&
+		gGuiPlaybackStatus.radioStatus == RADIO_STATUS_ERROR &&
+		gGuiPlaybackStatus.decodedFrames == 0);
+	SafeCopy(queuedInputName, sizeof(queuedInputName), gui->queuedInputName);
+	gui->playbackDonePending = 0;
+	gui->playbackStoppedByUser = 0;
+	gui->playbackActive = 0;
+	gui->playlistNextPending = 0;
+	gui->queuedPlayPending = 0;
+	radio_reset_playback_state_after_stop(gui, stoppedByUser ? "stop-cleanup" : "playback-cleanup");
+	if (gui->totalSecs > 0 && !stoppedByUser)
+		gui->elapsedSecs = gui->totalSecs + gui->launchBufferSecs;
+	DrawProgress(gui);
+	ResetCliParser();
+	/* Decoder statics are reset by the next playback child immediately before
+	 * entering the decoder.  Do not reset them again from the GUI task after
+	 * teardown; keeping all decoder-global mutation in the child avoids a
+	 * second-play race on shared process address space. */
+	gGuiPlayer.stopRequested = 0;
+	gPlaybackInterrupted = 0;
+	if (gui->artCacheSavePending) {
+		gui->artCacheSavePending = 0;
+		SaveArtworkCache(gui);
+	}
+	if (gui->artRestartPending) {
+		gui->artRestartPending = 0;
+		StartArtDecode(gui);
+	}
+	gui->lastCleanupStage = GUIPLAY_CLEANUP_NONE;
+	gui->lastDisplayedPhase = GUIPLAY_PHASE_IDLE;
+#if defined(AMIGA_M68K) && defined(MINIAMP3_DEBUG)
+	GuiRunAmigaDosInputRegression(gui, stoppedByUser);
+#else
+	if (failedRadioStart) {
+		SetRadioFailureStatus(gui, "radio stream failed");
+	} else {
+		SetStatus(gui, stoppedByUser ? "Stopped - ready." : "Playback finished - ready.");
+	}
+#endif
+	if (gui->closeRequested) {
+		gui->queuedInputName[0] = '\0';
+		gui->haveRadioHostAddr = 0;
+		gui->radioHostAddrBe = 0;
+	} else if (!strcmp(queuedInputName, "radio-selection")) {
+		RadioSetStatus(gui, "Starting queued stream...");
+		RadioDoProbeAndPlay(gui);
+	} else if (queuedInputName[0]) {
+		CancelArtDecode(gui);
+		SafeCopy(gui->inputName, sizeof(gui->inputName), queuedInputName);
+		gui->haveRadioHostAddr = queuedHaveRadioHostAddr;
+		gui->radioHostAddrBe = queuedRadioHostAddrBe;
+		SetFileDisplay(gui, gui->inputName);
+		ReadMp3Tags(gui->inputName, &gui->tags, gui->artEnabled);
+		if (is_url_path(gui->inputName))
+			SetInternetStreamMetadata(gui);
+		else
+			gui->totalSecs = gui->tags.durationSecs;
+		gui->elapsedSecs = 0;
+		gui->launchBufferSecs = 0;
+		UpdateTagDisplay(gui);
+		UpdateArtDisplay(gui);
+		DrawProgress(gui);
+		if (gui->artDecode.active)
+			SendTimerRequest(gui, ART_TIMER_MICROS);
+		if (queuedPlayPending) {
+#if defined(AMIGA_M68K)
+			RADIO_DBG(printf("radio-done: Delay before queued stream start after parent done received\n");)
+			Delay(3);
+#endif
+			StartPlayback(gui);
+		}
+		else if (!gui->artDecode.active)
+			SetStatus(gui, "Next file ready.");
+	} else if ((!stoppedByUser || nextPending) &&
+		gui->playlist.current >= 0 &&
+		gui->playlist.current + 1 < gui->playlist.count) {
+		/* Auto-advance to next playlist item (or forced via Next button) */
+		gui->playlist.current++;
+		gui->playlist.selected = gui->playlist.current;
+		RefreshPlaylistView(gui);
+		CancelArtDecode(gui);
+		SafeCopy(gui->inputName, sizeof(gui->inputName),
+			gui->playlist.paths[gui->playlist.current]);
+		SetFileDisplay(gui, gui->inputName);
+		ReadMp3Tags(gui->inputName, &gui->tags, gui->artEnabled);
+		if (is_url_path(gui->inputName))
+			SetInternetStreamMetadata(gui);
+		else
+			gui->totalSecs = gui->tags.durationSecs;
+		gui->elapsedSecs = 0;
+		gui->launchBufferSecs = 0;
+		UpdateTagDisplay(gui);
+		UpdateArtDisplay(gui);
+		DrawProgress(gui);
+		if (gui->artDecode.active)
+			SendTimerRequest(gui, ART_TIMER_MICROS);
+		StartPlayback(gui);
+	} else {
+		/* On a natural end-of-playlist, clear the position so subsequent
+		 * Next presses don't claim there is an active track.  On a manual
+		 * stop, keep the position so the Next button can advance from
+		 * where the user left off. */
+		if (!stoppedByUser)
+			gui->playlist.current = -1;
+	}
+}
+
+static void SignalPlaybackChildCtrlC(void)
+{
+	struct Task *child;
+	Forbid();
+	child = FindTask((STRPTR)"MintAMP-GT playback");
+	if (child)
+		Signal(child, SIGBREAKF_CTRL_C);
+	Permit();
+}
+
+static void HandleTimerSignal(HelixAmp3Gui *gui)
+{
+	int expiredWasArt;
+
+	if (!gui->timerReq)
+		return;
+	expiredWasArt = gui->timerIsArt;
+	while (GetMsg(gui->timerPort))
+		;
+	gui->timerPending = 0;
+	gui->timerIsArt = 0;
+
+	if (gui->playbackActive && !gui->playbackDonePending && gGuiPlayer.stopRequested) {
+		gPlaybackInterrupted = 1;
+		SignalPlaybackChildCtrlC();
+	}
+
+	/* Poll the done port on every tick while playback is active so that a
+	 * fast-exiting child whose signal wake was already consumed by a previous
+	 * Wait() return does not leave the GUI permanently locked. */
+	if (gui->playbackActive && gui->donePort) {
+		struct Message *msg;
+		int gotDone = 0;
+		while ((msg = GetMsg(gui->donePort)) != NULL)
+			gotDone = 1;
+		if (gotDone && !gui->playbackDonePending) {
+			gui->playbackDonePending = 1;
+			gui->playbackStoppedByUser = gGuiPlayer.stopRequested ? 1 : 0;
+			if (gui->playbackStoppedByUser)
+				SetStatus(gui, "Stopping...");
+			else if (IsRadioInputName(gui->inputName) &&
+				gGuiPlaybackStatus.radioStatus == RADIO_STATUS_ERROR)
+				SetRadioFailureStatus(gui, "radio error");
+			else
+				SetStatus(gui, "Playback finished - ready.");
+		}
+	}
+	if (gui->playbackDonePending && PlaybackCanFinalize(gui))
+		FinalizePlayback(gui);
+
+	/* Recovery: if the playback process has exited but no done message was
+	 * ever delivered to the GUI (e.g., the child read gDonePort as NULL in a
+	 * race, or died before reaching its own cleanup-complete bookkeeping),
+	 * force-finalize so the player does not stay stuck in the Stopping state
+	 * indefinitely.  Deliberately does not require cleanupComplete -- see
+	 * the comment on PlaybackCanFinalize(). */
+	if (gui->playbackActive && !gui->playbackDonePending &&
+		gGuiPlaybackStatus.runId == gui->playbackRunId &&
+		!PlaybackProcessStillExists()) {
+		gui->playbackDonePending = 1;
+		gui->playbackStoppedByUser = gGuiPlayer.stopRequested ? 1 : 0;
+		FinalizePlayback(gui);
+	}
+
+	/* Last-resort watchdog: Stop has been outstanding for a long time and the
+	 * child still has not been confirmed gone -- most likely wedged inside a
+	 * blocking bsdsocket/AmiSSL call that never observes SIGBREAKF_CTRL_C.
+	 * There is no safe way to force-kill an AmigaOS task stuck inside a
+	 * library call, and starting a new playback child while this one might
+	 * still be alive would let two children race on the same shared decoder/
+	 * IPC globals -- exactly the class of corruption this codebase already
+	 * has scar tissue from. So this does not try to recover playback; it
+	 * only replaces the indefinite silent "Stopping..." with an honest,
+	 * one-shot status so the user knows a restart is needed instead of
+	 * wondering whether the app is about to come back on its own. */
+	if (gui->playbackActive && !gui->playbackDonePending && gGuiPlayer.stopRequested) {
+		gui->stopWatchdogMicros += expiredWasArt ? ART_TIMER_MICROS : TIMER_TICK_MICROS;
+		if (!gui->stopWatchdogFired && gui->stopWatchdogMicros >= STOP_WATCHDOG_TIMEOUT_MICROS) {
+			gui->stopWatchdogFired = 1;
+			RADIO_DBG(printf("radio-stop: watchdog timeout after %luus, stream not responding to Stop\n", gui->stopWatchdogMicros);)
+			SetStatus(gui, "Stream isn't responding to Stop - restart the app to recover.");
+		}
+	} else {
+		gui->stopWatchdogMicros = 0;
+		gui->stopWatchdogFired = 0;
+	}
+
+	if (gui->playbackActive && !gui->playbackDonePending && !expiredWasArt) {
+		int phase = gGuiPlaybackStatus.phase;
+		unsigned long frames = gGuiPlaybackStatus.decodedFrames;
+		int rate = gGuiPlaybackStatus.sampleRate;
+		unsigned long underruns = gGuiPlaybackStatus.underruns;
+		long spareMs = gGuiPlaybackStatus.spareMs;
+		unsigned long halfBufferMs = gGuiPlaybackStatus.halfBufferMs;
+		unsigned long fastInputBytes = gGuiPlaybackStatus.fastInputBytes;
+		int phaseChanged = (phase != gui->lastDisplayedPhase);
+		int isRadioInput = IsRadioInputName(gui->inputName);
+
+		if (!gGuiFirstUiProgressLogged && frames > 0) {
+			gGuiFirstUiProgressLogged = 1;
+			RADIO_DBG(printf("radio-ui: first GadTools UI progress/status update phase=%d frames=%lu rate=%d status=\"%s\"\n",
+				phase, frames, rate, gui->statusText);)
+		}
+
+		if (isRadioInput) {
+			if (gGuiPlaybackStatus.radioStatus == RADIO_STATUS_ERROR) {
+				SetRadioFailureStatus(gui, "radio error");
+			} else if (gGuiPlaybackStatus.radioActive &&
+				gGuiPlaybackStatus.radioStatus != RADIO_STATUS_STOPPING &&
+				gGuiPlaybackStatus.radioStatus != RADIO_STATUS_CLOSED &&
+				(phaseChanged || gGuiPlaybackStatus.radioStatus == RADIO_STATUS_PLAYING))
+				UpdateRadioTagDisplay(gui);
+		}
+
+		if (phaseChanged)
+			gui->lastDisplayedPhase = phase;
+
+		/* Once the decoder reports a valid rate, fill in the Hz field that
+		 * ReadMpegInfo leaves as 0 for non-MP3 formats (e.g. FLAC). */
+		if (rate > 0 && gui->tags.sampleRate == 0) {
+			gui->tags.sampleRate = rate;
+			FormatFileInfo(gui);
+			if (gui->gadFileInfo)
+				GT_SetGadgetAttrs(gui->gadFileInfo, gui->win, NULL,
+					GTTX_Text, (ULONG)gui->fileInfoText,
+					TAG_DONE);
+		}
+
+		/* Derive audio position from decoded frames rather than wall-clock ticks.
+		 * Each MP3 frame = 1152 samples.  Subtract the selected half-buffer
+		 * duration for pipeline lag, falling back to the requested slider value
+		 * until the playback subprocess publishes the actual duration. */
+		if (frames > 0 && rate > 0) {
+			long audioSecs = (long)((frames * 1152UL) / (unsigned long)rate);
+			audioSecs -= halfBufferMs ?
+				(long)((halfBufferMs + 999UL) / 1000UL) : gui->bufferSeconds;
+			if (audioSecs < 0)
+				audioSecs = 0;
+			if (gui->totalSecs > 0 && audioSecs > gui->totalSecs)
+				audioSecs = gui->totalSecs;
+			gui->elapsedSecs = (int)audioSecs + gui->launchBufferSecs;
+		} else {
+			gui->elapsedSecs++;
+		}
+
+		switch (phase) {
+		case GUIPLAY_PHASE_BUFFERING: {
+			int stage = gGuiPlaybackStatus.startupStage;
+			int stageChanged = (stage != gui->lastStartupStage);
+			if (isRadioInput)
+				break;
+			if (stageChanged) {
+				gui->lastStartupStage = stage;
+				gui->startupStageStableTicks = 0;
+				gui->startupStallShown = 0;
+			} else if (stage != GUISTART_PLAYING) {
+				gui->startupStageStableTicks++;
+			}
+#ifdef MINIAMP3_DEBUG
+			{
+				char buf[128];
+				if (gui->startupStageStableTicks >= 5 && !gui->startupStallShown) {
+					sprintf(buf, "Startup stalled at: %s r%d/%d run%lu st%d",
+						GuiStartupStageName(stage), gGuiPlaybackStatus.requestedRate,
+						gGuiPlaybackStatus.effectiveRate, gGuiPlaybackStatus.runId, stage);
+					gui->startupStallShown = 1;
+				} else if (stage > GUISTART_NONE) {
+					sprintf(buf, "Starting: %s r%d/%d run%lu st%d",
+						GuiStartupStageName(stage), gGuiPlaybackStatus.requestedRate,
+						gGuiPlaybackStatus.effectiveRate, gGuiPlaybackStatus.runId, stage);
+				} else if (halfBufferMs)
+					sprintf(buf, "Buffering... (%lums half-buffer)", halfBufferMs);
+				else
+					sprintf(buf, "Buffering... (%ds requested)", gui->bufferSeconds);
+				SetStatus(gui, buf);
+			}
+#else
+			if (gui->startupStageStableTicks >= 5 && !gui->startupStallShown) {
+				SetStatus(gui, "Playback startup is taking longer than expected.");
+				gui->startupStallShown = 1;
+			} else if (phaseChanged || stageChanged) {
+				if (stage == GUISTART_INPUT_PRELOAD_FASTMEM)
+					SetStatus(gui, "Copying file to Fast RAM...");
+				else if (stage >= GUISTART_AUDIO_SETUP)
+					SetStatus(gui, "Buffering...");
+				else
+					SetStatus(gui, "Starting playback...");
+			}
+#endif
+			break;
+		}
+		case GUIPLAY_PHASE_UNDERRUN:
+			if (isRadioInput)
+				break;
+			if (underruns != gui->lastUnderrunCount) {
+				char buf[64];
+				gui->lastUnderrunCount = underruns;
+				sprintf(buf, "Playing - underruns: %lu", underruns);
+				SetStatus(gui, buf);
+			}
+			break;
+		case GUIPLAY_PHASE_ERROR:
+			if (phaseChanged)
+				SetStatus(gui, "Decoder error - playback stopped.");
+			break;
+		case GUIPLAY_PHASE_STOPPING:
+			if (gGuiPlaybackStatus.cleanupStage != gui->lastCleanupStage) {
+				gui->lastCleanupStage = gGuiPlaybackStatus.cleanupStage;
+#ifdef MINIAMP3_DEBUG
+				switch (gui->lastCleanupStage) {
+				case GUIPLAY_CLEANUP_ABORT_REAP: SetStatus(gui, "Stopping: aborting/reaping audio IO..."); break;
+				case GUIPLAY_CLEANUP_DEVICE_CLOSED: SetStatus(gui, "Stopping: audio.device closed..."); break;
+				case GUIPLAY_CLEANUP_BUFFERS_FREED: SetStatus(gui, "Stopping: buffers freed..."); break;
+				case GUIPLAY_CLEANUP_COMPLETE: SetStatus(gui, "Stopping: cleanup complete..."); break;
+				default: SetStatus(gui, "Stopping: cleanup started..."); break;
+				}
+#else
+				SetStatus(gui, "Stopping...");
+#endif
+			}
+			break;
+		case GUIPLAY_PHASE_PLAYING: {
+			if (gui->artRestartPending) {
+				gui->artRestartPending = 0;
+				StartArtDecode(gui);
+			}
+#ifdef MINIAMP3_DEBUG
+			long delta = spareMs - gui->lastDisplayedSpareMs;
+			if (delta < 0)
+				delta = -delta;
+			if (delta > 50 || gui->lastUnderrunCount != underruns) {
+				char buf[64];
+				gui->lastDisplayedSpareMs = spareMs;
+				if (gui->lastUnderrunCount > 0)
+					sprintf(buf, "Playing (%lu underruns, %ldms spare)",
+						underruns, spareMs);
+				else
+					sprintf(buf, "Playing (%ldms spare)", spareMs);
+				SetStatus(gui, buf);
+			}
+#else
+			if (phaseChanged) {
+				gui->lastDisplayedSpareMs = spareMs;
+				gui->lastUnderrunCount = underruns;
+				if (IsRadioInputName(gui->inputName)) {
+					char station[128], status[160];
+					CopyVolatileGuiString(station, sizeof(station), gGuiPlaybackStatus.radioStationName);
+					FormatRadioStreamingStatus(gui, station, status, sizeof(status));
+					SetStatus(gui, status);
+				} else {
+					char status[128];
+					if (fastInputBytes)
+						sprintf(status, "Playing - Fast RAM: %luK, buffer: %lu.%03lu sec",
+							(fastInputBytes + 1023UL) / 1024UL,
+							halfBufferMs / 1000UL, halfBufferMs % 1000UL);
+					else
+						sprintf(status, "Playing - buffer: %lu.%03lu sec",
+							halfBufferMs / 1000UL, halfBufferMs % 1000UL);
+					SetStatus(gui, status);
+				}
+			}
+#endif
+			break;
+		}
+		default:
+			break;
+		}
+
+		if (gui->progressEnabled)
+			DrawProgressIfChanged(gui);
+	}
+	{
+		int artCanPump = !gui->playbackActive ||
+			gGuiPlaybackStatus.phase == GUIPLAY_PHASE_PLAYING ||
+			gGuiPlaybackStatus.phase == GUIPLAY_PHASE_UNDERRUN;
+
+		if (artCanPump)
+			PumpArtDecode(gui);
+		SendTimerRequest(gui, gui->artDecode.active && artCanPump ?
+			ART_TIMER_MICROS : TIMER_TICK_MICROS);
+	}
+}
+
+static void HandleDoneSignal(HelixAmp3Gui *gui)
+{
+	struct Message *msg;
+	int gotDone;
+
+	if (!gui->donePort)
+		return;
+
+	gotDone = 0;
+	while ((msg = GetMsg(gui->donePort)) != NULL)
+		gotDone = 1;
+	if (!gotDone) {
+		/* No message on the port — but if playbackDonePending is already set
+		 * (polled ahead by HandleTimerSignal), still check if we can finalize. */
+		if (gui->playbackDonePending && PlaybackCanFinalize(gui))
+			FinalizePlayback(gui);
+		return;
+	}
+
+	/* HelixAmp3CliMain() has returned, but the child has not necessarily
+	 * finished its DOS/runtime teardown yet.  Keep Play locked until the
+	 * playback task itself has disappeared. */
+	if (gDoneRunId != gui->playbackRunId) {
+		SetStatus(gui, "Ignoring stale playback completion.");
+		return;
+	}
+
+	if (!gui->playbackDonePending) {
+		gui->playbackStoppedByUser = gGuiPlayer.stopRequested ? 1 : 0;
+		gui->playbackDonePending = 1;
+		if (gui->playbackStoppedByUser)
+			SetStatus(gui, "Stopping...");
+		else if (IsRadioInputName(gui->inputName) &&
+			gGuiPlaybackStatus.radioStatus == RADIO_STATUS_ERROR)
+			SetRadioFailureStatus(gui, "radio error");
+		else
+			SetStatus(gui, "Playback finished - ready.");
+	}
+
+	if (PlaybackCanFinalize(gui))
+		FinalizePlayback(gui);
+}
+
+static void GuiRefresh(HelixAmp3Gui *gui)
+{
+	if (!gui->win)
+		return;
+	GT_BeginRefresh(gui->win);
+	GT_EndRefresh(gui->win, TRUE);
+	DrawProgressFrame(gui);
+	DrawProgress(gui);
+	DrawArtPanel(gui);
+}
+
+static void SetMenuItemChecked(HelixAmp3Gui *gui, int menuNum, int itemNum,
+	int checked);
+
+static void SetDecodeThenPlay(HelixAmp3Gui *gui, int enabled)
+{
+	gui->decodeThenPlay = enabled ? 1 : 0;
+	if (gui->win && gui->gadBuffer) {
+		GT_SetGadgetAttrs(gui->gadBuffer, gui->win, NULL,
+			GA_Disabled, gui->decodeThenPlay,
+			TAG_DONE);
+	}
+	SetStatus(gui, gui->decodeThenPlay ?
+		"Decode-then-play enabled; Buffer slider disabled." :
+		"Streaming playback mode enabled.");
+	SaveGuiSettings(gui);
+}
+
+static void SetArtworkEnabled(HelixAmp3Gui *gui, int enabled)
+{
+	gui->artEnabled = enabled ? 1 : 0;
+	SetMenuItemChecked(gui, MENUNUM_PLAYBACK, ITEMNUM_ARTWORK,
+		gui->artEnabled);
+	CancelArtDecode(gui);
+	if (gui->artEnabled && gui->inputName[0] && !gui->tags.artData) {
+		if (is_url_path(gui->inputName))
+			SetInternetStreamMetadata(gui);
+		else {
+			ReadMp3Tags(gui->inputName, &gui->tags, 1);
+			gui->totalSecs = gui->tags.durationSecs;
+		}
+		UpdateTagDisplay(gui);
+	}
+	UpdateArtDisplay(gui);
+	SetStatus(gui, gui->artEnabled ? "Artwork enabled." : "Artwork disabled.");
+	SaveGuiSettings(gui);
+}
+
+static void ShowAbout(HelixAmp3Gui *gui)
+{
+	struct EasyStruct es;
+
+	es.es_StructSize = sizeof(es);
+	es.es_Flags = 0;
+	es.es_Title = (UBYTE *)"About MintAMP-GT";
+	es.es_TextFormat = (UBYTE *)"MintAMP-GT\nMini Internet Amiga Media Player\nGadTools Edition\nMade by boingball\n(C)2026 - v" MINTAMP_GT_VERSION "\nTo support this application visit:\nhttps://buymeacoffee.com/boingball\n-----\nMade with decoders from\nHelix MP3 / AAC\nby Real Networks\nlibfoxenflac\nby astoeckel\n\nESP8266Audio\nby earlephilhower\n-----\nAI Used\nClaude and Codex\nLate Nights\nMany";
+	es.es_GadgetFormat = (UBYTE *)"OK";
+	EasyRequest(gui->win, &es, NULL, TAG_DONE);
+}
+
+static struct Gadget *MakeGadgetWithTextAttr(HelixAmp3Gui *gui, struct Gadget *prev,
+	ULONG kind, UWORD id, WORD left, WORD top, WORD width, WORD height,
+	struct TextAttr *textAttr,
+	const char *label, ULONG tag1, ULONG value1, ULONG tag2, ULONG value2,
+	ULONG tag3, ULONG value3, ULONG tag4, ULONG value4)
+{
+	struct NewGadget ng;
+
+	memset(&ng, 0, sizeof(ng));
+	ng.ng_LeftEdge = left;
+	ng.ng_TopEdge = top;
+	ng.ng_Width = width;
+	ng.ng_Height = height;
+	ng.ng_GadgetText = (UBYTE *)label;
+	ng.ng_GadgetID = id;
+	ng.ng_TextAttr = textAttr ? textAttr : &gTopaz8Attr;
+	if (kind == BUTTON_KIND)
+		ng.ng_Flags = PLACETEXT_IN;
+	else if (kind == CHECKBOX_KIND)
+		ng.ng_Flags = PLACETEXT_RIGHT;
+	else
+		ng.ng_Flags = PLACETEXT_LEFT;
+	ng.ng_VisualInfo = gui->visualInfo;
+	if (kind == SLIDER_KIND)
+		return CreateGadget(kind, prev, &ng,
+			GA_Immediate, TRUE,
+			GA_RelVerify, TRUE,
+			tag1, value1,
+			tag2, value2,
+			tag3, value3,
+			tag4, value4,
+			TAG_DONE);
+
+	return CreateGadget(kind, prev, &ng,
+		tag1, value1,
+		tag2, value2,
+		tag3, value3,
+		tag4, value4,
+		TAG_DONE);
+}
+
+static struct Gadget *MakeGadget(HelixAmp3Gui *gui, struct Gadget *prev,
+	ULONG kind, UWORD id, WORD left, WORD top, WORD width, WORD height,
+	const char *label, ULONG tag1, ULONG value1, ULONG tag2, ULONG value2,
+	ULONG tag3, ULONG value3, ULONG tag4, ULONG value4)
+{
+	return MakeGadgetWithTextAttr(gui, prev, kind, id, left, top, width, height,
+		NULL, label, tag1, value1, tag2, value2, tag3, value3, tag4, value4);
+}
+
+static struct Gadget *MakeSliderGadget(HelixAmp3Gui *gui, struct Gadget *prev,
+	UWORD id, WORD left, WORD top, WORD width, const char *label,
+	LONG minValue, LONG maxValue, LONG level, const char *format,
+	LONG maxLevelLen, LONG visible)
+{
+	struct NewGadget ng;
+
+	memset(&ng, 0, sizeof(ng));
+	ng.ng_LeftEdge = left;
+	ng.ng_TopEdge = top;
+	ng.ng_Width = width;
+	ng.ng_Height = GUI_GADGET_HEIGHT;
+	ng.ng_GadgetText = (UBYTE *)label;
+	ng.ng_GadgetID = id;
+	ng.ng_TextAttr = &gTopaz8Attr;
+	ng.ng_Flags = PLACETEXT_LEFT;
+	ng.ng_VisualInfo = gui->visualInfo;
+	return CreateGadget(SLIDER_KIND, prev, &ng,
+		GA_Immediate, TRUE,
+		GA_RelVerify, TRUE,
+		GTSL_Min, minValue,
+		GTSL_Max, maxValue,
+		GTSL_Level, level,
+		GTSL_LevelFormat, (ULONG)format,
+		GTSL_LevelPlace, PLACETEXT_RIGHT,
+		GTSL_MaxLevelLen, maxLevelLen,
+		PGA_Visible, visible,
+		TAG_DONE);
+}
+
+static void UpdateChannelGadgetState(HelixAmp3Gui *gui)
+{
+	if (!gui->win)
+		return;
+	/* 22050 Mono Ultrafast is mono-only.  Fake stereo is now a normal choice
+	 * in this cycle, so it must not lock its own selector. */
+	if (gui->gadChannelMode)
+		GT_SetGadgetAttrs(gui->gadChannelMode, gui->win, NULL,
+			GA_Disabled, gui->cd32Ultrafast, TAG_DONE);
+	if (gui->gadFakeStereoWidth)
+		GT_SetGadgetAttrs(gui->gadFakeStereoWidth, gui->win, NULL,
+			GA_Disabled, !gui->fakeStereo, TAG_DONE);
+	if (gui->gadFakeStereoDelay)
+		GT_SetGadgetAttrs(gui->gadFakeStereoDelay, gui->win, NULL,
+			GA_Disabled, !gui->fakeStereo, TAG_DONE);
+}
+
+static int GuiCreateGadgets(HelixAmp3Gui *gui)
+{
+	struct Gadget *gad;
+
+	gui->gadContext = CreateContext(&gui->gadgets);
+	if (!gui->gadContext)
+		return -1;
+	gad = gui->gadContext;
+
+	gui->gadFile = gad = MakeGadget(gui, gad, TEXT_KIND, GID_FILE,
+		META_X, ROW_FILE, FILE_W, GUI_GADGET_HEIGHT, "File:",
+		GTTX_Text, (ULONG)gui->fileText,
+		GTTX_Border, TRUE,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gad = MakeGadget(gui, gad, BUTTON_KIND, GID_BROWSE,
+		BROWSE_X, ROW_FILE - 1, BROWSE_W, GUI_GADGET_HEIGHT, "Browse",
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gui->gadTitle = gad = MakeGadget(gui, gad, TEXT_KIND, GID_TITLE,
+		META_X, ROW_TITLE, META_W, GUI_GADGET_HEIGHT, "Title:",
+		GTTX_Text, (ULONG)"-",
+		GTTX_Border, TRUE,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gui->gadArtist = gad = MakeGadget(gui, gad, TEXT_KIND, GID_ARTIST,
+		META_X, ROW_ARTIST, META_W, GUI_GADGET_HEIGHT, "Artist:",
+		GTTX_Text, (ULONG)"-",
+		GTTX_Border, TRUE,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gui->gadAlbum = gad = MakeGadget(gui, gad, TEXT_KIND, GID_ALBUM,
+		META_X, ROW_ALBUM, META_W, GUI_GADGET_HEIGHT, "Album:",
+		GTTX_Text, (ULONG)"-",
+		GTTX_Border, TRUE,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gad = MakeGadget(gui, gad, TEXT_KIND, GID_RATING_LABEL,
+		GUI_FIELD_X, ROW_RATING, 1, GUI_GADGET_HEIGHT, "Rating:",
+		GTTX_Text, (ULONG)"",
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gui->gadStars[0] = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_STAR1,
+		GUI_FIELD_X, ROW_RATING - 1, 22, GUI_GADGET_HEIGHT, "-",
+		TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0);
+	if (!gad) return -1;
+	gui->gadStars[1] = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_STAR2,
+		(GUI_FIELD_X + 26), ROW_RATING - 1, 22, GUI_GADGET_HEIGHT, "-",
+		TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0);
+	if (!gad) return -1;
+	gui->gadStars[2] = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_STAR3,
+		(GUI_FIELD_X + 52), ROW_RATING - 1, 22, GUI_GADGET_HEIGHT, "-",
+		TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0);
+	if (!gad) return -1;
+	gui->gadStars[3] = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_STAR4,
+		(GUI_FIELD_X + 78), ROW_RATING - 1, 22, GUI_GADGET_HEIGHT, "-",
+		TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0);
+	if (!gad) return -1;
+	gui->gadStars[4] = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_STAR5,
+		(GUI_FIELD_X + 104), ROW_RATING - 1, 22, GUI_GADGET_HEIGHT, "-",
+		TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0);
+	if (!gad) return -1;
+	gui->gadRatingValue = gad = MakeGadget(gui, gad, TEXT_KIND, GID_RATING_VALUE,
+		(GUI_FIELD_X + 132), ROW_RATING, 80, 16, "",
+		GTTX_Text, (ULONG)gui->ratingText,
+		TAG_IGNORE, 0, TAG_IGNORE, 0, TAG_IGNORE, 0);
+	if (!gad) return -1;
+	gui->gadTrack = gad = MakeGadget(gui, gad, TEXT_KIND, GID_TRACK,
+		META_X, ROW_TRACK, META_W, GUI_GADGET_HEIGHT, "Track:",
+		GTTX_Text, (ULONG)"-",
+		GTTX_Border, TRUE,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gui->gadGenre = gad = MakeGadget(gui, gad, TEXT_KIND, GID_GENRE,
+		META_X, ROW_GENRE, META_W, GUI_GADGET_HEIGHT, "Genre:",
+		GTTX_Text, (ULONG)"-",
+		GTTX_Border, TRUE,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gad = MakeGadget(gui, gad, TEXT_KIND, GID_COUNT,
+		GUI_MARGIN, ROW_SPEED, GUI_LABEL_WIDTH, GUI_GADGET_HEIGHT, "",
+		GTTX_Text, (ULONG)"",
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gui->gadSpeedMode = gad = MakeGadget(gui, gad, CYCLE_KIND, GID_SPEED_MODE,
+		SPEED_X, ROW_SPEED, SPEED_W, GUI_GADGET_HEIGHT, "Speed:",
+		GTCY_Labels, (ULONG)kSpeedModeLabels,
+		GTCY_Active, SpeedModeIndex(gui),
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gui->gadFastMem = gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_FAST_MEM,
+		FASTMEM_X, ROW_SPEED + 1, CHECK_W, CHECK_H, "Fast-mem decoding",
+		GTCB_Checked, gui->fastMem,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	/* The decoder optimisation stack is now driven entirely by the Quality
+	 * cycle (see ApplyQualityOptions() in amiga_mp3dec.c): "Faster" enables the
+	 * ASM polyphase, ASM Huffman, reduced-tap dewindowing and quarter-rate
+	 * FDCT32 paths, with fewer of them at each higher-quality step.  The old
+	 * "Poly ASM" and "Reduced taps" checkboxes duplicated that (and were
+	 * silently overridden at "Faster"), so they have been removed. */
+
+	gui->gadChannelMode = gad = MakeGadget(gui, gad, CYCLE_KIND, GID_CHANNEL_MODE,
+		STEREO_X, ROW_PLAYBACK, CHANNEL_MODE_W, GUI_GADGET_HEIGHT, "Output:",
+		GTCY_Labels, (ULONG)kChannelModeLabels,
+		GTCY_Active, ChannelModeIndex(gui),
+		GA_Disabled, gui->cd32Ultrafast,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gui->gadFakeStereoWidth = gad = MakeGadget(gui, gad,
+		CYCLE_KIND, GID_FAKE_STEREO_WIDTH,
+		WIDTH_X, ROW_PLAYBACK, WIDTH_W, GUI_GADGET_HEIGHT, "Width:",
+		GTCY_Labels, (ULONG)kFakeStereoWidthLabels,
+		GTCY_Active, gui->fakeStereoWidthIndex,
+		GA_Disabled, !gui->fakeStereo,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gui->gadFakeStereoDelay = gad = MakeGadget(gui, gad,
+		CYCLE_KIND, GID_FAKE_STEREO_DELAY,
+		DELAY_X, ROW_PLAYBACK, DELAY_W, GUI_GADGET_HEIGHT, "Delay:",
+		GTCY_Labels, (ULONG)kFakeStereoDelayLabels,
+		GTCY_Active, gui->fakeStereoDelayIndex,
+		GA_Disabled, !gui->fakeStereo,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gui->gadRate = gad = MakeGadget(gui, gad, CYCLE_KIND, GID_RATE,
+		RATE_X, ROW_CYCLES, RATE_W, GUI_GADGET_HEIGHT, "Rate:",
+		GTCY_Labels, (ULONG)kRateLabels,
+		GTCY_Active, gui->rateIndex,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gad = MakeGadget(gui, gad, CYCLE_KIND, GID_QUALITY,
+		QUALITY_X, ROW_CYCLES, QUALITY_W, GUI_GADGET_HEIGHT, "Quality:",
+		GTCY_Labels, (ULONG)kQualityLabels,
+		GTCY_Active, gui->qualityIndex,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gad = MakeGadget(gui, gad, CYCLE_KIND, GID_SUBBAND_CAP,
+		SUBBAND_X, ROW_CYCLES, SUBBAND_W, GUI_GADGET_HEIGHT, "Subbands:",
+		GTCY_Labels, (ULONG)kSubbandCapLabels,
+		GTCY_Active, gui->subbandCapIndex,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gui->gadBuffer = gad = MakeSliderGadget(gui, gad, GID_BUFFER,
+		BUFFER_X, ROW_BUFVOL, BUFFER_W, "Buffer:",
+		1, 10, gui->bufferSeconds, "%ld sec", 6, 2);
+	if (!gad)
+		return -1;
+
+	gui->gadVolume = gad = MakeSliderGadget(gui, gad, GID_VOLUME,
+		VOLUME_X, ROW_BUFVOL, VOLUME_W, "Volume:",
+		0, 100, gui->volumePercent, "%ld%%", 4, 30);
+	if (!gad)
+		return -1;
+
+	gui->gadRewind = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_REWIND,
+		REWIND_X, ROW_BUTTONS, SEEK_W, TRANSPORT_H, "",
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gui->gadPlay = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_PLAY,
+		PLAY_X, ROW_BUTTONS, TRANSPORT_W, TRANSPORT_H, "",
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gui->gadNext = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_NEXT,
+		NEXT_X, ROW_BUTTONS, TRANSPORT_W, TRANSPORT_H, "",
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gui->gadStop = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_STOP,
+		STOP_X, ROW_BUTTONS, TRANSPORT_W, TRANSPORT_H, "",
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gui->gadFfwd = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_FFWD,
+		FFWD_X, ROW_BUTTONS, SEEK_W, TRANSPORT_H, "",
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gui->gadHardwareFilter = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_HARDWARE_FILTER,
+		FILTER_X, ROW_BUTTONS, FILTER_W, TRANSPORT_H, "",
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gui->gadRadio = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_RADIO,
+		RADIO_BTN_X, ROW_BUTTONS, RADIO_BTN_W, TRANSPORT_H, "Radio",
+		GA_Disabled, (ULONG)(gui->hasNetwork ? FALSE : TRUE),
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gui->gadPlaylist = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_PLAYLIST,
+		PL_OPEN_X, ROW_BUTTONS, PL_OPEN_W, TRANSPORT_H, "Playlist",
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gui->gadStatus = gad = MakeGadget(gui, gad, TEXT_KIND, GID_STATUS,
+		META_X, ROW_STATUS, GUI_FIELD_W, GUI_GADGET_HEIGHT, "Status:",
+		GTTX_Text, (ULONG)gui->statusText,
+		GTTX_Border, TRUE,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	gui->gadFileInfo = gad = MakeGadget(gui, gad, TEXT_KIND, GID_FILEINFO,
+		FILEINFO_X, ROW_FILEINFO, FILEINFO_W, GUI_GADGET_HEIGHT, "File info:",
+		GTTX_Text, (ULONG)gui->fileInfoText,
+		GTTX_Border, TRUE,
+		TAG_IGNORE, 0,
+		TAG_IGNORE, 0);
+	if (!gad)
+		return -1;
+
+	return 0;
+}
+
+
+static void SetMenuItemChecked(HelixAmp3Gui *gui, int menuNum, int itemNum,
+	int checked)
+{
+	struct MenuItem *item;
+
+	if (!gui->menuStrip)
+		return;
+	item = ItemAddress(gui->menuStrip, FULLMENUNUM(menuNum, itemNum, NOSUB));
+	if (!item)
+		return;
+	if (checked)
+		item->Flags |= CHECKED;
+	else
+		item->Flags &= ~CHECKED;
+}
+
+static void SyncMenuChecks(HelixAmp3Gui *gui)
+{
+	SetMenuItemChecked(gui, MENUNUM_PLAYBACK, ITEMNUM_DTP,
+		gui->decodeThenPlay);
+	SetMenuItemChecked(gui, MENUNUM_PLAYBACK, ITEMNUM_BENCH, gui->bench);
+	SetMenuItemChecked(gui, MENUNUM_PLAYBACK, ITEMNUM_ARTWORK,
+		gui->artEnabled);
+	SetMenuItemChecked(gui, MENUNUM_PLAYBACK, ITEMNUM_ARTCACHE,
+		gui->artCacheEnabled);
+	SetMenuItemChecked(gui, MENUNUM_PLAYBACK, ITEMNUM_ARTCOLOR,
+		gui->artColorEnabled);
+	SetMenuItemChecked(gui, MENUNUM_PLAYBACK, ITEMNUM_PROGRESS,
+		gui->progressEnabled);
+}
+
+static void StopPlayback(HelixAmp3Gui *gui);
+static void WaitForPlaybackShutdown(HelixAmp3Gui *gui);
+static void GuiClose(HelixAmp3Gui *gui);
+
+static void DrainWindowMessages(HelixAmp3Gui *gui)
+{
+	struct IntuiMessage *msg;
+	struct MsgPort *port;
+
+	if (!gui || !gui->win)
+		return;
+	/* ModifyIDCMP(win, 0) frees an Intuition-allocated IDCMP port and clears
+	 * win->UserPort.  Guard against a NULL port so a drain call after IDCMP has
+	 * been turned off does not call GT_GetIMsg(NULL) and walk low memory. */
+	port = gui->win->UserPort;
+	if (!port)
+		return;
+	while ((msg = GT_GetIMsg(port)) != NULL)
+		GT_ReplyIMsg(msg);
+}
+
+static void DrainAppPortMessages(HelixAmp3Gui *gui)
+{
+	struct Message *msg;
+	if (!gui || !gui->appPort)
+		return;
+	while ((msg = GetMsg(gui->appPort)) != NULL)
+		ReplyMsg(msg);
+}
+
+static struct Window *GuiOpenMainWindow(HelixAmp3Gui *gui, WORD left, WORD top)
+{
+	struct NewWindow nw;
+	memset(&nw, 0, sizeof(nw));
+	nw.LeftEdge = left;
+	nw.TopEdge = top;
+	nw.Width = GUI_WIN_W;
+	nw.Height = GUI_WIN_H;
+	nw.DetailPen = 0;
+	nw.BlockPen = 1;
+	nw.IDCMPFlags = IDCMP_GADGETUP | IDCMP_MOUSEMOVE | IDCMP_MOUSEBUTTONS |
+		IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW | IDCMP_ACTIVEWINDOW |
+		IDCMP_MENUPICK;
+	nw.Flags = WFLG_CLOSEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET |
+		WFLG_SIZEGADGET | WFLG_SIZEBBOTTOM | WFLG_ACTIVATE |
+		WFLG_SMART_REFRESH;
+	nw.FirstGadget = NULL;
+	nw.Title = (UBYTE *)"MintAMP-GT";
+	nw.MinWidth = GUI_WIN_W;
+	nw.MinHeight = GUI_WIN_H;
+	nw.MaxWidth = 680;
+	nw.MaxHeight = 440;
+	nw.Type = WBENCHSCREEN;
+	gui->win = OpenWindowTags(&nw,
+		WA_InnerWidth, GUI_WIN_W,
+		WA_Height, GUI_WIN_H,
+		TAG_DONE);
+	if (!gui->win)
+		return NULL;
+	if (gui->smallFont)
+		SetFont(gui->win->RPort, gui->smallFont);
+	WindowLimits(gui->win, gui->win->Width, gui->win->Height,
+		gui->win->Width, gui->win->Height);
+	if (gui->gadgets) {
+		AddGList(gui->win, gui->gadgets, (UWORD)-1, -1, NULL);
+		RefreshGList(gui->gadgets, gui->win, NULL, -1);
+	}
+	if (gui->menuStrip)
+		SetMenuStrip(gui->win, gui->menuStrip);
+	return gui->win;
+}
+
+static void GuiRemoveAppIcon(HelixAmp3Gui *gui)
+{
+	if (!gui)
+		return;
+	/* Workbench owns AppMessages.  Reply anything already delivered before
+	 * removing the AppIcon, then drain once more for a message that raced the
+	 * removal. */
+	DrainAppPortMessages(gui);
+	if (gui->appIcon) {
+		RemoveAppIcon(gui->appIcon);
+		gui->appIcon = NULL;
+	}
+	DrainAppPortMessages(gui);
+	if (gui->appIconDiskObject) {
+		FreeDiskObject(gui->appIconDiskObject);
+		gui->appIconDiskObject = NULL;
+	}
+}
+
+static void GuiPrepareAppIconObject(HelixAmp3Gui *gui)
+{
+	struct DiskObject *appIcon;
+	if (!gui || !gui->appIconDiskObject)
+		return;
+	/* Keep the loaded tool DiskObject intact so FreeDiskObject() can release
+	 * all of its strings/tooltypes later.  The shallow copy borrows only its
+	 * render images and is sanitised to the WBAPPICON contract. */
+	gui->appIconObject = *gui->appIconDiskObject;
+	appIcon = &gui->appIconObject;
+	appIcon->do_Magic = 0;
+	appIcon->do_Version = 0;
+	appIcon->do_Type = 0;
+	appIcon->do_DefaultTool = NULL;
+	appIcon->do_ToolTypes = NULL;
+	appIcon->do_CurrentX = NO_ICON_POSITION;
+	appIcon->do_CurrentY = NO_ICON_POSITION;
+	appIcon->do_DrawerData = NULL;
+	appIcon->do_ToolWindow = NULL;
+	appIcon->do_StackSize = 0;
+	appIcon->do_Gadget.NextGadget = NULL;
+	appIcon->do_Gadget.LeftEdge = 0;
+	appIcon->do_Gadget.TopEdge = 0;
+	appIcon->do_Gadget.Flags &= GFLG_GADGHIMAGE;
+	appIcon->do_Gadget.Activation = 0;
+	appIcon->do_Gadget.GadgetType = 0;
+	appIcon->do_Gadget.GadgetText = NULL;
+	appIcon->do_Gadget.MutualExclude = 0;
+	appIcon->do_Gadget.SpecialInfo = NULL;
+	appIcon->do_Gadget.GadgetID = 0;
+	appIcon->do_Gadget.UserData = NULL;
+}
+
+static void GuiRestoreFromAppIcon(HelixAmp3Gui *gui)
+{
+	if (!gui || !gui->iconified)
+		return;
+	GuiRemoveAppIcon(gui);
+	if (!GuiOpenMainWindow(gui, gui->iconifyLeft, gui->iconifyTop)) {
+		/* Keep a recovery route if Workbench is temporarily unable to reopen
+		 * the player window (for example during a public-screen transition). */
+		gui->appIconDiskObject = GetDiskObject((STRPTR)"PROGDIR:MintAMP-GT");
+		if (gui->appIconDiskObject) {
+			GuiPrepareAppIconObject(gui);
+			gui->appIcon = AddAppIconA(0, 0, (STRPTR)"MintAMP-GT",
+				gui->appPort, (BPTR)0, &gui->appIconObject, NULL);
+		}
+		return;
+	}
+	gui->iconified = 0;
+	GT_RefreshWindow(gui->win, NULL);
+	UpdateChannelGadgetState(gui);
+	ApplyHardwareAudioFilter(gui);
+	GuiRefresh(gui);
+	DrawTransportIcons(gui);
+	DrawFilterButton(gui);
+	WindowToFront(gui->win);
+	ActivateWindow(gui->win);
+}
+
+static void GuiHandleAppIcon(HelixAmp3Gui *gui)
+{
+	struct Message *msg;
+	int restore = 0;
+	if (!gui || !gui->appPort)
+		return;
+	while ((msg = GetMsg(gui->appPort)) != NULL) {
+		restore = 1;
+		ReplyMsg(msg);
+	}
+	if (restore)
+		GuiRestoreFromAppIcon(gui);
+}
+
+static void GuiIconify(HelixAmp3Gui *gui)
+{
+	if (!gui || !gui->win || gui->iconified)
+		return;
+	if (!gui->appPort || !WorkbenchBase || !IconBase) {
+		SetStatus(gui, "Workbench AppIcon support is unavailable.");
+		return;
+	}
+	gui->appIconDiskObject = GetDiskObject((STRPTR)"PROGDIR:MintAMP-GT");
+	if (!gui->appIconDiskObject) {
+		SetStatus(gui, "Could not load PROGDIR:MintAMP-GT.info.");
+		return;
+	}
+	GuiPrepareAppIconObject(gui);
+	/* V36/V37 Workbench requires a NULL taglist; AddAppIconA keeps this path
+	 * compatible with the OS 2.x/3.1 systems targeted by MintAMP-GT. */
+	gui->appIcon = AddAppIconA(0, 0, (STRPTR)"MintAMP-GT", gui->appPort,
+		(BPTR)0, &gui->appIconObject, NULL);
+	if (!gui->appIcon) {
+		FreeDiskObject(gui->appIconDiskObject);
+		gui->appIconDiskObject = NULL;
+		SetStatus(gui, "Could not create the MintAMP-GT AppIcon.");
+		return;
+	}
+
+	CloseRadioWindow(gui);
+	ClosePlaylistWindow(gui);
+	gui->iconifyLeft = gui->win->LeftEdge;
+	gui->iconifyTop = gui->win->TopEdge;
+	if (gui->menuStrip)
+		ClearMenuStrip(gui->win);
+	if (gui->gadgets)
+		RemoveGList(gui->win, gui->gadgets, -1);
+	DrainWindowMessages(gui);
+	ModifyIDCMP(gui->win, 0);
+	CloseWindow(gui->win);
+	gui->win = NULL;
+	gui->iconified = 1;
+}
+
+/*
+ * ScanDecoderModules — find all *.decoder files in PROGDIR:decoders/, load
+ * each one briefly to read its extension list, then build:
+ *   gDecoderModulesPath  — absolute path for the playback subprocess
+ *   gSupportedExtPattern — AmigaDOS ASL pattern like "#?.(mp3|aac|flac)"
+ */
+static void ScanDecoderModules(void)
+{
+#ifdef HAVE_AMIGA_AUDIO_DEVICE
+	BPTR     progDir;
+	BPTR     lock;
+	struct FileInfoBlock *fib;
+	char     dirPath[512];
+	char     extList[256];   /* collected "mp3|aac|flac|..." */
+	int      extLen;
+
+	extList[0] = '\0';
+	extLen     = 0;
+
+	/* Build path: PROGDIR:decoders/ */
+	progDir = GetProgramDir();
+	if (!progDir || !NameFromLock(progDir, (STRPTR)dirPath, (LONG)sizeof(dirPath))) {
+		/* Fallback: use PROGDIR: assign directly */
+		strncpy(dirPath, "PROGDIR:", sizeof(dirPath) - 12);
+		dirPath[sizeof(dirPath) - 12] = '\0';
+	} else {
+		/* Append trailing / if not already present */
+		{
+			int l = (int)strlen(dirPath);
+			if (l > 0 && dirPath[l - 1] != '/' && dirPath[l - 1] != ':') {
+				dirPath[l]     = '/';
+				dirPath[l + 1] = '\0';
+			}
+		}
+	}
+	strncat(dirPath, "decoders/", sizeof(dirPath) - strlen(dirPath) - 1);
+
+	strncpy(gDecoderModulesPath, dirPath, sizeof(gDecoderModulesPath) - 1);
+	gDecoderModulesPath[sizeof(gDecoderModulesPath) - 1] = '\0';
+
+	/* Always include built-in MP3 and the standard AAC module extension. */
+	strncpy(extList, "mp3|aac", sizeof(extList) - 1);
+	extLen = 7;
+
+	lock = SafeLockPath("DecoderModules/Lock", gDecoderModulesPath, ACCESS_READ);
+	if (lock) {
+		fib = (struct FileInfoBlock *)AllocMem(sizeof(*fib), MEMF_CLEAR);
+		if (fib && Examine(lock, fib)) {
+			while (ExNext(lock, fib)) {
+				const char *fname = fib->fib_FileName;
+				const char *dot = NULL;
+				const char *p;
+				BPTR seg;
+				char modPath[600];
+				int  dlen, flen;
+
+				for (p = fname; *p; p++)
+					if (*p == '.') dot = p;
+				if (!dot || strcmp(dot, ".decoder") != 0)
+					continue;
+
+				dlen = (int)strlen(gDecoderModulesPath);
+				flen = (int)strlen(fname);
+				if (dlen + flen + 1 >= (int)sizeof(modPath))
+					continue;
+				memcpy(modPath, gDecoderModulesPath, (size_t)dlen);
+				memcpy(modPath + dlen, fname, (size_t)(flen + 1));
+
+				seg = LoadSeg((STRPTR)modPath);
+				if (seg) {
+					typedef struct DecoderOps *(*EntFn)(void);
+					EntFn entry = (EntFn)((UBYTE *)BADDR(seg) + 4);
+					const struct DecoderOps *ops = entry();
+
+					if (ops && ops->info &&
+						ops->info->magic == DECODER_MODULE_MAGIC) {
+						const char *exts = ops->info->extensions;
+						while (exts && *exts) {
+							int elen = (int)strlen(exts);
+							if (extLen + 1 + elen + 1 < (int)sizeof(extList)) {
+								extList[extLen] = '|';
+								memcpy(extList + extLen + 1, exts, (size_t)(elen + 1));
+								extLen += 1 + elen;
+							}
+							exts += elen + 1;
+						}
+					}
+					UnLoadSeg(seg);
+				}
+			}
+			FreeMem(fib, sizeof(*fib));
+		}
+		UnLock(lock);
+	}
+
+	/* Build pattern: "#?.(mp3|aac|flac)" or "#?.mp3" if only one */
+	if (strchr(extList, '|')) {
+		int written = 0;
+		written += snprintf(gSupportedExtPattern + written,
+			sizeof(gSupportedExtPattern) - (size_t)written,
+			"#?.(");
+		written += snprintf(gSupportedExtPattern + written,
+			sizeof(gSupportedExtPattern) - (size_t)written,
+			"%s", extList);
+		snprintf(gSupportedExtPattern + written,
+			sizeof(gSupportedExtPattern) - (size_t)written, ")");
+	} else {
+		snprintf(gSupportedExtPattern, sizeof(gSupportedExtPattern),
+			"#?.%s", extList);
+	}
+#else
+	strncpy(gSupportedExtPattern, "#?.(mp3|aac)", sizeof(gSupportedExtPattern) - 1);
+	gSupportedExtPattern[sizeof(gSupportedExtPattern) - 1] = '\0';
+#endif
+}
+
+static int GuiOpen(HelixAmp3Gui *gui)
+{
+	/* Discover decoder modules and build the ASL file-browser pattern first,
+	 * so gSupportedExtPattern and gDecoderModulesPath are ready for playback. */
+	ScanDecoderModules();
+
+	memset(gui, 0, sizeof(*gui));
+	/* Probe bsdsocket.library/AmiSSL once up front so the menu/gadgets below
+	 * can be greyed out for offline users instead of failing on first use --
+	 * see Radio_HasNetwork()/Radio_HasHttps(). */
+	Radio_NetworkInit();
+	gui->hasNetwork = Radio_HasNetwork();
+	gui->hasHttps = Radio_HasHttps();
+	gui->fastLowrate = LoadEnvInt("FastLowrate", 1, 0, 1);
+	gui->superfastLowrate = LoadEnvInt("SuperfastLowrate", 0, 0, 1);
+	gui->ultrafast = LoadEnvInt("Ultrafast", 1, 0, 1);
+	gui->cd32Ultrafast = LoadEnvInt("CD32Ultrafast", 0, 0, 1);
+	gui->fastMem = LoadEnvInt("FastMem", 1, 0, 1);
+	gui->mono = LoadEnvInt("Mono", 1, 0, 1);
+	/* NOTE: first-run defaults below (Ultrafast speed, Faster quality, colour
+	 * artwork on) match the MintAMP (ReAction) frontend so both builds ship the
+	 * same fastest-on-a-stock-030 out-of-box preset. */
+	gui->fakeStereo = LoadEnvInt("FakeStereo", 0, 0, 1);
+	gui->fakeStereoWidthIndex = LoadEnvInt("FakeStereoWidthIndex", 1, 0, 4);
+	gui->fakeStereoDelayIndex = LoadEnvInt("FakeStereoDelayIndex", 2, 0, 4);
+	gui->hardwareFilter = LoadEnvInt("HardwareFilter", 0, 0, 1);
+	gui->rateIndex = LoadEnvInt("RateIndex", 2, 0, 5);
+	if (gui->cd32Ultrafast) {
+		gui->ultrafast = 0;
+		gui->fastLowrate = 1;
+		gui->superfastLowrate = 1;
+		gui->mono = 1;
+		gui->rateIndex = 4;
+	} else if (gui->ultrafast) {
+		gui->fastLowrate = 0;
+		gui->superfastLowrate = 0;
+	}
+	if (gui->superfastLowrate) {
+		gui->fastLowrate = 1;
+		if (!RateIndexSupportsSuperfast(gui->rateIndex, ChannelUsesMonoCost(gui)))
+			gui->rateIndex = DefaultSuperfastRateIndex(ChannelUsesMonoCost(gui));
+	}
+	gui->bufferSeconds = LoadEnvInt("BufferSeconds", 10, 1, 10);
+	gui->volumePercent = LoadEnvInt("Volume", 100, 0, 100);
+	gMiniAmp3RequestedVolume = (unsigned short)gui->volumePercent;
+	gMiniAmp3VolumeSequence++;
+	{
+		int settingsVersion;
+		int loadedQuality;
+		int hasSettingsVersion = LoadEnvIntMaybe("SettingsVersion", &settingsVersion,
+			1, HELIXAMP3_SETTINGS_VERSION);
+		int hasQualityIndex = LoadEnvIntMaybe("QualityIndex", &loadedQuality,
+			HELIXAMP3_QUALITY_MIN, HELIXAMP3_QUALITY_MAX);
+
+		if (!hasSettingsVersion && hasQualityIndex) {
+			/* Version 1 settings used 0=Fast, 1=Normal, 2=Best.
+			 * Version 2 inserts Faster at index 0, so migrate once. */
+			if (loadedQuality > 2)
+				loadedQuality = 2;
+			gui->qualityIndex = loadedQuality + 1;
+			SaveEnvInt("QualityIndex", gui->qualityIndex);
+			SaveEnvInt("SettingsVersion", HELIXAMP3_SETTINGS_VERSION);
+		} else {
+			/* First-run default: "Faster" (index 0), the fastest quality preset. */
+			gui->qualityIndex = hasQualityIndex ? loadedQuality : 0;
+		}
+	}
+	gui->subbandCapIndex = LoadEnvInt("SubbandCapIndex", 0, 0, SUBBAND_CAP_COUNT - 1);
+	gui->decodeThenPlay = LoadEnvInt("DecodeThenPlay", 0, 0, 1);
+	gui->bench = LoadEnvInt("Bench", 0, 0, 1);
+	gui->artEnabled = LoadEnvInt("Artwork", 1, 0, 1);
+	gui->artCacheEnabled = LoadEnvInt("ArtworkCache", 1, 0, 1);
+	gui->artColorEnabled = LoadEnvInt("ArtworkColour", 1, 0, 1);
+	gui->progressEnabled = LoadEnvInt("ProgressBar", 0, 0, 1);
+	LoadEnvString("LastDrawer", gui->lastDrawer, sizeof(gui->lastDrawer));
+	{
+		int i;
+		char key[32];
+		gui->rbFavouriteCount = LoadEnvInt("RadioFavCount", gui->rbFavouriteCount, 0, HELIXAMP3_RADIO_FAV_MAX);
+		for (i = 0; i < HELIXAMP3_RADIO_FAV_MAX; i++) {
+			sprintf(key, "RadioFavName%d", i);
+			LoadEnvString(key, gui->rbFavouriteNames[i], sizeof(gui->rbFavouriteNames[i]));
+			sprintf(key, "RadioFavUrl%d", i);
+			LoadEnvString(key, gui->rbFavouriteUrls[i], sizeof(gui->rbFavouriteUrls[i]));
+		}
+	}
+	SafeCopy(gui->statusText, sizeof(gui->statusText), "Ready.");
+	gui->lastDisplayedPhase = GUIPLAY_PHASE_IDLE;
+	gui->lastDrawnElapsedSecs = -1;
+	gui->lastDrawnTotalSecs = -1;
+	SafeCopy(gui->fileInfoText, sizeof(gui->fileInfoText), "-");
+	FormatRatingText(gui);
+	SetFileDisplay(gui, NULL);
+	NewList(&gui->playlist.list);
+	gui->playlist.count = 0;
+	gui->playlist.selected = -1;
+	gui->playlist.current = -1;
+
+	IntuitionBase = (struct IntuitionBase *)OpenLibrary("intuition.library", 37);
+	if (!IntuitionBase) {
+		fprintf(stderr, "MintAMP-GT requires intuition.library V37 or newer.\n");
+		return -1;
+	}
+	AslBase = OpenLibrary("asl.library", 37);
+	if (!AslBase) {
+		fprintf(stderr, "MintAMP-GT requires asl.library V37 or newer.\n");
+		GuiClose(gui);
+		return -1;
+	}
+	GadToolsBase = OpenLibrary("gadtools.library", 37);
+	if (!GadToolsBase) {
+		fprintf(stderr, "MintAMP-GT requires gadtools.library V37 or newer.\n");
+		GuiClose(gui);
+		return -1;
+	}
+	GfxBase = (struct GfxBase *)OpenLibrary("graphics.library", 37);
+	if (!GfxBase) {
+		fprintf(stderr, "MintAMP-GT requires graphics.library V37 or newer.\n");
+		GuiClose(gui);
+		return -1;
+	}
+	/* Iconification is optional on the OS 2.x/3.x GadTools build.  Keep the
+	 * player usable if Workbench is not running or either library is absent;
+	 * the Project/Iconify item is disabled below in that case. */
+	WorkbenchBase = OpenLibrary("workbench.library", 37);
+	IconBase = OpenLibrary("icon.library", 37);
+	if (WorkbenchBase && IconBase)
+		gui->appPort = CreateMsgPort();
+	DiskfontBase = OpenLibrary("diskfont.library", 36);
+	gui->smallFont = OpenBestFont();
+
+	gui->win = GuiOpenMainWindow(gui, 40, 30);
+	if (!gui->win) {
+		fprintf(stderr, "cannot open MintAMP-GT window\n");
+		GuiClose(gui);
+		return -1;
+	}
+	if (gui->smallFont)
+		SetFont(gui->win->RPort, gui->smallFont);
+
+	gui->visualInfo = GetVisualInfo(gui->win->WScreen,
+		TAG_DONE);
+	if (!gui->visualInfo) {
+		fprintf(stderr, "cannot create GadTools visual info\n");
+		GuiClose(gui);
+		return -1;
+	}
+	if (gui->smallFont)
+		SetFont(gui->win->RPort, gui->smallFont);
+	if (GuiCreateGadgets(gui) != 0) {
+		fprintf(stderr, "cannot create MintAMP-GT gadgets\n");
+		GuiClose(gui);
+		return -1;
+	}
+	AddGList(gui->win, gui->gadgets, (UWORD)-1, -1, NULL);
+	RefreshGList(gui->gadgets, gui->win, NULL, -1);
+	UpdateChannelGadgetState(gui);
+	ApplyHardwareAudioFilter(gui);
+	if (gui->decodeThenPlay && gui->gadBuffer) {
+		GT_SetGadgetAttrs(gui->gadBuffer, gui->win, NULL,
+			GA_Disabled, TRUE,
+			TAG_DONE);
+	}
+
+	gui->menuStrip = CreateMenus(myNewMenus, TAG_DONE);
+	if (gui->menuStrip) {
+		LayoutMenus(gui->menuStrip, gui->visualInfo, TAG_DONE);
+		SyncMenuChecks(gui);
+		SetMenuStrip(gui->win, gui->menuStrip);
+		if (!gui->hasNetwork)
+			OffMenu(gui->win, FULLMENUNUM(MENUNUM_PROJECT, ITEMNUM_STREAM, NOSUB));
+		if (!gui->appPort)
+			OffMenu(gui->win, FULLMENUNUM(MENUNUM_PROJECT, ITEMNUM_ICONIFY, NOSUB));
+	}
+	gui->timerPort = CreateMsgPort();
+	if (gui->timerPort)
+		gui->timerReq = (struct timerequest *)CreateIORequest(gui->timerPort,
+			sizeof(struct timerequest));
+	if (gui->timerReq && OpenDevice(TIMERNAME, UNIT_VBLANK,
+		(struct IORequest *)gui->timerReq, 0) == 0) {
+		gui->timerOpen = 1;
+	} else {
+		if (gui->timerReq) {
+			DeleteIORequest((struct IORequest *)gui->timerReq);
+			gui->timerReq = NULL;
+		}
+		if (gui->timerPort) {
+			DeleteMsgPort(gui->timerPort);
+			gui->timerPort = NULL;
+		}
+	}
+	gui->donePort = CreateMsgPort();
+	if (gui->donePort) {
+		memset(&gDoneMsg, 0, sizeof(gDoneMsg));
+		gDoneMsg.mn_Length = sizeof(gDoneMsg);
+		gDoneMsg.mn_Node.ln_Type = NT_MESSAGE;
+	}
+	GT_RefreshWindow(gui->win, NULL);
+	DrawProgressFrame(gui);
+	DrawProgress(gui);
+	DrawArtPanel(gui);
+	DrawTransportIcons(gui);
+	DrawFilterButton(gui);
+	if (gui->timerOpen)
+		SendTimerRequest(gui, TIMER_TICK_MICROS);
+	return 0;
+}
+
+static void GuiClose(HelixAmp3Gui *gui)
+{
+	RADIO_DBG(printf("gui-close: enter win=%p rbWin=%p plWin=%p playbackActive=%d\n",
+		(void *)gui->win, (void *)gui->rbWin, (void *)gui->plWin, gui->playbackActive);)
+	CancelArtDecode(gui);
+	RADIO_DBG(printf("gui-close: after CancelArtDecode\n");)
+	if (gui->playbackActive)
+		WaitForPlaybackShutdown(gui);
+	RADIO_DBG(printf("gui-close: after WaitForPlaybackShutdown\n");)
+	if (gui->rbWin)
+		CloseRadioWindow(gui);
+	RADIO_DBG(printf("gui-close: after CloseRadioWindow\n");)
+	GuiRemoveAppIcon(gui);
+	if (gui->win) {
+		/* Reply anything already pending, THEN stop Intuition queuing new IDCMP
+		 * traffic.  Drain first: ModifyIDCMP(win, 0) frees an Intuition-allocated
+		 * IDCMP port and clears win->UserPort, so draining afterwards would read a
+		 * freed port.  Leaving stale IntuiMessages on the port is also a classic
+		 * source of recoverable alerts on memory cleanup. */
+		DrainWindowMessages(gui);
+		ModifyIDCMP(gui->win, 0);
+	}
+	RADIO_DBG(printf("gui-close: after main-window IDCMP drain/off, before timer teardown\n");)
+	if (gui->timerReq) {
+		if (gui->timerPending) {
+			AbortIO((struct IORequest *)gui->timerReq);
+			WaitIO((struct IORequest *)gui->timerReq);
+			gui->timerPending = 0;
+			gui->timerIsArt = 0;
+		}
+		if (gui->timerOpen) {
+			CloseDevice((struct IORequest *)gui->timerReq);
+			gui->timerOpen = 0;
+		}
+		DeleteIORequest((struct IORequest *)gui->timerReq);
+		gui->timerReq = NULL;
+	}
+	if (gui->timerPort) {
+		DeleteMsgPort(gui->timerPort);
+		gui->timerPort = NULL;
+	}
+	if (gui->donePort) {
+		struct Message *msg;
+
+		gDonePort = NULL;
+		while ((msg = GetMsg(gui->donePort)) != NULL)
+			;
+		DeleteMsgPort(gui->donePort);
+		gui->donePort = NULL;
+	}
+	if (gui->appPort) {
+		DrainAppPortMessages(gui);
+		DeleteMsgPort(gui->appPort);
+		gui->appPort = NULL;
+	}
+	RADIO_DBG(printf("gui-close: before ClosePlaylistWindow\n");)
+	ClosePlaylistWindow(gui);
+	RADIO_DBG(printf("gui-close: before ReleaseArtColorPens\n");)
+	ReleaseArtColorPens(gui);
+	RADIO_DBG(printf("gui-close: before FreeTags\n");)
+	FreeTags(&gui->tags);
+	RADIO_DBG(printf("gui-close: before ClearMenuStrip/FreeMenus\n");)
+	if (gui->win && gui->menuStrip)
+		ClearMenuStrip(gui->win);
+	if (gui->menuStrip) {
+		FreeMenus(gui->menuStrip);
+		gui->menuStrip = NULL;
+	}
+	RADIO_DBG(printf("gui-close: before RemoveGList main gadgets=%p\n", (void *)gui->gadgets);)
+	if (gui->win && gui->gadgets)
+		RemoveGList(gui->win, gui->gadgets, -1);
+	if (gui->win) {
+		DrainWindowMessages(gui);
+		RADIO_DBG(printf("gui-close: before CloseWindow main\n");)
+		CloseWindow(gui->win);
+		gui->win = NULL;
+	}
+	RADIO_DBG(printf("gui-close: before FreeGadgets main\n");)
+	if (gui->gadgets) {
+		FreeGadgets(gui->gadgets);
+		gui->gadgets = NULL;
+	}
+	if (gui->visualInfo) {
+		FreeVisualInfo(gui->visualInfo);
+		gui->visualInfo = NULL;
+	}
+	RADIO_DBG(printf("gui-close: before font/library closes\n");)
+	if (gui->smallFont) {
+		CloseFont(gui->smallFont);
+		gui->smallFont = NULL;
+	}
+	if (DiskfontBase) {
+		CloseLibrary(DiskfontBase);
+		DiskfontBase = NULL;
+	}
+	if (IconBase) {
+		CloseLibrary(IconBase);
+		IconBase = NULL;
+	}
+	if (WorkbenchBase) {
+		CloseLibrary(WorkbenchBase);
+		WorkbenchBase = NULL;
+	}
+	if (GfxBase) {
+		CloseLibrary((struct Library *)GfxBase);
+		GfxBase = NULL;
+	}
+	if (GadToolsBase) {
+		CloseLibrary(GadToolsBase);
+		GadToolsBase = NULL;
+	}
+	if (AslBase) {
+		CloseLibrary(AslBase);
+		AslBase = NULL;
+	}
+	if (IntuitionBase) {
+		CloseLibrary((struct Library *)IntuitionBase);
+		IntuitionBase = NULL;
+	}
+	RADIO_DBG(printf("gui-close: before Radio_NetworkShutdown\n");)
+	Radio_NetworkShutdown();
+	RADIO_DBG(printf("gui-close: after Radio_NetworkShutdown -- done\n");)
+}
+
+
+static unsigned long GuiInputFileSize(const char *path)
+{
+#if defined(AMIGA_M68K)
+	BPTR fh;
+	LONG size;
+
+	fh = SafeOpenPath("GuiOpenRead/Open", path, MODE_OLDFILE);
+	if (!fh)
+		return 0;
+	if (Seek(fh, 0, OFFSET_END) < 0) {
+		Close(fh);
+		return 0;
+	}
+	size = Seek(fh, 0, OFFSET_CURRENT);
+	Close(fh);
+	return size > 0 ? (unsigned long)size : 0;
+#else
+	FILE *f;
+	long size;
+
+	GuiLogPathOp("GuiInputFileSize/fopen", path);
+	f = fopen(path, "rb");
+	if (!f)
+		return 0;
+	if (fseek(f, 0, SEEK_END) != 0) {
+		fclose(f);
+		return 0;
+	}
+	size = ftell(f);
+	fclose(f);
+	return size > 0 ? (unsigned long)size : 0;
+#endif
+}
+
+static int GuiFastMemoryCanHoldFile(const char *path, unsigned long *fileSizeOut,
+	unsigned long *fastAvailOut)
+{
+	unsigned long fileSize;
+	unsigned long fastAvail;
+
+	if (is_url_path(path)) {
+		if (fileSizeOut)
+			*fileSizeOut = 0;
+		if (fastAvailOut)
+			*fastAvailOut = 0;
+		return 1;
+	}
+	fileSize = GuiInputFileSize(path);
+#if defined(AMIGA_M68K)
+	fastAvail = (unsigned long)AvailMem(MEMF_FAST);
+#else
+	fastAvail = (unsigned long)-1;
+#endif
+	if (fileSizeOut)
+		*fileSizeOut = fileSize;
+	if (fastAvailOut)
+		*fastAvailOut = fastAvail;
+	return fileSize > 0 && fileSize < fastAvail;
+}
+
+static void GuiDisableFastMemIfTooSmall(HelixAmp3Gui *gui)
+{
+	unsigned long fileSize;
+	unsigned long fastAvail;
+
+	if (!gui->fastMem || !gui->inputName[0])
+		return;
+	if (GuiFastMemoryCanHoldFile(gui->inputName, &fileSize, &fastAvail))
+		return;
+	gui->fastMem = 0;
+	if (gui->win && gui->gadFastMem)
+		GT_SetGadgetAttrs(gui->gadFastMem, gui->win, NULL,
+			GTCB_Checked, FALSE, TAG_DONE);
+	SaveGuiSettings(gui);
+	if (fileSize > 0 && fastAvail != (unsigned long)-1) {
+		char buf[128];
+		sprintf(buf, "Fast-mem disabled: file %lu bytes, Fast RAM %lu bytes.",
+			fileSize, fastAvail);
+		SetStatus(gui, buf);
+	} else {
+		SetStatus(gui, "Fast-mem disabled: not enough Fast RAM for this file.");
+	}
+}
+
+static void GuiDisableFastMemForRadio(HelixAmp3Gui *gui)
+{
+	if (!gui || !gui->fastMem)
+		return;
+	gui->fastMem = 0;
+	if (gui->win && gui->gadFastMem)
+		GT_SetGadgetAttrs(gui->gadFastMem, gui->win, NULL,
+			GTCB_Checked, FALSE, TAG_DONE);
+	SetStatus(gui, "Fast-mem disabled for internet streams.");
+	SaveGuiSettings(gui);
+}
+
+static const int kRadioSearchLimits[] = { 10, 25, 50, 100 };
+static STRPTR kRadioSearchLimitLabels[] = { (STRPTR)"10", (STRPTR)"25", (STRPTR)"50", (STRPTR)"100", NULL };
+#define GT_RADIO_SEARCH_LIMIT_COUNT ((int)(sizeof(kRadioSearchLimits) / sizeof(kRadioSearchLimits[0])))
+
+static int RadioSearchLimitIndex(int limit)
+{
+	int best = 0, bestDist, i;
+	bestDist = limit > kRadioSearchLimits[0] ?
+		limit - kRadioSearchLimits[0] : kRadioSearchLimits[0] - limit;
+	for (i = 1; i < GT_RADIO_SEARCH_LIMIT_COUNT; i++) {
+		int dist = limit > kRadioSearchLimits[i] ?
+			limit - kRadioSearchLimits[i] : kRadioSearchLimits[i] - limit;
+		if (dist < bestDist) {
+			bestDist = dist;
+			best = i;
+		}
+	}
+	return best;
+}
+
+static const int kRadioBitrateMax[] = { -1, 56, 64, 96, 128 };
+static STRPTR kRadioBitrateLabels[] = { (STRPTR)"Any", (STRPTR)"<=56", (STRPTR)"<=64", (STRPTR)"<=96", (STRPTR)"<=128", NULL };
+static STRPTR kRadioSchemeLabels[] = { (STRPTR)"HTTP", (STRPTR)"HTTPS", (STRPTR)"All", NULL };
+static STRPTR kRadioCountryLabels[] = { (STRPTR)"All", (STRPTR)"GB", (STRPTR)"US", (STRPTR)"FR", (STRPTR)"ZA", (STRPTR)"DE", (STRPTR)"NL", NULL };
+
+static const char *RadioCountryFromIndex(int idx)
+{
+	switch (idx) {
+	case 1: return "GB";
+	case 2: return "US";
+	case 3: return "FR";
+	case 4: return "ZA";
+	case 5: return "DE";
+	case 6: return "NL";
+	default: return "";
+	}
+}
+
+static int RadioCountryToIndex(const char *countrycode)
+{
+	int i;
+	if (!countrycode || !countrycode[0]) return 0;
+	for (i = 1; kRadioCountryLabels[i]; i++)
+		if (!strcmp(countrycode, (const char *)kRadioCountryLabels[i])) return i;
+	return 0;
+}
+
+static const char *RadioBitrateFilterLabel(int max_bitrate)
+{
+	static char label[16];
+
+	if (max_bitrate <= 0) return "Any";
+	sprintf(label, "<=%d", max_bitrate);
+	return label;
+}
+
+static const char *RadioCodecFromIndex(int idx)
+{
+	switch (idx) {
+	case 1: return "MP3";
+	case 2: return "AAC";
+	case 3: return "AAC+";
+	default: return "";
+	}
+}
+
+static int RadioCodecToIndex(const char *codec)
+{
+	if (!codec || !codec[0]) return 0;
+	if (!strcmp(codec, "MP3")) return 1;
+	if (!strcmp(codec, "AAC")) return 2;
+	if (!strcmp(codec, "AAC+")) return 3;
+	return 0;
+}
+
+static const char *ProbeCodecName(RbStreamCodec codec)
+{
+	if (codec == RB_STREAM_CODEC_MP3) return "MP3";
+	if (codec == RB_STREAM_CODEC_AAC) return "AAC";
+	if (codec == RB_STREAM_CODEC_OGG) return "OGG";
+	return "unknown";
+}
+
+static void RadioSetStatus(HelixAmp3Gui *app, const char *text)
+{
+	struct Gadget *gad;
+	if (!app) return;
+	if (!text) text = "";
+	if (strcmp(app->rbStatusText, text) == 0)
+		return;
+	SafeCopy(app->rbStatusText, sizeof(app->rbStatusText), text);
+	if (!app->rbWin || !app->rbGadgets) return;
+	gad = app->rbGadgets;
+	while (gad && gad->GadgetID != RB_GID_STATUS) gad = gad->NextGadget;
+	if (gad) {
+		GT_SetGadgetAttrs(gad, app->rbWin, NULL,
+			GTTX_Text, (ULONG)app->rbStatusText, TAG_DONE);
+		/* GadTools does not always redraw a text gadget immediately when the
+		 * next step is a synchronous Radio Browser network request.  Force the
+		 * status line out before that request so the dialog does not look frozen
+		 * on search/probe like the button press was ignored. */
+		RefreshGList(gad, app->rbWin, NULL, 1);
+	}
+}
+
+static int RadioStationMatchesScheme(HelixAmp3Gui *app, const RadioBrowserStation *st)
+{
+	const char *url = rb_station_play_url(st);
+	int isHttp, isHttps;
+	if (!url) return 0;
+	isHttp = strncmp(url, "http://", 7) == 0;
+	isHttps = strncmp(url, "https://", 8) == 0;
+	if (app && app->rbSchemeMode == 1) {
+#if defined(HAVE_AMISSL)
+		return isHttps;
+#else
+		return 0;
+#endif
+	}
+	if (app && app->rbSchemeMode == 2) {
+#if defined(HAVE_AMISSL)
+		return isHttp || isHttps;
+#else
+		return isHttp;
+#endif
+	}
+	return isHttp;
+}
+
+static void RadioRefreshResults(HelixAmp3Gui *app)
+{
+	int i, row;
+	int selectedRow = -1;
+	int wantedController = -1;
+	int wantedFavourite = -1;
+	char display[RB_MAX_NAME];
+	const RadioBrowserStation *st;
+	const char *url;
+	const char *reason;
+	if (app->rbShowingFavourites)
+		wantedFavourite = app->rbSelectedFavourite;
+	else
+		wantedController = app->rbController.selected_index;
+	if (app->rbWin && app->rbGadList)
+		GT_SetGadgetAttrs(app->rbGadList, app->rbWin, NULL,
+			GTLV_Labels, (ULONG)~0,
+			GTLV_Selected, (ULONG)~0,
+			TAG_DONE);
+	NewList(&app->rbList);
+	app->rbVisibleCount = 0;
+	app->rbSelectedFavourite = -1;
+	if (app->rbShowingFavourites) {
+		for (i = 0; i < app->rbFavouriteCount && app->rbVisibleCount < RB_CONTROLLER_MAX_STATIONS; i++) {
+			if (!app->rbFavouriteNames[i][0] || !app->rbFavouriteUrls[i][0]) continue;
+			row = app->rbVisibleCount++;
+			app->rbVisibleToController[row] = i;
+			if (i == wantedFavourite) selectedRow = row;
+			sprintf(app->rbNames[row], "%.48s | favourite", app->rbFavouriteNames[i]);
+			memset(&app->rbNodes[row], 0, sizeof(app->rbNodes[row]));
+			app->rbNodes[row].ln_Name = app->rbNames[row];
+			app->rbNodes[row].ln_Type = NT_USER;
+			app->rbNodes[row].ln_Pri = (BYTE)i;
+			AddTail(&app->rbList, &app->rbNodes[row]);
+		}
+	} else {
+		for (i = 0; i < app->rbController.station_count; i++) {
+			st = rb_controller_get_station(&app->rbController, i);
+			if (!st) continue;
+			url = rb_station_play_url(st);
+			reason = "show";
+			if (!RadioStationMatchesScheme(app, st)) { reason = "hidden_scheme"; }
+			else if (st->hls) { reason = "hidden_hls"; }
+			else if (st->lastcheckok == 0) { reason = "hidden_offline"; }
+			else if (st->ssl_error != 0) { reason = "hidden_ssl_error"; }
+			else if (app->rbController.max_bitrate > 0 && st->bitrate == 0) { reason = "hidden_bitrate_unknown"; }
+			else if (app->rbController.max_bitrate > 0 && st->bitrate > app->rbController.max_bitrate) { reason = "hidden_bitrate"; }
+#ifdef MINIAMP3_DEBUG
+			printf("Radio Browser filter: name=\"%s\" scheme=%s codec=%s bitrate=%d max=%d reason=%s\n",
+				st->name, url && strncmp(url, "https://", 8) == 0 ? "https" : (url && strncmp(url, "http://", 7) == 0 ? "http" : "other"),
+				st->codec, st->bitrate, app->rbController.max_bitrate, reason);
+#endif
+			if (reason[0] != 's') continue;
+			row = app->rbVisibleCount++;
+			app->rbVisibleToController[row] = i;
+			if (i == wantedController) selectedRow = row;
+			rb_station_display_name(st, display, (int)sizeof(display));
+			sprintf(app->rbNames[row], "%.48s | %s | %d | %s",
+				display, st->codec, st->bitrate, st->countrycode);
+			memset(&app->rbNodes[row], 0, sizeof(app->rbNodes[row]));
+			app->rbNodes[row].ln_Name = app->rbNames[row];
+			app->rbNodes[row].ln_Type = NT_USER;
+			app->rbNodes[row].ln_Pri = (BYTE)i;
+			AddTail(&app->rbList, &app->rbNodes[row]);
+		}
+	}
+	if (app->rbVisibleCount <= 0) {
+		app->rbController.selected_index = -1;
+		app->rbSelectedFavourite = -1;
+		selectedRow = -1;
+	} else if (selectedRow < 0) {
+		selectedRow = 0;
+		if (app->rbShowingFavourites)
+			app->rbSelectedFavourite = app->rbVisibleToController[0];
+		else
+			rb_controller_set_selected(&app->rbController, app->rbVisibleToController[0]);
+	} else if (app->rbShowingFavourites) {
+		app->rbSelectedFavourite = app->rbVisibleToController[selectedRow];
+	} else {
+		rb_controller_set_selected(&app->rbController, app->rbVisibleToController[selectedRow]);
+	}
+	if (app->rbWin && app->rbGadList)
+		GT_SetGadgetAttrs(app->rbGadList, app->rbWin, NULL,
+			GTLV_Labels, (ULONG)&app->rbList,
+			GTLV_Selected, selectedRow >= 0 ? (ULONG)selectedRow : (ULONG)~0,
+			TAG_DONE);
+}
+
+static struct Gadget *FindRadioGadget(HelixAmp3Gui *app, UWORD id)
+{
+	struct Gadget *gad = app->rbGadgets;
+	while (gad) {
+		if (gad->GadgetID == id) return gad;
+		gad = gad->NextGadget;
+	}
+	return NULL;
+}
+
+static void RadioSetSearchBusy(HelixAmp3Gui *app, int busy)
+{
+	struct Gadget *gad;
+	UWORD ids[] = { RB_GID_SEARCH, RB_GID_PROBE, RB_GID_ADD_FAV, RB_GID_FAVOURITES,
+		RB_GID_UP, RB_GID_DOWN, 0 };
+	int i;
+
+	if (!app) return;
+	app->rbSearchInProgress = busy ? 1 : 0;
+	if (!app->rbWin) return;
+	for (i = 0; ids[i]; i++) {
+		gad = FindRadioGadget(app, ids[i]);
+		if (gad)
+			GT_SetGadgetAttrs(gad, app->rbWin, NULL, GA_Disabled, busy ? TRUE : FALSE, TAG_DONE);
+	}
+}
+
+/* Preserve the controls even when the user closes the radio window without
+ * running another search.  The result set already lives in rbController; only
+ * the temporary GadTools gadgets are destroyed by CloseRadioWindow(). */
+static void RadioRememberSearchState(HelixAmp3Gui *app)
+{
+	struct Gadget *gad;
+	STRPTR text = NULL;
+	ULONG value = 0;
+	if (!app || !app->rbWin)
+		return;
+	gad = FindRadioGadget(app, RB_GID_SEARCH_TEXT);
+	if (gad) {
+		GT_GetGadgetAttrs(gad, app->rbWin, NULL,
+			GTST_String, (ULONG)(void *)&text, TAG_DONE);
+		SafeCopy(app->rbController.name, sizeof(app->rbController.name),
+			text ? (const char *)text : "");
+	}
+	gad = FindRadioGadget(app, RB_GID_CODEC);
+	if (gad) {
+		value = 0;
+		GT_GetGadgetAttrs(gad, app->rbWin, NULL,
+			GTCY_Active, (ULONG)(void *)&value, TAG_DONE);
+		SafeCopy(app->rbController.codec, sizeof(app->rbController.codec),
+			RadioCodecFromIndex((int)value));
+	}
+	gad = FindRadioGadget(app, RB_GID_COUNTRY);
+	if (gad) {
+		text = NULL;
+		GT_GetGadgetAttrs(gad, app->rbWin, NULL,
+			GTST_String, (ULONG)(void *)&text, TAG_DONE);
+		SafeCopy(app->rbController.countrycode,
+			sizeof(app->rbController.countrycode),
+			text ? (const char *)text : "");
+	}
+	gad = FindRadioGadget(app, RB_GID_COUNTRY_CODE);
+	if (gad) {
+		value = 0;
+		GT_GetGadgetAttrs(gad, app->rbWin, NULL,
+			GTCY_Active, (ULONG)(void *)&value, TAG_DONE);
+		app->rbCountryMode = ClampInt((int)value, 0, 6);
+	}
+	gad = FindRadioGadget(app, RB_GID_SCHEME);
+	if (gad) {
+		value = 0;
+		GT_GetGadgetAttrs(gad, app->rbWin, NULL,
+			GTCY_Active, (ULONG)(void *)&value, TAG_DONE);
+		app->rbSchemeMode = ClampInt((int)value, 0, 2);
+		app->rbShowHttps = app->rbSchemeMode != 0;
+	}
+	gad = FindRadioGadget(app, RB_GID_LIMIT);
+	if (gad) {
+		value = 1;
+		GT_GetGadgetAttrs(gad, app->rbWin, NULL,
+			GTCY_Active, (ULONG)(void *)&value, TAG_DONE);
+		app->rbController.limit = kRadioSearchLimits[
+			ClampInt((int)value, 0, GT_RADIO_SEARCH_LIMIT_COUNT - 1)];
+	}
+	gad = FindRadioGadget(app, RB_GID_BITRATE);
+	if (gad) {
+		value = 0;
+		GT_GetGadgetAttrs(gad, app->rbWin, NULL,
+			GTCY_Active, (ULONG)(void *)&value, TAG_DONE);
+		app->rbController.max_bitrate = kRadioBitrateMax[
+			ClampInt((int)value, 0, 4)];
+	}
+}
+
+static void RadioDoSearch(HelixAmp3Gui *app)
+{
+	struct Gadget *nameGad = FindRadioGadget(app, RB_GID_SEARCH_TEXT);
+	struct Gadget *codecGad = FindRadioGadget(app, RB_GID_CODEC);
+	struct Gadget *countryGad = FindRadioGadget(app, RB_GID_COUNTRY);
+	struct Gadget *countryCodeGad = FindRadioGadget(app, RB_GID_COUNTRY_CODE);
+	struct Gadget *schemeGad = FindRadioGadget(app, RB_GID_SCHEME);
+	struct Gadget *limitGad = FindRadioGadget(app, RB_GID_LIMIT);
+	struct Gadget *bitrateGad = FindRadioGadget(app, RB_GID_BITRATE);
+	STRPTR text;
+	ULONG v;
+	int rc;
+	char filterMsg[192];
+
+	if (app->rbSearchInProgress) {
+		RadioSetStatus(app, "Search already running.");
+		return;
+	}
+	if (Radio_PlaybackOwnsNetwork()) {
+		RADIO_DBG(printf("radio-browser: search skipped while radio playback child owns networking\n");)
+		RadioSetStatus(app, "Radio playback owns networking; search after stopping.");
+		return;
+	}
+	RadioSetSearchBusy(app, TRUE);
+	RadioSetStatus(app, "Searching Radio Browser...");
+	text = NULL;
+	GT_GetGadgetAttrs(nameGad, app->rbWin, NULL, GTST_String, (ULONG)(void *)&text, TAG_DONE);
+	SafeCopy(app->rbController.name, sizeof(app->rbController.name), text ? (const char *)text : "");
+	v = 0;
+	GT_GetGadgetAttrs(codecGad, app->rbWin, NULL, GTCY_Active, (ULONG)&v, TAG_DONE);
+	SafeCopy(app->rbController.codec, sizeof(app->rbController.codec), RadioCodecFromIndex((int)v));
+	text = NULL;
+	GT_GetGadgetAttrs(countryGad, app->rbWin, NULL, GTST_String, (ULONG)(void *)&text, TAG_DONE);
+	SafeCopy(app->rbController.countrycode, sizeof(app->rbController.countrycode), text ? (const char *)text : "");
+	v = 0;
+	if (countryCodeGad)
+		GT_GetGadgetAttrs(countryCodeGad, app->rbWin, NULL, GTCY_Active, (ULONG)&v, TAG_DONE);
+	app->rbCountryMode = ClampInt((int)v, 0, 6);
+	if (app->rbCountryMode > 0)
+		SafeCopy(app->rbController.countrycode, sizeof(app->rbController.countrycode), RadioCountryFromIndex(app->rbCountryMode));
+	v = 0;
+	if (schemeGad)
+		GT_GetGadgetAttrs(schemeGad, app->rbWin, NULL, GTCY_Active, (ULONG)&v, TAG_DONE);
+	app->rbSchemeMode = ClampInt((int)v, 0, 2);
+	app->rbShowHttps = (app->rbSchemeMode != 0);
+	v = 1;
+	if (limitGad)
+		GT_GetGadgetAttrs(limitGad, app->rbWin, NULL, GTCY_Active, (ULONG)&v, TAG_DONE);
+	app->rbController.limit = kRadioSearchLimits[ClampInt((int)v, 0, GT_RADIO_SEARCH_LIMIT_COUNT - 1)];
+	v = 0;
+	if (bitrateGad)
+		GT_GetGadgetAttrs(bitrateGad, app->rbWin, NULL, GTCY_Active, (ULONG)&v, TAG_DONE);
+	app->rbController.max_bitrate = kRadioBitrateMax[ClampInt((int)v, 0, 4)];
+	sprintf(filterMsg, "Search filters: name=\"%.40s\" codec=%s country=%s max bitrate=%s limit=%d",
+		app->rbController.name[0] ? app->rbController.name : "Any",
+		app->rbController.codec[0] ? app->rbController.codec : "Any",
+		app->rbController.countrycode[0] ? app->rbController.countrycode : "Any",
+		RadioBitrateFilterLabel(app->rbController.max_bitrate),
+		app->rbController.limit);
+	RadioSetStatus(app, filterMsg);
+#ifdef MINIAMP3_DEBUG
+	printf("%s\n", filterMsg);
+#endif
+	rc = rb_controller_search(&app->rbController);
+	Radio_CheckMiniMem("after GadTools radio browser JSON parse");
+	app->rbShowingFavourites = FALSE;
+	RadioRefreshResults(app);
+	RadioSetSearchBusy(app, FALSE);
+	if (rc < 0)
+		RadioSetStatus(app, app->rbController.last_error);
+	else {
+		char msg[128];
+		int hidden = app->rbController.raw_station_count - app->rbVisibleCount;
+		if (app->rbVisibleCount == 0 && app->rbController.raw_station_count == 0)
+			sprintf(msg, "No stations found");
+		else if (app->rbVisibleCount == 0 && app->rbController.raw_station_count > 0)
+			sprintf(msg, "No stations found after filters");
+		else
+			sprintf(msg, "Found %d stations, showing %d playable (%d hidden)",
+				app->rbController.raw_station_count, app->rbVisibleCount, hidden < 0 ? 0 : hidden);
+		RadioSetStatus(app, msg);
+	}
+}
+
+static void RadioSelectResult(HelixAmp3Gui *app, ULONG eventSelected)
+{
+	ULONG selected = eventSelected;
+	ULONG row;
+	const RadioBrowserStation *st;
+	char display[RB_MAX_NAME];
+	char msg[RB_MAX_NAME + 16];
+
+	if (!app->rbWin || !app->rbGadList) return;
+	if (selected == (ULONG)~0)
+		GT_GetGadgetAttrs(app->rbGadList, app->rbWin, NULL,
+			GTLV_Selected, (ULONG)&selected, TAG_DONE);
+#ifdef MINIAMP3_DEBUG
+	printf("radio results selection event row/index: %ld\n", (long)selected);
+#endif
+	if (selected == (ULONG)~0 || selected >= (ULONG)app->rbVisibleCount) {
+		app->rbSelectedFavourite = -1;
+		rb_controller_set_selected(&app->rbController, -1);
+#ifdef MINIAMP3_DEBUG
+		printf("radio results controller selected_index: %d\n", app->rbController.selected_index);
+#endif
+		RadioSetStatus(app, "Select a station first.");
+		return;
+	}
+	row = selected;
+	selected = (ULONG)app->rbVisibleToController[row];
+	if (app->rbShowingFavourites) {
+		app->rbSelectedFavourite = (int)selected;
+		GT_SetGadgetAttrs(app->rbGadList, app->rbWin, NULL,
+			GTLV_Selected, (ULONG)row, TAG_DONE);
+		sprintf(msg, "Selected favourite: %.120s", app->rbFavouriteNames[app->rbSelectedFavourite]);
+		RadioSetStatus(app, msg);
+		return;
+	}
+	app->rbSelectedFavourite = -1;
+	if (rb_controller_set_selected(&app->rbController, (int)selected) < 0) {
+		RadioSetStatus(app, app->rbController.last_error);
+		return;
+	}
+	GT_SetGadgetAttrs(app->rbGadList, app->rbWin, NULL,
+		GTLV_Selected, (ULONG)row, TAG_DONE);
+	st = rb_controller_get_station(&app->rbController, app->rbController.selected_index);
+	if (!st) {
+		RadioSetStatus(app, "Select a station first.");
+		return;
+	}
+	rb_station_display_name(st, display, (int)sizeof(display));
+#ifdef MINIAMP3_DEBUG
+	printf("radio results controller selected_index: %d\n", app->rbController.selected_index);
+	printf("radio results station display name: %s\n", display);
+#endif
+	sprintf(msg, "Selected: %.120s", display);
+	RadioSetStatus(app, msg);
+}
+
+static int RadioCurrentSelectedRow(HelixAmp3Gui *app)
+{
+	int i, wanted;
+	if (!app || app->rbVisibleCount <= 0) return -1;
+	wanted = app->rbShowingFavourites ? app->rbSelectedFavourite : app->rbController.selected_index;
+	for (i = 0; i < app->rbVisibleCount; i++)
+		if (app->rbVisibleToController[i] == wanted)
+			return i;
+	return -1;
+}
+
+static void RadioMoveSelection(HelixAmp3Gui *app, int delta)
+{
+	int row;
+	ULONG top = 0;
+	if (!app || !app->rbWin || !app->rbGadList) return;
+	if (app->rbVisibleCount <= 0) {
+		RadioSetStatus(app, "No stations to select.");
+		return;
+	}
+	row = RadioCurrentSelectedRow(app);
+	if (row < 0) row = 0;
+	else row += delta;
+	if (row < 0) row = 0;
+	if (row >= app->rbVisibleCount) row = app->rbVisibleCount - 1;
+	RadioSelectResult(app, (ULONG)row);
+	/* Button-driven selection has to keep the new row visible.  Do this here,
+	 * not in the listview-click handler: the listview's built-in scrollbar uses
+	 * the same composite gadget, and forcing GTLV_Top while it is processing an
+	 * arrow click cancels the scroll and jumps back to the first result. */
+	GT_GetGadgetAttrs(app->rbGadList, app->rbWin, NULL,
+		GTLV_Top, (ULONG)(void *)&top, TAG_DONE);
+	if ((ULONG)row < top) top = (ULONG)row;
+	else if ((ULONG)row >= top + 8) top = (ULONG)row - 7;
+	GT_SetGadgetAttrs(app->rbGadList, app->rbWin, NULL,
+		GTLV_Selected, (ULONG)row, GTLV_Top, top, TAG_DONE);
+}
+
+static void RadioAddFavourite(HelixAmp3Gui *app)
+{
+	const RadioBrowserStation *st;
+	const char *url;
+	char display[RB_MAX_NAME];
+	char msg[160];
+	int i;
+	if (app->rbController.selected_index < 0) {
+		RadioSetStatus(app, "Select a search result to favourite.");
+		return;
+	}
+	st = rb_controller_get_station(&app->rbController, app->rbController.selected_index);
+	if (!st) {
+		RadioSetStatus(app, "Select a search result to favourite.");
+		return;
+	}
+	url = rb_station_play_url(st);
+	if (!url || !url[0]) {
+		RadioSetStatus(app, "Selected station has no URL.");
+		return;
+	}
+	rb_station_display_name(st, display, (int)sizeof(display));
+	for (i = 0; i < app->rbFavouriteCount; i++) {
+		if (!strcmp(app->rbFavouriteUrls[i], url)) {
+			SafeCopy(app->rbFavouriteNames[i], sizeof(app->rbFavouriteNames[i]), display);
+			SaveGuiSettings(app);
+			RadioSetStatus(app, "Favourite updated.");
+			return;
+		}
+	}
+	if (app->rbFavouriteCount >= HELIXAMP3_RADIO_FAV_MAX) {
+		RadioSetStatus(app, "Radio favourites are full.");
+		return;
+	}
+	i = app->rbFavouriteCount++;
+	SafeCopy(app->rbFavouriteNames[i], sizeof(app->rbFavouriteNames[i]), display);
+	SafeCopy(app->rbFavouriteUrls[i], sizeof(app->rbFavouriteUrls[i]), url);
+	SaveGuiSettings(app);
+	sprintf(msg, "Added favourite: %.120s", display);
+	RadioSetStatus(app, msg);
+}
+
+static void RadioToggleFavourites(HelixAmp3Gui *app)
+{
+	app->rbShowingFavourites = app->rbShowingFavourites ? FALSE : TRUE;
+	RadioRefreshResults(app);
+	RadioSetStatus(app, app->rbShowingFavourites ? "Showing radio favourites." : "Showing search results.");
+}
+
+static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
+{
+	static unsigned char peek[512];
+	RbStreamInfo info;
+	int peekLen = 0;
+	int rc;
+	const RadioBrowserStation *st;
+	char msg[512];
+	if (Radio_IsMemoryPoisoned()) {
+		RadioSetStatus(app, "Memory corruption detected; restart MintAMP before playing radio.");
+		RADIO_DBG(printf("radio-memory: refusing RadioDoProbeAndPlay after MiniMem/ring corruption\n");)
+		return;
+	}
+	if (app->playbackActive || app->playbackDonePending || PlaybackProcessStillExists()) {
+		SafeCopy(app->queuedInputName, sizeof(app->queuedInputName), "radio-selection");
+		app->queuedHaveRadioHostAddr = 0;
+		app->queuedRadioHostAddrBe = 0;
+		app->queuedPlayPending = 1;
+		RadioSetStatus(app, "Queued stream; stopping previous stream...");
+		if (!gGuiPlayer.stopRequested)
+			StopPlayback(app);
+		return;
+	}
+	if (Radio_PlaybackOwnsNetwork()) {
+		RADIO_DBG(printf("radio-probe: play/probe skipped while radio playback child owns networking\n");)
+		RadioSetStatus(app, "Radio playback owns networking; stop before probing another stream.");
+		return;
+	}
+	if (app->rbShowingFavourites) {
+		if (app->rbSelectedFavourite < 0 || app->rbSelectedFavourite >= app->rbFavouriteCount) {
+			RadioSetStatus(app, "Select a favourite first.");
+			return;
+		}
+		if (rb_probe_url_looks_hls(app->rbFavouriteUrls[app->rbSelectedFavourite])) {
+			RadioSetStatus(app, "HLS stream not supported");
+			return;
+		}
+		if (app->playbackActive || app->playbackDonePending) {
+			SafeCopy(app->queuedInputName, sizeof(app->queuedInputName), app->rbFavouriteUrls[app->rbSelectedFavourite]);
+			app->queuedHaveRadioHostAddr = 0;
+			app->queuedRadioHostAddrBe = 0;
+			app->queuedPlayPending = 1;
+			StopPlayback(app);
+			RadioSetStatus(app, "Stopping current stream before playing favourite...");
+			return;
+		}
+		/* Favourites only store a name and URL, no favicon. */
+		app->currentRadioFavicon[0] = '\0';
+		SelectInternetStream(app, app->rbFavouriteUrls[app->rbSelectedFavourite]);
+		SafeCopy(app->currentRadioStationName, sizeof(app->currentRadioStationName), app->rbFavouriteNames[app->rbSelectedFavourite]);
+		app->haveRadioHostAddr = 0;
+		app->radioHostAddrBe = 0;
+		sprintf(msg, "Buffering - %.120s", app->rbFavouriteNames[app->rbSelectedFavourite]);
+		RadioSetStatus(app, msg);
+		StartPlayback(app);
+		return;
+	}
+	if (app->rbController.selected_index < 0) {
+		RadioSetStatus(app, "Select a station first.");
+		return;
+	}
+	st = rb_controller_get_station(&app->rbController, app->rbController.selected_index);
+	if (!st) {
+		RadioSetStatus(app, "Select a station first.");
+		return;
+	}
+	if (!app->hasHttps && rb_station_play_url(st) && strncmp(rb_station_play_url(st), "https://", 8) == 0) {
+		RadioSetStatus(app, "HTTPS/TLS streams are not supported yet");
+		return;
+	}
+	memset(&info, 0, sizeof(info));
+	RadioSetStatus(app, "Checking stream...");
+	Radio_LogTestModeSummary();
+	{
+		int probeDisabled = rb_probe_stream_probe_disabled();
+		RADIO_DBG(printf("radio-probe: flag check MP3_NO_STREAM_PROBE enabled=%d testEnable=%d before selected probe\n", probeDisabled, rb_probe_stream_probe_test_enabled());)
+		if (!probeDisabled) {
+			RADIO_DBG(printf("radio-ui: new stream probe start url=\"%s\"\n", rb_station_play_url(st));)
+		}
+	}
+	rc = rb_controller_probe_selected(&app->rbController, &info, peek, (int)sizeof(peek), &peekLen);
+	if (rc < 0) {
+		radio_reset_playback_state_after_stop(app, "probe-failed");
+		RadioSetStatus(app, app->rbController.last_error);
+		return;
+	}
+	if (info.codec != RB_STREAM_CODEC_MP3 && info.codec != RB_STREAM_CODEC_AAC &&
+		info.codec != RB_STREAM_CODEC_OGG) {
+		sprintf(msg, "Unsupported stream codec: %s (%.48s)", ProbeCodecName(info.codec), info.content_type);
+		radio_reset_playback_state_after_stop(app, "probe-unsupported-codec");
+		RadioSetStatus(app, msg);
+		return;
+	}
+	if (!info.final_url[0]) {
+		radio_reset_playback_state_after_stop(app, "probe-no-url");
+		RadioSetStatus(app, "Stream probe did not return a playable URL.");
+		return;
+	}
+	if (app->playbackActive || app->playbackDonePending) {
+		SafeCopy(app->queuedInputName, sizeof(app->queuedInputName), info.final_url);
+		app->queuedHaveRadioHostAddr = info.have_host_addr;
+		app->queuedRadioHostAddrBe = info.host_addr_be;
+		app->queuedPlayPending = 1;
+		StopPlayback(app);
+		RadioSetStatus(app, "Stopping current stream before playing selection...");
+		return;
+	}
+	{
+		int artworkDisabled = rb_probe_artwork_disabled();
+		RADIO_DBG(printf("radio-art: flag check MP3_NO_ARTWORK enabled=%d testEnable=%d before favicon/artwork fetch\n", artworkDisabled, rb_probe_artwork_test_enabled());)
+		if (artworkDisabled) {
+			app->currentRadioFavicon[0] = '\0';
+			if (radio_runtime_flag_enabled("MP3_NO_ARTWORK"))
+				RADIO_DBG(printf("radio-art: skipped by MP3_NO_ARTWORK\n");)
+			else
+				RADIO_DBG(printf("radio-art: disabled for run after fatal TLS/artwork transport fault\n");)
+		} else {
+			SafeCopy(app->currentRadioFavicon, sizeof(app->currentRadioFavicon), st->favicon);
+			RADIO_DBG(printf("radio-art: station favicon=\"%s\"\n", app->currentRadioFavicon);)
+		}
+	}
+	SelectInternetStream(app, info.final_url);
+	rb_station_display_name(st, msg, (int)sizeof(msg));
+	SafeCopy(app->currentRadioStationName, sizeof(app->currentRadioStationName), msg);
+	app->haveRadioHostAddr = info.have_host_addr;
+	app->radioHostAddrBe = info.host_addr_be;
+	sprintf(msg, "Buffering - %.140s", app->currentRadioStationName[0] ? app->currentRadioStationName : "Internet Radio");
+	RadioSetStatus(app, msg);
+	StartPlayback(app);
+}
+
+/*
+ * Play the internet stream currently held in gui->inputName straight from the
+ * main window's Play button.  Radio URLs need the same DNS/redirect/codec probe
+ * the radio browser performs before launching the decoder child -- launching
+ * StartPlayback() directly on a bare URL is what produced "stream failed" when
+ * replaying a stopped stream.  This mirrors RadioDoProbeAndPlay()'s tail but
+ * probes an arbitrary URL (rb_probe_stream_url) rather than a browser
+ * selection.  The caller guarantees no playback is currently active.
+ */
+static void RadioReplayCurrentUrl(HelixAmp3Gui *gui)
+{
+	static unsigned char peek[512];
+	RbStreamInfo info;
+	int peekLen = 0;
+	int rc;
+	char msg[256];
+	char url[HELIXAMP3_MAX_PATH];
+	const char *err;
+
+	SafeCopy(url, sizeof(url), gui->inputName);
+	if (Radio_IsMemoryPoisoned()) {
+		SetStatus(gui, "Memory corruption detected; restart MintAMP before playing radio.");
+		return;
+	}
+	if (Radio_PlaybackOwnsNetwork()) {
+		SetStatus(gui, "Radio playback owns networking; stop before probing another stream.");
+		return;
+	}
+	if (!gui->hasHttps && strncmp(url, "https://", 8) == 0) {
+		SetStatus(gui, "HTTPS/TLS streams are not supported yet");
+		return;
+	}
+	if (rb_probe_url_looks_hls(url)) {
+		SetStatus(gui, "HLS stream not supported");
+		return;
+	}
+	memset(&info, 0, sizeof(info));
+	SetStatus(gui, "Checking stream...");
+	rc = rb_probe_stream_url(url, &info, peek, (int)sizeof(peek), &peekLen);
+	if (rc < 0) {
+		char emsg[256];
+		err = rb_probe_error_text(rc);
+		if (!err || !err[0]) err = "radio stream failed";
+		if (info.error_detail[0]) {
+			sprintf(emsg, "%.150s [%.90s]", err, info.error_detail);
+			SetRadioFailureStatus(gui, emsg);
+		} else {
+			SetRadioFailureStatus(gui, err);
+		}
+		return;
+	}
+	if (info.codec != RB_STREAM_CODEC_MP3 && info.codec != RB_STREAM_CODEC_AAC &&
+		info.codec != RB_STREAM_CODEC_OGG) {
+		sprintf(msg, "Unsupported stream codec: %s (%.48s)",
+			ProbeCodecName(info.codec), info.content_type);
+		SetStatus(gui, msg);
+		return;
+	}
+	if (!info.final_url[0]) {
+		SetStatus(gui, "Stream probe did not return a playable URL.");
+		return;
+	}
+	SelectInternetStream(gui, info.final_url);
+	gui->haveRadioHostAddr = info.have_host_addr;
+	gui->radioHostAddrBe = info.host_addr_be;
+	sprintf(msg, "Buffering - %.140s",
+		gui->currentRadioStationName[0] ? gui->currentRadioStationName : "Internet Radio");
+	SetStatus(gui, msg);
+	StartPlayback(gui);
+}
+
+static void CloseRadioWindow(HelixAmp3Gui *app)
+{
+	struct IntuiMessage *msg;
+	struct MsgPort *port;
+	if (!app->rbWin) return;
+	RadioRememberSearchState(app);
+	RADIO_DBG(printf("radio-close: enter rbWin=%p gadgets=%p visualInfo=%p\n",
+		(void *)app->rbWin, (void *)app->rbGadgets, (void *)app->rbVisualInfo);)
+	/* Snapshot the UserPort BEFORE ModifyIDCMP(win, 0): with an
+	 * Intuition-allocated IDCMP port, ModifyIDCMP(win, 0) frees that port and
+	 * clears win->UserPort, so reading app->rbWin->UserPort afterwards to drain
+	 * messages would dereference a freed/NULL port -- GetMsg() on it then walks
+	 * low memory and can hard-lock the machine.  Drain through the saved pointer
+	 * before turning IDCMP off instead. */
+	port = app->rbWin->UserPort;
+	RADIO_DBG(printf("radio-close: draining UserPort=%p before ModifyIDCMP\n", (void *)port);)
+	if (port) {
+		while ((msg = GT_GetIMsg(port)) != NULL)
+			GT_ReplyIMsg(msg);
+	}
+	RADIO_DBG(printf("radio-close: before ModifyIDCMP(0)\n");)
+	ModifyIDCMP(app->rbWin, 0);
+	RADIO_DBG(printf("radio-close: before RemoveGList gadgets=%p\n", (void *)app->rbGadgets);)
+	if (app->rbGadgets)
+		RemoveGList(app->rbWin, app->rbGadgets, -1);
+	RADIO_DBG(printf("radio-close: before CloseWindow\n");)
+	CloseWindow(app->rbWin);
+	app->rbWin = NULL;
+	RADIO_DBG(printf("radio-close: after CloseWindow, before FreeGadgets\n");)
+	if (app->rbGadgets) {
+		FreeGadgets(app->rbGadgets);
+		app->rbGadgets = NULL;
+		app->rbGadContext = NULL;
+		app->rbGadList = NULL;
+	}
+	RADIO_DBG(printf("radio-close: before FreeVisualInfo=%p\n", (void *)app->rbVisualInfo);)
+	if (app->rbVisualInfo) {
+		FreeVisualInfo(app->rbVisualInfo);
+		app->rbVisualInfo = NULL;
+	}
+	RADIO_DBG(printf("radio-close: done\n");)
+}
+
+static void OpenRadioWindow(HelixAmp3Gui *app)
+{
+	struct NewWindow nw;
+	struct NewGadget ng;
+	struct Gadget *gad;
+	static STRPTR codecs[] = { (STRPTR)"All", (STRPTR)"MP3", (STRPTR)"AAC", (STRPTR)"AAC+", NULL };
+	if (app->rbWin) {
+		WindowToFront(app->rbWin);
+		ActivateWindow(app->rbWin);
+		return;
+	}
+	if (!app->win || !GadToolsBase || !app->hasNetwork)
+		return;
+	if (app->rbController.limit <= 0) {
+		rb_controller_init(&app->rbController);
+		app->rbShowHttps = FALSE;
+		app->rbSchemeMode = 0;
+		app->rbCountryMode = 0;
+	}
+	app->rbCountryMode = RadioCountryToIndex(app->rbController.countrycode);
+	app->rbShowingFavourites = FALSE;
+	app->rbSelectedFavourite = -1;
+	app->rbSearchInProgress = 0;
+	app->rbVisualInfo = GetVisualInfoA(app->win->WScreen, NULL);
+	if (!app->rbVisualInfo) return;
+	app->rbGadContext = CreateContext(&app->rbGadgets);
+	if (!app->rbGadContext) goto fail;
+	NewList(&app->rbList);
+	gad = app->rbGadContext;
+	memset(&ng, 0, sizeof(ng));
+	ng.ng_VisualInfo = app->rbVisualInfo; ng.ng_Flags = PLACETEXT_LEFT;
+	/* Compact vertical stack: three filter rows, results, actions and status.
+	 * Four pixels between filter gadgets and six around the larger sections
+	 * preserve the native GadTools separation without wasting a full row. */
+	ng.ng_LeftEdge = 88; ng.ng_TopEdge = RB_FILTER_ROW1_Y; ng.ng_Width = 220; ng.ng_Height = 18; ng.ng_GadgetText = (UBYTE *)"Search";
+	ng.ng_GadgetID = RB_GID_SEARCH_TEXT; gad = CreateGadget(STRING_KIND, gad, &ng, GTST_MaxChars, RB_MAX_NAME, GTST_String, (ULONG)app->rbController.name, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 390; ng.ng_TopEdge = RB_FILTER_ROW1_Y; ng.ng_Width = 90; ng.ng_GadgetText = (UBYTE *)"Codec"; ng.ng_GadgetID = RB_GID_CODEC;
+	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)codecs, GTCY_Active, RadioCodecToIndex(app->rbController.codec), TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 88; ng.ng_TopEdge = RB_FILTER_ROW2_Y; ng.ng_Width = 150; ng.ng_GadgetText = (UBYTE *)"Country";
+	ng.ng_GadgetID = RB_GID_COUNTRY; gad = CreateGadget(STRING_KIND, gad, &ng, GTST_MaxChars, RB_MAX_COUNTRY, GTST_String, (ULONG)app->rbController.countrycode, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 304; ng.ng_TopEdge = RB_FILTER_ROW2_Y; ng.ng_Width = 70; ng.ng_GadgetText = (UBYTE *)"Code"; ng.ng_GadgetID = RB_GID_COUNTRY_CODE; ng.ng_Flags = PLACETEXT_LEFT;
+	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)kRadioCountryLabels, GTCY_Active, app->rbCountryMode, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 430; ng.ng_TopEdge = RB_FILTER_ROW2_Y; ng.ng_Width = 90; ng.ng_GadgetText = (UBYTE *)"URL"; ng.ng_GadgetID = RB_GID_SCHEME; ng.ng_Flags = PLACETEXT_LEFT;
+	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)kRadioSchemeLabels, GTCY_Active, app->rbSchemeMode,
+		GA_Disabled, !app->hasHttps, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 88; ng.ng_TopEdge = RB_FILTER_ROW3_Y; ng.ng_Width = 90; ng.ng_GadgetText = (UBYTE *)"Limit"; ng.ng_GadgetID = RB_GID_LIMIT; ng.ng_Flags = PLACETEXT_LEFT;
+	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)kRadioSearchLimitLabels, GTCY_Active, RadioSearchLimitIndex(app->rbController.limit), TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 288; ng.ng_TopEdge = RB_FILTER_ROW3_Y; ng.ng_Width = 90; ng.ng_GadgetText = (UBYTE *)"Max kbps"; ng.ng_GadgetID = RB_GID_BITRATE; ng.ng_Flags = PLACETEXT_LEFT;
+	gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)kRadioBitrateLabels,
+		GTCY_Active, app->rbController.max_bitrate <= 0 ? 0 :
+			(app->rbController.max_bitrate <= 56 ? 1 :
+			(app->rbController.max_bitrate <= 64 ? 2 :
+			(app->rbController.max_bitrate <= 96 ? 3 : 4))), TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 8; ng.ng_TopEdge = RB_RESULTS_Y; ng.ng_Width = 524; ng.ng_Height = RB_RESULTS_H; ng.ng_GadgetText = NULL; ng.ng_GadgetID = RB_GID_RADIO_RESULTS; ng.ng_Flags = 0;
+	app->rbGadList = gad = CreateGadget(LISTVIEW_KIND, gad, &ng,
+		GTLV_Labels, (ULONG)&app->rbList,
+		GTLV_Selected, (ULONG)~0,
+		GTLV_ShowSelected, (ULONG)NULL,
+		TAG_DONE); if (!gad) goto fail;
+	ng.ng_TopEdge = RB_BUTTONS_Y; ng.ng_Width = 86; ng.ng_Height = 18; ng.ng_Flags = PLACETEXT_IN;
+	ng.ng_LeftEdge = 8; ng.ng_GadgetText = (UBYTE *)"Search"; ng.ng_GadgetID = RB_GID_SEARCH; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 100; ng.ng_GadgetText = (UBYTE *)"Play"; ng.ng_GadgetID = RB_GID_PROBE; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 192; ng.ng_GadgetText = (UBYTE *)"Add Fav"; ng.ng_GadgetID = RB_GID_ADD_FAV; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 284; ng.ng_GadgetText = (UBYTE *)"Favourites"; ng.ng_GadgetID = RB_GID_FAVOURITES; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 376; ng.ng_Width = 40; ng.ng_GadgetText = (UBYTE *)"Up"; ng.ng_GadgetID = RB_GID_UP; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 420; ng.ng_GadgetText = (UBYTE *)"Down"; ng.ng_GadgetID = RB_GID_DOWN; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 464; ng.ng_GadgetText = (UBYTE *)"Close"; ng.ng_GadgetID = RB_GID_CLOSE; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 8; ng.ng_TopEdge = RB_STATUS_Y; ng.ng_Width = 524; ng.ng_GadgetText = NULL; ng.ng_GadgetID = RB_GID_STATUS; ng.ng_Flags = 0;
+	gad = CreateGadget(TEXT_KIND, gad, &ng,
+		GTTX_Text, (ULONG)(app->rbStatusText[0] ? app->rbStatusText : "Ready."),
+		GTTX_Border, TRUE, TAG_DONE); if (!gad) goto fail;
+	memset(&nw, 0, sizeof(nw));
+	nw.LeftEdge = app->win->LeftEdge + 30; nw.TopEdge = app->win->TopEdge + 30;
+	nw.Width = RB_WIN_W; nw.Height = RB_WIN_H;
+	/* LISTVIEWIDCMP includes the gadget-down, mouse, and IntuiTicks events
+	 * consumed by GadTools' composite scroller and auto-repeat arrow gadgets.
+	 * Requesting only GADGETUP leaves the arrows drawn but unable to scroll. */
+	nw.IDCMPFlags = LISTVIEWIDCMP | IDCMP_CLOSEWINDOW |
+		IDCMP_REFRESHWINDOW | IDCMP_VANILLAKEY;
+	nw.Flags = WFLG_CLOSEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET | WFLG_SMART_REFRESH;
+	nw.Title = (UBYTE *)"Internet Radio";
+	nw.MinWidth = nw.MaxWidth = RB_WIN_W; nw.MinHeight = nw.MaxHeight = RB_WIN_H;
+	nw.Type = WBENCHSCREEN;
+	app->rbWin = OpenWindowTags(&nw, TAG_DONE);
+	if (!app->rbWin) goto fail;
+	AddGList(app->rbWin, app->rbGadgets, (UWORD)-1, -1, NULL);
+	RefreshGList(app->rbGadgets, app->rbWin, NULL, -1);
+	GT_RefreshWindow(app->rbWin, NULL);
+	RadioRefreshResults(app);
+	return;
+fail:
+	CloseRadioWindow(app);
+}
+
+static void HandleRadioWindow(HelixAmp3Gui *app)
+{
+	struct IntuiMessage *msg;
+	if (!app->rbWin) return;
+	while ((msg = GT_GetIMsg(app->rbWin->UserPort)) != NULL) {
+		ULONG cls = msg->Class;
+		UWORD code = msg->Code;
+		struct Gadget *gad = (struct Gadget *)msg->IAddress;
+		UWORD gid = gad ? gad->GadgetID : 0;
+		GT_ReplyIMsg(msg);
+		if (cls == IDCMP_CLOSEWINDOW) { CloseRadioWindow(app); return; }
+		if (cls == IDCMP_REFRESHWINDOW) {
+			GT_BeginRefresh(app->rbWin);
+			GT_EndRefresh(app->rbWin, TRUE);
+			continue;
+		}
+		if (cls == IDCMP_VANILLAKEY && code == 13) {
+			RadioDoSearch(app);
+			continue;
+		}
+		if (cls == IDCMP_GADGETUP) {
+			if (gid == RB_GID_RADIO_RESULTS)
+				RadioSelectResult(app, (ULONG)code);
+			else if (gid == RB_GID_SEARCH)
+				RadioDoSearch(app);
+			else if (gid == RB_GID_PROBE)
+				RadioDoProbeAndPlay(app);
+			else if (gid == RB_GID_ADD_FAV)
+				RadioAddFavourite(app);
+			else if (gid == RB_GID_FAVOURITES)
+				RadioToggleFavourites(app);
+			else if (gid == RB_GID_UP)
+				RadioMoveSelection(app, -1);
+			else if (gid == RB_GID_DOWN)
+				RadioMoveSelection(app, 1);
+			else if (gid == RB_GID_SCHEME) {
+				app->rbSchemeMode = ClampInt((int)code, 0, 2);
+				app->rbShowHttps = (app->rbSchemeMode != 0);
+				RadioRefreshResults(app);
+			}
+			else if (gid == RB_GID_COUNTRY_CODE) {
+				struct Gadget *countryGad = FindRadioGadget(app, RB_GID_COUNTRY);
+				app->rbCountryMode = ClampInt((int)code, 0, 6);
+				if (countryGad)
+					GT_SetGadgetAttrs(countryGad, app->rbWin, NULL,
+						GTST_String, (ULONG)RadioCountryFromIndex(app->rbCountryMode), TAG_DONE);
+			}
+			else if (gid == RB_GID_CLOSE) {
+				CloseRadioWindow(app);
+				return;
+			}
+		}
+	}
+}
+
+
+/* --- Playlist implementation -------------------------------------------- */
+
+static const char *PlaylistBaseName(const char *path)
+{
+	const char *p = path;
+	const char *last = path;
+	while (*p) {
+		if (*p == '/' || *p == ':')
+			last = p + 1;
+		p++;
+	}
+	return last;
+}
+
+static void PlaylistRebuildList(Playlist *pl)
+{
+	int i;
+	NewList(&pl->list);
+	for (i = 0; i < pl->count; i++) {
+		pl->nodes[i].ln_Name = pl->names[i];
+		pl->nodes[i].ln_Type = NT_USER;
+		pl->nodes[i].ln_Pri = 0;
+		AddTail(&pl->list, &pl->nodes[i]);
+	}
+}
+
+static void RefreshPlaylistView(HelixAmp3Gui *gui)
+{
+	PlaylistRebuildList(&gui->playlist);
+	if (gui->plWin && gui->plGadList) {
+		ULONG sel = (gui->playlist.selected >= 0) ?
+			(ULONG)gui->playlist.selected : (ULONG)~0;
+		GT_SetGadgetAttrs(gui->plGadList, gui->plWin, NULL,
+			GTLV_Labels, (ULONG)&gui->playlist.list,
+			GTLV_Selected, sel,
+			TAG_DONE);
+	}
+}
+
+static void ClosePlaylistWindow(HelixAmp3Gui *gui)
+{
+	struct IntuiMessage *msg;
+	struct MsgPort *port;
+	if (!gui->plWin)
+		goto free_resources;
+
+	/* Snapshot and drain the Intuition-allocated IDCMP port before
+	 * ModifyIDCMP(win, 0), matching CloseRadioWindow().  That call may free
+	 * the port and clear win->UserPort, so the window's UserPort must not be
+	 * read afterwards. */
+	port = gui->plWin->UserPort;
+	if (port) {
+		while ((msg = GT_GetIMsg(port)) != NULL)
+			GT_ReplyIMsg(msg);
+	}
+	ModifyIDCMP(gui->plWin, 0);
+	if (gui->plGadgets)
+		RemoveGList(gui->plWin, gui->plGadgets, -1);
+	CloseWindow(gui->plWin);
+	gui->plWin = NULL;
+free_resources:
+	if (gui->plGadgets) {
+		FreeGadgets(gui->plGadgets);
+		gui->plGadgets = NULL;
+		gui->plGadContext = NULL;
+		gui->plGadList = NULL;
+	}
+	if (gui->plVisualInfo) {
+		FreeVisualInfo(gui->plVisualInfo);
+		gui->plVisualInfo = NULL;
+	}
+}
+
+#define PL_WIN_W  460
+#define PL_LIST_H 192
+#define PL_BTN_H  18
+#define PL_BTN_Y  (PL_LIST_H + 28)
+#define PL_BTN_Y2 (PL_BTN_Y + PL_BTN_H + 4)
+#define PL_WIN_H  (PL_BTN_Y2 + PL_BTN_H + 10)
+
+static void OpenPlaylistWindow(HelixAmp3Gui *gui)
+{
+	struct NewWindow nw;
+	struct Gadget *gad;
+	struct NewGadget ng;
+	int bw;
+	int bx;
+
+	if (gui->plWin || !gui->win)
+		return;
+
+	gui->plVisualInfo = GetVisualInfoA(gui->win->WScreen, NULL);
+	if (!gui->plVisualInfo)
+		return;
+	gui->plGadContext = CreateContext(&gui->plGadgets);
+	if (!gui->plGadContext)
+		goto fail;
+	gad = gui->plGadContext;
+
+	PlaylistRebuildList(&gui->playlist);
+
+	memset(&ng, 0, sizeof(ng));
+	ng.ng_LeftEdge = 8;
+	ng.ng_TopEdge = 20;
+	ng.ng_Width = PL_WIN_W - 16;
+	ng.ng_Height = PL_LIST_H;
+	ng.ng_GadgetText = NULL;
+	ng.ng_GadgetID = PL_GID_LIST;
+	ng.ng_Flags = 0;
+	ng.ng_VisualInfo = gui->plVisualInfo;
+	gui->plGadList = gad = CreateGadget(LISTVIEW_KIND, gad, &ng,
+		GTLV_Labels, (ULONG)&gui->playlist.list,
+		GTLV_Selected, gui->playlist.selected >= 0 ? (ULONG)gui->playlist.selected : (ULONG)~0,
+		GTLV_ShowSelected, (ULONG)NULL,
+		GA_RelVerify, TRUE,
+		TAG_DONE);
+	if (!gad) goto fail;
+
+	bw = (PL_WIN_W - 16 - 12) / 4;
+	bx = 8;
+
+	memset(&ng, 0, sizeof(ng));
+	ng.ng_LeftEdge = bx;
+	ng.ng_TopEdge = PL_BTN_Y;
+	ng.ng_Width = bw;
+	ng.ng_Height = PL_BTN_H;
+	ng.ng_GadgetText = (UBYTE *)"Add";
+	ng.ng_GadgetID = PL_GID_ADD;
+	ng.ng_Flags = PLACETEXT_IN;
+	ng.ng_VisualInfo = gui->plVisualInfo;
+	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE);
+	if (!gad) goto fail;
+	bx += bw + 4;
+
+	ng.ng_LeftEdge = bx;
+	ng.ng_GadgetText = (UBYTE *)"Remove";
+	ng.ng_GadgetID = PL_GID_REMOVE;
+	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE);
+	if (!gad) goto fail;
+	bx += bw + 4;
+
+	ng.ng_LeftEdge = bx;
+	ng.ng_GadgetText = (UBYTE *)"Clear";
+	ng.ng_GadgetID = PL_GID_CLEAR;
+	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE);
+	if (!gad) goto fail;
+	bx += bw + 4;
+
+	ng.ng_LeftEdge = bx;
+	ng.ng_GadgetText = (UBYTE *)"Play";
+	ng.ng_GadgetID = PL_GID_PLAY;
+	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE);
+	if (!gad) goto fail;
+
+	/* Second button row: Load M3U | Save M3U */
+	bx = 8;
+	bw = (PL_WIN_W - 16 - 4) / 2;
+	ng.ng_TopEdge = PL_BTN_Y2;
+	ng.ng_Width = bw;
+
+	ng.ng_LeftEdge = bx;
 	ng.ng_GadgetText = (UBYTE *)"Load M3U";
 	ng.ng_GadgetID = PL_GID_LOAD_M3U;
 	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE);
