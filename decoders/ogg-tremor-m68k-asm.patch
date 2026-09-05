@@ -14,7 +14,7 @@ index 0000000..d197d24
 + *                                                                  *
 + ********************************************************************
 +
-+ function: 68020+ wide math functions, mirroring asm_arm.h
++ function: 68020/030/040 wide math functions, mirroring asm_arm.h
 +
 + Amiga/m68k addition: not part of upstream Tremor. Follows the same
 + pattern as this project's real/assembly.h (see MULSHIFT32_AMIGA_M68K_ASM),
@@ -26,7 +26,7 @@ index 0000000..d197d24
 +
 +#if defined(__GNUC__) && \
 +	(defined(__mc68020__) || defined(__mc68030__) || defined(__mc68040__) || \
-+	 defined(__mc68060__) || defined(mc68020))
++	 defined(mc68020) || defined(mc68030) || defined(mc68040))
 +
 +#if !defined(_V_WIDE_MATH) && !defined(_LOW_ACCURACY_)
 +#define _V_WIDE_MATH
@@ -124,7 +124,7 @@ index 0000000..d197d24
 +
 +#endif
 +
-+#endif /* __GNUC__ && 68020+ */
++#endif /* __GNUC__ && 68020/030/040 */
 +
 +#endif /* _M68K_ASSEM_ */
 diff --git a/src/tremor/misc.h b/src/tremor/misc.h
