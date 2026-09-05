@@ -34,6 +34,9 @@ jobs:
       - name: Check the 68060 AAC multiply arithmetic
         run: make -f Makefile.amiga aac-mulshift60-ref-test
 
+      - name: Check the 68060 Ogg multiply arithmetic
+        run: make -f Makefile.amiga ogg-mulshift60-ref-test
+
       - name: Compile with the Amiga cross-compiler
         env:
           CPU: ${{ matrix.cpu }}
