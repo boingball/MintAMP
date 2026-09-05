@@ -238,10 +238,11 @@ repository for the complete terms and source code.
 History
 -------
 
-1.3.0  Added CPU-specific AAC, Ogg Vorbis and WMA fixed-point helpers.
+1.3.0  Added CPU-specific AAC, FLAC, Ogg Vorbis and WMA math helpers.
        The 68030/68040 editions retain the fast full-result MULS.L path.
        The 68060 edition now uses hardware-only partial products, avoiding
-       software emulation of register-pair MULS.L in all three decoders.
+       software emulation of register-pair MULS.L in all four decoders.
+       FLAC LPC restoration now has a real implementation behind FLACASM.
        WMA FFT, MDCT, complex multiplication and windowing use the new path.
        Corrected decoder ASM build wiring and added bit-exact arithmetic tests.
 

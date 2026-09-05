@@ -36,7 +36,7 @@ Notes
 - The 68030 build uses the established 68020/68030/68040 assembly path.
 - The 68060 build deliberately does not inherit the full 68030 assembly bundle.
 - The v1.3 68060 release uses: lowrate060 huffman midside planars8.
-- AAC, Ogg and WMA decoder math selects its own CPU-safe implementation.
+- AAC, FLAC, Ogg and WMA decoder math selects its own CPU-safe implementation.
 - RADIO=1 enables internet radio support.
 - SSL=1 enables HTTPS through AmiSSL.
 - SSLCERTS=1 enables TLS certificate and hostname verification.

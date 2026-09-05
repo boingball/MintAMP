@@ -297,7 +297,7 @@ That document covers:
 
 - clean repo sync
 - submodule sync
-- FLAC decoder build
+- FLAC decoder build and CPU-specific LPC restoration with `FLACASM=1`
 - AAC decoder build and optional m68k helpers with `AACASM=1`
 - Ogg Vorbis/Tremor decoder build and optional m68k helpers with `OGGASM=1`
 - WAV, IFF-8SVX and WMA decoder builds
@@ -309,6 +309,10 @@ That document covers:
 - copying files to Amiga/WinUAE
 - runtime tests
 - Git hygiene
+
+Each GitHub Actions CPU artifact contains `amiga_mp3dec.fastexp` together with
+all six matching `*.decoder` modules, so a CI build can be tested on hardware
+without rebuilding or mixing modules from another CPU edition.
 
 ## Quick build
 
@@ -537,7 +541,13 @@ Build:
 make -C decoders flac
 ```
 
-FLAC is heavier than MP3 and performance depends on CPU, file complexity, output rate and playback settings.
+The existing `AMIGA_M68K_ASM` flag now selects a real LPC restoration helper.
+CPU=20/30/40 uses hardware register-pair `MULS.L` and `ADD/ADDX` for each
+predictor tap. CPU=60 uses exact hardware-only partial products and avoids the
+emulated register-pair form. Use `FLACASM=0` for the original portable-C path.
+
+FLAC is heavier than MP3 and performance depends on CPU, file complexity,
+predictor order, output rate and playback settings.
 
 ## Ogg Vorbis notes
 

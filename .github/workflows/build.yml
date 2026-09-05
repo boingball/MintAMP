@@ -40,6 +40,9 @@ jobs:
       - name: Check the 68030 and 68060 WMA multiply arithmetic
         run: make -f Makefile.amiga wma-mulshift-ref-test
 
+      - name: Check the 68030 and 68060 FLAC LPC arithmetic
+        run: make -f Makefile.amiga flac-lpc-ref-test
+
       - name: Compile with the Amiga cross-compiler
         env:
           CPU: ${{ matrix.cpu }}
@@ -51,14 +54,17 @@ jobs:
             amigadev/crosstools:m68k-amigaos \
             bash -c 'make -f Makefile.amiga fast030 CPU="$CPU" ASM60_GROUPS="$ASM60_GROUPS"'
 
-      - name: Confirm the binary was produced
+      - name: Confirm the player and decoder modules were produced
         run: |
           ls -la amiga_mp3dec.fastexp
+          ls -la decoders/{aac,flac,ogg,wma,wav,iff}.decoder
           file amiga_mp3dec.fastexp || true
 
-      - name: Upload compiled binary
+      - name: Upload player and decoder modules
         uses: actions/upload-artifact@v4
         with:
           name: MintAMP-${{ matrix.label }}-AmigaOS
-          path: amiga_mp3dec.fastexp
+          path: |
+            amiga_mp3dec.fastexp
+            decoders/*.decoder
           if-no-files-found: error
