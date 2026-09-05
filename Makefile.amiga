@@ -313,7 +313,7 @@ HALFASM_TEST_CPPFLAGS := -DAMIGA_M68K_ASM_FDCT32
 FAST030_ASM_SOURCES := $(CPU_ASM_SOURCES)
 AMIGA_HUNK_FAST_PREFERRED := python3 tools/amiga_fast_preferred_hunks.py
 
-.PHONY: all fast030 radio030 sslradio030 amissl-get-test amissl-free-repro-test amissl-spawn-repro-test amissl-exec-repro-test rb-stream-probe-test prof030 gui guir miniamp3 minimp3r sslgui sslguir fast030-halfasm-test gui-halfasm-test decoder-modules release release-clean clean print-command print-fast030-command print-gui-command print-guir-command cpu60-baseline cpu60-huffman cpu60-huffman-dequant cpu60-huffman-dequant-imdct cpu60-huffman-dequant-imdct-fdct32 cpu60-audit-stages poly60-ref-test aac-mulshift60-ref-test
+.PHONY: all fast030 radio030 sslradio030 amissl-get-test amissl-free-repro-test amissl-spawn-repro-test amissl-exec-repro-test rb-stream-probe-test prof030 gui guir miniamp3 minimp3r sslgui sslguir fast030-halfasm-test gui-halfasm-test decoder-modules release release-clean clean print-command print-fast030-command print-gui-command print-guir-command cpu60-baseline cpu60-huffman cpu60-huffman-dequant cpu60-huffman-dequant-imdct cpu60-huffman-dequant-imdct-fdct32 cpu60-audit-stages poly60-ref-test aac-mulshift60-ref-test ogg-mulshift60-ref-test
 
 all: $(TARGET) decoder-modules
 
@@ -544,6 +544,12 @@ aac-mulshift60-ref-test:
 	$(HOSTCC) -O2 -std=gnu99 tests/aac_mulshift60_ref_test.c \
 		-o aac_mulshift60_ref_test
 	./aac_mulshift60_ref_test
+
+# Host bit-exactness test for Tremor's CPU=60 MULT32/MULT31/SHIFT15 helpers.
+ogg-mulshift60-ref-test:
+	$(HOSTCC) -O2 -std=gnu99 tests/ogg_mulshift60_ref_test.c \
+		-o ogg_mulshift60_ref_test
+	./ogg_mulshift60_ref_test
 
 # Build all decoder modules (FLAC and AAC) — requires upstream decoder libraries.
 # CPU is forwarded as the same numeric 00/20/30/40/60 code used above so
