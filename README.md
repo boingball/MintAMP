@@ -67,7 +67,7 @@ make -f Makefile.amiga release \
   RADIO=1 \
   SSL=1 \
   SSLCERTS=1 \
-  RELEASE_NAME=MintAMP-v1.2-68030
+  RELEASE_NAME=MintAMP-v1.3-68030
 
 # Keep the first release drawer, but remove CPU-specific objects.
 make -f Makefile.amiga clean
@@ -78,7 +78,7 @@ make -f Makefile.amiga release \
   RADIO=1 \
   SSL=1 \
   SSLCERTS=1 \
-  RELEASE_NAME=MintAMP-v1.2-68060
+  RELEASE_NAME=MintAMP-v1.3-68060
 ```
 
 The clean between builds is required so 68030 objects are not reused in the
@@ -142,7 +142,7 @@ amiga_mp3dec.fastexp --play "https://example.com/direct-stream"
 
 Useful playback controls include `--rate`, `--quality`, `--subband-cap`, `--mono`, `--stereo`, `--fake-stereo`, `--buffer-seconds`, `--volume` and `--fast-mem`. Run the binary without arguments to display the complete option list.
 
-The `fast030` target name is retained for compatibility. The actual target CPU is selected with `CPU=00`, `20`, `30`, `40` or `60`. MintAMP v1.2 release drawers are produced for the established 68030 path and a separately tuned 68060 path.
+The `fast030` target name is retained for compatibility. The actual target CPU is selected with `CPU=00`, `20`, `30`, `40` or `60`. MintAMP v1.3 release drawers are produced for the established 68030 path and a separately tuned 68060 path.
 
 ## Supported formats
 
@@ -549,7 +549,7 @@ Build:
 make -C decoders ogg
 ```
 
-The default build applies MintAMP's optional m68k optimisation patch. Use `OGGASM=0` to build the portable C path.
+The default build enables CPU-aware m68k fixed-point helpers. The 68020/68030/68040 path keeps Tremor's fast full-result register-pair `MULS.L`; the 68060 path uses exact hardware-only partial products so it does not fall into the 68060 software-emulation trap. Use `OGGASM=0` to build the portable C path.
 
 ## WAV, IFF-8SVX and WMA notes
 
