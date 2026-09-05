@@ -1,0 +1,23 @@
+diff --git a/src/foxen-flac.c b/src/foxen-flac.c
+index 1d42e50..86f8439 100644
+--- a/src/foxen-flac.c
++++ b/src/foxen-flac.c
+@@ -930,6 +930,10 @@ static inline void _fx_flac_restore_lpc_signal(int32_t *blk, uint32_t blk_size,
+                                                int32_t *lpc_coeffs,
+                                                uint8_t lpc_order,
+                                                int8_t lpc_shift) {
++#if defined(MINTAMP_FLAC_LPC_ASM)
++	/* MINTAMP_FLAC_LPC_ASM_HOOK */
++	MintAmpFlacRestoreLpcSignal(blk, blk_size, lpc_coeffs, lpc_order, lpc_shift);
++#else
+ 	blk = (int32_t *)FX_ASSUME_ALIGNED(blk);
+ 	lpc_coeffs = (int32_t *)FX_ASSUME_ALIGNED(lpc_coeffs);
+ 
+@@ -941,6 +945,7 @@ static inline void _fx_flac_restore_lpc_signal(int32_t *blk, uint32_t blk_size,
+ 		}
+ 		blk[i] = blk[i] + (accu >> lpc_shift);
+ 	}
++#endif
+ }
+ 
+ /******************************************************************************
