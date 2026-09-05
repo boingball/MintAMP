@@ -1,56 +1,70 @@
 # MintAMP — Mini Internet Amiga Media Player
 
+[![Build](https://github.com/boingball/MintAMP/actions/workflows/build.yml/badge.svg)](https://github.com/boingball/MintAMP/actions/workflows/build.yml)
+![Version](https://img.shields.io/badge/version-1.3.0-brightgreen)
+![Status](https://img.shields.io/badge/status-stable-brightgreen)
+![AmigaOS](https://img.shields.io/badge/AmigaOS-3.0%2B-F28C28)
+![CPU](https://img.shields.io/badge/CPU-68030%20%7C%2068040%20%7C%2068060-2F74C0)
+
+![Formats](https://img.shields.io/badge/audio-MP3%20%7C%20AAC%20%7C%20FLAC%20%7C%20Ogg%20%7C%20WMA%20%7C%20WAV%20%7C%20IFF-7B68EE)
+![Streaming](https://img.shields.io/badge/radio-HTTP%20%7C%20HTTPS-22A699)
+![Output](https://img.shields.io/badge/output-Paula%20audio.device-CB4B16)
+![GUI](https://img.shields.io/badge/GUI-ReAction%20%7C%20GadTools-8A2BE2)
+[![GitHub stars](https://img.shields.io/github/stars/boingball/MintAMP)](https://github.com/boingball/MintAMP/stargazers)
+[![GitHub last commit](https://img.shields.io/github/last-commit/boingball/MintAMP)](https://github.com/boingball/MintAMP/commits/master)
+[![Support](https://img.shields.io/badge/Support-Buy%20Me%20a%20Coffee-FFDD00?logo=buymeacoffee&logoColor=000000)](https://buymeacoffee.com/boingball)
 ![AI](https://img.shields.io/badge/AI-assisted%20coding-6e7781)
 
-Classic AmigaOS m68k audio player with two GUI editions: MintAMP for ReAction/ClassAct and MintAMP-GT for GadTools. Both editions use the same Helix-based playback engine and support local media and HTTP/HTTPS internet radio, with modular AAC, FLAC, Ogg Vorbis, WMA, WAV and IFF decoders, Radio Browser search, ICY metadata, station artwork, and Paula audio output.
+**A complete multiformat player and internet-radio client for classic AmigaOS.** MintAMP plays local audio, searches and streams internet radio, displays live metadata and station artwork, and outputs directly through Paula using `audio.device` — no AHI or sound card required.
 
-This started as an Amiga port of the Helix fixed-point MP3 decoder. It has grown into a small but surprisingly capable classic Amiga audio player for real hardware and emulators.
+MintAMP ships with ReAction/ClassAct, GadTools and command-line editions. Its fixed-point playback engine and modular decoders have separate 68030/68040 and dedicated 68060 builds for real classic hardware and emulators.
 
-<img width="713" height="692" alt="image" src="https://github.com/user-attachments/assets/fcc2acc5-2900-47e7-b5aa-273fd0c4520f" />
+[Build guide](docs/building-amiga.md) · [Release recipe](BUILD-RELEASE.txt) · [CI builds](https://github.com/boingball/MintAMP/actions/workflows/build.yml) · [Decoder details](#decoder-modules)
 
-
-```text
-Classic AmigaOS • m68k • Paula • MP3 • AAC • FLAC • Ogg Vorbis • WMA • WAV • IFF-8SVX • HTTP/HTTPS radio • ReAction • GadTools
-```
+<img width="713" height="692" alt="MintAMP running on Amiga Workbench" src="https://github.com/user-attachments/assets/fcc2acc5-2900-47e7-b5aa-273fd0c4520f" />
 
 ## Highlights
 
-- Local MP3 playback using the Helix fixed-point decoder
-- m68k optimised MP3 decode path for 030+ builds
-- AAC-LC ADTS playback through external `aac.decoder`
-- Optional AAC m68k helper paths with `AACASM=1`
-- FLAC playback through external `flac.decoder`
-- Ogg Vorbis playback through fixed-point Tremor in `ogg.decoder`
-- Classic WMAv1/WMAv2 playback through `wma.decoder`
-- PCM WAV playback through `wav.decoder`
-- Amiga IFF-8SVX playback through `iff.decoder`
-- Modular decoder loading
-- ReAction/ClassAct GUI: `MintAMP`
-- GadTools GUI: `MintAMP-GT`
-- Iconify while playback continues (native ReAction AppIcon; Project/Iconify in GadTools)
-- CLI playback mode: `amiga_mp3dec.fastexp`
-- Direct HTTP and HTTPS internet radio with `RADIO=1 SSL=1`
-- Optional AmiSSL certificate verification with `SSLCERTS=1`
-- Radio Browser station search
-- ICY metadata parsing and live title/artist updates
-- Station name, genre, bitrate and content-type display
-- JPEG, PNG, WebP, ICO and SVG station artwork support in both GUI editions
-- Resilient radio buffering and reconnect handling
-- Paula audio.device playback output
-- Fast low-rate playback options for slower classic systems
+- **Multiformat playback:** MP3, AAC-LC/AAC+ ADTS, FLAC, Ogg Vorbis, classic WMA, PCM WAV and Amiga IFF-8SVX.
+- **Internet radio:** direct HTTP/HTTPS streams, Radio Browser search, favourites, ICY title/artist updates and resilient reconnect handling.
+- **Workbench friendly:** ReAction/ClassAct and GadTools interfaces, playlists, track information, ratings, artwork and iconification while playback continues.
+- **Classic output:** direct Paula `audio.device` playback with configurable rate, quality, channel mode, buffering and reduced-work modes for slower systems.
+- **CPU-aware decoders:** dedicated 68060-safe multiply and hot-loop paths avoid instructions that the 68060 handles through software emulation.
+- **Modular distribution:** matching AAC, FLAC, Ogg, WMA, WAV and IFF decoder modules are bundled with every release edition and CI artifact.
+
+## Choose your edition
+
+| Installed CPU | Release drawer | Notes |
+|---|---|---|
+| 68030 or 68040 | `MintAMP-v1.3-68030` | Established full-result m68k assembly paths. |
+| 68060 | `MintAMP-v1.3-68060` | Dedicated 68060-safe and 68060-optimised player and decoder paths. |
+
+Each drawer contains all three front ends:
+
+| Program | Interface | Best for |
+|---|---|---|
+| `MintAMP` | ReAction/ClassAct | The full Workbench experience. |
+| `MintAMP-GT` | GadTools | Systems without ReAction/ClassAct. |
+| `amiga_mp3dec.fastexp` | Shell | Scripts, direct playback, testing and lower overhead. |
+
+Keep the player and the decoder modules from the same CPU drawer together. In particular, do not use the 68030 decoder set on a real 68060: its full-result `MULS.L` instructions are software-emulated and can be dramatically slower.
 
 ## Project status
 
-MintAMP is active classic Amiga development. Older development builds were named MiniAMP3/minimp3r; compatibility make targets are retained where practical.
+> [!IMPORTANT]
+> **MintAMP 1.3 is a stable, complete application.** It is no longer just a Helix MP3 port or decoder demonstration: local playback, both GUI editions, the CLI, modular codecs and direct internet radio are integrated release features.
 
-Current focus areas:
+| Area | Status | Notes |
+|---|---:|---|
+| ReAction and GadTools applications | Stable | Local playback, playlists, radio search, metadata, artwork and iconification. |
+| MP3, AAC, FLAC, Ogg, WAV and IFF | Stable | CPU-matched modules are included with the application. |
+| HTTP/HTTPS internet radio | Stable | HTTPS requires AmiSSL; certificate verification is optional at build time. |
+| 68030/68040 edition | Stable | Uses the established m68k assembly path. |
+| 68060 edition | Stable, hardware tested | Dedicated MP3 and decoder optimisations tested on a real 68060 Amiga. |
+| Classic WMA | Compatibility-limited | WMAv1/WMAv2 only; WMA Pro, Lossless and Voice are not supported. |
+| HLS/M3U8 | Out of scope | MintAMP plays direct stream URLs. |
 
-- ReAction GUI polish
-- GadTools GUI parity
-- internet radio stability
-- station artwork and logo handling
-- decoder performance and compatibility improvements
-- further m68k optimisation
+Development continues around performance, codec compatibility and UI polish, but those are improvements to a functioning player rather than missing foundations. Older development builds were named MiniAMP3/minimp3r; compatibility make targets remain where practical.
 
 ## Build both release editions
 
@@ -88,22 +102,6 @@ path and also supports 68040; the 68060 edition uses only the selected
 68060-safe optimisation groups. The same `CPU` value is passed to every
 external decoder module. The recipe is also kept in
 [`BUILD-RELEASE.txt`](BUILD-RELEASE.txt).
-
-## Screenshots
-
-Screenshots are expected under:
-
-```text
-docs/screenshots/
-```
-
-Suggested screenshots:
-
-- ReAction GUI playing a local MP3
-- ReAction GUI showing Radio Browser results
-- ReAction GUI playing HTTPS radio with ICY metadata and artwork
-- GadTools GUI
-- CLI playback output
 
 ## CLI / `fast030` edition
 
@@ -298,8 +296,8 @@ That document covers:
 - clean repo sync
 - submodule sync
 - FLAC decoder build and CPU-specific LPC restoration with `FLACASM=1`
-- AAC decoder build and optional m68k helpers with `AACASM=1`
-- Ogg Vorbis/Tremor decoder build and optional m68k helpers with `OGGASM=1`
+- AAC decoder build and CPU-aware m68k helpers (`AACASM=0` selects the portable-C fallback)
+- Ogg Vorbis/Tremor decoder build and CPU-aware m68k helpers (`OGGASM=0` selects the portable-C fallback)
 - WAV, IFF-8SVX and WMA decoder builds
 - radio builds with `RADIO=1`
 - HTTPS/AmiSSL builds with `SSL=1`
@@ -511,13 +509,13 @@ Build AAC normally:
 make -C decoders aac
 ```
 
-Build AAC with optional m68k asm helpers:
+Build AAC with the m68k assembly helpers explicitly selected (they are enabled by default):
 
 ```sh
 make -C decoders aac AACASM=1
 ```
 
-`AACASM=1` enables optional m68k helper paths for:
+`AACASM=1` selects m68k helper paths for:
 
 ```text
 AMIGA_M68K_ASM_AAC_HUFFMAN
