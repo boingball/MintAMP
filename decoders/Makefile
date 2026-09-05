@@ -43,6 +43,7 @@ endif
 OGGASM ?= 1
 AACASM ?= 1
 WMAASM ?= 1
+FLACASM ?= 1
 # override: these decoders link with -nostartfiles against a hand-written
 # Exec-backed allocator shim (see ogg_alloc.c/aac_alloc.c/flac_alloc.c) that
 # only works if GCC never recognizes/inlines a call as "the real libc
@@ -80,15 +81,33 @@ flac: flac.decoder
 
 FLAC_CFLAGS := $(filter-out -std=gnu89 -std=gnu11,$(CFLAGS)) -std=gnu99 -I. -Iflac/src
 
+FLAC_ASM_PATCH := flac-libfoxenflac-m68k-lpc.patch
+FLAC_ASM_SOURCE := flac/src/foxen-flac.c
+FLAC_ASM_MARKER := flac/.mintamp-m68k-lpc-v1
+
+# libfoxenflac is a third-party submodule. Keep the CPU implementation in the
+# parent repository and carry only the small dispatch hook as a patch.
+$(FLAC_ASM_MARKER): $(FLAC_ASM_PATCH)
+	@if grep -q 'MINTAMP_FLAC_LPC_ASM_HOOK' $(FLAC_ASM_SOURCE); then \
+	    echo "libfoxenflac m68k LPC patch already applied, skipping."; \
+	else \
+	    echo "Applying libfoxenflac m68k LPC patch ($(FLAC_ASM_PATCH))..."; \
+	    cd flac && patch -p1 < ../$(FLAC_ASM_PATCH); \
+	fi
+	@touch $@
+
+ifneq ($(filter 1 yes true on,$(FLACASM)),)
+FLAC_CFLAGS += -include flac_m68k_lpc.h -DAMIGA_M68K_ASM
+endif
+
 flac_entry.o flac_alloc.o flac_module.o: decoder_module.h
 flac_alloc.o flac_module.o flac/src/foxen-flac.o: flac_alloc.h
-flac/src/foxen-flac.o: flac_standalone.h
+flac/src/foxen-flac.o: flac_standalone.h flac_m68k_lpc.h $(FLAC_ASM_MARKER)
 flac_module.o flac/src/foxen-flac.o: flac/src/foxen-flac.h
 flac/src/foxen-flac.o: FLAC_CFLAGS += -include flac_standalone.h \
 	-Dmalloc=FlacModuleMalloc -Dcalloc=FlacModuleCalloc \
 	-Drealloc=FlacModuleRealloc -Dfree=FlacModuleFree \
-	-Dexit=FlacModuleExit -DNDEBUG \
-	-DAMIGA_M68K_ASM
+	-Dexit=FlacModuleExit -DNDEBUG
 
 %.o: %.c
 	$(CC) $(FLAC_CFLAGS) -c -o $@ $<
