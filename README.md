@@ -52,6 +52,43 @@ Current focus areas:
 - decoder performance and compatibility improvements
 - further m68k optimisation
 
+## Build both release editions
+
+MintAMP ships as separate 68030/68040 and 68060 editions. A plain
+`make clean && make release` builds only the default 68030 edition; use the
+following complete recipe to build both release drawers:
+
+```sh
+make -f Makefile.amiga release-clean
+make -f Makefile.amiga clean
+
+make -f Makefile.amiga release \
+  CPU=30 \
+  RADIO=1 \
+  SSL=1 \
+  SSLCERTS=1 \
+  RELEASE_NAME=MintAMP-v1.2-68030
+
+# Keep the first release drawer, but remove CPU-specific objects.
+make -f Makefile.amiga clean
+
+make -f Makefile.amiga release \
+  CPU=60 \
+  ASM60_GROUPS="lowrate060 huffman midside planars8" \
+  RADIO=1 \
+  SSL=1 \
+  SSLCERTS=1 \
+  RELEASE_NAME=MintAMP-v1.2-68060
+```
+
+The clean between builds is required so 68030 objects are not reused in the
+68060 edition. Do not run `release-clean` between them because it removes the
+first completed drawer. The 68030 edition uses the established full assembly
+path and also supports 68040; the 68060 edition uses only the selected
+68060-safe optimisation groups. The same `CPU` value is passed to every
+external decoder module. The recipe is also kept in
+[`BUILD-RELEASE.txt`](BUILD-RELEASE.txt).
+
 ## Screenshots
 
 Screenshots are expected under:
@@ -273,36 +310,6 @@ That document covers:
 - runtime tests
 - Git hygiene
 
-## MintAMP v1.2 release builds
-
-The exact v1.2 release recipe is also kept in [`BUILD-RELEASE.txt`](BUILD-RELEASE.txt).
-
-Build both release drawers from a clean release area:
-
-```sh
-make -f Makefile.amiga release-clean
-make -f Makefile.amiga clean
-
-make -f Makefile.amiga release \
-  CPU=30 \
-  RADIO=1 \
-  SSL=1 \
-  SSLCERTS=1 \
-  RELEASE_NAME=MintAMP-v1.2-68030
-
-make -f Makefile.amiga clean
-
-make -f Makefile.amiga release \
-  CPU=60 \
-  ASM60_GROUPS="lowrate060 huffman midside planars8" \
-  RADIO=1 \
-  SSL=1 \
-  SSLCERTS=1 \
-  RELEASE_NAME=MintAMP-v1.2-68060
-```
-
-The 68030 release uses the established 030-class assembly path. The v1.2 68060 release deliberately uses the tuned `lowrate060 huffman midside planars8` group rather than inheriting the full 68030 assembly bundle. The process-wide task-safe allocator remains enabled by default for normal release builds.
-
 ## Quick build
 
 From a clean checkout:
@@ -515,7 +522,10 @@ AMIGA_M68K_ASM_AAC_STEREO
 AMIGA_M68K_ASM_AAC_IMDCT
 ```
 
-The plain C fallback remains available by building without `AACASM=1`.
+The helpers are enabled by default. The 68020/030/040 path uses full-result
+`MULS.L`; CPU=60 selects a bit-exact implementation made from hardware
+two-operand `MULS.L`/`MULU.L` partial products instead, avoiding the emulated
+register-pair form. The plain C fallback remains available with `AACASM=0`.
 
 ## FLAC notes
 

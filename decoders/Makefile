@@ -41,6 +41,7 @@ $(error Unknown CPU=$(CPU) -- expected one of: 00 20 30 40 60)
 endif
 
 OGGASM ?= 1
+AACASM ?= 1
 # override: these decoders link with -nostartfiles against a hand-written
 # Exec-backed allocator shim (see ogg_alloc.c/aac_alloc.c/flac_alloc.c) that
 # only works if GCC never recognizes/inlines a call as "the real libc
@@ -154,9 +155,23 @@ AAC_SHIM_DIR := aac-arduino-shim
 
 AAC_CFLAGS := $(CFLAGS) -I. -I$(AAC_SHIM_DIR) -Iaac -DARDUINO
 
+# The Helix AAC sources have optional stage-level m68k helpers.  Keep the
+# single full-result MULS.L on 68020/030/040; the forced-include MintAMP
+# wrapper selects a 68060-safe, bit-exact partial-product implementation using
+# only the hardware two-operand (low-result) multiply form when CPU=60.
+# AACASM=0 remains the portable-C comparison/fallback build.
+ifneq ($(filter 1 yes true on,$(AACASM)),)
+AAC_CFLAGS += -include aac_m68k_aac_optimized.h \
+	-DAMIGA_M68K_ASM_AAC_HUFFMAN \
+	-DAMIGA_M68K_ASM_AAC_DEQUANT \
+	-DAMIGA_M68K_ASM_AAC_STEREO \
+	-DAMIGA_M68K_ASM_AAC_IMDCT
+endif
+
 aac_entry.o aac_alloc.o aac_module.o: decoder_module.h
 aac_alloc.o aac_module.o: aac_alloc.h
 aac_module.o: aac/aacdec.h
+$(AAC_LIB_SRCS:.c=.o): aac_m68k_aac_optimized.h
 
 # Compile our wrapper objects with base flags (no Arduino shim needed).
 aac_entry.o aac_alloc.o aac_module.o: %.o: %.c

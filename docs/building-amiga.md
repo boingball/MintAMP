@@ -135,7 +135,8 @@ rm -f decoders/aac.decoder decoders/aac.decoder.map
 make -C decoders aac
 ```
 
-Building without `AACASM=1` keeps the C fallback path.
+AAC asm is enabled by default. `AACASM=0` keeps the C fallback path for
+comparison or troubleshooting.
 
 ### AAC m68k assembly helper build
 
@@ -153,6 +154,13 @@ make -C decoders aac AACASM=1
 * `AMIGA_M68K_ASM_AAC_DEQUANT`
 * `AMIGA_M68K_ASM_AAC_STEREO`
 * `AMIGA_M68K_ASM_AAC_IMDCT`
+
+The implementation is CPU-aware. 68020/68030/68040 builds use the hardware
+32x32-to-64 `MULS.L` result directly. A 68060 build instead constructs the
+same bit-exact result from four hardware, two-operand `MULS.L`/`MULU.L`
+partial products, avoiding the software-emulated register-pair form. Run
+`make -f Makefile.amiga aac-mulshift60-ref-test` to check the arithmetic
+against the 64-bit reference on the host.
 
 After either AAC build, verify the module entrypoint:
 
