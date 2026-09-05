@@ -238,11 +238,12 @@ repository for the complete terms and source code.
 History
 -------
 
-1.3.0  Added CPU-specific AAC and Ogg Vorbis fixed-point multiply helpers.
+1.3.0  Added CPU-specific AAC, Ogg Vorbis and WMA fixed-point helpers.
        The 68030/68040 editions retain the fast full-result MULS.L path.
        The 68060 edition now uses hardware-only partial products, avoiding
-       software emulation of register-pair MULS.L in both decoders.
-       Corrected the AACASM build wiring and added bit-exact arithmetic tests.
+       software emulation of register-pair MULS.L in all three decoders.
+       WMA FFT, MDCT, complex multiplication and windowing use the new path.
+       Corrected decoder ASM build wiring and added bit-exact arithmetic tests.
 
 1.2.0  Added Workbench AppIcon iconification to both ReAction and GadTools.
        Expanded and repaired the GadTools Internet Radio browser, including

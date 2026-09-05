@@ -176,7 +176,34 @@ Expected first real symbol:
 
 If anything appears before `_DecoderModuleEntry`, the module can crash when loaded because the Amiga-side loader may enter the wrong code address.
 
-## 7. Build main player
+## 7. Build WMA decoder
+
+WMA fixed-point assembly is enabled by default and selected by `CPU`:
+
+```sh
+make -C decoders clean
+make -C decoders wma CPU=30
+
+make -C decoders clean
+make -C decoders wma CPU=60
+```
+
+The 68020/030/040 path uses the hardware full-result register-pair `MULS.L`.
+The 68060 path uses four hardware two-operand partial products and never emits
+that emulated register-pair form from the WMA helpers. Both paths replace the
+portable `int64_t` multiplications used throughout the FFT, MDCT, complex
+multiply and window code. The window helpers process two independent samples
+per iteration to reduce loop overhead and expose scheduling freedom on 68060.
+
+For a portable-C comparison build and the host arithmetic tests:
+
+```sh
+make -C decoders clean
+make -C decoders wma CPU=60 WMAASM=0
+make -f Makefile.amiga wma-mulshift-ref-test
+```
+
+## 8. Build main player
 
 Build the normal fast 030 Amiga player:
 
@@ -192,7 +219,7 @@ make -f Makefile.amiga fast030 RADIO=1
 
 `RADIO=1` enables HTTP MP3 streaming. It requires `bsdsocket.library` at runtime on the Amiga.
 
-## 8. Quick full build block
+## 9. Quick full build block
 
 The following condensed sequence performs a destructive sync, cleans build artefacts, builds the known-good FLAC decoder, builds the AAC decoder with optional m68k assembly helpers, builds the radio-enabled fast 030 player, and verifies decoder entrypoints:
 
@@ -227,7 +254,7 @@ Both decoder checks should start with:
 00000000 T _DecoderModuleEntry
 ```
 
-## 9. Files to copy to Amiga
+## 10. Files to copy to Amiga
 
 Expected runtime layout on the Amiga:
 
@@ -243,7 +270,7 @@ libhelix-mp3/
 
 The exact executable may depend on the selected build target/front-end. Copy the player executable you built, plus the decoder modules needed for the file types you want to play.
 
-## 10. Runtime tests
+## 11. Runtime tests
 
 ### Local playback tests
 
@@ -283,7 +310,7 @@ Expected radio behaviour:
 * Stop works without GUI corruption or hard lock;
 * menus remain safe after stopping radio.
 
-## 11. Final test checklist
+## 12. Final test checklist
 
 Before treating a build as known-good, verify:
 
@@ -298,7 +325,7 @@ Before treating a build as known-good, verify:
 * [ ] Restart radio after stopping
 * [ ] No decoder entrypoint regression
 
-## 12. Git hygiene
+## 13. Git hygiene
 
 Do not commit generated files, local binaries, downloaded test media, or Windows alternate-data-stream marker files.
 
@@ -319,6 +346,6 @@ Check the tree before committing:
 git status --short
 ```
 
-## 13. README link
+## 14. README link
 
 The repository README should point to this page so new developers can find the complete Amiga build instructions quickly.

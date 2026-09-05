@@ -22,6 +22,7 @@
 
 //#include "types.h"
 #include "fft.h"
+#include "asm_m68k.h"
 
 void ff_imdct_calc(unsigned int nbits, fixed32 *output, const fixed32 *input);
 void ff_imdct_half(unsigned int nbits, fixed32 *output, const fixed32 *input);
@@ -52,6 +53,13 @@ static inline int32_t fixmul32b(int32_t x, int32_t y)
         : [y] "d"  (y)
     );
     return x;
+}
+
+#elif defined(MINTAMP_WMA_M68K_ACTIVE)
+
+static inline int32_t fixmul32b(int32_t x, int32_t y)
+{
+    return WmaM68kMulShift31(x, y);
 }
 
 #else
@@ -110,6 +118,13 @@ void CMUL(fixed32 *x, fixed32 *y,
                 : [x] "a" (x), [y] "a" (y),
                   [b] "r" (b), [t] "r" (t), [v] "r" (v)
                 : "cc", "memory");
+}
+#elif defined(MINTAMP_WMA_M68K_ACTIVE)
+static inline
+void CMUL(fixed32 *x, fixed32 *y,
+          fixed32 a, fixed32 b, fixed32 t, fixed32 v)
+{
+    WmaM68kComplexMultiply(x, y, a, b, t, v);
 }
 #else
 static inline

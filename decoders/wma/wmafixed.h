@@ -28,6 +28,7 @@
 */
 
 #include "types.h"
+#include "asm_m68k.h"
 
 #define PRECISION       16
 #define PRECISION64     16
@@ -90,6 +91,13 @@ static inline int32_t fixmul32(int32_t x, int32_t y)
         : [y] "d"  (y)
     );
     return x;
+}
+
+#elif defined(MINTAMP_WMA_M68K_ACTIVE)
+
+static inline fixed32 fixmul32(fixed32 x, fixed32 y)
+{
+    return WmaM68kMulShift16(x, y);
 }
 
 #else
@@ -217,6 +225,20 @@ static inline void vector_fmul_reverse(fixed32 *dst, const fixed32 *src0, const 
         "jne 0b;"
         : [s0] "+a" (src0), [s1] "+a" (src1), [dst] "+a" (dst), [n] "+d" (len)
         : : "d0", "d1", "d2", "d3", "d4", "d5", "a0", "a1", "memory", "cc");
+}
+
+#elif defined(MINTAMP_WMA_M68K_ACTIVE)
+
+static inline void vector_fmul_add_add(fixed32 *dst, const fixed32 *src0,
+                                       const fixed32 *src1, int len)
+{
+    WmaM68kVectorFmulAdd(dst, src0, src1, len);
+}
+
+static inline void vector_fmul_reverse(fixed32 *dst, const fixed32 *src0,
+                                       const fixed32 *src1, int len)
+{
+    WmaM68kVectorFmulReverse(dst, src0, src1, len);
 }
 
 #else

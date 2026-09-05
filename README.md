@@ -560,6 +560,8 @@ The WAV and IFF modules are compact decoders written for MintAMP:
 
 The WMA module accepts classic WMAv1 and WMAv2 codec streams in ASF containers. Its fixed-point codec core comes from Rockbox's libwma and is derived from FFmpeg; the ASF demuxer and MintAMP module integration are project-specific. WMA Pro, Lossless, Voice and other ASF-contained codecs are out of scope.
 
+WMA's CPU-aware fixed-point helpers are enabled by default. CPU=20/30/40 uses the hardware full-result register-pair `MULS.L`; CPU=60 reconstructs the exact result with four hardware-only partial products. These primitives feed WMA's FFT, MDCT, complex multiplication and unrolled window loops. Use `WMAASM=0` for the portable 64-bit-C fallback and A/B testing.
+
 Build individually:
 
 ```sh

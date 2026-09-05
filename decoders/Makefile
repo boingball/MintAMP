@@ -42,6 +42,7 @@ endif
 
 OGGASM ?= 1
 AACASM ?= 1
+WMAASM ?= 1
 # override: these decoders link with -nostartfiles against a hand-written
 # Exec-backed allocator shim (see ogg_alloc.c/aac_alloc.c/flac_alloc.c) that
 # only works if GCC never recognizes/inlines a call as "the real libc
@@ -497,6 +498,14 @@ wma: wma.decoder
 
 WMA_CFLAGS := $(CFLAGS) -I. -Iwma
 
+# Rockbox's WMA core otherwise uses int64_t C for every fixed-point multiply.
+# CPU=20/30/40 gets the hardware full-result MULS.L path; CPU=60 gets an exact
+# four-part implementation using only hardware low-result multiplies.
+# WMAASM=0 retains the portable C decoder for comparison and fallback.
+ifneq ($(filter 1 yes true on,$(WMAASM)),)
+WMA_CFLAGS += -DAMIGA_M68K_WMA_ASM
+endif
+
 wma_entry.o wma_alloc.o wma_asf.o wma_module.o: decoder_module.h
 wma_alloc.o wma_asf.o wma_module.o: wma_alloc.h
 wma_asf.o wma_module.o: wma_asf.h
@@ -511,7 +520,7 @@ wma_entry.o wma_alloc.o wma_asf.o wma_module.o: %.o: %.c
 # same forced-rename pattern flac_module.c/aac_module.c/ogg_module.c use
 # for malloc/calloc/free, needed here because no libc is linked into these
 # -nostartfiles decoder-module hunks.
-wma/%.o: wma/%.c
+wma/%.o: wma/%.c wma/asm_m68k.h
 	$(CC) $(WMA_CFLAGS) \
 	    -Dmemcpy=WmaMemcpy \
 	    -Dmemset=WmaMemset \
