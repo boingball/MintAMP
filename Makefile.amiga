@@ -317,7 +317,7 @@ HALFASM_TEST_CPPFLAGS := -DAMIGA_M68K_ASM_FDCT32
 FAST030_ASM_SOURCES := $(CPU_ASM_SOURCES)
 AMIGA_HUNK_FAST_PREFERRED := python3 tools/amiga_fast_preferred_hunks.py
 
-.PHONY: all fast030 radio030 sslradio030 amissl-get-test amissl-free-repro-test amissl-spawn-repro-test amissl-exec-repro-test rb-stream-probe-test prof030 gui guir miniamp3 minimp3r sslgui sslguir fast030-halfasm-test gui-halfasm-test decoder-modules release release-clean clean print-command print-fast030-command print-gui-command print-guir-command cpu60-baseline cpu60-huffman cpu60-huffman-dequant cpu60-huffman-dequant-imdct cpu60-huffman-dequant-imdct-fdct32 cpu60-audit-stages poly60-ref-test aac-mulshift60-ref-test ogg-mulshift60-ref-test wma-mulshift-ref-test flac-lpc-ref-test
+.PHONY: all fast030 radio030 sslradio030 amissl-get-test amissl-free-repro-test amissl-spawn-repro-test amissl-exec-repro-test rb-stream-probe-test prof030 gui guir miniamp3 minimp3r sslgui sslguir fast030-halfasm-test gui-halfasm-test decoder-modules release release-clean clean print-command print-fast030-command print-gui-command print-guir-command cpu60-baseline cpu60-huffman cpu60-huffman-dequant cpu60-huffman-dequant-imdct cpu60-huffman-dequant-imdct-fdct32 cpu60-audit-stages poly60-ref-test aac-mulshift60-ref-test ogg-mulshift60-ref-test wma-mulshift-ref-test flac-lpc-ref-test radio-metadata-test
 
 all: $(TARGET) decoder-modules
 
@@ -573,6 +573,13 @@ flac-lpc-ref-test:
 		tests/flac_lpc_ref_test.c -o flac_lpc060_ref_test
 	./flac_lpc060_ref_test
 
+# Host test for bounded ICY RadioInfo XML extraction. Bauer's streams place a
+# full XML document in StreamTitle; this must never reach the GUI as markup.
+radio-metadata-test:
+	$(HOSTCC) -O2 -std=gnu99 tests/radio_metadata_test.c \
+		-o radio_metadata_test
+	./radio_metadata_test
+
 # Build all decoder modules (FLAC and AAC) — requires upstream decoder libraries.
 # CPU is forwarded as the same numeric 00/20/30/40/60 code used above so
 # decoders/Makefile derives the matching -mCPU flag itself; CFLAGS is
@@ -635,5 +642,5 @@ clean:
 	rm -f $(TARGET) $(FAST030_TARGET) $(PROF030_TARGET) $(FAST030_HALFASM_TEST_TARGET) $(GUI_TARGET) $(GUIR_TARGET) $(GUI_TARGET).freeall-discovery $(GUIR_TARGET).freeall-discovery $(GUI_TARGET).freeall-heads $(GUIR_TARGET).freeall-heads $(GUI_HALFASM_TEST_TARGET) \
 		amissl_https_get amissl_ssl_free_repro amissl_spawn_repro amissl_exec_repro amissl_child_worker_repro rb_stream_probe_test \
 		aac_mulshift60_ref_test ogg_mulshift60_ref_test wma_mulshift030_ref_test wma_mulshift060_ref_test \
-		flac_lpc030_ref_test flac_lpc060_ref_test
+		flac_lpc030_ref_test flac_lpc060_ref_test polyphase60_ref_test radio_metadata_test
 	$(MAKE) -C decoders clean
