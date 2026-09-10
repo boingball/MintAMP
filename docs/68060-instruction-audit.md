@@ -14,6 +14,14 @@ separately, groups by symbol, and separates decoder hot-path functions from
 unrelated application/library code. In diff mode it compares a clean baseline
 binary against a candidate.
 
+> **Current status:** this file started as a development audit, but the release
+> paths described here have since been validated on real hardware. The current
+> 68060 release combination is `lowrate060 huffman midside planars8`. Historical
+> notes about a stage being "not yet verified" describe the point at which that
+> measurement was recorded, not the current stability of the release path. See
+> `docs/optimization-status.md` and `BUILD-RELEASE.txt` for the current release
+> status and recipe.
+
 ## How GCC helps, and where the offenders come from
 
 At `-m68060`, GCC's own codegen avoids the emulated instruction: the C
@@ -102,8 +110,10 @@ Verified here (host + `m68k-linux-gnu` `-m68060`):
 * the whole decoder core built with `poly060` shows **0** register-pair
   multiplies in the polyphase hot path, versus **8281** for `asm_polyphase`.
 
-What is NOT yet verified: real-hardware throughput and responsiveness on the
-physical ~75 MHz 68060. A zero static count is necessary but not sufficient.
+The initial static-audit stage stopped here before a physical-machine run.
+Subsequent real-hardware testing on the 68060 validated the dedicated path and
+the release configuration built on it; the current release uses `lowrate060`
+rather than the old register-pair polyphase kernel.
 
 ## Per-group 68060 map (decoder core, verified)
 
@@ -129,28 +139,34 @@ register-pair long multiplies the group introduces into the decoder core:
 Crucially, the clean C baseline decoder has **zero** register-pair muls AND
 zero `__muldi3` calls at `-m68060`: GCC compiles the C `MULSHIFT32` to hardware
 2-operand `muls.l`. So imdct/dct32/dequant in plain C are already
-emulation-free on the 060 -- enabling their asm groups only makes things worse.
+emulation-free on the 060 -- enabling their 68030 asm groups only makes things
+worse. Those `AVOID` labels are therefore intentional CPU-compatibility rules,
+not a statement that the 68060 release path is experimental.
 
-## Recommended experimental 68060 config
+## Validated 68060 release configuration
 
+```sh
+make -f Makefile.amiga fast030 CPU=60 \
+  ASM60_GROUPS="lowrate060 huffman midside planars8"
 ```
-make -f Makefile.amiga fast030 CPU=60 ASM60_GROUPS="poly060 huffman midside"
-```
 
-`poly060` removes the one catastrophic emulation source (polyphase). `huffman`
-and `midside` are emulation-free and target exactly the throughput-bound cases
-(high bitrate -> huffman; stereo -> mid/side), though whether they beat GCC's
-`-m68060` C is an on-hardware A/B call, not a static one. Everything else in
-the decode path is already emulation-free C; the remaining limit at 44.1 kHz /
-stereo / high bitrate is raw compute on a 75 MHz 060, not emulated
-instructions.
+This is the established 68060 release combination. `lowrate060` supplies the
+dedicated trap-free 68060 synthesis/downsampling path; `huffman` and `midside`
+add validated hot-loop acceleration without register-pair long multiplies; and
+`planars8` supplies the validated output-conversion path.
+
+The older `poly060 huffman midside` command remains useful as an A/B or audit
+configuration, but it is no longer the release recommendation. Likewise,
+`full030` and the groups marked `AVOID` above remain test/audit knobs on a 68060
+and must not be mistaken for release-safe choices merely because they are valid
+`ASM60_GROUPS` names.
 
 To find the next thing worth hand-optimising, build the profiling decoder
 (`make -f Makefile.amiga prof030 CPU=60 ASM60_GROUPS="poly060"`) and read the
 per-bucket split (huffman / dequant / imdct / subband-dct32 / polyphase /
 stereo). Hand-writing a 68060 kernel for a stage only pays off where the C is
-the measured bottleneck -- it will not remove emulation there is none left to
-remove, only improve scheduling.
+the measured bottleneck -- it will not remove emulation where there is none
+left to remove, only improve scheduling.
 
 ## Decoupling the downsampling fast path for the 68060 (`lowrate060`)
 
@@ -191,7 +207,7 @@ now runs the entire downsampling path with hardware-only multiplies:
 Recommended for output rates below the source (e.g. 22050 from 44100), where
 the stride path roughly halves polyphase/dct32/imdct work:
 
-```
+```sh
 make -f Makefile.amiga fast030 CPU=60 ASM60_GROUPS="lowrate060"
 ```
 
@@ -202,7 +218,11 @@ dct32/imdct, which the profiler should drive.
 
 ## Status
 
-No config here is release-safe on the strength of a static count alone. A low
-count is necessary but not sufficient; every candidate must still be validated
-on the physical 68060 for both correctness and real-time behaviour. No
-dedicated 68060 binary ships until then.
+The 68060 release path is hardware-tested and established. Use
+`ASM60_GROUPS="lowrate060 huffman midside planars8"` for the release build.
+The audit remains valuable because it explains *why* the 68030 full-assembly
+bundle must not be used unchanged on a 68060 and identifies the groups that are
+still deliberately A/B/audit-only on that CPU.
+
+Do not interpret legacy `Experimental`/`exp` names elsewhere in the source or
+CLI as current stability labels; see `docs/optimization-status.md`.
