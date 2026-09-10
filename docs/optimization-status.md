@@ -4,7 +4,7 @@ MintAMP 1.3's release-enabled m68k optimizations are established, tested paths. 
 
 ## Current release status
 
-- The 68020/68030/68040 release path uses the established full m68k optimization bundle and has been validated on classic hardware.
+- The 68030/68040 release path uses the established full m68k optimization bundle and has been validated on classic hardware.
 - The 68060 release path uses the dedicated, 68060-safe combination `lowrate060 huffman midside planars8`, avoiding register-pair long multiply forms that the 68060 handles through software emulation.
 - The runtime quality and speed modes — Faster/Fast/Normal/Best plus Fast, Superfast and Ultrafast playback modes — are supported features. The faster modes intentionally trade bandwidth/quality for CPU headroom where documented; that is a user-selectable quality tradeoff, not an experimental-status warning.
 - Classic WMA support is working for WMAv1/WMAv2 in ASF containers. WMA Pro, Lossless and Voice remain out of scope.
