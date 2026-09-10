@@ -9,9 +9,9 @@
 ![Formats](https://img.shields.io/badge/audio-MP3%20%7C%20AAC%20%7C%20FLAC%20%7C%20Ogg%20%7C%20WMA%20%7C%20WAV%20%7C%20IFF-7B68EE)
 ![Streaming](https://img.shields.io/badge/radio-HTTP%20%7C%20HTTPS-22A699)
 ![Output](https://img.shields.io/badge/output-Paula%20audio.device-CB4B16)
-![GUI](https://img.shields.io/badge/GUI-ReAction%20%7C%20GadTools-7B68EE)
+![GUI](https://img.shields.io/badge/GUI-ReAction%20%7C%20GadTools-8A2BE2)
 [![GitHub stars](https://img.shields.io/github/stars/boingball/MintAMP)](https://github.com/boingball/MintAMP/stargazers)
-[![GitHub last commit](https://img.shields.io/github/last-commit/boingball/MintAMP)](https://github.com/boingball/MintAMP/commits/master)
+[![GitHub last commit](https://img.shields.io/github/last-commit/boingball/MintAMP/commits/master)
 [![Support](https://img.shields.io/badge/Support-Buy%20Me%20a%20Coffee-FFDD00?logo=buymeacoffee&logoColor=000000)](https://buymeacoffee.com/boingball)
 ![AI](https://img.shields.io/badge/AI-assisted%20coding-6e7781)
 
@@ -154,7 +154,7 @@ The `fast030` target name is retained for compatibility. The actual target CPU i
 | FLAC | Working | External `flac.decoder` module. Performance depends heavily on CPU, output rate and file complexity. |
 | Ogg Vorbis | Working | External `ogg.decoder` using the fixed-point Tremor decoder and libogg. |
 | WMA | Working (classic) | External `wma.decoder` for classic WMAv1/WMAv2 audio in ASF containers. WMA Pro, Lossless and Voice are not supported. |
-| WAV | Working | External `wav.decoder` for uncompressed PCM WAV: 8/16/24/32-bit integer, mono or stereo. |
+| WAV | Working | External `wav.decoder` for uncompressed integer PCM WAV files with 8, 16, 24 or 32-bit samples, mono or stereo. |
 | IFF-8SVX | Working | External `iff.decoder` for mono 8-bit samples, raw or Fibonacci-delta compressed. |
 | HTTP MP3/AAC radio | Working | Direct `http://` MP3 and ADTS AAC/AAC+ streams. ICY metadata supported where provided. |
 | HTTPS MP3/AAC radio | Working with AmiSSL | Build with `RADIO=1 SSL=1`. Uses AmiSSL and classic-Amiga-specific teardown quarantine for stability. |
