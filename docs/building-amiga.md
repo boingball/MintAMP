@@ -2,6 +2,13 @@
 
 This page documents the full known-good build flow for a fresh development machine or an existing checkout that needs to be synced, rebuilt, verified, copied to an Amiga, and runtime-tested.
 
+> **Optimization status:** the m68k paths enabled by the release recipes are
+> validated, supported paths. Some CLI/API names still contain `exp` or
+> `Experimental` for compatibility with their development-era spelling; those
+> names are not current stability labels. See `docs/optimization-status.md` for
+> the authoritative status and the 68060-specific distinction between the
+> release-safe groups and the old register-pair-multiply A/B groups.
+
 The current Amiga player supports:
 
 * local MP3 playback;

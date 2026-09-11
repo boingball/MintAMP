@@ -7,6 +7,13 @@ The backend deliberately uses portable C `long long` fixed-point helpers first;
 68020 inline assembly optimizations should be added only after comparing their
 output against this fallback.
 
+> **Current status:** the m68k fast paths enabled by MintAMP's release recipes
+> are validated and hardware-tested. Some CLI/API names still contain `exp` or
+> `Experimental` because those names were introduced during development and are
+> retained for compatibility. Do not interpret the old spelling as a current
+> stability warning. See `docs/optimization-status.md` for the authoritative
+> release status and the separate 68060 safety rules.
+
 ## Minimal decoder build
 
 Build the command-line decoder with the public decoder files, the common table
@@ -25,7 +32,7 @@ stay separated correctly:
 make -f Makefile.amiga
 ```
 
-For the experimental 68030 fast build, use:
+For the established, release-tested 68030 fast build, use:
 
 ```sh
 make -f Makefile.amiga fast030
@@ -45,10 +52,11 @@ m68k-amigaos-gcc -m68030 -std=gnu89 -O3 -fomit-frame-pointer \
 python3 tools/amiga_fast_preferred_hunks.py amiga_mp3dec.fastexp
 ```
 
-The optional Huffman m68k ASM refill path is runtime-gated.  It is included in
-the quality 0 preset and remains available as `--exp-huff` for targeted
-profiling; builds without `AMIGA_M68K_ASM_HUFFMAN` silently stay on the portable
-C Huffman decoder.
+The validated Huffman m68k ASM refill path is runtime-gated. It is included in
+the quality 0 preset and remains available under the legacy `--exp-huff` name
+for targeted A/B testing and profiling. The `exp` spelling is retained for
+compatibility; it is not a current stability label. Builds without
+`AMIGA_M68K_ASM_HUFFMAN` silently stay on the portable C Huffman decoder.
 
 Keep a space between every `-D...` define and every `-I...` include path.  For
 example, `-DAMIGA_M68K_ASM_MIDSIDE-Ipub` is parsed as one malformed macro
@@ -64,13 +72,13 @@ Fast RAM" setting.  This makes the program code/data load into Fast RAM when Fas
 RAM is available while preserving compatibility with chip-only systems.
 
 
-`--exp-poly` selects the additional experimental 68030 mono polyphase
-assembly path in `AMIGA_M68K_ASM_POLYPHASE` builds when
-`real/amiga_m68k_polyphase.S` is linked.  If the macro is set but the optional
+`--exp-poly` is the legacy compatibility name for the validated 68030 mono
+polyphase assembly path in `AMIGA_M68K_ASM_POLYPHASE` builds when
+`real/amiga_m68k_polyphase.S` is linked. If the macro is set but the optional
 assembly source is omitted, the weak asm reference resolves as unavailable and
 the decoder falls back to the existing `AMIGA_FAST_POLYPHASE` C path instead of
-failing at link time.  Without the runtime argument, the older experimental
-polyphase remains in use so target profiling can compare both variants.
+failing at link time. The option name is retained for A/B and self-test flows;
+it does not mean the assembly path is untested.
 
 The command-line decoder embeds an AmigaOS `$STACK:262144` cookie, requesting a
 minimum 262,144-byte stack without requiring users to run the `Stack` command
@@ -315,14 +323,14 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   channel count, bit depth, and total samples, then feeds the common Paula
   playback pipeline.  Use `--debug-decoder` for module-directory scanning,
   LoadSeg, ABI, extension-list, and stream-format diagnostics.
-- `--play` is an experimental AmigaOS Paula streaming mode for CD32/TF330-style
-  68030 testing. It opens `audio.device`, decodes to mono signed 8-bit PCM into
+- `--play` is the supported AmigaOS Paula streaming mode used by the CLI and GUI
+  editions. It opens `audio.device`, decodes to mono signed 8-bit PCM into
   Fast RAM work buffers, and bulk-copies each completed half-buffer into the
   chip-memory buffers submitted to `audio.device`. The default playback rate is
   8287 Hz for 030 safety; `--rate 8820`, `--rate 11025`, and `--rate 14700`
-  are accepted, `--rate 22050` is accepted as an experimental/high-CPU
-  mono-first mode that may underrun on 030 systems, and `--rate 28600` selects
-  the PAL-top Paula mode. Playback rates up to 22050 Hz imply `--fast-lowrate`; 28600 Hz uses normal
+  are accepted, `--rate 22050` is a supported/high-CPU mono-first mode that may
+  underrun on slower 030 systems, and `--rate 28600` selects the PAL-top Paula
+  mode. Playback rates up to 22050 Hz imply `--fast-lowrate`; 28600 Hz uses normal
   post-decode decimation because it is not an integer fast-lowrate stride. 22050 Hz fast-lowrate
   playback prints `22050 requires significantly more CPU and may underrun on
   030 systems.`
@@ -342,8 +350,8 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   8-bit Fast RAM work buffers, and uses one bulk copy per channel into the
   Paula chip-memory submission buffers when each half-buffer is submitted. Stereo
   supports `--rate 8820`, `--rate 11025`, and `--rate 14700` first; `--rate
-  22050` is allowed as an experimental/high-CPU stereo mode, and `--rate
-  28600` is available as the PAL-top Paula mode. `--rate 8287` is mono-only.
+  22050` is supported as a high-CPU stereo mode, and `--rate 28600` is available
+  as the PAL-top Paula mode. `--rate 8287` is mono-only.
   Enabling stereo prints `Stereo playback needs significantly more CPU and may
   underrun on 030.`
 - `--fake-stereo` is an opt-in `--play` alternative to true `--stereo` for systems
@@ -455,7 +463,7 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
   state alive across granules and MP3 frames.
   For exact integer strides such as 44100 -> 11025, fast-lowrate selects the
   same source positions as normal `--rate` decimation. The 8287 Hz mode uses a
-  fixed stride of 5 for Amiga-rate experiments, so 44100 Hz input emits at
+  fixed stride of 5 for Amiga-rate compatibility, so 44100 Hz input emits at
   8820 Hz and reports/plays/writes metadata at that actual emitted rate instead
   of labeling it as the requested 8287 Hz. For stride-2 22050 Hz output, the
   fast-polyphase build computes only the 16 even synthesis rows: a half-width
@@ -567,16 +575,14 @@ for the selected output format.  For example, `RAM:` with `song.mp3` writes
 ### Quality/speed tradeoff
 
 `--quality N` selects one of the verified fast-path combinations while leaving
-the individual `--exp-*` flags available for fine-grained override. If
-`--quality` is omitted, `--fast-lowrate --rate 11025`, `--fast-lowrate --rate
+the individual legacy-named `--exp-*` flags available for fine-grained override.
+If `--quality` is omitted, `--fast-lowrate --rate 11025`, `--fast-lowrate --rate
 14700`, and `--fast-lowrate --rate 22050` default to quality 1; all other
 invocations default to quality 3.
 
 - `--quality 0` (fastest) enables reduced taps, quarter-rate FDCT32, fast
-  polyphase, and the optional Huffman ASM refill path. The
-  Huffman shortcut is limited to this level because its ASM path has known
-  bit-accounting edge cases; in builds without the Huffman m68k ASM path it
-  silently falls back to the normal C Huffman decoder.
+  polyphase, and the validated Huffman ASM refill path. In builds without the
+  Huffman m68k ASM path it silently falls back to the normal C Huffman decoder.
 - `--quality 1` (fast) enables reduced taps and fast polyphase. This is the
   automatic default for `--fast-lowrate --rate 11025`, `--fast-lowrate --rate
   14700`, and `--fast-lowrate --rate 22050`. Reduced taps only affects
@@ -635,10 +641,10 @@ amiga_mp3dec --quality 0 --play --fast-mem --fast-lowrate --rate 11025 --mono so
   fast-lowrate selector across chunk boundaries.
 - `--selftest-huffman` runs 1000 pseudo-random Huffman pair decode cases
   through the portable C reference and active test path to verify stable bit
-  counts and coefficients.  `--exp-huff` enables the optional
-  `AMIGA_M68K_ASM_HUFFMAN` decode path at runtime; it keeps the C Huffman state
-  machine and bit extraction logic, but uses inline m68k refill code in the hot
-  pair loops when compiled for 68020+.
+  counts and coefficients.  The legacy `--exp-huff` name explicitly selects
+  the validated `AMIGA_M68K_ASM_HUFFMAN` decode path at runtime; it keeps the C
+  Huffman state machine and bit extraction logic, but uses inline m68k refill
+  code in the hot pair loops when compiled for 68020+.
 - `--selftest-dequant` compares the C dequant block reference with the active
   optional 68030 dequant inner loop for scale values -47..0 and coefficient
   magnitudes 0..8206.
@@ -648,7 +654,7 @@ amiga_mp3dec --quality 0 --play --fast-mem --fast-lowrate --rate 11025 --mono so
   thinning stays explicitly opt-in.
 - `--checksum` prints a 32-bit checksum of the decoded 16-bit PCM stream before
   optional mixing, downsampling, or output-format conversion. With
-  `--fast-lowrate`, it instead covers the low-rate output samples so experiments
+  `--fast-lowrate`, it instead covers the low-rate output samples so A/B checks
   can verify deterministic fast-lowrate output. Use it to compare the default
   polyphase path with optional optimized builds.
 - `--debug-argv` or `--show-argv` prints `argc` and `argv` after Amiga
@@ -660,7 +666,14 @@ The program prints the first decoded frame's input sample rate, output sample
 rate when it differs, channel count, and bitrate when available, followed by
 decoded frame count and output sample count.
 
-## Optimization roadmap
+## Optimization/reference notes
+
+This section preserves the individual build and A/B controls used while the
+m68k paths were developed. The current 68020/030/040 release bundle and the
+68060 release combination documented in `docs/optimization-status.md` are
+already validated; "opt-in" below means a path can still be selected separately
+for reference, self-test or profiling, not that the release-enabled feature is
+experimental.
 
 1. Keep the C helper block as the reference backend for 68000 and non-GCC builds.
 2. Benchmark with `--bench --decode-only`, `--bench --no-output`, and normal
@@ -696,27 +709,14 @@ decoded frame count and output sample count.
    `CLZ_AMIGA_M68K_ASM` wrapper and rely on the builtin guarded by the same zero
    check.
 
-4. `AMIGA_M68K_ASM_FDCT32` is an opt-in, exact full `FDCT32` arithmetic path for
-   68020+ GNU m68k builds, tuned for the 68030.  It also enables the validated
-   `FDCT32Half` m68k assembly implementation as the normal optimized stride-2
-   path on supported 68020+/68030 targets when guard bits are safe, while
-   retaining the C fallback for unsupported targets and low-guard-bit inputs.
-   It keeps `FDCT32_C_REFERENCE` and `FDCT32Half_C_REFERENCE`
-   callable and routes the normal `FDCT32` entry point through an
-   operation-order-preserving transform.  The fully unrolled first radix-4
-   pass is one register-scheduled machine-code region: butterfly values remain
-   in data registers, coefficients stream through an address register, and
-   `muls.l` high words feed the next operation without C compiler spill/reload
-   boundaries.  The second pass currently uses a compact four-iteration
-   assembly kernel with stable data-register roles rather than four unrolled
-   copies.  That keeps code size down, but it is not assumed to be fastest on
-   a 68030: benchmark a fully unrolled variant on the target too, because
-   eliminating loop and branch overhead may outweigh the extra code size.  The
-   two output-shuffle halves use bounded assembly regions that retain each
-   reused sum while issuing the paired stores directly.  The rare guard-bit
-   clipping/scaling pass remains in C.  This flag is
-   deliberately disabled by default; leave it disabled if any checksum or
-   `--selftest-fdct32` comparison differs from the C reference.
+4. `AMIGA_M68K_ASM_FDCT32` is an exact full `FDCT32` arithmetic path for
+   68020+ GNU m68k builds, tuned for the 68030. It is part of the established
+   68020/030/040 release bundle and also enables the validated `FDCT32Half`
+   assembly implementation for stride-2 paths when guard bits are safe. The C
+   fallbacks remain callable for regression testing and unsupported/low-guard
+   cases. On a 68060, do not enable the old `fdct32` group: its register-pair
+   multiply form is software-emulated there; use the dedicated 68060 release
+   configuration instead.
 
    ```sh
    m68k-amigaos-gcc -m68020 -std=gnu89 -O2 -DAMIGA_M68K_ASM_FDCT32 -Ipub -Ireal \
@@ -725,14 +725,14 @@ decoded frame count and output sample count.
    ```
 
 
-5. `AMIGA_M68K_ASM_IMDCT` is an opt-in exact long-block IMDCT36 path for
-   68020+ GNU m68k builds.  The C IMDCT remains the reference; the active
-   entry point uses a compact nine-iteration asm window/overlap kernel only
-   for the common long-window case and falls back to C for short blocks,
-   mixed/transition windows, start/stop windows, and anything else uncommon.
-   This flag is disabled by default; do not enable it by default unless real
-   mono plus stereo/high-bitrate target benchmarks improve and
-   `--selftest-imdct` plus every required checksum remain identical.
+5. `AMIGA_M68K_ASM_IMDCT` is the exact long-block IMDCT36 path used by the
+   established 68020/030/040 release bundle. The C IMDCT remains the reference;
+   the active entry point uses a compact nine-iteration asm window/overlap
+   kernel for the common long-window case and falls back to C for short blocks,
+   mixed/transition windows, start/stop windows, and other uncommon cases. On a
+   68060, the old `imdct` group is intentionally excluded because its
+   register-pair multiply form is software-emulated; use the dedicated 68060
+   release configuration instead.
 
    ```sh
    m68k-amigaos-gcc -m68030 -std=gnu89 -O3 -fomit-frame-pointer \
@@ -742,11 +742,11 @@ decoded frame count and output sample count.
    amiga_mp3dec.imdctasm --selftest-imdct
    ```
 
-6. `AMIGA_M68K_ASM_POLYPHASE` is an opt-in, experimental 68030 mono fast
-   polyphase kernel.  The C fast mono path remains callable as the reference;
-   `--selftest-polyphase` compares it against the active asm hook, and
-   `--exp-poly` reruns that check automatically before playback or decode
-   selects the assembly path.
+6. `AMIGA_M68K_ASM_POLYPHASE` is the validated 68030 mono fast polyphase
+   kernel used by the established 68020/030/040 path. The C fast mono path
+   remains callable as the reference; `--selftest-polyphase` compares it
+   against the active asm hook. The legacy `--exp-poly` spelling is retained
+   for compatibility and A/B testing; it does not indicate experimental status.
 
    ```sh
    m68k-amigaos-gcc -m68030 -std=gnu89 -O3 -fomit-frame-pointer \
@@ -757,14 +757,13 @@ decoded frame count and output sample count.
    amiga_mp3dec.polyasm --selftest-polyphase
    ```
 
-7. `AMIGA_M68K_ASM_MIDSIDE` is an opt-in 68020+ GNU m68k implementation of
-   the joint-stereo mid/side reconstruction loop.  It keeps both channel
-   pointers and guard-bit masks in registers, uses `dbf` for the bounded
-   sample loop, and performs each absolute value with a branchless
-   `asr`/`eor`/`sub` sequence.  The shift count is held in a data register
-   because m68k immediate shifts cannot encode 31.  Compare PCM checksums and
-   benchmark stereo joint-stereo inputs on the target before enabling it by
-   default.
+7. `AMIGA_M68K_ASM_MIDSIDE` is a validated 68020+ GNU m68k implementation of
+   the joint-stereo mid/side reconstruction loop. It is part of the established
+   68020/030/040 bundle and the validated 68060 release combination. It keeps
+   both channel pointers and guard-bit masks in registers, uses `dbf` for the
+   bounded sample loop, and performs each absolute value with a branchless
+   `asr`/`eor`/`sub` sequence. Keep the checksum/selftests when changing it so
+   both release paths remain regression-protected.
 
    ```sh
    m68k-amigaos-gcc -m68030 -std=gnu89 -O3 -fomit-frame-pointer \
@@ -812,15 +811,15 @@ decoded frame count and output sample count.
    capping it needs separate scrutiny of its `sfBand`/`cbi[]` boundary math.
 
 
-8. `AMIGA_M68K_ASM_HUFFMAN` is an opt-in experimental Huffman-pair refill
-   shortcut for 68020+ GNU m68k builds, tuned for 68030.  It deliberately does
-   not add a `.S` Huffman decoder and does not use `bfextu`; the C Huffman
-   state machine remains authoritative while the hot pair-loop refill can use
-   inline `move.l` on buffers with at least four safe bytes remaining, falling
-   back to the existing 16-bit refill near the tail.  It is also gated at
-   runtime by `--exp-huff`, so compiled-in support is inert unless explicitly
-   requested.  Validate with `--selftest-huffman` and compare `--checksum`
-   output against a reference decode before using it for playback benchmarks.
+8. `AMIGA_M68K_ASM_HUFFMAN` is the validated Huffman-pair refill shortcut for
+   68020+ GNU m68k builds, tuned for 68030 and included in the supported
+   release configurations where appropriate. It deliberately does not add a
+   `.S` Huffman decoder and does not use `bfextu`; the C Huffman state machine
+   remains authoritative while the hot pair-loop refill can use inline
+   `move.l` on buffers with at least four safe bytes remaining, falling back to
+   the existing 16-bit refill near the tail. The legacy `--exp-huff` spelling is
+   retained for explicit A/B selection and profiling; it is not a stability
+   label. Validate modifications with `--selftest-huffman` and `--checksum`.
 
    ```sh
    m68k-amigaos-gcc -m68030 -std=gnu89 -O3 -fomit-frame-pointer \
@@ -878,8 +877,8 @@ decoded frame count and output sample count.
    amiga_mp3dec.fastexp --bench --no-output --fast-lowrate --rate 22050 --checksum song.mp3
    ```
 
-10. `AMIGA_FAST_POLYPHASE` is an opt-in Amiga/m68k polyphase synthesis path
-   for 68020+ builds.  It keeps the original implementation available when the
+10. `AMIGA_FAST_POLYPHASE` is a selectable Amiga/m68k polyphase synthesis path
+   for 68020+ builds. It keeps the original implementation available when the
    flag is omitted, but replaces the 64-bit polyphase accumulator with 32-bit
    fixed-point high-multiply terms to reduce 68030 inner-loop overhead:
 

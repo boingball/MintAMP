@@ -39,7 +39,7 @@ Features
   - Local and streamed AAC-LC ADTS/AAC+ playback
   - Local FLAC playback
   - Local Ogg Vorbis playback using the fixed-point Tremor decoder
-  - Experimental classic WMA playback (WMAv1/WMAv2 in ASF containers)
+  - Classic WMA playback (WMAv1/WMAv2 in ASF containers)
   - Uncompressed PCM WAV playback (8/16/24/32-bit, mono or stereo)
   - Amiga IFF-8SVX playback, including Fibonacci-delta compression
   - Bundled modular AAC, FLAC, Ogg, WMA, WAV and IFF decoders
