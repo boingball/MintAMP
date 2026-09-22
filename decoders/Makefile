@@ -185,7 +185,9 @@ AAC_CFLAGS += -include aac_m68k_aac_optimized.h \
 	-DAMIGA_M68K_ASM_AAC_HUFFMAN \
 	-DAMIGA_M68K_ASM_AAC_DEQUANT \
 	-DAMIGA_M68K_ASM_AAC_STEREO \
-	-DAMIGA_M68K_ASM_AAC_IMDCT
+	-DAMIGA_M68K_ASM_AAC_IMDCT \
+	-DAMIGA_M68K_ASM_AAC_PNS \
+	-DAMIGA_M68K_ASM_AAC_TNS
 endif
 
 aac_entry.o aac_alloc.o aac_module.o: decoder_module.h
