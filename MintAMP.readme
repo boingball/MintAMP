@@ -2,7 +2,7 @@ Short:        Multiformat player and net radio
 Author:       Darren Banfi (boingball)
 Uploader:     boingball@gmail.com (Darren Banfi)
 Type:         mus/play
-Version:      1.3.0
+Version:      1.3.1
 Requires:     68030+; TCP/IP stack for radio; util/libs/AmiSSL-v5-OS3.lha for HTTPS
 Architecture: m68k-amigaos >= 3.0.0
 
@@ -237,6 +237,15 @@ repository for the complete terms and source code.
 
 History
 -------
+
+1.3.1  MP3 files at 8, 11.025 and 12 kHz (MPEG-2.5) now play. They used to
+       decode to silence, and the GUI showed the wrong rate and bitrate
+       for them.
+       The 68060 edition's AAC decoder no longer uses slow software
+       multiplies for noise substitution (PNS) or temporal noise shaping
+       (TNS).
+       Song titles now show for stations that send their metadata as a
+       RadioInfo XML document (e.g. Bauer's Portuguese stations).
 
 1.3.0  Added CPU-specific AAC, FLAC, Ogg Vorbis and WMA math helpers.
        The 68030/68040 editions retain the fast full-result MULS.L path.
