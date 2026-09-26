@@ -75,13 +75,13 @@
  * in here doubled up into a malformed path that silently failed to persist
  * across reboots while the plain ENV: (RAM) write kept working. */
 #define MR_ENV_PREFIX "MintAMP"
-#define MINTAMP_VERSION "1.3.1"
+#define MINTAMP_VERSION "1.3.2"
 #define MR_SETTINGS_VERSION 1
 #define MR_RADIO_FAV_MAX 20
 
 /* AmigaOS Version command metadata; unrelated to MR_SETTINGS_VERSION. */
 static const char gMintAmpVersionTag[] __attribute__((used)) =
-	"\0$VER: MintAMP " MINTAMP_VERSION " (25.09.2026)";
+	"\0$VER: MintAMP " MINTAMP_VERSION " (26.09.2026)";
 #if !defined(__AROS__) && !defined(MR_DISABLE_CIA_FILTER)
 #define MR_ENABLE_CIA_FILTER 1
 #endif

@@ -19,14 +19,20 @@ import argparse, re, subprocess, sys
 # So both mnemonic spellings and both displacement syntaxes are accepted, and
 # a head may be loaded into any of a0-a5. a6 is excluded because it only ever
 # receives the library base (SysBase) in this function.
+#
+# 4. The historical layout as printed by the GCC 13 toolchain's objdump, which
+#    repeats the address and leaves the symbol note unbracketed:
+#    "movea.l 18d69c 18d69c _errno+0xc,a2".
 MOVEA = r'\bmovea\.?l\s+'
 NUM = r'(-?(?:0x[0-9a-fA-F]+|[0-9]+))'
 HEAD_DEST = r'\s*,a([0-5])\b'
-# Absolute operand: a hex address with an optional <symbol+off> note.
-MOVEA_ABS_RE = re.compile(
-    MOVEA + r'(?:0x)?([0-9a-fA-F]+)(?:\s+<[^>]*>)?' + HEAD_DEST)
-LEA_ABS_RE = re.compile(
-    r'\blea\s+(?:0x)?([0-9a-fA-F]+)(?:\s+<[^>]*>)?\s*,a([0-7])\b')
+# Absolute operand: a hex address followed by whatever note this objdump
+# prints for it ("<_errno+0x4>", "18d69c _errno+0xc", or nothing) up to the
+# operand comma. A displacement operand ("8(a2)", "a3@(8)") cannot match: the
+# note must start after whitespace.
+ABS_OPERAND = r'(?:0x)?([0-9a-fA-F]+)(?:\s+[^,]*)?'
+MOVEA_ABS_RE = re.compile(MOVEA + ABS_OPERAND + HEAD_DEST)
+LEA_ABS_RE = re.compile(r'\blea\s+' + ABS_OPERAND + r'\s*,a([0-7])\b')
 MOVEA_DISP_MOT_RE = re.compile(MOVEA + NUM + r'\(a([0-7])\)' + HEAD_DEST)
 MOVEA_DISP_MIT_RE = re.compile(MOVEA + r'a([0-7])@\(' + NUM + r'\)' + HEAD_DEST)
 REGISTER_RE = re.compile(r'^(?:[ad][0-7]|sp|pc|fp)$')
