@@ -317,7 +317,7 @@ HALFASM_TEST_CPPFLAGS := -DAMIGA_M68K_ASM_FDCT32
 FAST030_ASM_SOURCES := $(CPU_ASM_SOURCES)
 AMIGA_HUNK_FAST_PREFERRED := python3 tools/amiga_fast_preferred_hunks.py
 
-.PHONY: all fast030 radio030 sslradio030 amissl-get-test amissl-free-repro-test amissl-spawn-repro-test amissl-exec-repro-test rb-stream-probe-test prof030 gui guir miniamp3 minimp3r sslgui sslguir fast030-halfasm-test gui-halfasm-test decoder-modules release release-clean clean print-command print-fast030-command print-gui-command print-guir-command cpu60-baseline cpu60-huffman cpu60-huffman-dequant cpu60-huffman-dequant-imdct cpu60-huffman-dequant-imdct-fdct32 cpu60-audit-stages poly60-ref-test aac-mulshift60-ref-test ogg-mulshift60-ref-test wma-mulshift-ref-test flac-lpc-ref-test radio-metadata-test
+.PHONY: all fast030 radio030 sslradio030 amissl-get-test amissl-free-repro-test amissl-spawn-repro-test amissl-exec-repro-test rb-stream-probe-test prof030 gui guir miniamp3 minimp3r sslgui sslguir fast030-halfasm-test gui-halfasm-test decoder-modules release release-clean clean print-command print-fast030-command print-gui-command print-guir-command cpu60-baseline cpu60-huffman cpu60-huffman-dequant cpu60-huffman-dequant-imdct cpu60-huffman-dequant-imdct-fdct32 cpu60-audit-stages poly60-ref-test aac-mulshift60-ref-test ogg-mulshift60-ref-test wma-mulshift-ref-test flac-lpc-ref-test radio-metadata-test freeall-heads-test
 
 all: $(TARGET) decoder-modules
 
@@ -590,6 +590,11 @@ radio-metadata-test:
 	$(HOSTCC) -O2 -std=gnu99 tests/radio_metadata_test.c \
 		-o radio_metadata_test
 	./radio_metadata_test
+
+# The GUI release links need tools/libnix_freeall_heads.py to read every
+# objdump layout of libnix's ___free_all; checked here on fixed dumps.
+freeall-heads-test:
+	PYTHONDONTWRITEBYTECODE=1 python3 tests/libnix_freeall_heads_test.py
 
 # Build all decoder modules (FLAC and AAC) — requires upstream decoder libraries.
 # CPU is forwarded as the same numeric 00/20/30/40/60 code used above so

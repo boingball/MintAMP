@@ -49,6 +49,9 @@ jobs:
       - name: Check MPEG-2.5 Layer III decoding
         run: make -f Makefile.amiga mpeg25-decode-test
 
+      - name: Check the libnix ___free_all head finder
+        run: make -f Makefile.amiga freeall-heads-test
+
       - name: Compile with the Amiga cross-compiler
         env:
           CPU: ${{ matrix.cpu }}

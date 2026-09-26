@@ -11,14 +11,27 @@ import argparse, re, subprocess, sys
 #
 # Support both. The addresses are discovered from the exact binary being
 # relinked, so this remains safer than hard-coding libnix internals.
-MOVEA_RE = re.compile(r'\bmovea\.l\s+(?:0x)?([0-9][0-9a-fA-F]*)')
-MOVEA_ABS_A0_RE = re.compile(
-    r'\bmovea\.l\s+(?:0x)?([0-9][0-9a-fA-F]*)(?:\s+[^,]*)?,a0\b')
+#
+# 3. The same layout as 2 printed in MIT syntax by the GCC 16 toolchain's
+#    objdump: "moveal" for movea.l, "a3@(8)" for 8(a3), the heads loaded
+#    into a2 rather than a0.
+#
+# So both mnemonic spellings and both displacement syntaxes are accepted, and
+# a head may be loaded into any of a0-a5. a6 is excluded because it only ever
+# receives the library base (SysBase) in this function.
+MOVEA = r'\bmovea\.?l\s+'
+NUM = r'(-?(?:0x[0-9a-fA-F]+|[0-9]+))'
+HEAD_DEST = r'\s*,a([0-5])\b'
+# Absolute operand: a hex address with an optional <symbol+off> note.
+MOVEA_ABS_RE = re.compile(
+    MOVEA + r'(?:0x)?([0-9a-fA-F]+)(?:\s+<[^>]*>)?' + HEAD_DEST)
 LEA_ABS_RE = re.compile(
-    r'\blea\s+(?:0x)?([0-9][0-9a-fA-F]*)(?:\s+[^,]*)?,a([0-7])\b')
-MOVEA_OFFSET_A0_RE = re.compile(
-    r'\bmovea\.l\s+(-?(?:0x[0-9a-fA-F]+|[0-9]+))\(a([0-7])\),a0\b')
-FUNC_LABEL_RE = re.compile(r'\b___free_all:\s*$')
+    r'\blea\s+(?:0x)?([0-9a-fA-F]+)(?:\s+<[^>]*>)?\s*,a([0-7])\b')
+MOVEA_DISP_MOT_RE = re.compile(MOVEA + NUM + r'\(a([0-7])\)' + HEAD_DEST)
+MOVEA_DISP_MIT_RE = re.compile(MOVEA + r'a([0-7])@\(' + NUM + r'\)' + HEAD_DEST)
+REGISTER_RE = re.compile(r'^(?:[ad][0-7]|sp|pc|fp)$')
+# "___free_all:" from the older objdump, "<___free_all>:" from GCC 16's.
+FUNC_LABEL_RE = re.compile(r'(?:\b|<)___free_all>?:\s*$')
 RTS_RE = re.compile(r'\brts\b')
 
 
@@ -55,8 +68,15 @@ def parse_objdump_displacement(value):
     return int(value, 10)
 
 
-def heads(binary):
-    text = disasm(binary)
+def absolute(m):
+    """The absolute address of an abs-operand match, or None if the operand
+    is actually a register name that happens to be valid hex (a2, d0...)."""
+    if REGISTER_RE.match(m.group(1).lower()):
+        return None
+    return int(m.group(1), 16)
+
+
+def heads_from_text(text):
     lines = free_all_lines(text)
 
     # Historical layout: three direct movea.l operands annotated as
@@ -65,42 +85,50 @@ def heads(binary):
     for line in lines:
         if '_errno+' not in line:
             continue
-        m = MOVEA_RE.search(line)
-        if m:
-            append_unique(vals, int(m.group(1), 16))
+        m = MOVEA_ABS_RE.search(line)
+        if m and absolute(m) is not None:
+            append_unique(vals, absolute(m))
     if len(vals) == 3:
         return vals
 
-    # Alternate libnix layout, seen with the CI GCC 6.5 toolchain:
+    # lea layout (GCC 6.5 in Motorola syntax, GCC 16 in MIT syntax):
     #
-    #   lea      <base>,a2
-    #   movea.l  8(a2),a0      -> first list head = base + 8
-    #   ...
-    #   movea.l  12(a2),a0     -> second list head = base + 12
-    #   ...
-    #   movea.l  <absolute>,a0  -> third list head
+    #   lea      <base>,aN
+    #   movea.l  8(aN),aM      -> first list head = base + 8
+    #   movea.l  12(aN),aM     -> second list head = base + 12
+    #   movea.l  <absolute>,aM -> third list head
     #
-    # Track absolute LEA bases generically so this is not tied to a2.
+    # Track absolute LEA bases per register so this is not tied to a2/a3.
     vals = []
     bases = {}
     for line in lines:
         m = LEA_ABS_RE.search(line)
-        if m:
-            bases[int(m.group(2))] = int(m.group(1), 16)
-
-        m = MOVEA_OFFSET_A0_RE.search(line)
-        if m:
-            reg = int(m.group(2))
-            if reg in bases:
-                append_unique(
-                    vals,
-                    bases[reg] + parse_objdump_displacement(m.group(1)))
+        if m and absolute(m) is not None:
+            bases[int(m.group(2))] = absolute(m)
             continue
 
-        m = MOVEA_ABS_A0_RE.search(line)
+        m = MOVEA_DISP_MOT_RE.search(line)
         if m:
-            append_unique(vals, int(m.group(1), 16))
+            disp, reg = m.group(1), int(m.group(2))
+        else:
+            m = MOVEA_DISP_MIT_RE.search(line)
+            if m:
+                reg, disp = int(m.group(1)), m.group(2)
+        if m:
+            if reg in bases:
+                append_unique(vals,
+                              bases[reg] + parse_objdump_displacement(disp))
+            continue
 
+        m = MOVEA_ABS_RE.search(line)
+        if m and absolute(m) is not None:
+            append_unique(vals, absolute(m))
+    return vals
+
+
+def heads(binary):
+    text = disasm(binary)
+    vals = heads_from_text(text)
     if len(vals) != 3:
         sys.stderr.write(
             'expected exactly three ___free_all list-head addresses, found %d\n' %
