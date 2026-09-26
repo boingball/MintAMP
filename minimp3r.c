@@ -6054,19 +6054,32 @@ fail:
 	if (!app->rbWinObj && root) DisposeObject(root); CloseRadioWindow(app);
 }
 
-/* Double-clicking a station plays it, the same as pressing Play (as MintVID's
- * IPTV browser does). Two clicks on the same row within the user's Input prefs
- * double-click time count; the pair is then forgotten, so a third click does
- * not start it again. */
-static int RadioResultDoubleClicked(ULONG row, ULONG secs, ULONG micros)
-{
-	static ULONG lastSecs, lastMicros;
-	static ULONG lastRow = (ULONG)~0;
-	int dbl = row != (ULONG)~0 && row == lastRow &&
-		DoubleClick(lastSecs, lastMicros, secs, micros);
+/* Double-clicking a station plays it, the same as pressing Play. This mirrors
+ * MintVID's ReAction IPTV browser, which works: the row comes from the list's
+ * own LISTBROWSER_Selected, not from RA_HandleInput()'s code (a listbrowser
+ * inside a layout reports through window.class notification, so that code is
+ * not a dependable row number), and the clicks are timed with DateStamp(),
+ * about 600 ms at dos.library's 50 ticks a second. The pair is forgotten once
+ * it fires, so a third click does not start the station again. */
+#define RB_DOUBLE_CLICK_TICKS 30UL
 
-	lastSecs = secs;
-	lastMicros = micros;
+static ULONG RadioDateStampTicks(const struct DateStamp *ds)
+{
+	return ((ULONG)ds->ds_Days * 24UL * 60UL + (ULONG)ds->ds_Minute) * 3000UL +
+		(ULONG)ds->ds_Tick;
+}
+
+static int RadioResultDoubleClicked(ULONG row)
+{
+	static struct DateStamp last;
+	static ULONG lastRow = (ULONG)~0;
+	struct DateStamp now;
+	int dbl;
+
+	DateStamp(&now);
+	dbl = row != (ULONG)~0 && row == lastRow &&
+		RadioDateStampTicks(&now) - RadioDateStampTicks(&last) <= RB_DOUBLE_CLICK_TICKS;
+	last = now;
 	lastRow = dbl ? (ULONG)~0 : row;
 	return dbl;
 }
@@ -6093,13 +6106,14 @@ static void HandleRadioWindow(MrApp *app)
 			switch (result & WMHI_GADGETMASK) {
 			case RB_GID_SEARCH_TEXT: case RB_GID_SEARCH: RadioDoSearch(app); break;
 			case RB_GID_RADIO_RESULTS: {
-				/* RA_HandleInput() hides the event's timestamp, so time the
-				 * click as it is handled; that is close enough for this. */
-				ULONG secs = 0, micros = 0;
-				CurrentTime(&secs, &micros);
+				/* Read the clicked row from the list itself, before
+				 * RadioSelectResult() sets the selection from code. */
+				ULONG row = (ULONG)~0;
+				if (app->rbListGad)
+					GetAttr(LISTBROWSER_Selected, app->rbListGad, &row);
 				RadioSelectResult(app, (ULONG)code);
-				if (RadioResultDoubleClicked((ULONG)code, secs, micros) &&
-				    (ULONG)code < (ULONG)app->rbVisibleCount)
+				if (RadioResultDoubleClicked(row) &&
+				    row < (ULONG)app->rbVisibleCount)
 					RadioDoProbeAndPlay(app);
 				break;
 			}

@@ -17,8 +17,8 @@ sound card are not required.
 
 This archive contains two complete MintAMP drawers:
 
-  MintAMP-v1.3-68030  For 68030 and 68040 systems
-  MintAMP-v1.3-68060  Dedicated build for 68060 systems
+  MintAMP-v1.3.1-68030  For 68030 and 68040 systems
+  MintAMP-v1.3.1-68060  Dedicated build for 68060 systems
 
 Open or copy the drawer which matches the processor installed in your Amiga.
 The 68060 edition contains a dedicated 68060-safe and 68060-optimised MP3
@@ -72,25 +72,25 @@ Installation
 
 Extract the complete archive. Its root contains:
 
-  MintAMP-v1.3-68030/
-  MintAMP-v1.3-68060/
-  MintAMP-v1.3-68030.info
-  MintAMP-v1.3-68060.info
+  MintAMP-v1.3.1-68030/
+  MintAMP-v1.3.1-68060/
+  MintAMP-v1.3.1-68030.info
+  MintAMP-v1.3.1-68060.info
 
 Choose the drawer matching your processor:
 
   68030 or 68040:
-    Use MintAMP-v1.3-68030
+    Use MintAMP-v1.3.1-68030
 
   68060:
-    Use MintAMP-v1.3-68060
+    Use MintAMP-v1.3.1-68060
 
 You may leave both drawers together or copy only the required drawer to your
 preferred location.
 
 Keep every file inside the selected drawer together. Its layout is:
 
-  MintAMP-v1.3-68xxx/
+  MintAMP-v1.3.1-68xxx/
     MintAMP
     MintAMP.info
     MintAMP-GT
