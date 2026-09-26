@@ -7254,6 +7254,23 @@ fail:
 	CloseRadioWindow(app);
 }
 
+/* Double-clicking a station plays it, the same as pressing Play (as MintVID's
+ * IPTV browser does). Two clicks on the same row within the user's Input prefs
+ * double-click time count; the pair is then forgotten, so a third click does
+ * not start it again. */
+static int RadioResultDoubleClicked(ULONG row, ULONG secs, ULONG micros)
+{
+	static ULONG lastSecs, lastMicros;
+	static ULONG lastRow = (ULONG)~0;
+	int dbl = row != (ULONG)~0 && row == lastRow &&
+		DoubleClick(lastSecs, lastMicros, secs, micros);
+
+	lastSecs = secs;
+	lastMicros = micros;
+	lastRow = dbl ? (ULONG)~0 : row;
+	return dbl;
+}
+
 static void HandleRadioWindow(HelixAmp3Gui *app)
 {
 	struct IntuiMessage *msg;
@@ -7261,6 +7278,8 @@ static void HandleRadioWindow(HelixAmp3Gui *app)
 	while ((msg = GT_GetIMsg(app->rbWin->UserPort)) != NULL) {
 		ULONG cls = msg->Class;
 		UWORD code = msg->Code;
+		ULONG secs = msg->Seconds;
+		ULONG micros = msg->Micros;
 		struct Gadget *gad = (struct Gadget *)msg->IAddress;
 		UWORD gid = gad ? gad->GadgetID : 0;
 		GT_ReplyIMsg(msg);
@@ -7275,8 +7294,12 @@ static void HandleRadioWindow(HelixAmp3Gui *app)
 			continue;
 		}
 		if (cls == IDCMP_GADGETUP) {
-			if (gid == RB_GID_RADIO_RESULTS)
+			if (gid == RB_GID_RADIO_RESULTS) {
 				RadioSelectResult(app, (ULONG)code);
+				if (RadioResultDoubleClicked((ULONG)code, secs, micros) &&
+				    (ULONG)code < (ULONG)app->rbVisibleCount)
+					RadioDoProbeAndPlay(app);
+			}
 			else if (gid == RB_GID_SEARCH)
 				RadioDoSearch(app);
 			else if (gid == RB_GID_PROBE)
