@@ -1,7 +1,7 @@
 # MintAMP — Mini Internet Amiga Media Player
 
 [![Build](https://github.com/boingball/MintAMP/actions/workflows/build.yml/badge.svg)](https://github.com/boingball/MintAMP/actions/workflows/build.yml)
-![Version](https://img.shields.io/badge/version-1.3.1-brightgreen)
+![Version](https://img.shields.io/badge/version-1.3.2-brightgreen)
 ![Status](https://img.shields.io/badge/status-stable-brightgreen)
 ![AmigaOS](https://img.shields.io/badge/AmigaOS-3.0%2B-F28C28)
 ![CPU](https://img.shields.io/badge/CPU-68030%20%7C%2068040%20%7C%2068060-2F74C0)
@@ -36,8 +36,8 @@ MintAMP ships with ReAction/ClassAct, GadTools and command-line editions. Its fi
 
 | Installed CPU | Release drawer | Notes |
 |---|---|---|
-| 68030 or 68040 | `MintAMP-v1.3.1-68030` | Established full-result m68k assembly paths. |
-| 68060 | `MintAMP-v1.3.1-68060` | Dedicated 68060-safe and 68060-optimised player and decoder paths. |
+| 68030 or 68040 | `MintAMP-v1.3.2-68030` | Established full-result m68k assembly paths. |
+| 68060 | `MintAMP-v1.3.2-68060` | Dedicated 68060-safe and 68060-optimised player and decoder paths. |
 
 Each drawer contains all three front ends:
 
@@ -84,7 +84,7 @@ make -f Makefile.amiga release \
   RADIO=1 \
   SSL=1 \
   SSLCERTS=1 \
-  RELEASE_NAME=MintAMP-v1.3.1-68030
+  RELEASE_NAME=MintAMP-v1.3.2-68030
 
 # Keep the first release drawer, but remove CPU-specific objects.
 make -f Makefile.amiga clean
@@ -95,7 +95,7 @@ make -f Makefile.amiga release \
   RADIO=1 \
   SSL=1 \
   SSLCERTS=1 \
-  RELEASE_NAME=MintAMP-v1.3.1-68060
+  RELEASE_NAME=MintAMP-v1.3.2-68060
 ```
 
 The clean between builds is required so 68030 objects are not reused in the
@@ -143,7 +143,7 @@ amiga_mp3dec.fastexp --play "https://example.com/direct-stream"
 
 Useful playback controls include `--rate`, `--quality`, `--subband-cap`, `--mono`, `--stereo`, `--fake-stereo`, `--buffer-seconds`, `--volume` and `--fast-mem`. Run the binary without arguments to display the complete option list.
 
-The `fast030` target name is retained for compatibility. The actual target CPU is selected with `CPU=00`, `20`, `30`, `40` or `60`. MintAMP v1.3.1 release drawers are produced for the established 68030 path and a separately tuned 68060 path.
+The `fast030` target name is retained for compatibility. The actual target CPU is selected with `CPU=00`, `20`, `30`, `40` or `60`. MintAMP v1.3.2 release drawers are produced for the established 68030 path and a separately tuned 68060 path.
 
 ## Supported formats
 
