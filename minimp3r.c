@@ -6054,6 +6054,23 @@ fail:
 	if (!app->rbWinObj && root) DisposeObject(root); CloseRadioWindow(app);
 }
 
+/* Double-clicking a station plays it, the same as pressing Play (as MintVID's
+ * IPTV browser does). Two clicks on the same row within the user's Input prefs
+ * double-click time count; the pair is then forgotten, so a third click does
+ * not start it again. */
+static int RadioResultDoubleClicked(ULONG row, ULONG secs, ULONG micros)
+{
+	static ULONG lastSecs, lastMicros;
+	static ULONG lastRow = (ULONG)~0;
+	int dbl = row != (ULONG)~0 && row == lastRow &&
+		DoubleClick(lastSecs, lastMicros, secs, micros);
+
+	lastSecs = secs;
+	lastMicros = micros;
+	lastRow = dbl ? (ULONG)~0 : row;
+	return dbl;
+}
+
 static void HandleRadioWindow(MrApp *app)
 {
 	ULONG result; UWORD code = 0; if (!app->rbWinObj) return;
@@ -6075,7 +6092,17 @@ static void HandleRadioWindow(MrApp *app)
 			}
 			switch (result & WMHI_GADGETMASK) {
 			case RB_GID_SEARCH_TEXT: case RB_GID_SEARCH: RadioDoSearch(app); break;
-			case RB_GID_RADIO_RESULTS: RadioSelectResult(app, (ULONG)code); break;
+			case RB_GID_RADIO_RESULTS: {
+				/* RA_HandleInput() hides the event's timestamp, so time the
+				 * click as it is handled; that is close enough for this. */
+				ULONG secs = 0, micros = 0;
+				CurrentTime(&secs, &micros);
+				RadioSelectResult(app, (ULONG)code);
+				if (RadioResultDoubleClicked((ULONG)code, secs, micros) &&
+				    (ULONG)code < (ULONG)app->rbVisibleCount)
+					RadioDoProbeAndPlay(app);
+				break;
+			}
 			case RB_GID_PROBE: RadioDoProbeAndPlay(app); break;
 			case RB_GID_ADD_FAV: RadioAddFavourite(app); break;
 			case RB_GID_FAVOURITES: RadioToggleFavourites(app); break;
