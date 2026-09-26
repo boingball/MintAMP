@@ -3483,9 +3483,19 @@ static int connect_http(RadioStream *rs){
          * the worker task itself (radio_net_worker_is_self() is enforced
          * by every caller of connect_http()). */
         SetSignal(0, SIGBREAKF_CTRL_C);
-        SocketBaseTags(SBTM_SETVAL(SBTC_BREAKMASK), (ULONG)SIGBREAKF_CTRL_C, TAG_DONE);
-        he=gethostbyname(rs->host);
-        SocketBaseTags(SBTM_SETVAL(SBTC_BREAKMASK), 0UL, TAG_DONE);
+        {
+            /* SocketBaseTagList() with an array, not the SocketBaseTags()
+             * varargs macro, which GCC 16's NDK inlines fail to compile. */
+            struct TagItem mask_tags[2];
+            mask_tags[0].ti_Tag = SBTM_SETVAL(SBTC_BREAKMASK);
+            mask_tags[0].ti_Data = (ULONG)SIGBREAKF_CTRL_C;
+            mask_tags[1].ti_Tag = TAG_DONE;
+            mask_tags[1].ti_Data = 0;
+            SocketBaseTagList(mask_tags);
+            he=gethostbyname(rs->host);
+            mask_tags[0].ti_Data = 0UL;
+            SocketBaseTagList(mask_tags);
+        }
 #else
         he=gethostbyname(rs->host);
 #endif

@@ -21,20 +21,29 @@
 #include <proto/bsdsocket.h>
 #include <netdb.h>
 
-#define RADIO_DNS_JOIN_INNER(a, b) a##b
-#define RADIO_DNS_JOIN(a, b) RADIO_DNS_JOIN_INNER(a, b)
-#define RADIO_DNS_SOCKET_TAGS RADIO_DNS_JOIN(Socket, BaseTags)
+/* Set the resolver's break mask through SocketBaseTagList() and a TagItem
+ * array rather than the SocketBaseTags() varargs macro: GCC 16's NDK
+ * inlines expand that macro to an `_sfdc_vararg` array whose type it does
+ * not always declare, which fails to compile. */
+static LONG radio_dns_set_breakmask(ULONG mask)
+{
+    struct TagItem tags[2];
+
+    tags[0].ti_Tag = SBTM_SETVAL(SBTC_BREAKMASK);
+    tags[0].ti_Data = mask;
+    tags[1].ti_Tag = TAG_DONE;
+    tags[1].ti_Data = 0;
+    return SocketBaseTagList(tags);
+}
 
 static struct hostent *radio_gethostbyname_scoped(const char *host)
 {
     struct hostent *result;
 
     SetSignal(0, SIGBREAKF_CTRL_C);
-    RADIO_DNS_SOCKET_TAGS(SBTM_SETVAL(SBTC_BREAKMASK),
-                          (ULONG)SIGBREAKF_CTRL_C,
-                          TAG_DONE);
+    radio_dns_set_breakmask((ULONG)SIGBREAKF_CTRL_C);
     result = gethostbyname((char *)host);
-    RADIO_DNS_SOCKET_TAGS(SBTM_SETVAL(SBTC_BREAKMASK), 0UL, TAG_DONE);
+    radio_dns_set_breakmask(0UL);
     return result;
 }
 
