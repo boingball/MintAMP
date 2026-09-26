@@ -75,10 +75,68 @@ GCC16 = """
    d4e3c:       4e75            rts
 """
 
+# GCC 13: the historical layout, but objdump repeats each address and leaves
+# the symbol note unbracketed. Verbatim from a CPU=30 MintAMP link.
+GCC13 = """
+000ce7e6 000ce7e6 ___free_all:
+   ce7e6:       2f0e            move.l a6,-(sp)
+   ce7e8:       2f0a            move.l a2,-(sp)
+   ce7ea:       2479 0018 d69c  movea.l 18d69c 18d69c _errno+0xc,a2
+   ce7f0:       4a8a            tst.l a2
+   ce7f2:       671a            beq.s ce80e ce80e ___free_all+0x28
+   ce7f4:       204a            movea.l a2,a0
+   ce7f6:       2452            movea.l (a2),a2
+   ce7f8:       2c79 0000 0018  movea.l 18 18 _SysBase,a6
+   ce7fe:       43e8 fffc       lea -4(a0),a1
+   ce802:       2028 fffc       move.l -4(a0),d0
+   ce806:       4eae ff2e       jsr -210(a6)
+   ce80a:       4a8a            tst.l a2
+   ce80c:       66e6            bne.s ce7f4 ce7f4 ___free_all+0xe
+   ce80e:       2479 0018 d6a0  movea.l 18d6a0 18d6a0 _errno+0x10,a2
+   ce814:       4a8a            tst.l a2
+   ce816:       671a            beq.s ce832 ce832 ___free_all+0x4c
+   ce818:       204a            movea.l a2,a0
+   ce81a:       2452            movea.l (a2),a2
+   ce81c:       2c79 0000 0018  movea.l 18 18 _SysBase,a6
+   ce822:       43e8 fffc       lea -4(a0),a1
+   ce826:       2028 fffc       move.l -4(a0),d0
+   ce82a:       4eae ff2e       jsr -210(a6)
+   ce82e:       4a8a            tst.l a2
+   ce830:       66e6            bne.s ce818 ce818 ___free_all+0x32
+   ce832:       2479 0018 d6b0  movea.l 18d6b0 18d6b0 _errno+0x20,a2
+   ce838:       4a8a            tst.l a2
+   ce83a:       671a            beq.s ce856 ce856 ___free_all+0x70
+   ce83c:       204a            movea.l a2,a0
+   ce83e:       2452            movea.l (a2),a2
+   ce840:       2c79 0000 0018  movea.l 18 18 _SysBase,a6
+   ce846:       43e8 fffc       lea -4(a0),a1
+   ce84a:       2028 fffc       move.l -4(a0),d0
+   ce84e:       4eae ff2e       jsr -210(a6)
+   ce852:       4a8a            tst.l a2
+   ce854:       66e6            bne.s ce83c ce83c ___free_all+0x56
+   ce856:       245f            movea.l (sp)+,a2
+   ce858:       2c5f            movea.l (sp)+,a6
+   ce85a:       4e75            rts
+"""
+
+# GCC 6.5's lea layout printed the GCC 13 way (repeated address, bare note).
+GCC65_BARE = """
+000d4dc6 000d4dc6 ___free_all:
+   d4dc6:\t48e7 0032      \tmovem.l a2-a3/a6,-(sp)
+   d4dca:\t45f9 0018 d684 \tlea 18d684 18d684 _errno+0x4,a2
+   d4dd0:\t206a 0008      \tmovea.l 8(a2),a0
+   d4ddc:\t2c79 0000 0014 \tmovea.l 14 14 _____start+0x14,a6
+   d4df2:\t206a 000c      \tmovea.l 12(a2),a0
+   d4e14:\t2079 0018 d6a0 \tmovea.l 18d6a0 18d6a0 _errno+0x20,a0
+   d4e3c:\t4e75           \trts
+"""
+
 CASES = [
     ('historical', HISTORICAL, [0x20c8b4, 0x20c8b8, 0x20c8c8]),
     ('gcc 6.5 lea layout', GCC65, [0x18d68c, 0x18d690, 0x18d6a0]),
     ('gcc 16 MIT syntax', GCC16, [0x18d68c, 0x18d690, 0x18d6a0]),
+    ('gcc 13 repeated address', GCC13, [0x18d69c, 0x18d6a0, 0x18d6b0]),
+    ('lea layout, repeated address', GCC65_BARE, [0x18d68c, 0x18d690, 0x18d6a0]),
 ]
 
 failed = 0
