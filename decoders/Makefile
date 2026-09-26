@@ -133,7 +133,7 @@ flac.decoder: $(FLAC_OBJS) decoder_module.h flac/src/foxen-flac.h
 	    echo "ERROR: FLAC decoder map does not mention flac_module.o" >&2; \
 	    exit 1; \
 	fi
-	@if ! strings $@ | grep -q 'FLAC MODULE BUILD MARKER 12345'; then \
+	@if ! grep -aqF 'FLAC MODULE BUILD MARKER 12345' $@; then \
 	    echo "ERROR: FLAC decoder is missing build marker string" >&2; \
 	    exit 1; \
 	fi
@@ -236,7 +236,7 @@ aac.decoder: $(AAC_OBJS) decoder_module.h aac/aacdec.h
 	    echo "ERROR: AAC decoder map does not mention aac_module.o" >&2; \
 	    exit 1; \
 	fi
-	@if ! strings $@ | grep -q 'AAC MODULE BUILD MARKER 12345'; then \
+	@if ! grep -aqF 'AAC MODULE BUILD MARKER 12345' $@; then \
 	    echo "ERROR: AAC decoder is missing build marker string" >&2; \
 	    exit 1; \
 	fi
@@ -383,7 +383,7 @@ ogg.decoder: $(OGG_OBJS) decoder_module.h tremor/src/tremor/ivorbisfile.h
 	    echo "ERROR: OGG decoder map does not mention ogg_module.o" >&2; \
 	    exit 1; \
 	fi
-	@if ! strings $@ | grep -q 'OGG MODULE BUILD MARKER 12345'; then \
+	@if ! grep -aqF 'OGG MODULE BUILD MARKER 12345' $@; then \
 	    echo "ERROR: OGG decoder is missing build marker string" >&2; \
 	    exit 1; \
 	fi
@@ -436,7 +436,7 @@ wav.decoder: $(WAV_OBJS) decoder_module.h
 	    echo "ERROR: WAV decoder map does not mention wav_module.o" >&2; \
 	    exit 1; \
 	fi
-	@if ! strings $@ | grep -q 'WAV MODULE BUILD MARKER 12345'; then \
+	@if ! grep -aqF 'WAV MODULE BUILD MARKER 12345' $@; then \
 	    echo "ERROR: WAV decoder is missing build marker string" >&2; \
 	    exit 1; \
 	fi
@@ -482,7 +482,7 @@ iff.decoder: $(IFF_OBJS) decoder_module.h
 	    echo "ERROR: IFF decoder map does not mention iff_module.o" >&2; \
 	    exit 1; \
 	fi
-	@if ! strings $@ | grep -q 'IFF MODULE BUILD MARKER 12345'; then \
+	@if ! grep -aqF 'IFF MODULE BUILD MARKER 12345' $@; then \
 	    echo "ERROR: IFF decoder is missing build marker string" >&2; \
 	    exit 1; \
 	fi
@@ -573,7 +573,7 @@ wma.decoder: $(WMA_OBJS) decoder_module.h wma_alloc.h wma_asf.h wma/wmadec.h
 	    echo "ERROR: WMA decoder map does not mention wma_module.o" >&2; \
 	    exit 1; \
 	fi
-	@if ! strings $@ | grep -q 'WMA MODULE BUILD MARKER 12345'; then \
+	@if ! grep -aqF 'WMA MODULE BUILD MARKER 12345' $@; then \
 	    echo "ERROR: WMA decoder is missing build marker string" >&2; \
 	    exit 1; \
 	fi

@@ -1,7 +1,7 @@
 # MintAMP — Mini Internet Amiga Media Player
 
 [![Build](https://github.com/boingball/MintAMP/actions/workflows/build.yml/badge.svg)](https://github.com/boingball/MintAMP/actions/workflows/build.yml)
-![Version](https://img.shields.io/badge/version-1.3.0-brightgreen)
+![Version](https://img.shields.io/badge/version-1.3.1-brightgreen)
 ![Status](https://img.shields.io/badge/status-stable-brightgreen)
 ![AmigaOS](https://img.shields.io/badge/AmigaOS-3.0%2B-F28C28)
 ![CPU](https://img.shields.io/badge/CPU-68030%20%7C%2068040%20%7C%2068060-2F74C0)
