@@ -129,4 +129,17 @@ struct DecoderOps {
  */
 typedef struct DecoderOps *(*DecoderModuleEntryFn)(void);
 
+/* exec.library's base, from absolute address 4.  Reading it as
+ * *((void **)4L) makes GCC 12+ warn that the constant address is outside
+ * any object (-Warray-bounds); going through a volatile pointer variable
+ * reads the same word without the warning. */
+#if defined(__GNUC__)
+__attribute__((unused))
+#endif
+static void *DecoderModuleAbsExecBase(void)
+{
+    void **volatile absExecBase = (void **)4L;
+    return *absExecBase;
+}
+
 #endif /* DECODER_MODULE_H */

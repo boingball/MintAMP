@@ -91,7 +91,7 @@ static DecHandle OggOpen(DecoderReadCb readFn, DecoderSeekCb seekFn,
 
     /* Matches aac_module.c: set up the module allocator's ExecBase here,
      * before the first allocation, rather than in ogg_entry.c. */
-    OggModuleSetExecBase(*((void **)4L));
+    OggModuleSetExecBase(DecoderModuleAbsExecBase());
 
     st = (OggState *)OggModuleCalloc(1, sizeof(OggState));
     if (!st)

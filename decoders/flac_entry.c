@@ -27,7 +27,7 @@ __attribute__((section(".text")))
 struct DecoderOps *DecoderModuleEntry(void)
 {
 #ifdef HAVE_AMIGA_AUDIO_DEVICE
-    FlacModuleSetExecBase(*((void **)4L));
+    FlacModuleSetExecBase(DecoderModuleAbsExecBase());
 #endif
     return &gFlacOps;
 }
