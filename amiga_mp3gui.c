@@ -544,6 +544,11 @@ enum {
 #define RB_GID_DOWN         313
 #define RB_GID_CLOSE        314
 #define RB_GID_STATUS       315
+#define RB_GID_FAV_NAME     316
+#define RB_GID_FAV_RENAME   317
+#define RB_GID_FAV_REMOVE   318
+#define RB_GID_FAV_MOVE_UP  319
+#define RB_GID_FAV_MOVE_DOWN 320
 
 /* Compact GadTools Internet Radio layout.  Coordinates are relative to the
  * complete window (including its title bar), matching NewGadget semantics. */
@@ -553,7 +558,10 @@ enum {
 #define RB_FILTER_ROW2_Y     42
 #define RB_FILTER_ROW3_Y     64
 #define RB_RESULTS_Y         88
-#define RB_RESULTS_H        116
+/* The results list gave up a row's height to the favourites edit row, so
+ * the window is no taller than before. */
+#define RB_RESULTS_H         94
+#define RB_FAVEDIT_Y        188
 #define RB_BUTTONS_Y        210
 #define RB_STATUS_Y         234
 
@@ -697,6 +705,9 @@ typedef struct HelixAmp3Gui {
 	char            rbFavouriteUrls[HELIXAMP3_RADIO_FAV_MAX][RB_MAX_URL];
 	char            rbStatusText[128];
 	char            currentRadioStationName[RB_MAX_NAME];
+	/* URL the current stream was started from, before redirects or a
+	 * .pls/.m3u were followed: what Add Fav bookmarks. */
+	char            currentRadioSourceUrl[RB_MAX_URL];
 	char            currentRadioFavicon[RB_MAX_FAVICON];
 	struct VisualInfo *rbVisualInfo;
 	RadioBrowserController rbController;
@@ -6521,7 +6532,7 @@ static int RadioStationMatchesScheme(HelixAmp3Gui *app, const RadioBrowserStatio
 	return isHttp;
 }
 
-static void RadioRefreshResults(HelixAmp3Gui *app)
+static void RadioRefreshResultsList(HelixAmp3Gui *app)
 {
 	int i, row;
 	int selectedRow = -1;
@@ -6607,6 +6618,14 @@ static void RadioRefreshResults(HelixAmp3Gui *app)
 			GTLV_Labels, (ULONG)&app->rbList,
 			GTLV_Selected, selectedRow >= 0 ? (ULONG)selectedRow : (ULONG)~0,
 			TAG_DONE);
+}
+
+static void RadioFavEditSync(HelixAmp3Gui *app);
+
+static void RadioRefreshResults(HelixAmp3Gui *app)
+{
+	RadioRefreshResultsList(app);
+	RadioFavEditSync(app);
 }
 
 static struct Gadget *FindRadioGadget(HelixAmp3Gui *app, UWORD id)
@@ -6818,6 +6837,7 @@ static void RadioSelectResult(HelixAmp3Gui *app, ULONG eventSelected)
 		GT_SetGadgetAttrs(app->rbGadList, app->rbWin, NULL,
 			GTLV_Selected, (ULONG)row, TAG_DONE);
 		sprintf(msg, "Selected favourite: %.120s", app->rbFavouriteNames[app->rbSelectedFavourite]);
+		RadioFavEditSync(app);
 		RadioSetStatus(app, msg);
 		return;
 	}
@@ -6880,6 +6900,9 @@ static void RadioMoveSelection(HelixAmp3Gui *app, int delta)
 		GTLV_Selected, (ULONG)row, GTLV_Top, top, TAG_DONE);
 }
 
+static void RadioFavEditSync(HelixAmp3Gui *app);
+static void RadioAddCurrentStreamFavourite(HelixAmp3Gui *app);
+
 static void RadioAddFavourite(HelixAmp3Gui *app)
 {
 	const RadioBrowserStation *st;
@@ -6887,8 +6910,10 @@ static void RadioAddFavourite(HelixAmp3Gui *app)
 	char display[RB_MAX_NAME];
 	char msg[160];
 	int i;
-	if (app->rbController.selected_index < 0) {
-		RadioSetStatus(app, "Select a search result to favourite.");
+	/* With the favourites shown, or no search result selected, Add Fav
+	 * bookmarks the stream that is playing (or was last started) instead. */
+	if (app->rbShowingFavourites || app->rbController.selected_index < 0) {
+		RadioAddCurrentStreamFavourite(app);
 		return;
 	}
 	st = rb_controller_get_station(&app->rbController, app->rbController.selected_index);
@@ -6922,11 +6947,168 @@ static void RadioAddFavourite(HelixAmp3Gui *app)
 	RadioSetStatus(app, msg);
 }
 
+/* Name for a bookmark of the current stream: the station name it was
+ * started with, else the name the stream announces (icy-name), else the
+ * URL. */
+static void RadioCurrentStreamName(HelixAmp3Gui *app, const char *url, char *out, size_t outSize)
+{
+	char live[128];
+	if (app->currentRadioStationName[0] && strcmp(app->currentRadioStationName, "Internet Radio") != 0) {
+		SafeCopy(out, outSize, app->currentRadioStationName);
+		return;
+	}
+	CopyVolatileGuiString(live, sizeof(live), gGuiPlaybackStatus.radioStationName);
+	SafeCopy(out, outSize, live[0] ? live : url);
+}
+
+static void RadioAddCurrentStreamFavourite(HelixAmp3Gui *app)
+{
+	const char *url = app->currentRadioSourceUrl[0] ? app->currentRadioSourceUrl :
+		(IsRadioInputName(app->inputName) ? app->inputName : "");
+	char name[RB_MAX_NAME];
+	char msg[160];
+	int i;
+	if (!url[0]) {
+		RadioSetStatus(app, "Nothing to bookmark: play a stream, or select a search result.");
+		return;
+	}
+	for (i = 0; i < app->rbFavouriteCount; i++) {
+		if (!strcmp(app->rbFavouriteUrls[i], url)) {
+			sprintf(msg, "Already a favourite: %.120s", app->rbFavouriteNames[i]);
+			RadioSetStatus(app, msg);
+			return;
+		}
+	}
+	if (app->rbFavouriteCount >= HELIXAMP3_RADIO_FAV_MAX) {
+		RadioSetStatus(app, "Radio favourites are full.");
+		return;
+	}
+	if (strlen(url) >= sizeof(app->rbFavouriteUrls[0])) {
+		RadioSetStatus(app, "Stream URL is too long to bookmark.");
+		return;
+	}
+	RadioCurrentStreamName(app, url, name, sizeof(name));
+	i = app->rbFavouriteCount++;
+	SafeCopy(app->rbFavouriteNames[i], sizeof(app->rbFavouriteNames[i]), name);
+	SafeCopy(app->rbFavouriteUrls[i], sizeof(app->rbFavouriteUrls[i]), url);
+	SaveGuiSettings(app);
+	if (app->rbShowingFavourites) {
+		app->rbSelectedFavourite = i;
+		RadioRefreshResults(app);
+	}
+	sprintf(msg, "Added favourite: %.120s", name);
+	RadioSetStatus(app, msg);
+}
+
+static int RadioSelectedFavouriteForEdit(HelixAmp3Gui *app)
+{
+	if (!app->rbShowingFavourites) {
+		RadioSetStatus(app, "Press Favourites first to edit them.");
+		return -1;
+	}
+	if (app->rbSelectedFavourite < 0 || app->rbSelectedFavourite >= app->rbFavouriteCount) {
+		RadioSetStatus(app, "Select a favourite first.");
+		return -1;
+	}
+	return app->rbSelectedFavourite;
+}
+
+static void RadioRenameFavourite(HelixAmp3Gui *app)
+{
+	struct Gadget *gad = FindRadioGadget(app, RB_GID_FAV_NAME);
+	char name[RB_MAX_NAME];
+	char *p;
+	int i = RadioSelectedFavouriteForEdit(app);
+	if (i < 0) return;
+	name[0] = '\0';
+	if (gad && gad->SpecialInfo)
+		SafeCopy(name, sizeof(name), (const char *)((struct StringInfo *)gad->SpecialInfo)->Buffer);
+	for (p = name; *p == ' ' || *p == '\t'; p++) ;
+	memmove(name, p, strlen(p) + 1);
+	p = name + strlen(name);
+	while (p > name && (p[-1] == ' ' || p[-1] == '\t')) *--p = '\0';
+	if (!name[0]) {
+		RadioSetStatus(app, "Type the new name first.");
+		return;
+	}
+	SafeCopy(app->rbFavouriteNames[i], sizeof(app->rbFavouriteNames[i]), name);
+	SaveGuiSettings(app);
+	RadioRefreshResults(app);
+	RadioSetStatus(app, "Favourite renamed.");
+}
+
+static void RadioRemoveFavourite(HelixAmp3Gui *app)
+{
+	char msg[160];
+	int j, i = RadioSelectedFavouriteForEdit(app);
+	if (i < 0) return;
+	sprintf(msg, "Removed favourite: %.120s", app->rbFavouriteNames[i]);
+	for (j = i; j < app->rbFavouriteCount - 1; j++) {
+		SafeCopy(app->rbFavouriteNames[j], sizeof(app->rbFavouriteNames[j]), app->rbFavouriteNames[j + 1]);
+		SafeCopy(app->rbFavouriteUrls[j], sizeof(app->rbFavouriteUrls[j]), app->rbFavouriteUrls[j + 1]);
+	}
+	app->rbFavouriteCount--;
+	app->rbFavouriteNames[app->rbFavouriteCount][0] = '\0';
+	app->rbFavouriteUrls[app->rbFavouriteCount][0] = '\0';
+	SaveGuiSettings(app);
+	app->rbSelectedFavourite = i < app->rbFavouriteCount ? i : app->rbFavouriteCount - 1;
+	RadioRefreshResults(app);
+	RadioSetStatus(app, msg);
+}
+
+static void RadioMoveFavourite(HelixAmp3Gui *app, int delta)
+{
+	char name[RB_MAX_NAME];
+	char url[RB_MAX_URL];
+	int i = RadioSelectedFavouriteForEdit(app);
+	int j = i + delta;
+	if (i < 0) return;
+	if (j < 0 || j >= app->rbFavouriteCount) {
+		RadioSetStatus(app, delta < 0 ? "Already at the top." : "Already at the bottom.");
+		return;
+	}
+	SafeCopy(name, sizeof(name), app->rbFavouriteNames[i]);
+	SafeCopy(url, sizeof(url), app->rbFavouriteUrls[i]);
+	SafeCopy(app->rbFavouriteNames[i], sizeof(app->rbFavouriteNames[i]), app->rbFavouriteNames[j]);
+	SafeCopy(app->rbFavouriteUrls[i], sizeof(app->rbFavouriteUrls[i]), app->rbFavouriteUrls[j]);
+	SafeCopy(app->rbFavouriteNames[j], sizeof(app->rbFavouriteNames[j]), name);
+	SafeCopy(app->rbFavouriteUrls[j], sizeof(app->rbFavouriteUrls[j]), url);
+	SaveGuiSettings(app);
+	app->rbSelectedFavourite = j;
+	RadioRefreshResults(app);
+	RadioSetStatus(app, delta < 0 ? "Favourite moved up." : "Favourite moved down.");
+}
+
+/* Enables the favourites edit row only while the favourites are shown, and
+ * fills the name field with the selected favourite's name. */
+static void RadioFavEditSync(HelixAmp3Gui *app)
+{
+	static const UWORD ids[] = { RB_GID_FAV_NAME, RB_GID_FAV_RENAME, RB_GID_FAV_REMOVE,
+		RB_GID_FAV_MOVE_UP, RB_GID_FAV_MOVE_DOWN, 0 };
+	int editing = app->rbShowingFavourites && app->rbSelectedFavourite >= 0 &&
+		app->rbSelectedFavourite < app->rbFavouriteCount;
+	struct Gadget *gad;
+	int k;
+	if (!app->rbWin)
+		return;
+	for (k = 0; ids[k]; k++) {
+		gad = FindRadioGadget(app, ids[k]);
+		if (gad)
+			GT_SetGadgetAttrs(gad, app->rbWin, NULL, GA_Disabled, editing ? FALSE : TRUE, TAG_DONE);
+	}
+	gad = FindRadioGadget(app, RB_GID_FAV_NAME);
+	if (gad)
+		GT_SetGadgetAttrs(gad, app->rbWin, NULL,
+			GTST_String, (ULONG)(editing ? app->rbFavouriteNames[app->rbSelectedFavourite] : ""),
+			TAG_DONE);
+}
+
 static void RadioToggleFavourites(HelixAmp3Gui *app)
 {
 	app->rbShowingFavourites = app->rbShowingFavourites ? FALSE : TRUE;
 	RadioRefreshResults(app);
-	RadioSetStatus(app, app->rbShowingFavourites ? "Showing radio favourites." : "Showing search results.");
+	RadioSetStatus(app, app->rbShowingFavourites ?
+		"Favourites: Add Fav saves the stream that is playing." : "Showing search results.");
 }
 
 static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
@@ -7052,6 +7234,8 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 		}
 	}
 	SelectInternetStream(app, info.final_url);
+	SafeCopy(app->currentRadioSourceUrl, sizeof(app->currentRadioSourceUrl),
+		rb_station_play_url(st) ? rb_station_play_url(st) : info.final_url);
 	rb_station_display_name(st, msg, (int)sizeof(msg));
 	SafeCopy(app->currentRadioStationName, sizeof(app->currentRadioStationName), msg);
 	app->haveRadioHostAddr = info.have_host_addr;
@@ -7125,6 +7309,7 @@ static void RadioReplayCurrentUrl(HelixAmp3Gui *gui)
 		return;
 	}
 	SelectInternetStream(gui, info.final_url);
+	SafeCopy(gui->currentRadioSourceUrl, sizeof(gui->currentRadioSourceUrl), url);
 	gui->haveRadioHostAddr = info.have_host_addr;
 	gui->radioHostAddrBe = info.host_addr_be;
 	sprintf(msg, "Buffering - %.140s",
@@ -7235,6 +7420,16 @@ static void OpenRadioWindow(HelixAmp3Gui *app)
 		GTLV_Selected, (ULONG)~0,
 		GTLV_ShowSelected, (ULONG)NULL,
 		TAG_DONE); if (!gad) goto fail;
+	/* Favourites edit row: enabled by RadioFavEditSync() while the
+	 * favourites are shown. */
+	ng.ng_TopEdge = RB_FAVEDIT_Y; ng.ng_Height = 18;
+	ng.ng_LeftEdge = 56; ng.ng_Width = 176; ng.ng_GadgetText = (UBYTE *)"Name"; ng.ng_GadgetID = RB_GID_FAV_NAME; ng.ng_Flags = PLACETEXT_LEFT;
+	gad = CreateGadget(STRING_KIND, gad, &ng, GTST_MaxChars, RB_MAX_NAME - 1, GTST_String, (ULONG)"", GA_Disabled, TRUE, TAG_DONE); if (!gad) goto fail;
+	ng.ng_Width = 68; ng.ng_Flags = PLACETEXT_IN;
+	ng.ng_LeftEdge = 238; ng.ng_GadgetText = (UBYTE *)"Rename"; ng.ng_GadgetID = RB_GID_FAV_RENAME; gad = CreateGadget(BUTTON_KIND, gad, &ng, GA_Disabled, TRUE, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 310; ng.ng_GadgetText = (UBYTE *)"Remove"; ng.ng_GadgetID = RB_GID_FAV_REMOVE; gad = CreateGadget(BUTTON_KIND, gad, &ng, GA_Disabled, TRUE, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 382; ng.ng_GadgetText = (UBYTE *)"Move Up"; ng.ng_GadgetID = RB_GID_FAV_MOVE_UP; gad = CreateGadget(BUTTON_KIND, gad, &ng, GA_Disabled, TRUE, TAG_DONE); if (!gad) goto fail;
+	ng.ng_LeftEdge = 454; ng.ng_GadgetText = (UBYTE *)"Move Dn"; ng.ng_GadgetID = RB_GID_FAV_MOVE_DOWN; gad = CreateGadget(BUTTON_KIND, gad, &ng, GA_Disabled, TRUE, TAG_DONE); if (!gad) goto fail;
 	ng.ng_TopEdge = RB_BUTTONS_Y; ng.ng_Width = 86; ng.ng_Height = 18; ng.ng_Flags = PLACETEXT_IN;
 	ng.ng_LeftEdge = 8; ng.ng_GadgetText = (UBYTE *)"Search"; ng.ng_GadgetID = RB_GID_SEARCH; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
 	ng.ng_LeftEdge = 100; ng.ng_GadgetText = (UBYTE *)"Play"; ng.ng_GadgetID = RB_GID_PROBE; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
@@ -7328,6 +7523,14 @@ static void HandleRadioWindow(HelixAmp3Gui *app)
 				RadioMoveSelection(app, -1);
 			else if (gid == RB_GID_DOWN)
 				RadioMoveSelection(app, 1);
+			else if (gid == RB_GID_FAV_NAME || gid == RB_GID_FAV_RENAME)
+				RadioRenameFavourite(app);
+			else if (gid == RB_GID_FAV_REMOVE)
+				RadioRemoveFavourite(app);
+			else if (gid == RB_GID_FAV_MOVE_UP)
+				RadioMoveFavourite(app, -1);
+			else if (gid == RB_GID_FAV_MOVE_DOWN)
+				RadioMoveFavourite(app, 1);
 			else if (gid == RB_GID_SCHEME) {
 				app->rbSchemeMode = ClampInt((int)code, 0, 2);
 				app->rbShowHttps = (app->rbSchemeMode != 0);
