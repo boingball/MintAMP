@@ -26,7 +26,7 @@ MintAMP ships with ReAction/ClassAct, GadTools and command-line editions. Its fi
 ## Highlights
 
 - **Multiformat playback:** MP3, AAC-LC/AAC+ ADTS, FLAC, Ogg Vorbis, classic WMA, PCM WAV and Amiga IFF-8SVX.
-- **Internet radio:** HTTP/HTTPS MP3, AAC/AAC+, Ogg Vorbis and lossless FLAC streams, `.pls`/`.m3u` station links with mirror fallback, Radio Browser search, editable favourites, ICY title/artist updates and resilient reconnect handling.
+- **Internet radio:** HTTP/HTTPS MP3, AAC/AAC+, Ogg Vorbis and lossless FLAC streams, `.pls`/`.m3u` station links with mirror fallback, Radio Browser search, editable favourites, ICY title/artist updates and resilient reconnect handling. Station names and titles in any language are converted for the Amiga's Latin-1 fonts.
 - **Workbench friendly:** ReAction/ClassAct and GadTools interfaces, M3U/PLS playlists mixing files and radio stations, track information, ratings, artwork and iconification while playback continues.
 - **Classic output:** direct Paula `audio.device` playback with configurable rate, quality, channel mode, buffering and reduced-work modes for slower systems.
 - **CPU-aware decoders:** dedicated 68060-safe multiply and hot-loop paths avoid instructions that the 68060 handles through software emulation.
@@ -494,7 +494,15 @@ This is important because the Amiga module loader expects to enter the decoder m
 
 ## AAC notes
 
-AAC support currently targets AAC-LC ADTS files and streams.
+AAC support currently targets AAC-LC ADTS files and streams, with or without
+the ADTS CRC.
+
+Radio streams are told apart by their bytes, not only the server's
+Content-Type: the probe reads the first 4 KB and looks for a chain of matching
+ADTS or MP3 frame headers anywhere in it, since a stream rarely starts on a
+frame boundary and some servers send the wrong type or none. The radio AAC
+start-up likewise waits for an ADTS header whose next frame also matches
+before decoding.
 
 The AAC decoder uses the `decoders/esp8266audio` submodule, with the AAC source under:
 
