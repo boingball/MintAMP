@@ -4,16 +4,20 @@
 #include <stddef.h>
 #include <string.h>
 
-/* Convert internet-provided UTF-8 display text to Amiga-safe single-byte
- * Latin-1-ish bytes for GUI gadgets and manual text drawing.  This is a
- * display-only helper: do not use it for stream URLs or other protocol data.
- * ASCII control bytes are removed, with tab/newline/carriage return folded to
- * a normal space so callers that intentionally handle text layout can still
- * collapse whitespace.  Common UTF-8 Latin-1 sequences become their single-byte
- * ISO-8859-1 values; unsupported UTF-8 multibyte runs become '?'. */
+#include "mr_text.h"
+
+/* Convert internet-provided display text to ISO Latin-1 for GUI gadgets and
+ * manual text drawing.  This is a display-only helper: do not use it for
+ * stream URLs or other protocol data.  The text is read as UTF-8, with bytes
+ * that are not valid UTF-8 taken as Windows-1252/Latin-1 (many ICY servers
+ * send that).  mr_text.h does the conversion: Latin-1 characters are kept,
+ * typographic quotes, dashes and the like become plain ASCII, other accented
+ * letters lose the accent, Cyrillic and Greek are transliterated, emoji are
+ * dropped and a run of anything else becomes one '?'.  Control characters
+ * become spaces, runs of spaces collapse and the result is trimmed. */
 static size_t AmigaUtf8ToDisplay(char *dst, size_t dstSize, const char *src)
 {
-    size_t si = 0, di = 0;
+    size_t di;
     char structured[256];
     const char *textMarker;
     const char *titleMarker;
@@ -22,7 +26,6 @@ static size_t AmigaUtf8ToDisplay(char *dst, size_t dstSize, const char *src)
     const char *valueEnd;
     size_t prefixLen;
     size_t valueLen;
-    unsigned char c;
 
     if (!dst || dstSize == 0)
         return 0;
@@ -72,30 +75,17 @@ static size_t AmigaUtf8ToDisplay(char *dst, size_t dstSize, const char *src)
         }
     }
 
-    while (src[si] && di + 1 < dstSize) {
-        c = (unsigned char)src[si++];
-        if (c == '\t' || c == '\n' || c == '\r') {
-            dst[di++] = ' ';
-        } else if (c < 0x20 || c == 0x7f) {
-            continue;
-        } else if (c < 0x80) {
-            dst[di++] = (char)c;
-        } else if ((c == 0xc2 || c == 0xc3) &&
-                   (unsigned char)src[si] >= 0x80 &&
-                   (unsigned char)src[si] <= 0xbf) {
-            dst[di++] = (char)((c == 0xc2) ? (unsigned char)src[si] :
-                ((unsigned char)src[si] + 0x40));
-            si++;
-        } else if (c >= 0xc0 && src[si] &&
-                   (((unsigned char)src[si] & 0xc0) == 0x80)) {
-            while (src[si] && (((unsigned char)src[si] & 0xc0) == 0x80))
-                si++;
-            dst[di++] = '?';
-        } else {
-            dst[di++] = (c >= 0x80 && c < 0xc0) ? '?' : (char)c;
+    di = mr_text_from_utf8(dst, dstSize, src, strlen(src));
+    /* A name made only of emoji still names something. */
+    if (di == 0 && dstSize > 1) {
+        while (*src == ' ' || *src == '\t' || *src == '\n' || *src == '\r')
+            src++;
+        if (*src) {
+            dst[0] = '?';
+            dst[1] = 0;
+            di = 1;
         }
     }
-    dst[di] = 0;
     return di;
 }
 

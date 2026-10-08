@@ -210,6 +210,7 @@ static char gSupportedExtPattern[512];
 #include "radio_stream.h"
 #include "radio_browser_controller.h"
 #include "playlist_format.h"
+#include "radio_favourites.h"
 #ifndef OBP_FailIfBad
 #define OBP_FailIfBad (TAG_USER + 0x01L)
 #endif
@@ -1145,11 +1146,24 @@ static void LoadEnvString(const char *key, char *dst, size_t dstSize)
 
 static void SaveEnvString(const char *key, const char *value)
 {
+	static char current[1024];
 	char name[64];
+	LONG len;
+	size_t n;
 
 	EnvName(name, sizeof(name), key);
 	if (!value)
 		value = "";
+	/* Each GVF_SAVE_VAR write is a file in ENVARC: on disk, and a settings
+	 * save covers every favourite slot (130-odd variables), which took up to
+	 * a minute on a slow drive.  ENV: holds the same values (copied from
+	 * ENVARC: at boot, then kept in step here), so write only what changed. */
+	len = GetVar((STRPTR)name, (STRPTR)current, sizeof(current),
+		GVF_GLOBAL_ONLY | GVF_BINARY_VAR);
+	n = strlen(value);
+	if (len < 0 ? n == 0 :
+		(n + 1 < sizeof(current) && (size_t)len == n && !memcmp(current, value, n)))
+		return;
 	SetVar((STRPTR)name, (STRPTR)value, strlen(value), GVF_GLOBAL_ONLY);
 	SetVar((STRPTR)name, (STRPTR)value, strlen(value), GVF_SAVE_VAR);
 }
@@ -1167,6 +1181,63 @@ static void SaveEnvInt(const char *key, int value)
 
 	sprintf(text, "%d", value);
 	SaveEnvString(key, text);
+}
+
+/* The radio favourites live in one variable (see radio_favourites.h); a
+ * variable per slot meant ~100 ENVARC: files rewritten on every edit. */
+static void LoadRadioFavourites(HelixAmp3Gui *gui)
+{
+	size_t cap = RADIO_FAV_TEXT_MAX(HELIXAMP3_RADIO_FAV_MAX);
+	char *text = (char *)malloc(cap);
+	char name[64];
+	char key[32];
+	LONG len;
+	int count = -1, i;
+
+	if (text) {
+		EnvName(name, sizeof(name), "RadioFavourites");
+		len = GetVar((STRPTR)name, (STRPTR)text, (LONG)cap, GVF_GLOBAL_ONLY | GVF_BINARY_VAR);
+		if (len >= 0)
+			count = radio_fav_parse(text, (size_t)len, gui->rbFavouriteNames,
+				gui->rbFavouriteUrls, HELIXAMP3_RADIO_FAV_MAX);
+		free(text);
+	}
+	if (count >= 0) {
+		gui->rbFavouriteCount = count;
+		return;
+	}
+	/* Saved by MintAMP 1.4.0 or earlier: a name and a URL variable per slot. */
+	gui->rbFavouriteCount = LoadEnvInt("RadioFavCount", gui->rbFavouriteCount, 0, HELIXAMP3_RADIO_FAV_MAX);
+	for (i = 0; i < gui->rbFavouriteCount; i++) {
+		sprintf(key, "RadioFavName%d", i);
+		LoadEnvString(key, gui->rbFavouriteNames[i], sizeof(gui->rbFavouriteNames[i]));
+		sprintf(key, "RadioFavUrl%d", i);
+		LoadEnvString(key, gui->rbFavouriteUrls[i], sizeof(gui->rbFavouriteUrls[i]));
+	}
+}
+
+/* Writes the favourites variable, only when it changed. */
+static void SaveRadioFavourites(HelixAmp3Gui *gui)
+{
+	size_t cap = RADIO_FAV_TEXT_MAX(HELIXAMP3_RADIO_FAV_MAX);
+	char *text = (char *)malloc(cap * 2);
+	char name[64];
+	size_t n;
+	LONG len;
+
+	if (!text)
+		return;
+	n = radio_fav_format(text, cap, gui->rbFavouriteNames, gui->rbFavouriteUrls,
+		ClampInt(gui->rbFavouriteCount, 0, HELIXAMP3_RADIO_FAV_MAX));
+	if (n) {
+		EnvName(name, sizeof(name), "RadioFavourites");
+		len = GetVar((STRPTR)name, (STRPTR)(text + cap), (LONG)cap, GVF_GLOBAL_ONLY | GVF_BINARY_VAR);
+		if (len < 0 || (size_t)len != n || memcmp(text + cap, text, n) != 0) {
+			SetVar((STRPTR)name, (STRPTR)text, (LONG)n, GVF_GLOBAL_ONLY);
+			SetVar((STRPTR)name, (STRPTR)text, (LONG)n, GVF_SAVE_VAR);
+		}
+	}
+	free(text);
 }
 
 static void SaveGuiSettings(HelixAmp3Gui *gui)
@@ -1194,17 +1265,7 @@ static void SaveGuiSettings(HelixAmp3Gui *gui)
 	SaveEnvInt("ArtworkColour", gui->artColorEnabled);
 	SaveEnvInt("ProgressBar", gui->progressEnabled);
 	SaveEnvString("LastDrawer", gui->lastDrawer);
-	{
-		int i;
-		char key[32];
-		SaveEnvInt("RadioFavCount", ClampInt(gui->rbFavouriteCount, 0, HELIXAMP3_RADIO_FAV_MAX));
-		for (i = 0; i < HELIXAMP3_RADIO_FAV_MAX; i++) {
-			sprintf(key, "RadioFavName%d", i);
-			SaveEnvString(key, gui->rbFavouriteNames[i]);
-			sprintf(key, "RadioFavUrl%d", i);
-			SaveEnvString(key, gui->rbFavouriteUrls[i]);
-		}
-	}
+	SaveRadioFavourites(gui);
 }
 
 static void FreeTags(Mp3Tags *tags)
@@ -6047,17 +6108,7 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	gui->artColorEnabled = LoadEnvInt("ArtworkColour", 1, 0, 1);
 	gui->progressEnabled = LoadEnvInt("ProgressBar", 0, 0, 1);
 	LoadEnvString("LastDrawer", gui->lastDrawer, sizeof(gui->lastDrawer));
-	{
-		int i;
-		char key[32];
-		gui->rbFavouriteCount = LoadEnvInt("RadioFavCount", gui->rbFavouriteCount, 0, HELIXAMP3_RADIO_FAV_MAX);
-		for (i = 0; i < gui->rbFavouriteCount; i++) {
-			sprintf(key, "RadioFavName%d", i);
-			LoadEnvString(key, gui->rbFavouriteNames[i], sizeof(gui->rbFavouriteNames[i]));
-			sprintf(key, "RadioFavUrl%d", i);
-			LoadEnvString(key, gui->rbFavouriteUrls[i], sizeof(gui->rbFavouriteUrls[i]));
-		}
-	}
+	LoadRadioFavourites(gui);
 	SafeCopy(gui->statusText, sizeof(gui->statusText), "Ready.");
 	gui->lastDisplayedPhase = GUIPLAY_PHASE_IDLE;
 	gui->lastDrawnElapsedSecs = -1;
@@ -7114,7 +7165,7 @@ static void RadioToggleFavourites(HelixAmp3Gui *app)
 
 static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 {
-	static unsigned char peek[512];
+	static unsigned char peek[RB_PROBE_PEEK_SIZE];
 	RbStreamInfo info;
 	int peekLen = 0;
 	int rc;
@@ -7257,7 +7308,7 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
  */
 static void RadioReplayCurrentUrl(HelixAmp3Gui *gui)
 {
-	static unsigned char peek[512];
+	static unsigned char peek[RB_PROBE_PEEK_SIZE];
 	RbStreamInfo info;
 	int peekLen = 0;
 	int rc;
@@ -7850,10 +7901,14 @@ static int GtPlaylistLoadEntry(void *ctx, const char *location, const char *titl
 {
 	GtPlaylistLoad *load = (GtPlaylistLoad *)ctx;
 	char fullPath[HELIXAMP3_MAX_PATH];
+	char shown[PLAYLIST_TITLE_MAX];
 	int isAbsolute = 0;
 	int j;
 	if (load->pl->count >= HELIXAMP3_PLAYLIST_MAX)
 		return 0;
+	/* Downloaded playlists are usually UTF-8; the location stays as is. */
+	AmigaUtf8ToDisplay(shown, sizeof(shown), title);
+	title = shown;
 	/* URLs and absolute Amiga paths as written ("Volume:" before any '/');
 	 * anything else is relative to the playlist's drawer. */
 	for (j = 0; location[j] && location[j] != '/'; j++) {

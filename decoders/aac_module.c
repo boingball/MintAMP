@@ -578,8 +578,8 @@ static DecHandle AacOpen(DecoderReadCb readFn, DecoderSeekCb seekFn,
     if (!AacRefillBuf(st) || !st->iobufReadPtr || st->iobufLeft < 2) {
         AacFreeState(st); return NULL;
     }
-    if (st->iobufReadPtr[0] != 0xff ||
-        (st->iobufReadPtr[1] != 0xf1 && st->iobufReadPtr[1] != 0xf9)) {
+    /* ADTS sync with layer 00, CRC present or not (FF F0/F1/F8/F9). */
+    if (st->iobufReadPtr[0] != 0xff || (st->iobufReadPtr[1] & 0xf6) != 0xf0) {
         AacFreeState(st); return NULL;
     }
 

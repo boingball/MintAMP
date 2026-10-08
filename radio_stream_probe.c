@@ -683,12 +683,81 @@ static int rb_probe_url_has_aac_hint(const RbProbeUrl *url)
            rb_probe_contains_nocase(url->path, "aac");
 }
 
+/* audio/aac, audio/aacp, audio/x-aac, audio/x-hx-aac-adts, audio/mp4... */
 static int rb_probe_content_type_is_aac(const char *content_type)
 {
-    return rb_probe_contains_nocase(content_type, "audio/aac") ||
-           rb_probe_contains_nocase(content_type, "audio/aacp") ||
-           rb_probe_contains_nocase(content_type, "audio/x-aac") ||
+    return (rb_probe_contains_nocase(content_type, "audio/") &&
+            rb_probe_contains_nocase(content_type, "aac")) ||
            rb_probe_contains_nocase(content_type, "audio/mp4");
+}
+
+/* Frame headers, for telling AAC (ADTS) from MP3 by the bytes themselves.
+ * Both start with a 0xFFF sync; ADTS has layer bits 00, which MPEG audio
+ * reserves.  Each returns the frame length, or 0 if p is not a plausible
+ * header.  *kind gets the fields that stay fixed from frame to frame. */
+static int rb_probe_adts_frame(const unsigned char *p, int n, unsigned *kind)
+{
+    int len;
+
+    if (n < 7 || p[0] != 0xff || (p[1] & 0xf6) != 0xf0) return 0;
+    if (((p[2] >> 2) & 0x0f) > 12) return 0;            /* sampling index */
+    len = ((p[3] & 0x03) << 11) | (p[4] << 3) | (p[5] >> 5);
+    if (len < ((p[1] & 1) ? 7 : 9)) return 0;           /* header (+CRC) */
+    *kind = ((unsigned)(p[1] & 0x08) << 8) | (p[2] & 0xfc);
+    return len;
+}
+
+static int rb_probe_mpeg_frame(const unsigned char *p, int n, unsigned *kind)
+{
+    static const unsigned short kbps[2][3][15] = {
+        { { 0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448 },
+          { 0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384 },
+          { 0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320 } },
+        { { 0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256 },
+          { 0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160 },
+          { 0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160 } } };
+    static const unsigned short rates[3] = { 44100, 48000, 32000 };
+    int version, layer, bri, sri, pad, rate, bitrate;
+
+    if (n < 4 || p[0] != 0xff || (p[1] & 0xe0) != 0xe0) return 0;
+    version = (p[1] >> 3) & 3;                 /* 3 = MPEG-1, 2 = 2, 0 = 2.5 */
+    layer = 4 - ((p[1] >> 1) & 3);             /* 4 = reserved */
+    bri = p[2] >> 4;
+    sri = (p[2] >> 2) & 3;
+    if (version == 1 || layer == 4 || bri == 0 || bri == 15 || sri == 3) return 0;
+    rate = rates[sri] >> (version == 3 ? 0 : (version == 2 ? 1 : 2));
+    bitrate = kbps[version == 3 ? 0 : 1][layer - 1][bri] * 1000;
+    pad = (p[2] >> 1) & 1;
+    *kind = (unsigned)(p[1] & 0xfe) << 8 | (p[2] & 0x0c);
+    if (layer == 1) return (12 * bitrate / rate + pad) * 4;
+    if (layer == 3 && version != 3) return 72 * bitrate / rate + pad;
+    return 144 * bitrate / rate + pad;
+}
+
+/* Looks for at least `links' + 1 consecutive frames of one kind starting
+ * anywhere in the buffer (a stream rarely starts on a frame boundary).
+ * Returns the codec of the earliest such chain. */
+static RbStreamCodec rb_probe_sniff_frames(const unsigned char *b, int n, int links)
+{
+    int i;
+
+    for (i = 0; i + 7 <= n; i++) {
+        int adts;
+        for (adts = 1; adts >= 0; adts--) {
+            unsigned kind = 0, next = 0;
+            int at = i, k;
+            for (k = 0; k <= links; k++) {
+                int len = adts ? rb_probe_adts_frame(b + at, n - at, &next)
+                               : rb_probe_mpeg_frame(b + at, n - at, &next);
+                if (!len || (k > 0 && next != kind)) break;
+                kind = next;
+                if (k < links) at += len;
+            }
+            if (k > links)
+                return adts ? RB_STREAM_CODEC_AAC : RB_STREAM_CODEC_MP3;
+        }
+    }
+    return RB_STREAM_CODEC_UNKNOWN;
 }
 
 static RbStreamCodec rb_probe_detect_codec(const RbProbeUrl *url, const RbStreamInfo *info,
@@ -698,18 +767,22 @@ static RbStreamCodec rb_probe_detect_codec(const RbProbeUrl *url, const RbStream
         RADIO_DBG(printf("rb-probe codec: initial byte sniff=ID3 final=MP3\n");)
         return RB_STREAM_CODEC_MP3;
     }
-    if (peek && peek_len >= 2 && peek[0] == 0xff && (peek[1] & 0xe0) == 0xe0 &&
-        peek[1] != 0xf1 && peek[1] != 0xf9) {
-        if ((info && rb_probe_content_type_is_aac(info->content_type)) || rb_probe_url_has_aac_hint(url)) {
-            RADIO_DBG(printf("rb-probe codec conflict: AAC hint but first-byte sniff=MPEG/MP3; final=unsupported\n");)
-            return RB_STREAM_CODEC_UNKNOWN;
-        }
-        RADIO_DBG(printf("rb-probe codec: initial byte sniff=MPEG frame sync final=MP3\n");)
-        return RB_STREAM_CODEC_MP3;
-    }
-    if (peek && peek_len >= 2 && peek[0] == 0xff && (peek[1] == 0xf1 || peek[1] == 0xf9)) {
+    if (peek && peek_len >= 2 && peek[0] == 0xff && (peek[1] & 0xf6) == 0xf0) {
+        /* ADTS, with or without CRC (FF F0/F1/F8/F9). */
         RADIO_DBG(printf("rb-probe codec: initial byte sniff=ADTS final=AAC\n");)
         return RB_STREAM_CODEC_AAC;
+    }
+    if (peek && peek_len >= 2 && peek[0] == 0xff && (peek[1] & 0xe0) == 0xe0) {
+        int aac_hint = (info && rb_probe_content_type_is_aac(info->content_type)) ||
+                       rb_probe_url_has_aac_hint(url);
+        /* MPEG-looking first bytes may just be where the server happened to
+         * start: a chain of MP3 frames settles it, and so, the other way, does
+         * a chain of ADTS frames later on or an AAC hint. */
+        if (rb_probe_sniff_frames(peek, peek_len, 1) == RB_STREAM_CODEC_MP3 ||
+            (!aac_hint && rb_probe_sniff_frames(peek, peek_len, 2) != RB_STREAM_CODEC_AAC)) {
+            RADIO_DBG(printf("rb-probe codec: initial byte sniff=MPEG frame sync final=MP3\n");)
+            return RB_STREAM_CODEC_MP3;
+        }
     }
     /* "OggS" is just the container magic -- Vorbis, Opus, Speex and
      * FLAC-in-Ogg all start a page with it. The only codec this app can
@@ -751,6 +824,17 @@ static RbStreamCodec rb_probe_detect_codec(const RbProbeUrl *url, const RbStream
         RADIO_DBG(printf("rb-probe codec: initial byte sniff=OggS final=OGG\n");)
         return RB_STREAM_CODEC_OGG;
     }
+    /* The bytes outrank a server's Content-Type, which is sometimes wrong
+     * (audio/mpeg on an AAC stream) or absent: three frames in a row are
+     * convincing, two are enough when the server says nothing useful. */
+    if (peek) {
+        RbStreamCodec framed = rb_probe_sniff_frames(peek, peek_len, 2);
+        if (framed != RB_STREAM_CODEC_UNKNOWN) {
+            RADIO_DBG(printf("rb-probe codec: frame chain sniff final=%s\n",
+                framed == RB_STREAM_CODEC_AAC ? "AAC" : "MP3");)
+            return framed;
+        }
+    }
     if (info && info->content_type[0]) {
         if (rb_probe_contains_nocase(info->content_type, "audio/mpeg") ||
             rb_probe_contains_nocase(info->content_type, "audio/mp3")) return RB_STREAM_CODEC_MP3;
@@ -763,6 +847,10 @@ static RbStreamCodec rb_probe_detect_codec(const RbProbeUrl *url, const RbStream
             rb_probe_contains_nocase(info->content_type, "application/ogg") ||
             rb_probe_contains_nocase(info->content_type, "audio/vorbis") ||
             rb_probe_contains_nocase(info->content_type, "audio/x-vorbis")) return RB_STREAM_CODEC_OGG;
+    }
+    if (peek) {
+        RbStreamCodec framed = rb_probe_sniff_frames(peek, peek_len, 1);
+        if (framed != RB_STREAM_CODEC_UNKNOWN) return framed;
     }
     if (rb_probe_url_has_aac_hint(url))
         return RB_STREAM_CODEC_AAC;
@@ -1848,6 +1936,72 @@ static const char *rb_probe_codec_name(RbStreamCodec codec)
     }
 }
 
+/* Writes an ADTS frame (AAC LC, 44.1 kHz stereo) of len bytes. */
+static void rb_probe_test_adts(unsigned char *p, int len, int crc)
+{
+    memset(p, 0x5a, (size_t)len);
+    p[0] = 0xff;
+    p[1] = (unsigned char)(crc ? 0xf0 : 0xf1);
+    p[2] = (unsigned char)(0x40 | (4 << 2));
+    p[3] = (unsigned char)(0x80 | ((len >> 11) & 3));
+    p[4] = (unsigned char)(len >> 3);
+    p[5] = (unsigned char)(((len & 7) << 5) | 0x1f);
+    p[6] = 0xfc;
+}
+
+/* Writes a 128 kbit/s 44.1 kHz MPEG-1 layer III frame (417 bytes). */
+static void rb_probe_test_mp3(unsigned char *p)
+{
+    memset(p, 0x5a, 417);
+    p[0] = 0xff; p[1] = 0xfb; p[2] = 0x90; p[3] = 0x64;
+}
+
+static int rb_probe_selftest_frames(void)
+{
+    static unsigned char b[RB_PROBE_PEEK_SIZE];
+    RbProbeUrl plain;
+    RbStreamInfo info;
+    int i, at;
+
+    if (rb_probe_parse_url("http://example.com/stream", &plain) != RB_STREAM_PROBE_OK) return 1;
+    rb_probe_info_init(&info);
+
+    /* ADTS with a CRC (FF F0) is AAC, hinted or not. */
+    rb_probe_test_adts(b, 557, 1);
+    if (rb_probe_detect_codec(&plain, &info, b, 557) != RB_STREAM_CODEC_AAC) return 2;
+    rb_probe_copy_trim(info.content_type, (int)sizeof(info.content_type), "audio/aacp", 10);
+    if (rb_probe_detect_codec(&plain, &info, b, 557) != RB_STREAM_CODEC_AAC) return 3;
+
+    /* An AAC stream that starts mid-frame, from a server that calls it
+     * audio/mpeg, or says nothing. */
+    memset(b, 0x11, sizeof(b));
+    b[0] = 0xff; b[1] = 0xfb; b[2] = 0x90; b[3] = 0x64;   /* looks like MP3 */
+    for (i = 0, at = 300; i < 6; i++, at += 557) rb_probe_test_adts(b + at, 557, i & 1);
+    rb_probe_copy_trim(info.content_type, (int)sizeof(info.content_type), "audio/mpeg", 10);
+    if (rb_probe_detect_codec(&plain, &info, b, (int)sizeof(b)) != RB_STREAM_CODEC_AAC) return 4;
+    info.content_type[0] = '\0';
+    if (rb_probe_detect_codec(&plain, &info, b, (int)sizeof(b)) != RB_STREAM_CODEC_AAC) return 5;
+
+    /* Real MP3 frames on a station that claims AAC play as MP3. */
+    memset(b, 0x11, sizeof(b));
+    for (i = 0, at = 0; i < 4; i++, at += 417) rb_probe_test_mp3(b + at);
+    rb_probe_copy_trim(info.content_type, (int)sizeof(info.content_type), "audio/aacp", 10);
+    if (rb_probe_detect_codec(&plain, &info, b, 4 * 417) != RB_STREAM_CODEC_MP3) return 6;
+    memmove(b + 123, b, 4 * 417);                           /* and mid-frame */
+    memset(b, 0x11, 123);
+    if (rb_probe_detect_codec(&plain, &info, b, 123 + 4 * 417) != RB_STREAM_CODEC_MP3) return 7;
+    /* One MP3-looking header with no frame after it is not enough. */
+    if (rb_probe_detect_codec(&plain, &info, b, 123 + 300) != RB_STREAM_CODEC_AAC) return 8;
+
+    /* Unknown bytes: the Content-Type decides. */
+    memset(b, 0x11, 64);
+    rb_probe_copy_trim(info.content_type, (int)sizeof(info.content_type), "audio/x-hx-aac-adts", 19);
+    if (rb_probe_detect_codec(&plain, &info, b, 64) != RB_STREAM_CODEC_AAC) return 9;
+    info.content_type[0] = '\0';
+    if (rb_probe_detect_codec(&plain, &info, b, 64) != RB_STREAM_CODEC_UNKNOWN) return 10;
+    return 0;
+}
+
 static int rb_probe_selftest(void)
 {
     RbProbeUrl url;
@@ -1863,7 +2017,10 @@ static int rb_probe_selftest(void)
     if (rb_probe_detect_codec(&url, &info, id3, (int)sizeof(id3)) != RB_STREAM_CODEC_MP3) return 5;
     if (rb_probe_detect_codec(&url, &info, mpeg, (int)sizeof(mpeg)) != RB_STREAM_CODEC_MP3) return 6;
     rb_probe_copy_trim(info.content_type, (int)sizeof(info.content_type), "audio/aacp", 10);
-    if (rb_probe_detect_codec(&url, &info, mpeg, (int)sizeof(mpeg)) != RB_STREAM_CODEC_UNKNOWN) return 7;
+    /* MPEG-looking first bytes on an AAC station: just where the server
+     * started, unless a chain of MP3 frames says otherwise. */
+    if (rb_probe_detect_codec(&url, &info, mpeg, (int)sizeof(mpeg)) != RB_STREAM_CODEC_AAC) return 7;
+    if (rb_probe_selftest_frames() != 0) return 34;
     rb_probe_info_init(&info);
     rb_probe_copy_trim(info.content_type, (int)sizeof(info.content_type), "audio/mp4", 9);
     if (rb_probe_detect_codec(&url, &info, NULL, 0) != RB_STREAM_CODEC_AAC) return 8;
@@ -1941,7 +2098,7 @@ static int rb_probe_selftest(void)
 int main(int argc, char **argv)
 {
     RbStreamInfo info;
-    unsigned char peek[512];
+    static unsigned char peek[RB_PROBE_PEEK_SIZE];
     int peek_len;
     int rc;
 
