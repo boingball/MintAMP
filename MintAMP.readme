@@ -2,7 +2,7 @@ Short:        Multiformat player and net radio
 Author:       Darren Banfi (boingball)
 Uploader:     boingball@gmail.com (Darren Banfi)
 Type:         mus/play
-Version:      1.3.3
+Version:      1.4.0
 Requires:     68030+; TCP/IP stack for radio; util/libs/AmiSSL-v5-OS3.lha for HTTPS
 Architecture: m68k-amigaos >= 3.0.0
 
@@ -17,8 +17,8 @@ sound card are not required.
 
 This archive contains two complete MintAMP drawers:
 
-  MintAMP-v1.3.3-68030  For 68030 and 68040 systems
-  MintAMP-v1.3.3-68060  Dedicated build for 68060 systems
+  MintAMP-v1.4.0-68030  For 68030 and 68040 systems
+  MintAMP-v1.4.0-68060  Dedicated build for 68060 systems
 
 Open or copy the drawer which matches the processor installed in your Amiga.
 The 68060 edition contains a dedicated 68060-safe and 68060-optimised MP3
@@ -43,8 +43,9 @@ Features
   - Uncompressed PCM WAV playback (8/16/24/32-bit, mono or stereo)
   - Amiga IFF-8SVX playback, including Fibonacci-delta compression
   - Bundled modular AAC, FLAC, Ogg, WMA, WAV and IFF decoders
-  - HTTP and HTTPS internet radio
-  - Radio Browser station search and favourites
+  - HTTP and HTTPS internet radio: MP3, AAC/AAC+, Ogg Vorbis and lossless
+    FLAC, with .pls/.m3u station links followed to the stream
+  - Radio Browser station search and editable favourites
   - Live ICY station, artist and title information
   - Station artwork using JPEG, PNG, WebP, ICO and a subset of SVG
   - M3U and PLS playlists of files and radio stations
@@ -72,25 +73,25 @@ Installation
 
 Extract the complete archive. Its root contains:
 
-  MintAMP-v1.3.3-68030/
-  MintAMP-v1.3.3-68060/
-  MintAMP-v1.3.3-68030.info
-  MintAMP-v1.3.3-68060.info
+  MintAMP-v1.4.0-68030/
+  MintAMP-v1.4.0-68060/
+  MintAMP-v1.4.0-68030.info
+  MintAMP-v1.4.0-68060.info
 
 Choose the drawer matching your processor:
 
   68030 or 68040:
-    Use MintAMP-v1.3.3-68030
+    Use MintAMP-v1.4.0-68030
 
   68060:
-    Use MintAMP-v1.3.3-68060
+    Use MintAMP-v1.4.0-68060
 
 You may leave both drawers together or copy only the required drawer to your
 preferred location.
 
 Keep every file inside the selected drawer together. Its layout is:
 
-  MintAMP-v1.3.3-68xxx/
+  MintAMP-v1.4.0-68xxx/
     MintAMP
     MintAMP.info
     MintAMP-GT
@@ -175,9 +176,10 @@ The established 68030 decoder path remains available in the 68030 drawer.
 Internet Radio Notes
 --------------------
 
-MintAMP supports direct HTTP and HTTPS MP3 and ADTS AAC/AAC+ streams. Radio
-Browser search, favourites, ICY metadata and station artwork are available in
-both GUI editions.
+MintAMP plays HTTP and HTTPS MP3, ADTS AAC/AAC+, Ogg Vorbis and FLAC
+streams, and follows .pls/.m3u station links and redirects to the stream.
+Radio Browser search, favourites, ICY metadata and station artwork are
+available in both GUI editions.
 
 Version 1.1 increases the compressed radio input buffer and improves network
 worker scheduling, rebuffer handling and HTTP/HTTPS read throughput.
@@ -290,28 +292,27 @@ repository for the complete terms and source code.
 History
 -------
 
-1.3.3  Internet radio links that point at a .pls or .m3u playlist, such
-       as Shoutcast's "listen.pls?sid=1", now play: MintAMP opens the
-       playlist and plays the stream it names instead of failing.
-       internet-radio.com "playlist generator" links play directly, even
-       without AmiSSL. MintAMP-GT favourites are checked before playing,
-       as in MintAMP, so playlist and redirecting favourites work there
-       too. Station icons sent with chunked HTTP encoding now load.
-       Lossless FLAC internet radio now plays, including FLAC inside Ogg,
-       and "FLAC" is a codec choice in the radio search. FLAC files and
-       streams that use blocks larger than 4608 samples, as ffmpeg writes
-       at 88.2 kHz and above, now play instead of stopping after a moment.
-       Playlists can now hold radio stations: Add URL, .pls as well as
-       .m3u load and save, station names shown and kept, and favourites
-       export/import (From Favs / To Favs). Streams in a playlist now play;
-       before, MintAMP started them without the stream check and they
-       failed.
-       Radio favourites can now be edited: Add Fav bookmarks the stream that
-       is playing, and favourites can be renamed, removed and reordered.
-       Up to 50 favourites instead of 20. Playlist files open from the main
-       file requester, the command line or a Workbench icon. If the first
-       server in a station's .pls is down, the next is tried. The
-       command-line player follows .pls/.m3u station links and redirects.
+1.4.0  Lossless FLAC internet radio, including FLAC inside Ogg, the form
+       most Icecast stations use; "FLAC" is a codec choice in the radio
+       search.
+       Station links that point at a .pls or .m3u playlist now play, such
+       as Shoutcast's "listen.pls?sid=1" and internet-radio.com playlist
+       generator links. If the first server in a station's playlist is
+       down, the next is tried. The command-line player follows these
+       links too.
+       Playlists can hold radio stations as well as files: Add URL, load
+       and save .pls as well as .m3u, with station names kept. Playlist
+       files open from the main file requester, the command line or a
+       Workbench project icon.
+       Radio favourites: Add Fav bookmarks the stream that is playing,
+       favourites can be renamed, removed, reordered and exported or
+       imported through the playlist (From Favs / To Favs), and up to 50
+       can be kept instead of 20.
+       Fixed: streams in a playlist, and MintAMP-GT favourites, started
+       without the stream check and failed on redirects and playlist
+       links; station icons sent with chunked HTTP encoding did not load;
+       FLAC files and streams with blocks over 4608 samples (ffmpeg at
+       88.2 kHz and above) stopped after a moment.
 
 1.3.2  Builds again with the GCC 13 Amiga toolchain as well as GCC 16: the
        release link no longer stops with "expected exactly three
@@ -334,7 +335,8 @@ History
        software emulation of register-pair MULS.L in all four decoders.
        FLAC LPC restoration now has a real implementation behind FLACASM.
        WMA FFT, MDCT, complex multiplication and windowing use the new path.
-       Corrected decoder ASM build wiring and added bit-exact arithmetic tests.
+       Corrected decoder ASM build wiring and added bit-exact arithmetic
+       tests.
 
 1.2.0  Added Workbench AppIcon iconification to both ReAction and GadTools.
        Expanded and repaired the GadTools Internet Radio browser, including

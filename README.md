@@ -1,7 +1,7 @@
 # MintAMP — Mini Internet Amiga Media Player
 
 [![Build](https://github.com/boingball/MintAMP/actions/workflows/build.yml/badge.svg)](https://github.com/boingball/MintAMP/actions/workflows/build.yml)
-![Version](https://img.shields.io/badge/version-1.3.3-brightgreen)
+![Version](https://img.shields.io/badge/version-1.4.0-brightgreen)
 ![Status](https://img.shields.io/badge/status-stable-brightgreen)
 ![AmigaOS](https://img.shields.io/badge/AmigaOS-3.0%2B-F28C28)
 ![CPU](https://img.shields.io/badge/CPU-68030%20%7C%2068040%20%7C%2068060-2F74C0)
@@ -26,7 +26,7 @@ MintAMP ships with ReAction/ClassAct, GadTools and command-line editions. Its fi
 ## Highlights
 
 - **Multiformat playback:** MP3, AAC-LC/AAC+ ADTS, FLAC, Ogg Vorbis, classic WMA, PCM WAV and Amiga IFF-8SVX.
-- **Internet radio:** direct HTTP/HTTPS streams, Radio Browser search, favourites, ICY title/artist updates and resilient reconnect handling.
+- **Internet radio:** HTTP/HTTPS MP3, AAC/AAC+, Ogg Vorbis and lossless FLAC streams, `.pls`/`.m3u` station links with mirror fallback, Radio Browser search, editable favourites, ICY title/artist updates and resilient reconnect handling.
 - **Workbench friendly:** ReAction/ClassAct and GadTools interfaces, M3U/PLS playlists mixing files and radio stations, track information, ratings, artwork and iconification while playback continues.
 - **Classic output:** direct Paula `audio.device` playback with configurable rate, quality, channel mode, buffering and reduced-work modes for slower systems.
 - **CPU-aware decoders:** dedicated 68060-safe multiply and hot-loop paths avoid instructions that the 68060 handles through software emulation.
@@ -36,8 +36,8 @@ MintAMP ships with ReAction/ClassAct, GadTools and command-line editions. Its fi
 
 | Installed CPU | Release drawer | Notes |
 |---|---|---|
-| 68030 or 68040 | `MintAMP-v1.3.3-68030` | Established full-result m68k assembly paths. |
-| 68060 | `MintAMP-v1.3.3-68060` | Dedicated 68060-safe and 68060-optimised player and decoder paths. |
+| 68030 or 68040 | `MintAMP-v1.4.0-68030` | Established full-result m68k assembly paths. |
+| 68060 | `MintAMP-v1.4.0-68060` | Dedicated 68060-safe and 68060-optimised player and decoder paths. |
 
 Each drawer contains all three front ends:
 
@@ -52,7 +52,7 @@ Keep the player and the decoder modules from the same CPU drawer together. In pa
 ## Project status
 
 > [!IMPORTANT]
-> **MintAMP 1.3 is a stable, complete application.** It is no longer just a Helix MP3 port or decoder demonstration: local playback, both GUI editions, the CLI, modular codecs and direct internet radio are integrated release features.
+> **MintAMP 1.4 is a stable, complete application.** It is no longer just a Helix MP3 port or decoder demonstration: local playback, both GUI editions, the CLI, modular codecs and direct internet radio are integrated release features.
 
 > [!NOTE]
 > Some compatibility/debug names still contain `exp` or `Experimental` because they were named during development, including `--exp-huff`, `--exp-poly`, `MP3SetExperimentalHuffman()` and `MP3SetExperimentalPolyphase()`. Those names are retained to avoid breaking callers; they do **not** mean the release-enabled paths are untested. See [Optimization and feature status](docs/optimization-status.md).
@@ -65,7 +65,7 @@ Keep the player and the decoder modules from the same CPU drawer together. In pa
 | 68030/68040 edition | Stable | Uses the established m68k assembly path. |
 | 68060 edition | Stable, hardware tested | Dedicated MP3 and decoder optimisations tested on a real 68060 Amiga. |
 | Classic WMA | Compatibility-limited | WMAv1/WMAv2 only; WMA Pro, Lossless and Voice are not supported. |
-| HLS/M3U8 | Out of scope | MintAMP plays direct stream URLs. |
+| HLS/M3U8 | Out of scope | MintAMP plays direct stream URLs and `.pls`/`.m3u` station links. |
 
 Development continues around performance, codec compatibility and UI polish, but those are improvements to a functioning player rather than missing foundations. Older development builds were named MiniAMP3/minimp3r; compatibility make targets remain where practical.
 
@@ -84,7 +84,7 @@ make -f Makefile.amiga release \
   RADIO=1 \
   SSL=1 \
   SSLCERTS=1 \
-  RELEASE_NAME=MintAMP-v1.3.3-68030
+  RELEASE_NAME=MintAMP-v1.4.0-68030
 
 # Keep the first release drawer, but remove CPU-specific objects.
 make -f Makefile.amiga clean
@@ -95,7 +95,7 @@ make -f Makefile.amiga release \
   RADIO=1 \
   SSL=1 \
   SSLCERTS=1 \
-  RELEASE_NAME=MintAMP-v1.3.3-68060
+  RELEASE_NAME=MintAMP-v1.4.0-68060
 ```
 
 The clean between builds is required so 68030 objects are not reused in the
@@ -143,7 +143,7 @@ amiga_mp3dec.fastexp --play "https://example.com/direct-stream"
 
 Useful playback controls include `--rate`, `--quality`, `--subband-cap`, `--mono`, `--stereo`, `--fake-stereo`, `--buffer-seconds`, `--volume` and `--fast-mem`. Run the binary without arguments to display the complete option list.
 
-The `fast030` target name is retained for compatibility. The actual target CPU is selected with `CPU=00`, `20`, `30`, `40` or `60`. MintAMP v1.3.3 release drawers are produced for the established 68030 path and a separately tuned 68060 path.
+The `fast030` target name is retained for compatibility. The actual target CPU is selected with `CPU=00`, `20`, `30`, `40` or `60`. MintAMP v1.4.0 release drawers are produced for the established 68030 path and a separately tuned 68060 path.
 
 ## Supported formats
 
@@ -156,7 +156,7 @@ The `fast030` target name is retained for compatibility. The actual target CPU i
 | WMA | Working (classic) | External `wma.decoder` for classic WMAv1/WMAv2 audio in ASF containers. WMA Pro, Lossless and Voice are not supported. |
 | WAV | Working | External `wav.decoder` for uncompressed integer PCM WAV files with 8, 16, 24 or 32-bit samples, mono or stereo. |
 | IFF-8SVX | Working | External `iff.decoder` for mono 8-bit samples, raw or Fibonacci-delta compressed. |
-| HTTP MP3/AAC radio | Working | Direct `http://` MP3 and ADTS AAC/AAC+ streams. ICY metadata supported where provided. |
+| HTTP MP3/AAC/Ogg radio | Working | `http://` MP3, ADTS AAC/AAC+ and Ogg Vorbis streams. `.pls`/`.m3u` station links and redirects are followed, trying a playlist's next server if one is down. ICY metadata supported where provided. |
 | FLAC radio | Working | Lossless stations sending FLAC in Ogg (the usual Icecast form) or plain FLAC, through `flac.decoder`. Needs roughly 1 Mbit/s for 16-bit/44.1 kHz; 24-bit/high-rate streams are reduced to 16-bit and the output rate. |
 | HTTPS MP3/AAC radio | Working with AmiSSL | Build with `RADIO=1 SSL=1`. Uses AmiSSL and classic-Amiga-specific teardown quarantine for stability. |
 | HTTPS certificate verification | Optional | Add `SSLCERTS=1` to use AmiSSL's installed CA certificates for peer/hostname verification. |
@@ -166,7 +166,8 @@ The `fast030` target name is retained for compatibility. The actual target CPU i
 | WebP artwork | Working | Compact VP8/VP8L decoder for station artwork and favicons. |
 | ICO artwork | Working | PNG-backed ICO and simple DIB-backed favicon entries. |
 | SVG artwork | Working (subset) | Fixed-point `svgdec.c` renderer; see "Artwork notes" below. |
-| HLS / M3U8 | Not supported | Out of scope currently. Direct stream URLs only. |
+| Playlists and favourites | Working | M3U and PLS playlists mixing files and stations, opened from the file requester, command line or a Workbench icon. Favourites can bookmark the playing stream and be renamed, removed and reordered. |
+| HLS / M3U8 | Not supported | Out of scope currently. Direct stream URLs and `.pls`/`.m3u` station links only. |
 
 ## Internet radio
 

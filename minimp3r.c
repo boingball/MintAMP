@@ -76,7 +76,7 @@
  * in here doubled up into a malformed path that silently failed to persist
  * across reboots while the plain ENV: (RAM) write kept working. */
 #define MR_ENV_PREFIX "MintAMP"
-#define MINTAMP_VERSION "1.3.3"
+#define MINTAMP_VERSION "1.4.0"
 #define MR_SETTINGS_VERSION 1
 #define MR_RADIO_FAV_MAX 50
 
