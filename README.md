@@ -11,7 +11,7 @@
 ![Output](https://img.shields.io/badge/output-Paula%20audio.device-CB4B16)
 ![GUI](https://img.shields.io/badge/GUI-ReAction%20%7C%20GadTools-8A2BE2)
 [![GitHub stars](https://img.shields.io/github/stars/boingball/MintAMP)](https://github.com/boingball/MintAMP/stargazers)
-[![GitHub last commit](https://img.shields.io/github/last-commit/boingball/MintAMP/commits/master)
+[![GitHub last commit](https://img.shields.io/github/last-commit/boingball/MintAMP/master)](https://github.com/boingball/MintAMP/commits/master)
 [![Support](https://img.shields.io/badge/Support-Buy%20Me%20a%20Coffee-FFDD00?logo=buymeacoffee&logoColor=000000)](https://buymeacoffee.com/boingball)
 ![AI](https://img.shields.io/badge/AI-assisted%20coding-6e7781)
 
