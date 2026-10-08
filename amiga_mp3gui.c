@@ -208,6 +208,7 @@ static char gSupportedExtPattern[512];
 #include "svgdec.h"
 #include "radio_stream.h"
 #include "radio_browser_controller.h"
+#include "playlist_format.h"
 #ifndef OBP_FailIfBad
 #define OBP_FailIfBad (TAG_USER + 0x01L)
 #endif
@@ -564,12 +565,19 @@ enum {
 #define PL_GID_PLAY      204
 #define PL_GID_LOAD_M3U  205
 #define PL_GID_SAVE_M3U  206
+#define PL_GID_URL       207
+#define PL_GID_ADD_URL   208
+#define PL_GID_FROM_FAVS 209
+#define PL_GID_TO_FAVS   210
 
 #define HELIXAMP3_PLAYLIST_MAX 128
 
 typedef struct {
 	char paths[HELIXAMP3_PLAYLIST_MAX][HELIXAMP3_MAX_PATH];
-	char names[HELIXAMP3_PLAYLIST_MAX][80];
+	char names[HELIXAMP3_PLAYLIST_MAX][80];   /* what the list shows */
+	/* Station name or #EXTINF/TitleN title; empty means show the file
+	 * name or URL. */
+	char titles[HELIXAMP3_PLAYLIST_MAX][80];
 	struct Node nodes[HELIXAMP3_PLAYLIST_MAX];
 	struct List list;
 	int count;
@@ -664,6 +672,7 @@ typedef struct HelixAmp3Gui {
 	struct Gadget  *plGadgets;
 	struct Gadget  *plGadContext;
 	struct Gadget  *plGadList;
+	struct Gadget  *plGadUrl;
 	struct VisualInfo *plVisualInfo;
 	Playlist playlist;
 	struct Window  *rbWin;
@@ -2662,6 +2671,7 @@ static void RefreshPlaylistView(HelixAmp3Gui *gui);
 static void HandlePlaylistPoll(HelixAmp3Gui *gui);
 static void PlaylistLoadM3U(HelixAmp3Gui *gui);
 static void PlaylistSaveM3U(HelixAmp3Gui *gui);
+static void PlaylistStartCurrent(HelixAmp3Gui *gui);
 
 static int JpegGreySample(const pjpeg_image_info_t *info, int off)
 {
@@ -4802,7 +4812,7 @@ static void FinalizePlayback(HelixAmp3Gui *gui)
 		DrawProgress(gui);
 		if (gui->artDecode.active)
 			SendTimerRequest(gui, ART_TIMER_MICROS);
-		StartPlayback(gui);
+		PlaylistStartCurrent(gui);
 	} else {
 		/* On a natural end-of-playlist, clear the position so subsequent
 		 * Next presses don't claim there is an active track.  On a manual
@@ -7353,6 +7363,25 @@ static const char *PlaylistBaseName(const char *path)
 	return last;
 }
 
+/* Appends one entry; a location that does not fit is skipped rather than
+ * cut short (a truncated URL or path would only fail later). The list shows
+ * the title if there is one, else the file name, or the whole URL for a
+ * stream (whose last path part is often just "stream"). */
+static int PlaylistAddEntry(Playlist *pl, const char *location, const char *title)
+{
+	int n = pl->count;
+	if (n >= HELIXAMP3_PLAYLIST_MAX || !location || !location[0] ||
+		strlen(location) >= HELIXAMP3_MAX_PATH)
+		return 0;
+	SafeCopy(pl->paths[n], sizeof(pl->paths[n]), location);
+	SafeCopy(pl->titles[n], sizeof(pl->titles[n]), title ? title : "");
+	SafeCopy(pl->names[n], sizeof(pl->names[n]),
+		pl->titles[n][0] ? pl->titles[n] :
+		(is_url_path(location) ? location : PlaylistBaseName(location)));
+	pl->count++;
+	return 1;
+}
+
 static void PlaylistRebuildList(Playlist *pl)
 {
 	int i;
@@ -7405,6 +7434,7 @@ free_resources:
 		gui->plGadgets = NULL;
 		gui->plGadContext = NULL;
 		gui->plGadList = NULL;
+		gui->plGadUrl = NULL;
 	}
 	if (gui->plVisualInfo) {
 		FreeVisualInfo(gui->plVisualInfo);
@@ -7412,12 +7442,15 @@ free_resources:
 	}
 }
 
+/* Three rows under the list (buttons, URL entry, file/favourites buttons);
+ * the list gave up one row's height so the window is no taller than before. */
 #define PL_WIN_W  460
-#define PL_LIST_H 192
+#define PL_LIST_H 170
 #define PL_BTN_H  18
 #define PL_BTN_Y  (PL_LIST_H + 28)
 #define PL_BTN_Y2 (PL_BTN_Y + PL_BTN_H + 4)
-#define PL_WIN_H  (PL_BTN_Y2 + PL_BTN_H + 10)
+#define PL_BTN_Y3 (PL_BTN_Y2 + PL_BTN_H + 4)
+#define PL_WIN_H  (PL_BTN_Y3 + PL_BTN_H + 10)
 
 static void OpenPlaylistWindow(HelixAmp3Gui *gui)
 {
@@ -7465,7 +7498,7 @@ static void OpenPlaylistWindow(HelixAmp3Gui *gui)
 	ng.ng_TopEdge = PL_BTN_Y;
 	ng.ng_Width = bw;
 	ng.ng_Height = PL_BTN_H;
-	ng.ng_GadgetText = (UBYTE *)"Add";
+	ng.ng_GadgetText = (UBYTE *)"Add Files";
 	ng.ng_GadgetID = PL_GID_ADD;
 	ng.ng_Flags = PLACETEXT_IN;
 	ng.ng_VisualInfo = gui->plVisualInfo;
@@ -7493,22 +7526,56 @@ static void OpenPlaylistWindow(HelixAmp3Gui *gui)
 	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE);
 	if (!gad) goto fail;
 
-	/* Second button row: Load M3U | Save M3U */
-	bx = 8;
-	bw = (PL_WIN_W - 16 - 4) / 2;
+	/* Second row: URL entry | Add URL */
+	bw = (PL_WIN_W - 16 - 12) / 4;
 	ng.ng_TopEdge = PL_BTN_Y2;
+	ng.ng_LeftEdge = 8 + 32;
+	ng.ng_Width = PL_WIN_W - 16 - 32 - 4 - bw;
+	ng.ng_GadgetText = (UBYTE *)"URL";
+	ng.ng_GadgetID = PL_GID_URL;
+	ng.ng_Flags = PLACETEXT_LEFT;
+	gui->plGadUrl = gad = CreateGadget(STRING_KIND, gad, &ng,
+		GTST_String, (ULONG)"http://",
+		GTST_MaxChars, HELIXAMP3_MAX_PATH - 1,
+		TAG_DONE);
+	if (!gad) goto fail;
+
+	ng.ng_LeftEdge = PL_WIN_W - 8 - bw;
 	ng.ng_Width = bw;
+	ng.ng_GadgetText = (UBYTE *)"Add URL";
+	ng.ng_GadgetID = PL_GID_ADD_URL;
+	ng.ng_Flags = PLACETEXT_IN;
+	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE);
+	if (!gad) goto fail;
+
+	/* Third row: Load | Save | From Favs | To Favs */
+	bx = 8;
+	ng.ng_TopEdge = PL_BTN_Y3;
 
 	ng.ng_LeftEdge = bx;
-	ng.ng_GadgetText = (UBYTE *)"Load M3U";
+	ng.ng_GadgetText = (UBYTE *)"Load...";
 	ng.ng_GadgetID = PL_GID_LOAD_M3U;
 	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE);
 	if (!gad) goto fail;
 	bx += bw + 4;
 
 	ng.ng_LeftEdge = bx;
-	ng.ng_GadgetText = (UBYTE *)"Save M3U";
+	ng.ng_GadgetText = (UBYTE *)"Save...";
 	ng.ng_GadgetID = PL_GID_SAVE_M3U;
+	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE);
+	if (!gad) goto fail;
+	bx += bw + 4;
+
+	ng.ng_LeftEdge = bx;
+	ng.ng_GadgetText = (UBYTE *)"From Favs";
+	ng.ng_GadgetID = PL_GID_FROM_FAVS;
+	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE);
+	if (!gad) goto fail;
+	bx += bw + 4;
+
+	ng.ng_LeftEdge = bx;
+	ng.ng_GadgetText = (UBYTE *)"To Favs";
+	ng.ng_GadgetID = PL_GID_TO_FAVS;
 	gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE);
 	if (!gad) goto fail;
 
@@ -7568,30 +7635,60 @@ static void PlaylistLoadAndShow(HelixAmp3Gui *gui, int index)
 		SendTimerRequest(gui, ART_TIMER_MICROS);
 }
 
+typedef struct GtPlaylistLoad {
+	Playlist *pl;
+	const char *drawer;
+	int added;
+	int skipped;
+} GtPlaylistLoad;
+
+static int GtPlaylistLoadEntry(void *ctx, const char *location, const char *title)
+{
+	GtPlaylistLoad *load = (GtPlaylistLoad *)ctx;
+	char fullPath[HELIXAMP3_MAX_PATH];
+	int isAbsolute = 0;
+	int j;
+	if (load->pl->count >= HELIXAMP3_PLAYLIST_MAX)
+		return 0;
+	/* URLs and absolute Amiga paths as written ("Volume:" before any '/');
+	 * anything else is relative to the playlist's drawer. */
+	for (j = 0; location[j] && location[j] != '/'; j++) {
+		if (location[j] == ':') { isAbsolute = 1; break; }
+	}
+	if (isAbsolute || location[0] == '/' || is_url_path(location)) {
+		SafeCopy(fullPath, sizeof(fullPath), location);
+	} else {
+		SafeCopy(fullPath, sizeof(fullPath), load->drawer);
+		SafeAddPartPath("PlaylistLoad/AddPartItem", fullPath, location, sizeof(fullPath));
+	}
+	if (PlaylistAddEntry(load->pl, fullPath, title))
+		load->added++;
+	else
+		load->skipped++;
+	return 1;
+}
+
+/* Appends the entries of an M3U or PLS playlist to the current one. */
 static void PlaylistLoadM3U(HelixAmp3Gui *gui)
 {
 	struct FileRequester *req;
 	BPTR fh;
 	char m3uPath[HELIXAMP3_MAX_PATH];
 	char drawer[HELIXAMP3_MAX_PATH];
-	char lineBuf[HELIXAMP3_MAX_PATH + 4];
-	char fullPath[HELIXAMP3_MAX_PATH];
-	char statusMsg[64];
-	int lineLen;
-	int addCount;
-	int isAbsolute;
-	int j;
-	int n;
-	char ch;
+	char statusMsg[80];
+	GtPlaylistLoad load;
+	char *text;
+	LONG len, got;
+	const LONG maxBytes = 96L * 1024L;
 
 	if (!AslBase) {
 		SetStatus(gui, "ASL library not available.");
 		return;
 	}
 	req = (struct FileRequester *)AllocAslRequestTags(ASL_FileRequest,
-		ASLFR_TitleText, (ULONG)"Load M3U Playlist",
+		ASLFR_TitleText, (ULONG)"Load M3U or PLS Playlist",
 		ASLFR_DoPatterns, TRUE,
-		ASLFR_InitialPattern, (ULONG)"#?.m3u",
+		ASLFR_InitialPattern, (ULONG)"#?.(m3u|m3u8|pls)",
 		ASLFR_InitialDrawer,
 			(ULONG)(gui->lastDrawer[0] ? gui->lastDrawer : NULL),
 		TAG_DONE);
@@ -7619,85 +7716,52 @@ static void PlaylistLoadM3U(HelixAmp3Gui *gui)
 
 	fh = SafeOpenPath("PlaylistLoadM3U/Open", m3uPath, MODE_OLDFILE);
 	if (!fh) {
-		SetStatus(gui, "Cannot open M3U file.");
+		SetStatus(gui, "Cannot open playlist file.");
 		return;
 	}
-
-	addCount = 0;
-	lineLen = 0;
-	while (Read(fh, &ch, 1) == 1) {
-		if (ch == '\n' || ch == '\r') {
-			if (lineLen > 0) {
-				lineBuf[lineLen] = '\0';
-				while (lineLen > 0 &&
-					(lineBuf[lineLen-1] == '\r' || lineBuf[lineLen-1] == ' '))
-					lineBuf[--lineLen] = '\0';
-				if (lineLen > 0 && lineBuf[0] != '#' &&
-					gui->playlist.count < HELIXAMP3_PLAYLIST_MAX) {
-					isAbsolute = 0;
-					for (j = 0; lineBuf[j] && lineBuf[j] != '/'; j++) {
-						if (lineBuf[j] == ':') { isAbsolute = 1; break; }
-					}
-					if (isAbsolute || lineBuf[0] == '/') {
-						SafeCopy(fullPath, sizeof(fullPath), lineBuf);
-					} else {
-						SafeCopy(fullPath, sizeof(fullPath), drawer);
-						SafeAddPartPath("PlaylistLoadM3U/AddPartItem", fullPath, lineBuf, sizeof(fullPath));
-					}
-					n = gui->playlist.count;
-					SafeCopy(gui->playlist.paths[n], HELIXAMP3_MAX_PATH, fullPath);
-					SafeCopy(gui->playlist.names[n], 80, PlaylistBaseName(fullPath));
-					gui->playlist.count++;
-					addCount++;
-				}
-				lineLen = 0;
-			}
-		} else if (lineLen < (int)(sizeof(lineBuf) - 1)) {
-			lineBuf[lineLen++] = ch;
-		}
+	text = (char *)malloc((size_t)maxBytes + 1);
+	if (!text) {
+		Close(fh);
+		SetStatus(gui, "Not enough memory to load playlist.");
+		return;
 	}
-	/* Handle final line with no trailing newline */
-	if (lineLen > 0) {
-		lineBuf[lineLen] = '\0';
-		while (lineLen > 0 &&
-			(lineBuf[lineLen-1] == '\r' || lineBuf[lineLen-1] == ' '))
-			lineBuf[--lineLen] = '\0';
-		if (lineLen > 0 && lineBuf[0] != '#' &&
-			gui->playlist.count < HELIXAMP3_PLAYLIST_MAX) {
-			isAbsolute = 0;
-			for (j = 0; lineBuf[j] && lineBuf[j] != '/'; j++) {
-				if (lineBuf[j] == ':') { isAbsolute = 1; break; }
-			}
-			if (isAbsolute || lineBuf[0] == '/') {
-				SafeCopy(fullPath, sizeof(fullPath), lineBuf);
-			} else {
-				SafeCopy(fullPath, sizeof(fullPath), drawer);
-				SafeAddPartPath("PlaylistLoadM3U/AddPartItem", fullPath, lineBuf, sizeof(fullPath));
-			}
-			n = gui->playlist.count;
-			SafeCopy(gui->playlist.paths[n], HELIXAMP3_MAX_PATH, fullPath);
-			SafeCopy(gui->playlist.names[n], 80, PlaylistBaseName(fullPath));
-			gui->playlist.count++;
-			addCount++;
-		}
-	}
+	len = 0;
+	while (len < maxBytes && (got = Read(fh, text + len, maxBytes - len)) > 0)
+		len += got;
+	text[len] = '\0';
 	Close(fh);
+
+	load.pl = &gui->playlist;
+	load.drawer = drawer;
+	load.added = 0;
+	load.skipped = 0;
+	playlist_parse(text, (size_t)len, GtPlaylistLoadEntry, &load);
+	free(text);
 	RefreshPlaylistView(gui);
-	sprintf(statusMsg, "Loaded %d tracks from M3U.", addCount);
+	if (load.skipped > 0)
+		sprintf(statusMsg, "Loaded %d entries; %d too long or did not fit.", load.added, load.skipped);
+	else
+		sprintf(statusMsg, "Loaded %d entries from playlist.", load.added);
 	SetStatus(gui, statusMsg);
 }
 
+static int GtWriteAll(BPTR fh, const char *text, size_t len)
+{
+	return len == 0 || Write(fh, (APTR)text, (LONG)len) == (LONG)len;
+}
+
+/* Saves the playlist as PLS when the chosen name ends in .pls, else as an
+ * extended M3U, with each entry's title where it has one. */
 static void PlaylistSaveM3U(HelixAmp3Gui *gui)
 {
 	struct FileRequester *req;
 	BPTR fh;
 	char m3uPath[HELIXAMP3_MAX_PATH];
-	char lineBuf[HELIXAMP3_MAX_PATH + 2];
-	int i;
-	int len;
+	char text[1024];
+	int i, format, ok;
 
 	if (gui->playlist.count <= 0) {
-		SetStatus(gui, "Playlist is empty — nothing to save.");
+		SetStatus(gui, "Playlist is empty - nothing to save.");
 		return;
 	}
 	if (!AslBase) {
@@ -7705,7 +7769,7 @@ static void PlaylistSaveM3U(HelixAmp3Gui *gui)
 		return;
 	}
 	req = (struct FileRequester *)AllocAslRequestTags(ASL_FileRequest,
-		ASLFR_TitleText, (ULONG)"Save M3U Playlist",
+		ASLFR_TitleText, (ULONG)"Save Playlist (name it .m3u or .pls)",
 		ASLFR_DoSaveMode, TRUE,
 		ASLFR_InitialFile, (ULONG)"playlist.m3u",
 		ASLFR_InitialDrawer,
@@ -7730,29 +7794,126 @@ static void PlaylistSaveM3U(HelixAmp3Gui *gui)
 	if (!m3uPath[0])
 		return;
 
+	format = playlist_format_from_name(m3uPath);
 	fh = SafeOpenPath("PlaylistSaveM3U/Open", m3uPath, MODE_NEWFILE);
 	if (!fh) {
-		SetStatus(gui, "Cannot create M3U file.");
+		SetStatus(gui, "Cannot create playlist file.");
 		return;
 	}
+	ok = GtWriteAll(fh, text, playlist_write_header(text, sizeof(text), format));
+	for (i = 0; ok && i < gui->playlist.count; i++)
+		ok = GtWriteAll(fh, text, playlist_write_entry(text, sizeof(text), format, i + 1,
+			gui->playlist.paths[i], gui->playlist.titles[i]));
+	if (ok)
+		ok = GtWriteAll(fh, text, playlist_write_footer(text, sizeof(text), format, gui->playlist.count));
+	Close(fh);
+	SetStatus(gui, !ok ? "Error writing playlist file." :
+		format == PLAYLIST_FORMAT_PLS ? "Playlist saved as PLS." : "Playlist saved as M3U.");
+}
 
-	len = (int)strlen("#EXTM3U\n");
-	if (Write(fh, (APTR)"#EXTM3U\n", len) != len)
-		goto fail;
-
-	for (i = 0; i < gui->playlist.count; i++) {
-		SafeCopy(lineBuf, sizeof(lineBuf) - 1, gui->playlist.paths[i]);
-		len = (int)strlen(lineBuf);
-		lineBuf[len] = '\n';
-		if (Write(fh, (APTR)lineBuf, len + 1) != len + 1)
-			goto fail;
+/* Adds the URL typed in the playlist window's URL field. */
+static void PlaylistAddUrl(HelixAmp3Gui *gui)
+{
+	char url[HELIXAMP3_MAX_PATH];
+	char *p;
+	url[0] = '\0';
+	if (gui->plGadUrl && gui->plGadUrl->SpecialInfo)
+		SafeCopy(url, sizeof(url),
+			(const char *)((struct StringInfo *)gui->plGadUrl->SpecialInfo)->Buffer);
+	p = url;
+	while (*p == ' ' || *p == '\t') p++;
+	memmove(url, p, strlen(p) + 1);
+	p = url + strlen(url);
+	while (p > url && (p[-1] == ' ' || p[-1] == '\t')) *--p = '\0';
+	if (!url[0] || !strcmp(url, "http://")) {
+		SetStatus(gui, "Type a stream URL first.");
+		return;
 	}
-	Close(fh);
-	SetStatus(gui, "Playlist saved as M3U.");
-	return;
-fail:
-	Close(fh);
-	SetStatus(gui, "Error writing M3U file.");
+	if (!is_url_path(url)) {
+		SetStatus(gui, "Stream URL must start with http:// or https://");
+		return;
+	}
+	if (!PlaylistAddEntry(&gui->playlist, url, NULL)) {
+		SetStatus(gui, gui->playlist.count >= HELIXAMP3_PLAYLIST_MAX ?
+			"Playlist is full." : "URL is too long.");
+		return;
+	}
+	gui->playlist.selected = gui->playlist.count - 1;
+	RefreshPlaylistView(gui);
+	if (gui->plGadUrl && gui->plWin)
+		GT_SetGadgetAttrs(gui->plGadUrl, gui->plWin, NULL,
+			GTST_String, (ULONG)"http://", TAG_DONE);
+	SetStatus(gui, "Stream added to playlist.");
+}
+
+/* Appends every radio favourite to the playlist (then Save exports them). */
+static void PlaylistAddFavourites(HelixAmp3Gui *gui)
+{
+	int i, added = 0;
+	char msg[64];
+	for (i = 0; i < gui->rbFavouriteCount; i++)
+		if (PlaylistAddEntry(&gui->playlist, gui->rbFavouriteUrls[i], gui->rbFavouriteNames[i]))
+			added++;
+	if (added == 0) {
+		SetStatus(gui, gui->rbFavouriteCount == 0 ? "No radio favourites yet." :
+			"Playlist is full.");
+		return;
+	}
+	if (gui->playlist.selected < 0)
+		gui->playlist.selected = gui->playlist.count - added;
+	RefreshPlaylistView(gui);
+	sprintf(msg, "Added %d favourite%s to playlist.", added, added == 1 ? "" : "s");
+	SetStatus(gui, msg);
+}
+
+/* Adds every stream in the playlist to the radio favourites (so a loaded
+ * .pls/.m3u imports them), updating the name of ones already there. */
+static void PlaylistToFavourites(HelixAmp3Gui *gui)
+{
+	int i, j, added = 0, full = 0;
+	char msg[80];
+	for (i = 0; i < gui->playlist.count; i++) {
+		const char *url = gui->playlist.paths[i];
+		const char *name = gui->playlist.titles[i][0] ? gui->playlist.titles[i] : url;
+		if (!is_url_path(url))
+			continue;
+		for (j = 0; j < gui->rbFavouriteCount; j++)
+			if (!strcmp(gui->rbFavouriteUrls[j], url))
+				break;
+		if (j == gui->rbFavouriteCount) {
+			if (gui->rbFavouriteCount >= HELIXAMP3_RADIO_FAV_MAX) {
+				full = 1;
+				continue;
+			}
+			gui->rbFavouriteCount++;
+			SafeCopy(gui->rbFavouriteUrls[j], sizeof(gui->rbFavouriteUrls[j]), url);
+			added++;
+		} else if (!gui->playlist.titles[i][0]) {
+			continue;   /* keep the existing favourite's name */
+		}
+		SafeCopy(gui->rbFavouriteNames[j], sizeof(gui->rbFavouriteNames[j]), name);
+	}
+	SaveGuiSettings(gui);
+	if (gui->rbWin && gui->rbShowingFavourites)
+		RadioRefreshResults(gui);
+	sprintf(msg, "Added %d stream%s to favourites%s", added, added == 1 ? "" : "s",
+		full ? " (favourites full)." : ".");
+	SetStatus(gui, msg);
+}
+
+/* Starts the entry PlaylistLoadAndShow() just made current.  A stream goes
+ * through the same probe as the Play button (redirects, .pls/.m3u links,
+ * codec check); StartPlayback() on a bare URL skips all of that. */
+static void PlaylistStartCurrent(HelixAmp3Gui *gui)
+{
+	int i = gui->playlist.current;
+	if (IsRadioInputName(gui->inputName)) {
+		SafeCopy(gui->currentRadioStationName, sizeof(gui->currentRadioStationName),
+			(i >= 0 && i < gui->playlist.count) ? gui->playlist.titles[i] : "");
+		RadioReplayCurrentUrl(gui);
+	} else {
+		StartPlayback(gui);
+	}
 }
 
 static void HandlePlaylistPoll(HelixAmp3Gui *gui)
@@ -7807,7 +7968,6 @@ static void HandlePlaylistPoll(HelixAmp3Gui *gui)
 					/* Multi-select (asl v38+) */
 					int i;
 					for (i = 0; i < (int)req->fr_NumArgs && gui->playlist.count < HELIXAMP3_PLAYLIST_MAX; i++) {
-						int n;
 						path[0] = '\0';
 						if (req->fr_Drawer && req->fr_Drawer[0]) {
 							SafeCopy(path, sizeof(path), req->fr_Drawer);
@@ -7816,15 +7976,10 @@ static void HandlePlaylistPoll(HelixAmp3Gui *gui)
 							SafeCopy(path, sizeof(path), req->fr_ArgList[i].wa_Name);
 						}
 						if (!path[0]) continue;
-						n = gui->playlist.count;
-						SafeCopy(gui->playlist.paths[n], sizeof(gui->playlist.paths[0]), path);
-						SafeCopy(gui->playlist.names[n], sizeof(gui->playlist.names[0]),
-							PlaylistBaseName(path));
-						gui->playlist.count++;
+						PlaylistAddEntry(&gui->playlist, path, NULL);
 					}
 				} else if (req->fr_File && req->fr_File[0]) {
 					/* Single-select fallback */
-					int n;
 					path[0] = '\0';
 					if (req->fr_Drawer && req->fr_Drawer[0]) {
 						SafeCopy(path, sizeof(path), req->fr_Drawer);
@@ -7832,13 +7987,8 @@ static void HandlePlaylistPoll(HelixAmp3Gui *gui)
 					} else {
 						SafeCopy(path, sizeof(path), req->fr_File);
 					}
-					if (path[0] && gui->playlist.count < HELIXAMP3_PLAYLIST_MAX) {
-						n = gui->playlist.count;
-						SafeCopy(gui->playlist.paths[n], sizeof(gui->playlist.paths[0]), path);
-						SafeCopy(gui->playlist.names[n], sizeof(gui->playlist.names[0]),
-							PlaylistBaseName(path));
-						gui->playlist.count++;
-					}
+					if (path[0])
+						PlaylistAddEntry(&gui->playlist, path, NULL);
 				}
 				RefreshPlaylistView(gui);
 			}
@@ -7854,6 +8004,8 @@ static void HandlePlaylistPoll(HelixAmp3Gui *gui)
 						gui->playlist.paths[i + 1]);
 					SafeCopy(gui->playlist.names[i], sizeof(gui->playlist.names[0]),
 						gui->playlist.names[i + 1]);
+					SafeCopy(gui->playlist.titles[i], sizeof(gui->playlist.titles[0]),
+						gui->playlist.titles[i + 1]);
 				}
 				gui->playlist.count--;
 				if (gui->playlist.current > sel)
@@ -7878,7 +8030,7 @@ static void HandlePlaylistPoll(HelixAmp3Gui *gui)
 					break;
 				}
 				PlaylistLoadAndShow(gui, gui->playlist.selected);
-				StartPlayback(gui);
+				PlaylistStartCurrent(gui);
 			}
 			break;
 		case PL_GID_LOAD_M3U:
@@ -7886,6 +8038,16 @@ static void HandlePlaylistPoll(HelixAmp3Gui *gui)
 			break;
 		case PL_GID_SAVE_M3U:
 			PlaylistSaveM3U(gui);
+			break;
+		case PL_GID_URL:
+		case PL_GID_ADD_URL:
+			PlaylistAddUrl(gui);
+			break;
+		case PL_GID_FROM_FAVS:
+			PlaylistAddFavourites(gui);
+			break;
+		case PL_GID_TO_FAVS:
+			PlaylistToFavourites(gui);
 			break;
 		}
 	}

@@ -49,6 +49,9 @@ jobs:
       - name: Check Ogg FLAC radio stream conversion
         run: make -f Makefile.amiga radio-oggflac-test
 
+      - name: Check M3U/PLS playlist reading and writing
+        run: make -f Makefile.amiga playlist-format-test
+
       - name: Check MPEG-2.5 Layer III decoding
         run: make -f Makefile.amiga mpeg25-decode-test
 

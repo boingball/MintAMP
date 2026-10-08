@@ -47,7 +47,7 @@ Features
   - Radio Browser station search and favourites
   - Live ICY station, artist and title information
   - Station artwork using JPEG, PNG, WebP, ICO and a subset of SVG
-  - Playlist loading and saving
+  - M3U and PLS playlists of files and radio stations
   - Iconify to a Workbench AppIcon while playback continues
   - ID3 tag display and track ratings
   - Configurable output rate, quality, channel mode and buffering
@@ -195,6 +195,23 @@ HLS/M3U8 streams are not supported. Internet stations must provide a direct
 MP3, ADTS AAC/AAC+, Ogg Vorbis or FLAC stream URL, or a .pls/.m3u playlist
 naming one.
 
+Playlists
+---------
+
+The playlist window (both editions) holds local files and radio streams
+together:
+
+  Add Files   add audio files from a file requester
+  Add URL     add the stream typed in the URL field (Return works too)
+  Load...     open an .m3u, .m3u8 or .pls playlist
+  Save...     save the list; name it .pls for a PLS file, otherwise it is
+              saved as an extended M3U. Station names are kept.
+  From Favs   append your radio favourites to the list
+  To Favs     add every stream in the list to your radio favourites
+
+To export your favourites, press From Favs and save the list. To import a
+station list, load it and press To Favs.
+
 Format Notes
 ------------
 
@@ -257,6 +274,11 @@ History
        and "FLAC" is a codec choice in the radio search. FLAC files and
        streams that use blocks larger than 4608 samples, as ffmpeg writes
        at 88.2 kHz and above, now play instead of stopping after a moment.
+       Playlists can now hold radio stations: Add URL, .pls as well as
+       .m3u load and save, station names shown and kept, and favourites
+       export/import (From Favs / To Favs). Streams in a playlist now play;
+       before, MintAMP started them without the stream check and they
+       failed.
 
 1.3.2  Builds again with the GCC 13 Amiga toolchain as well as GCC 16: the
        release link no longer stops with "expected exactly three

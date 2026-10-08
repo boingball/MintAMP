@@ -27,7 +27,7 @@ MintAMP ships with ReAction/ClassAct, GadTools and command-line editions. Its fi
 
 - **Multiformat playback:** MP3, AAC-LC/AAC+ ADTS, FLAC, Ogg Vorbis, classic WMA, PCM WAV and Amiga IFF-8SVX.
 - **Internet radio:** direct HTTP/HTTPS streams, Radio Browser search, favourites, ICY title/artist updates and resilient reconnect handling.
-- **Workbench friendly:** ReAction/ClassAct and GadTools interfaces, playlists, track information, ratings, artwork and iconification while playback continues.
+- **Workbench friendly:** ReAction/ClassAct and GadTools interfaces, M3U/PLS playlists mixing files and radio stations, track information, ratings, artwork and iconification while playback continues.
 - **Classic output:** direct Paula `audio.device` playback with configurable rate, quality, channel mode, buffering and reduced-work modes for slower systems.
 - **CPU-aware decoders:** dedicated 68060-safe multiply and hot-loop paths avoid instructions that the 68060 handles through software emulation.
 - **Modular distribution:** matching AAC, FLAC, Ogg, WMA, WAV and IFF decoder modules are bundled with every release edition and CI artifact.
