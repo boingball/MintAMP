@@ -11,6 +11,9 @@
 #include "miniamp_memguard.h"
 #include "radio_stream.h"
 #include "radio_oggflac.h"
+#if ENABLE_RADIO && !defined(main)
+#include "radio_stream_probe.h"
+#endif
 #include <time.h>
 #include <stdarg.h>
 #ifndef AMIGA_M68K
@@ -5989,6 +5992,47 @@ static int StrCaseStarts(const char *s, const char *prefix)
 	return 1;
 }
 
+#if ENABLE_RADIO && !defined(main)
+/* The command-line player has no GUI to probe a URL before playing it, so
+ * follow redirects, .pls/.m3u station links (with mirror fallback) and
+ * playlist-generator links here, as the GUIs do. If the probe fails the URL
+ * is played as given, exactly as before, so nothing that played stops. The
+ * GUIs (where main is renamed) have probed already and skip this. */
+static void CliResolveRadioUrl(DecodeOptions *opt)
+{
+	static RbStreamInfo info;
+	static unsigned char peek[512];
+	static char resolved[512];
+	int peekLen = 0;
+	int rc;
+
+	if (!opt || !opt->inName || opt->haveRadioHostAddr)
+		return;
+	/* The GUIs do this at start-up; without AmiSSL the probe resolves and
+	 * connects on this task, so bsdsocket.library must be open first. */
+	Radio_NetworkInit();
+	if (!Radio_HasNetwork())
+		return;
+	rc = rb_probe_stream_url(opt->inName, &info, peek, (int)sizeof(peek), &peekLen);
+	if (rc < 0 || !info.final_url[0]) {
+		fprintf(stderr, "radio-cli: probe failed (%s); trying the URL as given\n",
+			rb_probe_error_text(rc));
+		return;
+	}
+	if (strcmp(info.final_url, opt->inName) != 0)
+		fprintf(stderr, "radio-cli: %s -> %s\n", opt->inName, info.final_url);
+	strncpy(resolved, info.final_url, sizeof(resolved) - 1);
+	resolved[sizeof(resolved) - 1] = '\0';
+	opt->inName = resolved;
+	opt->haveRadioHostAddr = info.have_host_addr;
+	opt->radioHostAddrBe = info.host_addr_be;
+	if (!opt->radioCodecHint) {
+		if (info.codec == RB_STREAM_CODEC_FLAC) opt->radioCodecHint = "FLAC";
+		else if (info.codec == RB_STREAM_CODEC_AAC) opt->radioCodecHint = "AAC";
+	}
+}
+#endif
+
 static const char *RadioDecoderExtFromContentType(const char *contentType)
 {
 	if (!contentType || !contentType[0])
@@ -11791,6 +11835,9 @@ int main(int argc, char **argv)
 #ifdef HAVE_AMIGA_AUDIO_DEVICE
 	if (opt.play && opt.radioStream) {
 		RadioStream *radio;
+#if ENABLE_RADIO && !defined(main)
+		CliResolveRadioUrl(&opt);
+#endif
 		GuiPublishStartupStage(GUISTART_INPUT_FOPEN_BEFORE);
 		radio = Radio_OpenWithHostAddr(opt.inName, opt.haveRadioHostAddr, opt.radioHostAddrBe);
 		GuiPublishStartupStage(GUISTART_INPUT_FOPEN_AFTER);

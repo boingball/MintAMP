@@ -78,7 +78,7 @@
 #define MR_ENV_PREFIX "MintAMP"
 #define MINTAMP_VERSION "1.3.3"
 #define MR_SETTINGS_VERSION 1
-#define MR_RADIO_FAV_MAX 20
+#define MR_RADIO_FAV_MAX 50
 
 /* AmigaOS Version command metadata; unrelated to MR_SETTINGS_VERSION. */
 static const char gMintAmpVersionTag[] __attribute__((used)) =
@@ -105,6 +105,7 @@ static const char gMintAmpVersionTag[] __attribute__((used)) =
 
 #include <proto/exec.h>
 #include <proto/dos.h>
+#include <workbench/startup.h>
 #include <proto/intuition.h>
 #include <proto/utility.h>
 #include <proto/asl.h>
@@ -825,6 +826,8 @@ static int SetStatusIfChanged(MrApp *app, const char *text);
 static void SetStatus(MrApp *app, const char *text);
 static void RadioDoProbeAndPlay(MrApp *app);
 static void RadioProbeUrlAndStart(MrApp *app, const char *url, const char *stationName);
+static void LoadPlaylistPath(MrApp *app, const char *m3uPath, const char *drawer);
+static void PlaylistLoadCurrent(MrApp *app, int index, int startPlayback);
 static void RadioSelectResult(MrApp *app, ULONG eventSelected);
 static void PlaylistStartCurrent(MrApp *app);
 
@@ -1142,7 +1145,7 @@ static void LoadSettings(MrApp *app)
 		int i;
 		char key[32];
 		app->rbFavouriteCount = LoadEnvInt("RadioFavCount", app->rbFavouriteCount, 0, MR_RADIO_FAV_MAX);
-		for (i = 0; i < MR_RADIO_FAV_MAX; i++) {
+		for (i = 0; i < app->rbFavouriteCount; i++) {
 			sprintf(key, "RadioFavName%d", i);
 			LoadEnvString(key, app->rbFavouriteNames[i], sizeof(app->rbFavouriteNames[i]));
 			sprintf(key, "RadioFavUrl%d", i);
@@ -1313,6 +1316,13 @@ static int MrIsRadioInput(const char *name)
 {
 	return name && (!strncmp(name, "http://", 7) ||
 		!strncmp(name, "https://", 8));
+}
+
+/* A local .m3u/.m3u8/.pls file (URLs ending so are station links, which the
+ * stream probe follows instead). */
+static int MrIsPlaylistFile(const char *name)
+{
+	return !MrIsRadioInput(name) && playlist_is_playlist_name(name);
 }
 
 
@@ -5124,9 +5134,9 @@ struct FileRequester *fr;
 char path[MR_MAX_PATH];
 
 fr = (struct FileRequester *)AllocAslRequestTags(ASL_FileRequest,
-ASLFR_TitleText, (ULONG)"Choose an audio file",
+ASLFR_TitleText, (ULONG)"Choose an audio file or playlist",
 ASLFR_DoPatterns, TRUE,
-ASLFR_InitialPattern, (ULONG)"#?.(mp3|flac|aac|ogg|oga|wav|wma|8svx|iff|svx|aif|aiff)",
+ASLFR_InitialPattern, (ULONG)"#?.(mp3|flac|aac|ogg|oga|wav|wma|8svx|iff|svx|aif|aiff|m3u|m3u8|pls)",
 ASLFR_InitialDrawer, (ULONG)(app->lastDrawer[0] ? app->lastDrawer : NULL),
 TAG_DONE);
 
@@ -5147,6 +5157,15 @@ SafeCopy(path, sizeof(path), (const char *)fr->fr_Drawer);
 if (fr->fr_File && fr->fr_File[0]) {
 if (!AddPart((STRPTR)path, fr->fr_File, sizeof(path))) {
 SetStatus(app, "Selected path is too long.");
+FreeAslRequest(fr);
+return;
+}
+
+/* A playlist opens in the playlist, with its first entry selected. */
+if (MrIsPlaylistFile(path)) {
+CopyDrawerFromPath(app->lastDrawer, sizeof(app->lastDrawer), path);
+SaveSettings(app);
+LoadPlaylistPath(app, path, (const char *)fr->fr_Drawer);
 FreeAslRequest(fr);
 return;
 }
@@ -7247,6 +7266,40 @@ static ULONG gMrDetectedStackUpper;
 static ULONG gMrDetectedStackSize;
 static ULONG gMrEffectiveStackSize;
 
+/* Opens and plays a file, stream URL or .pls/.m3u playlist given on the
+ * command line ("MintAMP Work:Radio/jazz.pls") or as a Workbench project
+ * icon whose Default Tool is MintAMP. */
+static void MrOpenStartupArg(MrApp *app, int argc, char **argv)
+{
+	char path[MR_MAX_PATH];
+	path[0] = '\0';
+	if (argc >= 2 && argv[1] && argv[1][0] && argv[1][0] != '-') {
+		SafeCopy(path, sizeof(path), argv[1]);
+	} else if (argc == 0 && argv) {
+		struct WBStartup *wb = (struct WBStartup *)argv;
+		if (wb->sm_NumArgs >= 2 && wb->sm_ArgList[1].wa_Lock &&
+			(!NameFromLock(wb->sm_ArgList[1].wa_Lock, (STRPTR)path, sizeof(path)) ||
+			 !AddPart((STRPTR)path, wb->sm_ArgList[1].wa_Name, sizeof(path))))
+			path[0] = '\0';
+	}
+	if (!path[0])
+		return;
+	if (MrIsPlaylistFile(path)) {
+		char drawer[MR_MAX_PATH];
+		CopyDrawerFromPath(drawer, sizeof(drawer), path);
+		LoadPlaylistPath(app, path, drawer);
+		if (app->playlistCount > 0)
+			PlaylistLoadCurrent(app, 0, 1);
+	} else if (MrIsRadioInput(path)) {
+		RadioProbeUrlAndStart(app, path, NULL);
+	} else {
+		SafeCopy(app->inputName, sizeof(app->inputName), path);
+		UpdateFileGadget(app);
+		RefreshFileInfoAndTags(app);
+		StartPlayback(app);
+	}
+}
+
 static int MrMainReal(int argc, char **argv)
 {
 	static MrApp app;
@@ -7370,6 +7423,8 @@ static int MrMainReal(int argc, char **argv)
 	/* Paint the (empty) artwork panel once now that the layout has sized the
 	 * placeholder, so the recessed box is shown before the first file loads. */
 	DrawArtPanel(&app);
+
+	MrOpenStartupArg(&app, argc, argv);
 
 	MR_TASK_IDENTITY("gui-event-loop");
 	while (!done) {
