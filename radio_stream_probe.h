@@ -117,6 +117,11 @@ enum {
     RB_STREAM_PROBE_ERR_PLAYLIST_EMPTY = -20
 };
 
+/* Bytes of stream body the callers let the probe read.  Enough for three
+ * frames of a 192 kbit/s AAC or 320 kbit/s MP3 stream that starts mid-frame,
+ * so the codec can be told from the bytes and not just the Content-Type. */
+#define RB_PROBE_PEEK_SIZE 4096
+
 const char *rb_probe_error_text(int rc);
 int rb_probe_url_looks_hls(const char *url);
 /* For an internet-radio.com "playlist generator" link (?u=STATION&t=.pls),

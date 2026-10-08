@@ -321,7 +321,7 @@ HALFASM_TEST_CPPFLAGS := -DAMIGA_M68K_ASM_FDCT32
 FAST030_ASM_SOURCES := $(CPU_ASM_SOURCES)
 AMIGA_HUNK_FAST_PREFERRED := python3 tools/amiga_fast_preferred_hunks.py
 
-.PHONY: all fast030 radio030 sslradio030 amissl-get-test amissl-free-repro-test amissl-spawn-repro-test amissl-exec-repro-test rb-stream-probe-test prof030 gui guir miniamp3 minimp3r sslgui sslguir fast030-halfasm-test gui-halfasm-test decoder-modules release release-clean clean print-command print-fast030-command print-gui-command print-guir-command cpu60-baseline cpu60-huffman cpu60-huffman-dequant cpu60-huffman-dequant-imdct cpu60-huffman-dequant-imdct-fdct32 cpu60-audit-stages poly60-ref-test aac-mulshift60-ref-test ogg-mulshift60-ref-test wma-mulshift-ref-test flac-lpc-ref-test radio-metadata-test radio-oggflac-test playlist-format-test freeall-heads-test
+.PHONY: all fast030 radio030 sslradio030 amissl-get-test amissl-free-repro-test amissl-spawn-repro-test amissl-exec-repro-test rb-stream-probe-test prof030 gui guir miniamp3 minimp3r sslgui sslguir fast030-halfasm-test gui-halfasm-test decoder-modules release release-clean clean print-command print-fast030-command print-gui-command print-guir-command cpu60-baseline cpu60-huffman cpu60-huffman-dequant cpu60-huffman-dequant-imdct cpu60-huffman-dequant-imdct-fdct32 cpu60-audit-stages poly60-ref-test aac-mulshift60-ref-test ogg-mulshift60-ref-test wma-mulshift-ref-test flac-lpc-ref-test radio-metadata-test radio-oggflac-test playlist-format-test display-text-test radio-favourites-test freeall-heads-test
 
 all: $(TARGET) decoder-modules
 
@@ -600,6 +600,19 @@ radio-oggflac-test:
 	$(HOSTCC) -O2 -std=gnu99 tests/radio_oggflac_test.c \
 		-o radio_oggflac_test
 	./radio_oggflac_test
+
+# Host test for converting internet text (station names, ICY titles) for
+# the Amiga's Latin-1 fonts.
+display-text-test:
+	$(HOSTCC) -O2 -std=gnu89 -Wall -Wextra tests/display_text_test.c \
+		-o display_text_test
+	./display_text_test
+
+# Host test for the one-variable radio favourites format.
+radio-favourites-test:
+	$(HOSTCC) -O2 -std=gnu89 -Wall -Wextra tests/radio_favourites_test.c \
+		-o radio_favourites_test
+	./radio_favourites_test
 
 # Host test for M3U/PLS playlist reading and writing used by both GUIs.
 playlist-format-test:

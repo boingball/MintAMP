@@ -463,7 +463,7 @@ int main(void)
 
 #define RB_RADIO_E2E_HOST "de1.api.radio-browser.info"
 #define RB_RADIO_E2E_BODY_SIZE 131072
-#define RB_RADIO_E2E_PEEK_SIZE 512
+#define RB_RADIO_E2E_PEEK_SIZE RB_PROBE_PEEK_SIZE
 #define RB_RADIO_E2E_BODY_PREVIEW 200
 
 static const char *rb_radio_e2e_codec_name(RbStreamCodec codec)

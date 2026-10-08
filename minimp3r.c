@@ -69,6 +69,7 @@
 #include "radio_browser_controller.h"
 #include "radio_browser_http.h"
 #include "playlist_format.h"
+#include "radio_favourites.h"
 
 /* See the matching comment in amiga_mp3gui.c's GUI_ENV_PREFIX: bare name,
  * no explicit device prefix -- GVF_SAVE_VAR already constructs the
@@ -1088,9 +1089,22 @@ static void LoadEnvString(const char *key, char *dst, size_t dstSize)
 
 static void SaveEnvString(const char *key, const char *value)
 {
+	static char current[1024];
 	char name[64];
+	LONG len;
+	size_t n;
 	EnvName(name, sizeof(name), key);
 	if (!value) value = "";
+	/* Each GVF_SAVE_VAR write is a file in ENVARC: on disk, and a settings
+	 * save covers every favourite slot (130-odd variables), which took up to
+	 * a minute on a slow drive.  ENV: holds the same values (copied from
+	 * ENVARC: at boot, then kept in step here), so write only what changed. */
+	len = GetVar((STRPTR)name, (STRPTR)current, sizeof(current),
+		GVF_GLOBAL_ONLY | GVF_BINARY_VAR);
+	n = strlen(value);
+	if (len < 0 ? n == 0 :
+		(n + 1 < sizeof(current) && (size_t)len == n && !memcmp(current, value, n)))
+		return;
 	SetVar((STRPTR)name, (STRPTR)value, strlen(value), GVF_GLOBAL_ONLY);
 	SetVar((STRPTR)name, (STRPTR)value, strlen(value), GVF_SAVE_VAR);
 }
@@ -1098,6 +1112,63 @@ static void SaveEnvString(const char *key, const char *value)
 static void SaveEnvInt(const char *key, int value)
 {
 	char text[16]; sprintf(text, "%d", value); SaveEnvString(key, text);
+}
+
+/* The radio favourites live in one variable (see radio_favourites.h); a
+ * variable per slot meant ~100 ENVARC: files rewritten on every edit. */
+static void LoadRadioFavourites(MrApp *app)
+{
+	size_t cap = RADIO_FAV_TEXT_MAX(MR_RADIO_FAV_MAX);
+	char *text = (char *)malloc(cap);
+	char name[64];
+	char key[32];
+	LONG len;
+	int count = -1, i;
+
+	if (text) {
+		EnvName(name, sizeof(name), "RadioFavourites");
+		len = GetVar((STRPTR)name, (STRPTR)text, (LONG)cap, GVF_GLOBAL_ONLY | GVF_BINARY_VAR);
+		if (len >= 0)
+			count = radio_fav_parse(text, (size_t)len, app->rbFavouriteNames,
+				app->rbFavouriteUrls, MR_RADIO_FAV_MAX);
+		free(text);
+	}
+	if (count >= 0) {
+		app->rbFavouriteCount = count;
+		return;
+	}
+	/* Saved by MintAMP 1.4.0 or earlier: a name and a URL variable per slot. */
+	app->rbFavouriteCount = LoadEnvInt("RadioFavCount", app->rbFavouriteCount, 0, MR_RADIO_FAV_MAX);
+	for (i = 0; i < app->rbFavouriteCount; i++) {
+		sprintf(key, "RadioFavName%d", i);
+		LoadEnvString(key, app->rbFavouriteNames[i], sizeof(app->rbFavouriteNames[i]));
+		sprintf(key, "RadioFavUrl%d", i);
+		LoadEnvString(key, app->rbFavouriteUrls[i], sizeof(app->rbFavouriteUrls[i]));
+	}
+}
+
+/* Writes the favourites variable, only when it changed. */
+static void SaveRadioFavourites(MrApp *app)
+{
+	size_t cap = RADIO_FAV_TEXT_MAX(MR_RADIO_FAV_MAX);
+	char *text = (char *)malloc(cap * 2);
+	char name[64];
+	size_t n;
+	LONG len;
+
+	if (!text)
+		return;
+	n = radio_fav_format(text, cap, app->rbFavouriteNames, app->rbFavouriteUrls,
+		ClampInt(app->rbFavouriteCount, 0, MR_RADIO_FAV_MAX));
+	if (n) {
+		EnvName(name, sizeof(name), "RadioFavourites");
+		len = GetVar((STRPTR)name, (STRPTR)(text + cap), (LONG)cap, GVF_GLOBAL_ONLY | GVF_BINARY_VAR);
+		if (len < 0 || (size_t)len != n || memcmp(text + cap, text, n) != 0) {
+			SetVar((STRPTR)name, (STRPTR)text, (LONG)n, GVF_GLOBAL_ONLY);
+			SetVar((STRPTR)name, (STRPTR)text, (LONG)n, GVF_SAVE_VAR);
+		}
+	}
+	free(text);
 }
 
 static void LoadSettings(MrApp *app)
@@ -1141,17 +1212,7 @@ static void LoadSettings(MrApp *app)
 	app->artColorEnabled = LoadEnvInt("ArtworkColour", app->artColorEnabled, 0, 1);
 	app->progressEnabled = LoadEnvInt("ProgressBar", app->progressEnabled, 0, 1);
 	LoadEnvString("LastDrawer", app->lastDrawer, sizeof(app->lastDrawer));
-	{
-		int i;
-		char key[32];
-		app->rbFavouriteCount = LoadEnvInt("RadioFavCount", app->rbFavouriteCount, 0, MR_RADIO_FAV_MAX);
-		for (i = 0; i < app->rbFavouriteCount; i++) {
-			sprintf(key, "RadioFavName%d", i);
-			LoadEnvString(key, app->rbFavouriteNames[i], sizeof(app->rbFavouriteNames[i]));
-			sprintf(key, "RadioFavUrl%d", i);
-			LoadEnvString(key, app->rbFavouriteUrls[i], sizeof(app->rbFavouriteUrls[i]));
-		}
-	}
+	LoadRadioFavourites(app);
 }
 
 static void SaveSettings(MrApp *app)
@@ -1180,17 +1241,7 @@ static void SaveSettings(MrApp *app)
 	SaveEnvInt("ArtworkColour", app->artColorEnabled);
 	SaveEnvInt("ProgressBar", app->progressEnabled);
 	SaveEnvString("LastDrawer", app->lastDrawer);
-	{
-		int i;
-		char key[32];
-		SaveEnvInt("RadioFavCount", ClampInt(app->rbFavouriteCount, 0, MR_RADIO_FAV_MAX));
-		for (i = 0; i < MR_RADIO_FAV_MAX; i++) {
-			sprintf(key, "RadioFavName%d", i);
-			SaveEnvString(key, app->rbFavouriteNames[i]);
-			sprintf(key, "RadioFavUrl%d", i);
-			SaveEnvString(key, app->rbFavouriteUrls[i]);
-		}
-	}
+	SaveRadioFavourites(app);
 }
 
 static int SetReadonlyString(Object *gad, struct Window *win, char *cache, size_t cacheSize, const char *text)
@@ -5257,8 +5308,12 @@ static int MrPlaylistLoadEntry(void *ctx, const char *location, const char *titl
 {
 	MrPlaylistLoad *load = (MrPlaylistLoad *)ctx;
 	char full[MR_MAX_PATH];
+	char shown[PLAYLIST_TITLE_MAX];
 	if (load->app->playlistCount >= MR_PLAYLIST_MAX)
 		return 0;
+	/* Downloaded playlists are usually UTF-8; the location stays as is. */
+	AmigaUtf8ToDisplay(shown, sizeof(shown), title);
+	title = shown;
 	/* URLs and absolute Amiga paths as written; anything else is relative
 	 * to the playlist's drawer. */
 	if (strchr(location, ':') || location[0] == '/') {
@@ -5467,7 +5522,7 @@ static void RadioSetStatus(MrApp *app, const char *text)
 
 static void RadioProbeUrlAndStart(MrApp *app, const char *url, const char *stationName)
 {
-	static unsigned char peek[512];
+	static unsigned char peek[RB_PROBE_PEEK_SIZE];
 	static char unwrapped[512];
 	RbStreamInfo info;
 	int peekLen = 0;
@@ -6074,7 +6129,7 @@ static void RadioToggleFavourites(MrApp *app)
 
 static void RadioDoProbeAndPlay(MrApp *app)
 {
-	static unsigned char peek[512];
+	static unsigned char peek[RB_PROBE_PEEK_SIZE];
 	RbStreamInfo info;
 	int peekLen = 0;
 	int rc;

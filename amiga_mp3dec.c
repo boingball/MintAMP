@@ -6001,7 +6001,7 @@ static int StrCaseStarts(const char *s, const char *prefix)
 static void CliResolveRadioUrl(DecodeOptions *opt)
 {
 	static RbStreamInfo info;
-	static unsigned char peek[512];
+	static unsigned char peek[RB_PROBE_PEEK_SIZE];
 	static char resolved[512];
 	int peekLen = 0;
 	int rc;
@@ -10261,6 +10261,48 @@ static int FindAdtsSyncLocal(const unsigned char *buf, size_t n)
 	return -1;
 }
 
+/* Length of the ADTS frame whose plausible header is at b, else 0. */
+static int AdtsFrameLenLocal(const unsigned char *b, size_t n)
+{
+	int len;
+	if (n < 7 || b[0] != 0xff || (b[1] & 0xf6) != 0xf0)
+		return 0;
+	if (((b[2] >> 2) & 0x0f) > 12)
+		return 0;
+	len = ((b[3] & 0x03) << 11) | (b[4] << 3) | (b[5] >> 5);
+	return len >= ((b[1] & 1) ? 7 : 9) ? len : 0;
+}
+
+/* Where AAC radio audio really starts.  A stream joins mid-frame, and two
+ * bytes of frame data look like an ADTS sync about once in 4 KB, so a header
+ * only counts once the next frame starts with a matching one (*confirmed).
+ * Failing that, the first header whose next frame is not yet buffered. */
+static int FindAdtsStartLocal(const unsigned char *buf, size_t n, int *confirmed)
+{
+	size_t i;
+	int first = -1;
+	*confirmed = 0;
+	for (i = 0; i + 7 <= n; i++) {
+		const unsigned char *q;
+		int len = AdtsFrameLenLocal(buf + i, n - i);
+		if (!len)
+			continue;
+		if (i + (size_t)len + 7 > n) {
+			if (first < 0)
+				first = (int)i;
+			continue;
+		}
+		q = buf + i + len;
+		if (AdtsFrameLenLocal(q, n - i - (size_t)len) &&
+			(q[1] & 0x08) == (buf[i + 1] & 0x08) &&
+			(q[2] & 0xfc) == (buf[i + 2] & 0xfc)) {
+			*confirmed = 1;
+			return (int)i;
+		}
+	}
+	return first;
+}
+
 static int ValidateAacAdtsInput(InputSource *input, int debugDecoder)
 {
 	unsigned char probe[16];
@@ -10313,6 +10355,7 @@ static int PrimeRadioAacAdtsInput(InputSource *input, int debugDecoder)
 	unsigned long total = 0;
 	clock_t startedAt;
 	int sync = -1;
+	int syncConfirmed = 0;
 	int pump;
 	int i;
 
@@ -10331,8 +10374,8 @@ static int PrimeRadioAacAdtsInput(InputSource *input, int debugDecoder)
 		if (got == 0)
 			break;
 		total += (unsigned long)got;
-		sync = FindAdtsSyncLocal(input->prefix, (size_t)total);
-		if (sync >= 0 && total >= (unsigned long)sync + 7UL)
+		sync = FindAdtsStartLocal(input->prefix, (size_t)total, &syncConfirmed);
+		if (sync >= 0 && syncConfirmed)
 			break;
 		if (PlaybackElapsedMilliseconds(startedAt, clock()) >=
 			AAC_RADIO_STARTUP_TIMEOUT_MS) {
@@ -10369,8 +10412,8 @@ static int PrimeRadioAacAdtsInput(InputSource *input, int debugDecoder)
 			(int)Radio_GetStatus(input->radio), total);
 		return 0;
 	}
-	fprintf(stderr, "radio-aac-startup: ADTS sync found offset=%d buffered=%lu bytesSkipped=%d\n",
-		sync, total, sync);
+	fprintf(stderr, "radio-aac-startup: ADTS sync found offset=%d buffered=%lu bytesSkipped=%d confirmed=%d\n",
+		sync, total, sync, syncConfirmed);
 	if (sync > 0) {
 		memmove(input->prefix, input->prefix + sync, (size_t)(total - (unsigned long)sync));
 		input->prefixSize = total - (unsigned long)sync;
