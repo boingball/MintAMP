@@ -262,7 +262,7 @@ static void GuiTaskIdentityLog(const char *phase)
 
 #define HELIXAMP3_MAX_PATH 256
 #define HELIXAMP3_ARGC_MAX 28
-#define MINTAMP_GT_VERSION "1.3.3"
+#define MINTAMP_GT_VERSION "1.4.0"
 #define HELIXAMP3_SETTINGS_VERSION 2
 #define HELIXAMP3_RADIO_FAV_MAX 50
 #define HELIXAMP3_QUALITY_MIN 0
