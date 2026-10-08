@@ -192,9 +192,13 @@ CFLAGS_COMMON := $(CPU_MFLAG) $(STD) $(OPTFLAGS)
 DECODER_SOURCES := mp3dec.c mp3tabs.c $(wildcard real/*.c)
 RADIO_SOURCES :=
 RADIO_CPPFLAGS :=
+# The GUIs list radio_stream_probe.c themselves; the command-line player
+# needs it too so it can follow redirects and .pls/.m3u station links.
+RADIO_CLI_SOURCES :=
 ifneq ($(filter 1 yes true on,$(RADIO) $(ENABLE_RADIO) $(HAVE_BSDSOCKET))$(findstring -DENABLE_RADIO,$(EXTRA_CFLAGS))$(findstring -DHAVE_BSDSOCKET,$(EXTRA_CFLAGS)),)
 RADIO_SOURCES := radio_stream.c
 RADIO_CPPFLAGS := -DENABLE_RADIO -DHAVE_BSDSOCKET
+RADIO_CLI_SOURCES := radio_stream_probe.c
 endif
 
 # AmiSSL support: make -f Makefile.amiga fast030 RADIO=1 SSL=1
@@ -285,7 +289,7 @@ PNG_CPPFLAGS := -DENABLE_PNG_ARTWORK -DLODEPNG_NO_COMPILE_ENCODER \
 # drop webpdec.c from the *_SOURCES below; the C-level guard alone only skips
 # the decode calls.  WebP is the second most common real-world favicon format.
 
-SOURCES := amiga_mp3dec.c miniamp_memguard.c $(TASKSAFE_MALLOC_SOURCE) radio_runtime_flags.c $(RADIO_SOURCES) $(DECODER_SOURCES)
+SOURCES := amiga_mp3dec.c miniamp_memguard.c $(TASKSAFE_MALLOC_SOURCE) radio_runtime_flags.c $(RADIO_SOURCES) $(RADIO_CLI_SOURCES) $(DECODER_SOURCES)
 # miniamp_memguard.c compiles to nothing unless HEAPGUARD=1 (see
 # MINIAMP_DEBUG_ALLOC above), so it's harmless to always list it.
 GUI_SOURCES := amiga_mp3gui.c picojpeg.c lodepng.c webpdec.c svgdec.c miniamp_memguard.c $(TASKSAFE_MALLOC_SOURCE) radio_runtime_flags.c $(RADIO_SOURCES) \

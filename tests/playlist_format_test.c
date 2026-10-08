@@ -82,6 +82,10 @@ int main(void)
     assert(playlist_format_from_name("Work:Radio.PLS") == PLAYLIST_FORMAT_PLS);
     assert(playlist_format_from_name("list.m3u") == PLAYLIST_FORMAT_M3U);
     assert(playlist_format_from_name("pls") == PLAYLIST_FORMAT_M3U);
+    assert(playlist_is_playlist_name("Work:Radio/Jazz.PLS"));
+    assert(playlist_is_playlist_name("list.m3u") && playlist_is_playlist_name("live.M3U8"));
+    assert(!playlist_is_playlist_name("song.mp3") && !playlist_is_playlist_name("m3u") &&
+           !playlist_is_playlist_name(NULL));
     assert(playlist_location_is_url("https://x/y"));
     assert(!playlist_location_is_url("Work:Music/a.mp3"));
     assert(!playlist_location_is_url("DH0:http://x"));

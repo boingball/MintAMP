@@ -805,6 +805,16 @@ int rb_probe_url_looks_hls(const char *url)
  * the playlist and follows its first http(s) entry, as AmigaAMP does. */
 #define RB_PROBE_MAX_PLAYLIST_HOPS 3
 #define RB_PROBE_FOLLOW_PLAYLIST 1
+/* Shoutcast playlists usually list several mirror servers; when one cannot
+ * be reached the next is tried, as AmigaAMP does.  Only entries within the
+ * probe's peek of the playlist are seen. */
+#define RB_PROBE_MAX_PLAYLIST_ENTRIES 4
+
+/* Entries of the playlist the last hop followed, set by
+ * rb_probe_stream_url_hop(); static like the impl's buffers (one probe at a
+ * time, kept off small task stacks). */
+static char rb_probe_playlist_entries[RB_PROBE_MAX_PLAYLIST_ENTRIES][RB_PROBE_MAX_URL];
+static int rb_probe_playlist_entry_count;
 
 static int rb_probe_content_type_is_playlist(const char *content_type)
 {
@@ -868,11 +878,12 @@ static int rb_probe_body_has_playlist_magic(const unsigned char *body, int len)
            rb_probe_body_starts_nocase(body, len, "https://");
 }
 
-/* Copies the first entry of a PLS ("FileN=URL") or plain M3U (bare URL
- * line) body into out: an absolute http(s) URL or a relative one.  complete says the whole body was read;
+/* Copies entry number index (0 = first) of a PLS ("FileN=URL") or plain
+ * M3U (bare URL line) body into out: an absolute http(s) URL or a relative
+ * one.  complete says the whole body was read;
  * otherwise an unterminated last line may be cut short and is ignored. */
-static int rb_probe_playlist_first_url(const unsigned char *body, int len, int complete,
-                                       char *out, int out_size)
+static int rb_probe_playlist_url(const unsigned char *body, int len, int complete,
+                                 int index, char *out, int out_size)
 {
     int pos;
     int pls;
@@ -922,12 +933,19 @@ static int rb_probe_playlist_first_url(const unsigned char *body, int len, int c
                 if (strchr(":\\= <>\"", line[k])) ok = 0;
             if (!ok) continue;
         }
+        if (index-- > 0) continue;
         if (line_len >= out_size) return RB_STREAM_PROBE_ERR_URL_TOO_LONG;
         memcpy(out, line, (size_t)line_len);
         out[line_len] = '\0';
         return RB_STREAM_PROBE_OK;
     }
     return RB_STREAM_PROBE_ERR_PLAYLIST_EMPTY;
+}
+
+static int rb_probe_playlist_first_url(const unsigned char *body, int len, int complete,
+                                       char *out, int out_size)
+{
+    return rb_probe_playlist_url(body, len, complete, 0, out, out_size);
 }
 
 static int rb_probe_hex_value(int c)
@@ -1411,14 +1429,32 @@ n2 = rb_probe_transport(&transport, (char *)peek_buf + *peek_len, want2);
             if (rb_probe_body_starts_nocase(peek_buf + i, *peek_len - i, "#EXT-X-"))
                 return RB_STREAM_PROBE_ERR_HLS_UNSUPPORTED;
         }
-        rc = rb_probe_playlist_first_url(peek_buf, *peek_len, body_complete, entry, (int)sizeof(entry));
-        if (rc == RB_STREAM_PROBE_OK) {
-            rc = rb_probe_resolve_location(&parsed, entry, playlist_url, playlist_url_size);
-            if (rc < 0) return rc;
-            printf("rb-probe: playlist %.200s -> stream %.200s\n", current_url, playlist_url);
-            return RB_PROBE_FOLLOW_PLAYLIST;
+        {
+            int n, first_error = RB_STREAM_PROBE_OK;
+            rb_probe_playlist_entry_count = 0;
+            for (n = 0; n < RB_PROBE_MAX_PLAYLIST_ENTRIES; n++) {
+                rc = rb_probe_playlist_url(peek_buf, *peek_len, body_complete, n, entry, (int)sizeof(entry));
+                if (rc == RB_STREAM_PROBE_OK)
+                    rc = rb_probe_resolve_location(&parsed, entry,
+                        rb_probe_playlist_entries[rb_probe_playlist_entry_count], RB_PROBE_MAX_URL);
+                if (rc == RB_STREAM_PROBE_ERR_PLAYLIST_EMPTY) break;
+                if (rc < 0) {
+                    /* e.g. an https:// mirror in a build without AmiSSL:
+                     * skip it, a later entry may still do. */
+                    if (first_error == RB_STREAM_PROBE_OK) first_error = rc;
+                    continue;
+                }
+                rb_probe_playlist_entry_count++;
+            }
+            if (rb_probe_playlist_entry_count > 0) {
+                rc = rb_probe_copy_string(playlist_url, playlist_url_size, rb_probe_playlist_entries[0]);
+                if (rc < 0) return rc;
+                printf("rb-probe: playlist %.200s -> stream %.200s (%d entr%s)\n", current_url, playlist_url,
+                    rb_probe_playlist_entry_count, rb_probe_playlist_entry_count == 1 ? "y" : "ies");
+                return RB_PROBE_FOLLOW_PLAYLIST;
+            }
+            if (first_error != RB_STREAM_PROBE_OK) return first_error;
         }
-        if (rc == RB_STREAM_PROBE_ERR_URL_TOO_LONG) return rc;
         if (rb_probe_content_type_is_playlist(info->content_type) ||
             rb_probe_body_has_playlist_magic(peek_buf, *peek_len))
             return RB_STREAM_PROBE_ERR_PLAYLIST_EMPTY;
@@ -1445,14 +1481,26 @@ n2 = rb_probe_transport(&transport, (char *)peek_buf + *peek_len, want2);
     return RB_STREAM_PROBE_OK;
 }
 
+/* Failures that say one server could not be reached, so another entry of
+ * the same playlist (a mirror) is worth trying. */
+static int rb_probe_entry_unreachable(int rc)
+{
+    return rc == RB_STREAM_PROBE_ERR_DNS || rc == RB_STREAM_PROBE_ERR_CONNECT ||
+           rc == RB_STREAM_PROBE_ERR_SEND || rc == RB_STREAM_PROBE_ERR_RECV ||
+           rc == RB_STREAM_PROBE_ERR_SERVER_CLOSED || rc == RB_STREAM_PROBE_ERR_TLS_HANDSHAKE ||
+           rc == RB_STREAM_PROBE_ERR_HTTP_STATUS;
+}
+
 static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
                         unsigned char *peek_buf, int peek_buf_size, int *peek_len)
 {
     /* Static rather than stack-local: without AmiSSL this runs on the
      * calling GUI task, whose stack rb_probe_stream_url_hop() already uses
      * heavily (see rb_probe_fetch_binary_impl()).  Probes never overlap. */
-    static char current_url[RB_PROBE_MAX_URL];
+    static char candidates[RB_PROBE_MAX_PLAYLIST_ENTRIES][RB_PROBE_MAX_URL];
     static char playlist_url[RB_PROBE_MAX_URL];
+    int candidate_count;
+    int candidate;
     int hops;
     int redirects;
     int rc;
@@ -1462,22 +1510,35 @@ static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
         printf("rb-probe: playlist generator link -> %.200s\n", playlist_url);
         url = playlist_url;
     }
-    rc = rb_probe_copy_string(current_url, (int)sizeof(current_url), url);
+    rc = rb_probe_copy_string(candidates[0], (int)sizeof(candidates[0]), url);
     if (rc < 0) return rc;
+    candidate_count = 1;
+    candidate = 0;
     redirects = 0;
-    for (hops = 0; ; hops++) {
-        playlist_url[0] = '\0';
-        rc = rb_probe_stream_url_hop(current_url, info, peek_buf, peek_buf_size, peek_len,
+    hops = 0;
+    for (;;) {
+        rc = rb_probe_stream_url_hop(candidates[candidate], info, peek_buf, peek_buf_size, peek_len,
                                      playlist_url, (int)sizeof(playlist_url));
         redirects += info->redirect_count;
         info->redirect_count = redirects;
-        if (rc != RB_PROBE_FOLLOW_PLAYLIST) return rc;
-        *peek_len = 0;
-        /* A playlist may name another playlist (a generator link wrapping a
-         * station's listen.pls); any deeper than this is most likely a loop. */
-        if (hops + 1 >= RB_PROBE_MAX_PLAYLIST_HOPS) return RB_STREAM_PROBE_ERR_TOO_MANY_REDIRECTS;
-        rc = rb_probe_copy_string(current_url, (int)sizeof(current_url), playlist_url);
-        if (rc < 0) return rc;
+        if (rc == RB_PROBE_FOLLOW_PLAYLIST) {
+            *peek_len = 0;
+            /* A playlist may name another playlist (a generator link wrapping
+             * a station's listen.pls); any deeper than this is most likely a
+             * loop. */
+            if (++hops >= RB_PROBE_MAX_PLAYLIST_HOPS) return RB_STREAM_PROBE_ERR_TOO_MANY_REDIRECTS;
+            memcpy(candidates, rb_probe_playlist_entries, sizeof(candidates));
+            candidate_count = rb_probe_playlist_entry_count;
+            candidate = 0;
+            continue;
+        }
+        if (rc < 0 && hops > 0 && candidate + 1 < candidate_count && rb_probe_entry_unreachable(rc)) {
+            printf("rb-probe: playlist entry %d unreachable (%s); trying entry %d: %.200s\n",
+                candidate + 1, rb_probe_error_text(rc), candidate + 2, candidates[candidate + 1]);
+            candidate++;
+            continue;
+        }
+        return rc;
     }
 }
 
@@ -1826,6 +1887,9 @@ static int rb_probe_selftest(void)
             strcmp(out, "/stream") != 0) return 18;
         if (rb_probe_playlist_first_url((const unsigned char *)"<html>\n<body>\n", 15, 1, out, (int)sizeof(out)) != RB_STREAM_PROBE_ERR_PLAYLIST_EMPTY) return 19;
         if (rb_probe_playlist_first_url((const unsigned char *)"C:\\x.mp3\n", 9, 1, out, (int)sizeof(out)) != RB_STREAM_PROBE_ERR_PLAYLIST_EMPTY) return 20;
+        if (rb_probe_playlist_url((const unsigned char *)pls, (int)strlen(pls), 1, 1, out, (int)sizeof(out)) != RB_STREAM_PROBE_OK ||
+            strcmp(out, "http://backup.example.com/") != 0) return 32;
+        if (rb_probe_playlist_url((const unsigned char *)pls, (int)strlen(pls), 1, 2, out, (int)sizeof(out)) != RB_STREAM_PROBE_ERR_PLAYLIST_EMPTY) return 33;
         if (!rb_probe_body_has_playlist_magic((const unsigned char *)pls, (int)strlen(pls))) return 14;
         if (rb_probe_body_is_text(mpeg, (int)sizeof(mpeg))) return 15;
         if (!rb_probe_content_type_is_playlist("audio/x-scpls")) return 16;

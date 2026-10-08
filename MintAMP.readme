@@ -130,6 +130,10 @@ Direct internet radio:
 
   amiga_mp3dec.fastexp --play "http://example.com/direct-stream"
   amiga_mp3dec.fastexp --play "https://example.com/direct-stream"
+  amiga_mp3dec.fastexp --play "http://example.com:8000/listen.pls?sid=1"
+
+Station links that name a .pls/.m3u playlist or redirect are followed to the
+stream, as in the GUIs.
 
 Useful options include:
 
@@ -212,6 +216,14 @@ together:
 To export your favourites, press From Favs and save the list. To import a
 station list, load it and press To Favs.
 
+A playlist file can also be opened straight away: pick it in the main file
+requester, give it on the command line ("MintAMP Work:Radio/Jazz.pls"), or
+double-click its icon after setting the icon's Default Tool to MintAMP or
+MintAMP-GT. Started that way, it begins playing at once.
+
+When a station's .pls lists several servers and the first cannot be
+reached, the next is tried automatically.
+
 Radio Favourites
 ----------------
 
@@ -225,7 +237,7 @@ Open the Internet Radio window and press Favourites to see them.
   Remove      deletes the selected favourite
   Move Up/Dn  changes its place in the list
 
-Favourites are saved straight away.
+Favourites are saved straight away. Up to 50 can be kept.
 
 Format Notes
 ------------
@@ -296,6 +308,10 @@ History
        failed.
        Radio favourites can now be edited: Add Fav bookmarks the stream that
        is playing, and favourites can be renamed, removed and reordered.
+       Up to 50 favourites instead of 20. Playlist files open from the main
+       file requester, the command line or a Workbench icon. If the first
+       server in a station's .pls is down, the next is tried. The
+       command-line player follows .pls/.m3u station links and redirects.
 
 1.3.2  Builds again with the GCC 13 Amiga toolchain as well as GCC 16: the
        release link no longer stops with "expected exactly three

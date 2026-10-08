@@ -195,6 +195,7 @@ static char gSupportedExtPattern[512];
 #include <proto/intuition.h>
 #include <proto/asl.h>
 #include <proto/dos.h>
+#include <workbench/startup.h>
 #include <proto/gadtools.h>
 #include <proto/graphics.h>
 #include <proto/diskfont.h>
@@ -263,7 +264,7 @@ static void GuiTaskIdentityLog(const char *phase)
 #define HELIXAMP3_ARGC_MAX 28
 #define MINTAMP_GT_VERSION "1.3.3"
 #define HELIXAMP3_SETTINGS_VERSION 2
-#define HELIXAMP3_RADIO_FAV_MAX 20
+#define HELIXAMP3_RADIO_FAV_MAX 50
 #define HELIXAMP3_QUALITY_MIN 0
 #define HELIXAMP3_QUALITY_MAX 3
 #define HELIXAMP3_SIGMASK(gui) (1UL << (gui)->win->UserPort->mp_SigBit)
@@ -6050,7 +6051,7 @@ static int GuiOpen(HelixAmp3Gui *gui)
 		int i;
 		char key[32];
 		gui->rbFavouriteCount = LoadEnvInt("RadioFavCount", gui->rbFavouriteCount, 0, HELIXAMP3_RADIO_FAV_MAX);
-		for (i = 0; i < HELIXAMP3_RADIO_FAV_MAX; i++) {
+		for (i = 0; i < gui->rbFavouriteCount; i++) {
 			sprintf(key, "RadioFavName%d", i);
 			LoadEnvString(key, gui->rbFavouriteNames[i], sizeof(gui->rbFavouriteNames[i]));
 			sprintf(key, "RadioFavUrl%d", i);
@@ -7871,18 +7872,55 @@ static int GtPlaylistLoadEntry(void *ctx, const char *location, const char *titl
 	return 1;
 }
 
-/* Appends the entries of an M3U or PLS playlist to the current one. */
-static void PlaylistLoadM3U(HelixAmp3Gui *gui)
+/* Appends the entries of the M3U or PLS playlist at path to the current
+ * one; relative entries are taken from drawer. Returns the number added. */
+static int PlaylistLoadFromPath(HelixAmp3Gui *gui, const char *path, const char *drawer)
 {
-	struct FileRequester *req;
 	BPTR fh;
-	char m3uPath[HELIXAMP3_MAX_PATH];
-	char drawer[HELIXAMP3_MAX_PATH];
 	char statusMsg[80];
 	GtPlaylistLoad load;
 	char *text;
 	LONG len, got;
 	const LONG maxBytes = 96L * 1024L;
+
+	fh = SafeOpenPath("PlaylistLoadM3U/Open", path, MODE_OLDFILE);
+	if (!fh) {
+		SetStatus(gui, "Cannot open playlist file.");
+		return 0;
+	}
+	text = (char *)malloc((size_t)maxBytes + 1);
+	if (!text) {
+		Close(fh);
+		SetStatus(gui, "Not enough memory to load playlist.");
+		return 0;
+	}
+	len = 0;
+	while (len < maxBytes && (got = Read(fh, text + len, maxBytes - len)) > 0)
+		len += got;
+	text[len] = '\0';
+	Close(fh);
+
+	load.pl = &gui->playlist;
+	load.drawer = drawer ? drawer : "";
+	load.added = 0;
+	load.skipped = 0;
+	playlist_parse(text, (size_t)len, GtPlaylistLoadEntry, &load);
+	free(text);
+	RefreshPlaylistView(gui);
+	if (load.skipped > 0)
+		sprintf(statusMsg, "Loaded %d entries; %d too long or did not fit.", load.added, load.skipped);
+	else
+		sprintf(statusMsg, "Loaded %d entries from playlist.", load.added);
+	SetStatus(gui, statusMsg);
+	return load.added;
+}
+
+/* Appends the entries of an M3U or PLS playlist to the current one. */
+static void PlaylistLoadM3U(HelixAmp3Gui *gui)
+{
+	struct FileRequester *req;
+	char m3uPath[HELIXAMP3_MAX_PATH];
+	char drawer[HELIXAMP3_MAX_PATH];
 
 	if (!AslBase) {
 		SetStatus(gui, "ASL library not available.");
@@ -7917,35 +7955,7 @@ static void PlaylistLoadM3U(HelixAmp3Gui *gui)
 	if (!m3uPath[0])
 		return;
 
-	fh = SafeOpenPath("PlaylistLoadM3U/Open", m3uPath, MODE_OLDFILE);
-	if (!fh) {
-		SetStatus(gui, "Cannot open playlist file.");
-		return;
-	}
-	text = (char *)malloc((size_t)maxBytes + 1);
-	if (!text) {
-		Close(fh);
-		SetStatus(gui, "Not enough memory to load playlist.");
-		return;
-	}
-	len = 0;
-	while (len < maxBytes && (got = Read(fh, text + len, maxBytes - len)) > 0)
-		len += got;
-	text[len] = '\0';
-	Close(fh);
-
-	load.pl = &gui->playlist;
-	load.drawer = drawer;
-	load.added = 0;
-	load.skipped = 0;
-	playlist_parse(text, (size_t)len, GtPlaylistLoadEntry, &load);
-	free(text);
-	RefreshPlaylistView(gui);
-	if (load.skipped > 0)
-		sprintf(statusMsg, "Loaded %d entries; %d too long or did not fit.", load.added, load.skipped);
-	else
-		sprintf(statusMsg, "Loaded %d entries from playlist.", load.added);
-	SetStatus(gui, statusMsg);
+	PlaylistLoadFromPath(gui, m3uPath, drawer);
 }
 
 static int GtWriteAll(BPTR fh, const char *text, size_t len)
@@ -8258,18 +8268,82 @@ static void HandlePlaylistPoll(HelixAmp3Gui *gui)
 
 /* --- End playlist implementation ---------------------------------------- */
 
+/* Makes path (a local audio file or a stream URL) the current input, as
+ * picking it in the file requester does. */
+static void GuiSelectFile(HelixAmp3Gui *gui, const char *path)
+{
+	if (gui->playbackActive || gui->playbackDonePending) {
+		SafeCopy(gui->queuedInputName, sizeof(gui->queuedInputName), path);
+		SetStatus(gui, "Selected for next Play.");
+		return;
+	}
+	CancelArtDecode(gui);
+	SafeCopy(gui->inputName, sizeof(gui->inputName), path);
+	SetFileDisplay(gui, gui->inputName);
+	ReadMp3Tags(gui->inputName, &gui->tags, gui->artEnabled);
+	if (is_url_path(gui->inputName))
+		SetInternetStreamMetadata(gui);
+	else
+		gui->totalSecs = gui->tags.durationSecs;
+	gui->elapsedSecs = 0;
+	UpdateTagDisplay(gui);
+	UpdateArtDisplay(gui);
+	DrawProgress(gui);
+	if (gui->artDecode.active)
+		SendTimerRequest(gui, ART_TIMER_MICROS);
+	if (!gui->artDecode.active) {
+		FormatReadyStatus(&gui->tags, gui->statusText, sizeof(gui->statusText));
+		SetStatus(gui, gui->statusText);
+	}
+	GuiDisableFastMemIfTooSmall(gui);
+}
+
+/* A local .m3u/.m3u8/.pls file (URLs ending so are station links, which the
+ * stream probe follows instead). */
+static int GuiIsPlaylistFile(const char *path)
+{
+	return !is_url_path(path) && playlist_is_playlist_name(path);
+}
+
+/* Replaces the playlist with the playlist file at path and, when idle,
+ * makes its first entry current. Returns the number of entries. */
+static int GuiOpenPlaylistFile(HelixAmp3Gui *gui, const char *path)
+{
+	char drawer[HELIXAMP3_MAX_PATH];
+	int added;
+	CopyDrawerFromPath(drawer, sizeof(drawer), path);
+	gui->playlist.count = 0;
+	gui->playlist.selected = -1;
+	gui->playlist.current = -1;
+	added = PlaylistLoadFromPath(gui, path, drawer);
+	if (added > 0) {
+		gui->playlist.selected = 0;
+		if (!gui->playbackActive && !gui->playbackDonePending)
+			PlaylistLoadAndShow(gui, 0);
+		else
+			RefreshPlaylistView(gui);
+	}
+	return added;
+}
+
 static void ChooseMp3(HelixAmp3Gui *gui)
 {
 	struct FileRequester *req;
 	char path[HELIXAMP3_MAX_PATH];
+	char pattern[sizeof(gSupportedExtPattern) + 16];
 
 	if (!gui->lastDrawer[0] && gui->inputName[0])
 		CopyDrawerFromPath(gui->lastDrawer, sizeof(gui->lastDrawer),
 			gui->inputName);
+	/* Audio files plus playlists: "#?.(m3u|m3u8|pls|mp3|aac|...)". */
+	if (!strncmp(gSupportedExtPattern, "#?.(", 4))
+		snprintf(pattern, sizeof(pattern), "#?.(m3u|m3u8|pls|%s", gSupportedExtPattern + 4);
+	else
+		snprintf(pattern, sizeof(pattern), "#?.(m3u|m3u8|pls|%s)", gSupportedExtPattern + 3);
 	req = (struct FileRequester *)AllocAslRequestTags(ASL_FileRequest,
-		ASLFR_TitleText, (ULONG)"Select audio file for MintAMP-GT",
+		ASLFR_TitleText, (ULONG)"Select audio file or playlist for MintAMP-GT",
 		ASLFR_DoPatterns, TRUE,
-		ASLFR_InitialPattern, (ULONG)gSupportedExtPattern,
+		ASLFR_InitialPattern, (ULONG)pattern,
 		ASLFR_InitialDrawer,
 			(ULONG)(gui->lastDrawer[0] ? gui->lastDrawer : NULL),
 		TAG_DONE);
@@ -8288,30 +8362,10 @@ static void ChooseMp3(HelixAmp3Gui *gui)
 		} else {
 			SafeCopy(path, sizeof(path), req->fr_File);
 		}
-		if (gui->playbackActive || gui->playbackDonePending) {
-			SafeCopy(gui->queuedInputName, sizeof(gui->queuedInputName), path);
-			SetStatus(gui, "Selected for next Play.");
-		} else {
-			CancelArtDecode(gui);
-			SafeCopy(gui->inputName, sizeof(gui->inputName), path);
-			SetFileDisplay(gui, gui->inputName);
-			ReadMp3Tags(gui->inputName, &gui->tags, gui->artEnabled);
-			if (is_url_path(gui->inputName))
-				SetInternetStreamMetadata(gui);
-			else
-				gui->totalSecs = gui->tags.durationSecs;
-			gui->elapsedSecs = 0;
-			UpdateTagDisplay(gui);
-			UpdateArtDisplay(gui);
-			DrawProgress(gui);
-			if (gui->artDecode.active)
-				SendTimerRequest(gui, ART_TIMER_MICROS);
-			if (!gui->artDecode.active) {
-				FormatReadyStatus(&gui->tags, gui->statusText, sizeof(gui->statusText));
-				SetStatus(gui, gui->statusText);
-			}
-			GuiDisableFastMemIfTooSmall(gui);
-		}
+		if (GuiIsPlaylistFile(path))
+			GuiOpenPlaylistFile(gui, path);
+		else
+			GuiSelectFile(gui, path);
 	}
 	FreeAslRequest(req);
 }
@@ -9518,12 +9572,40 @@ static ULONG gGuiDetectedStackUpper;
 static ULONG gGuiDetectedStackSize;
 static ULONG gGuiEffectiveStackSize;
 
+/* Opens and plays a file, stream URL or .pls/.m3u playlist given on the
+ * command line ("MintAMP-GT Work:Radio/jazz.pls") or as a Workbench project
+ * icon whose Default Tool is MintAMP-GT. */
+static void GuiOpenStartupArg(HelixAmp3Gui *gui, int argc, char **argv)
+{
+	char path[HELIXAMP3_MAX_PATH];
+	path[0] = '\0';
+	if (argc >= 2 && argv[1] && argv[1][0] && argv[1][0] != '-') {
+		SafeCopy(path, sizeof(path), argv[1]);
+	} else if (argc == 0 && argv) {
+		struct WBStartup *wb = (struct WBStartup *)argv;
+		if (wb->sm_NumArgs >= 2 && wb->sm_ArgList[1].wa_Lock &&
+			(!NameFromLock(wb->sm_ArgList[1].wa_Lock, (STRPTR)path, sizeof(path)) ||
+			 !AddPart((STRPTR)path, wb->sm_ArgList[1].wa_Name, sizeof(path))))
+			path[0] = '\0';
+	}
+	if (!path[0])
+		return;
+	if (GuiIsPlaylistFile(path)) {
+		if (GuiOpenPlaylistFile(gui, path) > 0)
+			PlaylistStartCurrent(gui);
+	} else if (is_url_path(path)) {
+		SelectInternetStream(gui, path);
+		RadioReplayCurrentUrl(gui);
+	} else {
+		GuiSelectFile(gui, path);
+		StartPlayback(gui);
+	}
+}
+
 static int GuiMainReal(int argc, char **argv)
 {
 	static HelixAmp3Gui gui;
 
-	(void)argc;
-	(void)argv;
 	/* GUI/main application task identity: every GUI_FREE_BEGIN/END below logs
 	 * FindTask(NULL), and this is the pointer they must match for the
 	 * recoverable AN_FreeTwice/AN_BadFreeAddr alerts to be pinned on the GUI
@@ -9531,6 +9613,7 @@ static int GuiMainReal(int argc, char **argv)
 	GUI_TASK_IDENTITY("application-startup-main-task");
 	if (GuiOpen(&gui) != 0)
 		return 1;
+	GuiOpenStartupArg(&gui, argc, argv);
 	GUI_TASK_IDENTITY("gui-event-loop");
 	while (!gui.closeRequested) {
 		ULONG winMask = (gui.win && gui.win->UserPort) ?

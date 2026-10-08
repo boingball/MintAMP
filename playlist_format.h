@@ -51,6 +51,15 @@ static int playlist_format_from_name(const char *name)
         PLAYLIST_FORMAT_PLS : PLAYLIST_FORMAT_M3U;
 }
 
+/* True for a name ending ".m3u", ".m3u8" or ".pls" (any case). */
+static int playlist_is_playlist_name(const char *name)
+{
+    size_t n = name ? strlen(name) : 0;
+    return (n >= 4 && (playlist_ascii_starts_nocase(name + n - 4, 4, ".m3u") ||
+                       playlist_ascii_starts_nocase(name + n - 4, 4, ".pls"))) ||
+           (n >= 5 && playlist_ascii_starts_nocase(name + n - 5, 5, ".m3u8"));
+}
+
 /* Copies text[0..len) with surrounding blanks removed into out. */
 static void playlist_copy_trimmed(char *out, size_t outSize, const char *text, size_t len)
 {
