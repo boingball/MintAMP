@@ -665,6 +665,12 @@ typedef struct MrApp {
 	Object         *rbUpGad;
 	Object         *rbDownGad;
 	Object         *rbCloseGad;
+	/* Favourites edit row, enabled while the favourites are shown. */
+	Object         *rbFavNameGad;
+	Object         *rbFavRenameGad;
+	Object         *rbFavRemoveGad;
+	Object         *rbFavMoveUpGad;
+	Object         *rbFavMoveDownGad;
 	struct List     rbList;
 	struct Node    *rbNodes[RB_CONTROLLER_MAX_STATIONS];
 	char            rbNames[RB_CONTROLLER_MAX_STATIONS][96];
@@ -684,6 +690,9 @@ typedef struct MrApp {
 	char            rbFavouriteNames[MR_RADIO_FAV_MAX][RB_MAX_NAME];
 	char            rbFavouriteUrls[MR_RADIO_FAV_MAX][RB_MAX_URL];
 	char            currentRadioStationName[RB_MAX_NAME];
+	/* URL the current stream was started from, before redirects or a
+	 * .pls/.m3u were followed: what Add Fav bookmarks. */
+	char            currentRadioSourceUrl[RB_MAX_URL];
 	char            currentRadioFavicon[RB_MAX_FAVICON];
 	/* Final URL the current station name/favicon belong to, so a Play/replay
 	 * (which passes no station name) can tell "same stream, keep the artwork"
@@ -5336,7 +5345,12 @@ enum {
 	RB_GID_BITRATE,
 	RB_GID_UP,
 	RB_GID_DOWN,
-	RB_GID_STATUS
+	RB_GID_STATUS,
+	RB_GID_FAV_NAME,
+	RB_GID_FAV_RENAME,
+	RB_GID_FAV_REMOVE,
+	RB_GID_FAV_MOVE_UP,
+	RB_GID_FAV_MOVE_DOWN
 };
 
 
@@ -5527,6 +5541,8 @@ static void RadioProbeUrlAndStart(MrApp *app, const char *url, const char *stati
 		Delay(waitTicks);
 	}
 #endif
+	if (url != app->currentRadioSourceUrl)
+		SafeCopy(app->currentRadioSourceUrl, sizeof(app->currentRadioSourceUrl), url);
 	SafeCopy(app->inputName, sizeof(app->inputName), info.final_url);
 	app->haveRadioHostAddr = info.have_host_addr;
 	app->radioHostAddrBe = info.host_addr_be;
@@ -5585,7 +5601,7 @@ static int RadioStationMatchesScheme(MrApp *app, const RadioBrowserStation *st)
 	return isHttp;
 }
 
-static void RadioRefreshResults(MrApp *app)
+static void RadioRefreshResultsList(MrApp *app)
 {
 	int i, row;
 	int selectedRow = -1;
@@ -5694,6 +5710,14 @@ static void RadioRefreshResults(MrApp *app)
 	}
 }
 
+static void RadioFavEditSync(MrApp *app);
+
+static void RadioRefreshResults(MrApp *app)
+{
+	RadioRefreshResultsList(app);
+	RadioFavEditSync(app);
+}
+
 static void RadioDoSearch(MrApp *app)
 {
 	STRPTR text = NULL;
@@ -5791,6 +5815,7 @@ static void RadioSelectResult(MrApp *app, ULONG eventSelected)
 			LISTBROWSER_MakeVisible, (ULONG)row, TAG_DONE);
 		sprintf(msg, "Selected favourite: %.120s", app->rbFavouriteNames[app->rbSelectedFavourite]);
 		RadioSetStatus(app, msg);
+		RadioFavEditSync(app);
 		return;
 	}
 	app->rbSelectedFavourite = -1;
@@ -5816,6 +5841,9 @@ static void RadioSelectResult(MrApp *app, ULONG eventSelected)
 	RadioSetStatus(app, msg);
 }
 
+static void RadioFavEditSync(MrApp *app);
+static void RadioAddCurrentStreamFavourite(MrApp *app);
+
 static void RadioAddFavourite(MrApp *app)
 {
 	const RadioBrowserStation *st;
@@ -5823,8 +5851,10 @@ static void RadioAddFavourite(MrApp *app)
 	char display[RB_MAX_NAME];
 	char msg[160];
 	int i;
-	if (app->rbController.selected_index < 0) {
-		RadioSetStatus(app, "Select a search result to favourite.");
+	/* With the favourites shown, or no search result selected, Add Fav
+	 * bookmarks the stream that is playing (or was last started) instead. */
+	if (app->rbShowingFavourites || app->rbController.selected_index < 0) {
+		RadioAddCurrentStreamFavourite(app);
 		return;
 	}
 	st = rb_controller_get_station(&app->rbController, app->rbController.selected_index);
@@ -5858,11 +5888,169 @@ static void RadioAddFavourite(MrApp *app)
 	RadioSetStatus(app, msg);
 }
 
+/* Name for a bookmark of the current stream: the station name it was
+ * started with, else the name the stream announces (icy-name), else the
+ * URL. */
+static void RadioCurrentStreamName(MrApp *app, const char *url, char *out, size_t outSize)
+{
+	char live[128];
+	if (app->currentRadioStationName[0] && strcmp(app->currentRadioStationName, "Internet Radio") != 0) {
+		SafeCopy(out, outSize, app->currentRadioStationName);
+		return;
+	}
+	MrCopyVolatileString(live, sizeof(live), gGuiPlaybackStatus.radioStationName);
+	SafeCopy(out, outSize, live[0] ? live : url);
+}
+
+static void RadioAddCurrentStreamFavourite(MrApp *app)
+{
+	const char *url = app->currentRadioSourceUrl[0] ? app->currentRadioSourceUrl :
+		(MrIsRadioInput(app->inputName) ? app->inputName : "");
+	char name[RB_MAX_NAME];
+	char msg[160];
+	int i;
+	if (!url[0]) {
+		RadioSetStatus(app, "Nothing to bookmark: play a stream, or select a search result.");
+		return;
+	}
+	for (i = 0; i < app->rbFavouriteCount; i++) {
+		if (!strcmp(app->rbFavouriteUrls[i], url)) {
+			sprintf(msg, "Already a favourite: %.120s", app->rbFavouriteNames[i]);
+			RadioSetStatus(app, msg);
+			return;
+		}
+	}
+	if (app->rbFavouriteCount >= MR_RADIO_FAV_MAX) {
+		RadioSetStatus(app, "Radio favourites are full.");
+		return;
+	}
+	if (strlen(url) >= sizeof(app->rbFavouriteUrls[0])) {
+		RadioSetStatus(app, "Stream URL is too long to bookmark.");
+		return;
+	}
+	RadioCurrentStreamName(app, url, name, sizeof(name));
+	i = app->rbFavouriteCount++;
+	SafeCopy(app->rbFavouriteNames[i], sizeof(app->rbFavouriteNames[i]), name);
+	SafeCopy(app->rbFavouriteUrls[i], sizeof(app->rbFavouriteUrls[i]), url);
+	SaveSettings(app);
+	if (app->rbShowingFavourites) {
+		app->rbSelectedFavourite = i;
+		RadioRefreshResults(app);
+	}
+	sprintf(msg, "Added favourite: %.120s", name);
+	RadioSetStatus(app, msg);
+}
+
+static int RadioSelectedFavouriteForEdit(MrApp *app)
+{
+	if (!app->rbShowingFavourites) {
+		RadioSetStatus(app, "Press Favourites first to edit them.");
+		return -1;
+	}
+	if (app->rbSelectedFavourite < 0 || app->rbSelectedFavourite >= app->rbFavouriteCount) {
+		RadioSetStatus(app, "Select a favourite first.");
+		return -1;
+	}
+	return app->rbSelectedFavourite;
+}
+
+static void RadioRenameFavourite(MrApp *app)
+{
+	STRPTR text = NULL;
+	char name[RB_MAX_NAME];
+	char *p;
+	int i = RadioSelectedFavouriteForEdit(app);
+	if (i < 0) return;
+	if (app->rbFavNameGad)
+		GetAttr(STRINGA_TextVal, app->rbFavNameGad, (ULONG *)(void *)&text);
+	SafeCopy(name, sizeof(name), text ? (const char *)text : "");
+	for (p = name; *p == ' ' || *p == '\t'; p++) ;
+	memmove(name, p, strlen(p) + 1);
+	p = name + strlen(name);
+	while (p > name && (p[-1] == ' ' || p[-1] == '\t')) *--p = '\0';
+	if (!name[0]) {
+		RadioSetStatus(app, "Type the new name first.");
+		return;
+	}
+	SafeCopy(app->rbFavouriteNames[i], sizeof(app->rbFavouriteNames[i]), name);
+	SaveSettings(app);
+	RadioRefreshResults(app);
+	RadioSetStatus(app, "Favourite renamed.");
+}
+
+static void RadioRemoveFavourite(MrApp *app)
+{
+	char msg[160];
+	int j, i = RadioSelectedFavouriteForEdit(app);
+	if (i < 0) return;
+	sprintf(msg, "Removed favourite: %.120s", app->rbFavouriteNames[i]);
+	for (j = i; j < app->rbFavouriteCount - 1; j++) {
+		SafeCopy(app->rbFavouriteNames[j], sizeof(app->rbFavouriteNames[j]), app->rbFavouriteNames[j + 1]);
+		SafeCopy(app->rbFavouriteUrls[j], sizeof(app->rbFavouriteUrls[j]), app->rbFavouriteUrls[j + 1]);
+	}
+	app->rbFavouriteCount--;
+	app->rbFavouriteNames[app->rbFavouriteCount][0] = '\0';
+	app->rbFavouriteUrls[app->rbFavouriteCount][0] = '\0';
+	SaveSettings(app);
+	app->rbSelectedFavourite = i < app->rbFavouriteCount ? i : app->rbFavouriteCount - 1;
+	RadioRefreshResults(app);
+	RadioSetStatus(app, msg);
+}
+
+static void RadioMoveFavourite(MrApp *app, int delta)
+{
+	char name[RB_MAX_NAME];
+	char url[RB_MAX_URL];
+	int i = RadioSelectedFavouriteForEdit(app);
+	int j = i + delta;
+	if (i < 0) return;
+	if (j < 0 || j >= app->rbFavouriteCount) {
+		RadioSetStatus(app, delta < 0 ? "Already at the top." : "Already at the bottom.");
+		return;
+	}
+	SafeCopy(name, sizeof(name), app->rbFavouriteNames[i]);
+	SafeCopy(url, sizeof(url), app->rbFavouriteUrls[i]);
+	SafeCopy(app->rbFavouriteNames[i], sizeof(app->rbFavouriteNames[i]), app->rbFavouriteNames[j]);
+	SafeCopy(app->rbFavouriteUrls[i], sizeof(app->rbFavouriteUrls[i]), app->rbFavouriteUrls[j]);
+	SafeCopy(app->rbFavouriteNames[j], sizeof(app->rbFavouriteNames[j]), name);
+	SafeCopy(app->rbFavouriteUrls[j], sizeof(app->rbFavouriteUrls[j]), url);
+	SaveSettings(app);
+	app->rbSelectedFavourite = j;
+	RadioRefreshResults(app);
+	RadioSetStatus(app, delta < 0 ? "Favourite moved up." : "Favourite moved down.");
+}
+
+/* Enables the favourites edit row only while the favourites are shown, and
+ * fills the name field with the selected favourite's name. */
+static void RadioFavEditSync(MrApp *app)
+{
+	int editing = app->rbShowingFavourites && app->rbSelectedFavourite >= 0 &&
+		app->rbSelectedFavourite < app->rbFavouriteCount;
+	Object *gads[5];
+	int k;
+	if (!app->rbWin)
+		return;
+	gads[0] = app->rbFavNameGad;
+	gads[1] = app->rbFavRenameGad;
+	gads[2] = app->rbFavRemoveGad;
+	gads[3] = app->rbFavMoveUpGad;
+	gads[4] = app->rbFavMoveDownGad;
+	for (k = 0; k < 5; k++)
+		if (gads[k])
+			SetGadgetAttrs((struct Gadget *)gads[k], app->rbWin, NULL,
+				GA_Disabled, editing ? FALSE : TRUE, TAG_DONE);
+	if (app->rbFavNameGad)
+		SetGadgetAttrs((struct Gadget *)app->rbFavNameGad, app->rbWin, NULL,
+			STRINGA_TextVal, (ULONG)(editing ? app->rbFavouriteNames[app->rbSelectedFavourite] : ""),
+			TAG_DONE);
+}
+
 static void RadioToggleFavourites(MrApp *app)
 {
 	app->rbShowingFavourites = app->rbShowingFavourites ? FALSE : TRUE;
 	RadioRefreshResults(app);
-	RadioSetStatus(app, app->rbShowingFavourites ? "Showing radio favourites." : "Showing search results.");
+	RadioSetStatus(app, app->rbShowingFavourites ?
+		"Favourites: Add Fav saves the stream that is playing." : "Showing search results.");
 }
 
 static void RadioDoProbeAndPlay(MrApp *app)
@@ -5982,6 +6170,8 @@ static void RadioDoProbeAndPlay(MrApp *app)
 		Delay(waitTicks);
 	}
 #endif
+	SafeCopy(app->currentRadioSourceUrl, sizeof(app->currentRadioSourceUrl),
+		rb_station_play_url(st) ? rb_station_play_url(st) : info.final_url);
 	SafeCopy(app->inputName, sizeof(app->inputName), info.final_url);
 	/* This station's name/favicon (set just below) belong to this URL, so a
 	 * later Play/replay can recognise it and keep the artwork. */
@@ -6055,6 +6245,8 @@ static void CloseRadioWindow(MrApp *app)
 	app->rbSchemeGad = app->rbLimitGad = app->rbBitrateGad = app->rbListGad = NULL;
 	app->rbStatusGad = app->rbDoSearchGad = app->rbPlayGad = app->rbAddFavGad = NULL;
 	app->rbFavouritesGad = app->rbUpGad = app->rbDownGad = app->rbCloseGad = NULL;
+	app->rbFavNameGad = app->rbFavRenameGad = app->rbFavRemoveGad = NULL;
+	app->rbFavMoveUpGad = app->rbFavMoveDownGad = NULL;
 }
 
 static void OpenRadioWindow(MrApp *app)
@@ -6099,12 +6291,24 @@ static void OpenRadioWindow(MrApp *app)
 	app->rbListGad = (Object *)NewObject(LISTBROWSER_GetClass(), NULL, GA_ID, RB_GID_RADIO_RESULTS, GA_RelVerify, TRUE, LISTBROWSER_Labels, (ULONG)&app->rbList, LISTBROWSER_Selected, (ULONG)~0, LISTBROWSER_ShowSelected, TRUE, LISTBROWSER_AutoFit, TRUE, LISTBROWSER_Separators, TRUE, TAG_DONE);
 	app->rbStatusGad = (Object *)NewObject(STRING_GetClass(), NULL, GA_ID, RB_GID_STATUS, GA_ReadOnly, TRUE, STRINGA_TextVal, (ULONG)(app->lastRadioError[0] ? app->lastRadioError : "Ready."), STRINGA_MaxChars, 512, TAG_DONE);
 	app->rbDoSearchGad = RadioButton(RB_GID_SEARCH, "Search"); app->rbPlayGad = RadioButton(RB_GID_PROBE, "Play"); app->rbAddFavGad = RadioButton(RB_GID_ADD_FAV, "Add Fav"); app->rbFavouritesGad = RadioButton(RB_GID_FAVOURITES, "Favourites"); app->rbUpGad = RadioButton(RB_GID_UP, "Up"); app->rbDownGad = RadioButton(RB_GID_DOWN, "Down"); app->rbCloseGad = RadioButton(RB_GID_CLOSE, "Close");
-	if (!app->rbSearchGad || !app->rbCodecGad || !app->rbCountryGad || !app->rbCountryCodeGad || !app->rbSchemeGad || !app->rbLimitGad || !app->rbBitrateGad || !app->rbListGad || !app->rbStatusGad || !app->rbDoSearchGad || !app->rbPlayGad || !app->rbAddFavGad || !app->rbFavouritesGad || !app->rbUpGad || !app->rbDownGad || !app->rbCloseGad) goto fail;
+	app->rbFavNameGad = (Object *)NewObject(STRING_GetClass(), NULL, GA_ID, RB_GID_FAV_NAME, GA_RelVerify, TRUE, GA_Disabled, TRUE, STRINGA_TextVal, (ULONG)"", STRINGA_MaxChars, RB_MAX_NAME, TAG_DONE);
+	app->rbFavRenameGad = RadioButton(RB_GID_FAV_RENAME, "Rename"); app->rbFavRemoveGad = RadioButton(RB_GID_FAV_REMOVE, "Remove"); app->rbFavMoveUpGad = RadioButton(RB_GID_FAV_MOVE_UP, "Move Up"); app->rbFavMoveDownGad = RadioButton(RB_GID_FAV_MOVE_DOWN, "Move Down");
+	if (!app->rbSearchGad || !app->rbCodecGad || !app->rbCountryGad || !app->rbCountryCodeGad || !app->rbSchemeGad || !app->rbLimitGad || !app->rbBitrateGad || !app->rbListGad || !app->rbStatusGad || !app->rbDoSearchGad || !app->rbPlayGad || !app->rbAddFavGad || !app->rbFavouritesGad || !app->rbUpGad || !app->rbDownGad || !app->rbCloseGad ||
+		!app->rbFavNameGad || !app->rbFavRenameGad || !app->rbFavRemoveGad || !app->rbFavMoveUpGad || !app->rbFavMoveDownGad) goto fail;
 	root = (Object *)NewObject(LAYOUT_GetClass(), NULL, LAYOUT_Orientation, LAYOUT_ORIENT_VERT, LAYOUT_SpaceOuter, TRUE, LAYOUT_SpaceInner, TRUE, LAYOUT_DeferLayout, TRUE,
 		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL, LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ, ADD_LABELLED(app->rbSearchGad, "Search"), ADD_LABELLED(app->rbCodecGad, "Codec"), TAG_DONE), CHILD_WeightedHeight, 0,
 		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL, LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ, ADD_LABELLED(app->rbCountryGad, "Country"), ADD_LABELLED(app->rbCountryCodeGad, "Code"), ADD_LABELLED(app->rbSchemeGad, "URL"), TAG_DONE), CHILD_WeightedHeight, 0,
 		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL, LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ, ADD_LABELLED(app->rbLimitGad, "Limit"), ADD_LABELLED(app->rbBitrateGad, "Max kbps"), TAG_DONE), CHILD_WeightedHeight, 0,
-		LAYOUT_AddChild, (ULONG)app->rbListGad, CHILD_MinHeight, 120,
+		/* Minimum list height trimmed by the favourites row below, so the
+		 * screen-fitted window does not need to grow. */
+		LAYOUT_AddChild, (ULONG)app->rbListGad, CHILD_MinHeight, 100,
+		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL, LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
+			ADD_LABELLED(app->rbFavNameGad, "Name"),
+			LAYOUT_AddChild, (ULONG)app->rbFavRenameGad, CHILD_WeightedWidth, 0,
+			LAYOUT_AddChild, (ULONG)app->rbFavRemoveGad, CHILD_WeightedWidth, 0,
+			LAYOUT_AddChild, (ULONG)app->rbFavMoveUpGad, CHILD_WeightedWidth, 0,
+			LAYOUT_AddChild, (ULONG)app->rbFavMoveDownGad, CHILD_WeightedWidth, 0,
+			TAG_DONE), CHILD_WeightedHeight, 0,
 		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL, LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ, LAYOUT_EvenSize, TRUE, LAYOUT_AddChild, (ULONG)app->rbDoSearchGad, LAYOUT_AddChild, (ULONG)app->rbPlayGad, LAYOUT_AddChild, (ULONG)app->rbAddFavGad, LAYOUT_AddChild, (ULONG)app->rbFavouritesGad, LAYOUT_AddChild, (ULONG)app->rbUpGad, LAYOUT_AddChild, (ULONG)app->rbDownGad, LAYOUT_AddChild, (ULONG)app->rbCloseGad, TAG_DONE), CHILD_WeightedHeight, 0,
 		LAYOUT_AddChild, (ULONG)app->rbStatusGad, CHILD_WeightedHeight, 0, TAG_DONE);
 	if (!root) goto fail;
@@ -6203,6 +6407,10 @@ static void HandleRadioWindow(MrApp *app)
 			case RB_GID_FAVOURITES: RadioToggleFavourites(app); break;
 			case RB_GID_UP: RadioMoveSelection(app, -1); break;
 			case RB_GID_DOWN: RadioMoveSelection(app, 1); break;
+			case RB_GID_FAV_NAME: case RB_GID_FAV_RENAME: RadioRenameFavourite(app); break;
+			case RB_GID_FAV_REMOVE: RadioRemoveFavourite(app); break;
+			case RB_GID_FAV_MOVE_UP: RadioMoveFavourite(app, -1); break;
+			case RB_GID_FAV_MOVE_DOWN: RadioMoveFavourite(app, 1); break;
 			case RB_GID_SCHEME: { ULONG active = 0; GetAttr(CHOOSER_Selected, app->rbSchemeGad, &active); app->rbSchemeMode = ClampInt((int)active, 0, 2); app->rbShowHttps = (app->rbSchemeMode != 0); RadioRefreshResults(app); break; }
 			case RB_GID_COUNTRY_CODE: { ULONG active = 0; GetAttr(CHOOSER_Selected, app->rbCountryCodeGad, &active); app->rbCountryMode = ClampInt((int)active, 0, 6); if (app->rbCountryGad) SetGadgetAttrs((struct Gadget *)app->rbCountryGad, app->rbWin, NULL, STRINGA_TextVal, (ULONG)RadioCountryFromIndex(app->rbCountryMode), TAG_DONE); break; }
 			case RB_GID_CLOSE: CloseRadioWindow(app); return;

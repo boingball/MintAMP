@@ -212,6 +212,21 @@ together:
 To export your favourites, press From Favs and save the list. To import a
 station list, load it and press To Favs.
 
+Radio Favourites
+----------------
+
+Open the Internet Radio window and press Favourites to see them.
+
+  Add Fav     with a search result selected, saves that station; while the
+              favourites are shown, saves the stream that is playing (or was
+              last played), whether it came from a typed URL, a playlist or
+              a forum link
+  Name/Rename type a new name for the selected favourite (Return works too)
+  Remove      deletes the selected favourite
+  Move Up/Dn  changes its place in the list
+
+Favourites are saved straight away.
+
 Format Notes
 ------------
 
@@ -279,6 +294,8 @@ History
        export/import (From Favs / To Favs). Streams in a playlist now play;
        before, MintAMP started them without the stream check and they
        failed.
+       Radio favourites can now be edited: Add Fav bookmarks the stream that
+       is playing, and favourites can be renamed, removed and reordered.
 
 1.3.2  Builds again with the GCC 13 Amiga toolchain as well as GCC 16: the
        release link no longer stops with "expected exactly three
