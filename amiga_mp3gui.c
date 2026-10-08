@@ -6441,6 +6441,7 @@ static const char *RadioCodecFromIndex(int idx)
 	case 1: return "MP3";
 	case 2: return "AAC";
 	case 3: return "AAC+";
+	case 4: return "FLAC";
 	default: return "";
 	}
 }
@@ -6451,6 +6452,7 @@ static int RadioCodecToIndex(const char *codec)
 	if (!strcmp(codec, "MP3")) return 1;
 	if (!strcmp(codec, "AAC")) return 2;
 	if (!strcmp(codec, "AAC+")) return 3;
+	if (!strcmp(codec, "FLAC")) return 4;
 	return 0;
 }
 
@@ -6459,6 +6461,7 @@ static const char *ProbeCodecName(RbStreamCodec codec)
 	if (codec == RB_STREAM_CODEC_MP3) return "MP3";
 	if (codec == RB_STREAM_CODEC_AAC) return "AAC";
 	if (codec == RB_STREAM_CODEC_OGG) return "OGG";
+	if (codec == RB_STREAM_CODEC_FLAC) return "FLAC";
 	return "unknown";
 }
 
@@ -7004,7 +7007,7 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 		return;
 	}
 	if (info.codec != RB_STREAM_CODEC_MP3 && info.codec != RB_STREAM_CODEC_AAC &&
-		info.codec != RB_STREAM_CODEC_OGG) {
+		info.codec != RB_STREAM_CODEC_OGG && info.codec != RB_STREAM_CODEC_FLAC) {
 		sprintf(msg, "Unsupported stream codec: %s (%.48s)", ProbeCodecName(info.codec), info.content_type);
 		radio_reset_playback_state_after_stop(app, "probe-unsupported-codec");
 		RadioSetStatus(app, msg);
@@ -7101,7 +7104,7 @@ static void RadioReplayCurrentUrl(HelixAmp3Gui *gui)
 		return;
 	}
 	if (info.codec != RB_STREAM_CODEC_MP3 && info.codec != RB_STREAM_CODEC_AAC &&
-		info.codec != RB_STREAM_CODEC_OGG) {
+		info.codec != RB_STREAM_CODEC_OGG && info.codec != RB_STREAM_CODEC_FLAC) {
 		sprintf(msg, "Unsupported stream codec: %s (%.48s)",
 			ProbeCodecName(info.codec), info.content_type);
 		SetStatus(gui, msg);
@@ -7168,7 +7171,7 @@ static void OpenRadioWindow(HelixAmp3Gui *app)
 	struct NewWindow nw;
 	struct NewGadget ng;
 	struct Gadget *gad;
-	static STRPTR codecs[] = { (STRPTR)"All", (STRPTR)"MP3", (STRPTR)"AAC", (STRPTR)"AAC+", NULL };
+	static STRPTR codecs[] = { (STRPTR)"All", (STRPTR)"MP3", (STRPTR)"AAC", (STRPTR)"AAC+", (STRPTR)"FLAC", NULL };
 	if (app->rbWin) {
 		WindowToFront(app->rbWin);
 		ActivateWindow(app->rbWin);

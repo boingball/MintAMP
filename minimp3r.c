@@ -1325,6 +1325,8 @@ static void MrSplitStreamTitle(const char *streamTitle, char *artist, unsigned l
 static const char *MrRadioCodecName(const char *contentType)
 {
 	if (!contentType) return "";
+	if (strstr(contentType, "flac") || strstr(contentType, "FLAC"))
+		return "FLAC";
 	if (strstr(contentType, "aac") || strstr(contentType, "AAC") ||
 		strstr(contentType, "aach") || strstr(contentType, "AACH"))
 		return "AAC+";
@@ -5324,6 +5326,7 @@ static const char *RadioCodecFromIndex(int idx)
 	case 1: return "MP3";
 	case 2: return "AAC";
 	case 3: return "AAC+";
+	case 4: return "FLAC";
 	default: return "";
 	}
 }
@@ -5334,6 +5337,7 @@ static int RadioCodecToIndex(const char *codec)
 	if (!strcmp(codec, "MP3")) return 1;
 	if (!strcmp(codec, "AAC")) return 2;
 	if (!strcmp(codec, "AAC+")) return 3;
+	if (!strcmp(codec, "FLAC")) return 4;
 	return 0;
 }
 
@@ -5342,6 +5346,7 @@ static const char *ProbeCodecName(RbStreamCodec codec)
 	if (codec == RB_STREAM_CODEC_MP3) return "MP3";
 	if (codec == RB_STREAM_CODEC_AAC) return "AAC";
 	if (codec == RB_STREAM_CODEC_OGG) return "OGG";
+	if (codec == RB_STREAM_CODEC_FLAC) return "FLAC";
 	return "unknown";
 }
 
@@ -5425,7 +5430,7 @@ static void RadioProbeUrlAndStart(MrApp *app, const char *url, const char *stati
 		return;
 	}
 	if (info.codec != RB_STREAM_CODEC_MP3 && info.codec != RB_STREAM_CODEC_AAC &&
-		info.codec != RB_STREAM_CODEC_OGG) {
+		info.codec != RB_STREAM_CODEC_OGG && info.codec != RB_STREAM_CODEC_FLAC) {
 		sprintf(msg, "Unsupported stream codec: %s (%.48s)", ProbeCodecName(info.codec), info.content_type);
 		RadioSetStatus(app, msg);
 		SetStatus(app, msg);
@@ -5882,7 +5887,7 @@ static void RadioDoProbeAndPlay(MrApp *app)
 		return;
 	}
 	if (info.codec != RB_STREAM_CODEC_MP3 && info.codec != RB_STREAM_CODEC_AAC &&
-		info.codec != RB_STREAM_CODEC_OGG) {
+		info.codec != RB_STREAM_CODEC_OGG && info.codec != RB_STREAM_CODEC_FLAC) {
 		sprintf(msg, "Unsupported stream codec: %s (%.48s)", ProbeCodecName(info.codec), info.content_type);
 		RadioSetStatus(app, msg);
 		return;
@@ -5982,7 +5987,7 @@ static void CloseRadioWindow(MrApp *app)
 static void OpenRadioWindow(MrApp *app)
 {
 	Object *root = NULL;
-	static STRPTR codecs[] = { (STRPTR)"All", (STRPTR)"MP3", (STRPTR)"AAC", (STRPTR)"AAC+", NULL };
+	static STRPTR codecs[] = { (STRPTR)"All", (STRPTR)"MP3", (STRPTR)"AAC", (STRPTR)"AAC+", (STRPTR)"FLAC", NULL };
 	/* Window geometry, fitted to the actual screen.  The radio window's natural
 	 * size is 540x340; on a standard PAL/NTSC Workbench screen (256/200 px tall)
 	 * a 340-tall window centred with WPOS_CENTERSCREEN puts its title/drag bar

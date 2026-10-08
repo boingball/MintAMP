@@ -10,6 +10,7 @@
 #include <string.h>
 #include "miniamp_memguard.h"
 #include "radio_stream.h"
+#include "radio_oggflac.h"
 #include <time.h>
 #include <stdarg.h>
 #ifndef AMIGA_M68K
@@ -574,6 +575,9 @@ typedef struct InputSource {
 	unsigned long prefixPos;
 	Mp3InputInfo info;
 	RadioStream *radio;
+	/* Set while an Ogg FLAC radio stream is read as native FLAC; the struct
+	 * and its RADIO_OGGFLAC_PAGE_MAX page buffer share one allocation. */
+	RadioOggFlac *oggFlac;
 } InputSource;
 
 static void InputSourceInit(InputSource *input, FILE *file);
@@ -1900,6 +1904,8 @@ static void InputSourceClose(InputSource *input)
 	}
 	input->useAmigaDos = 0;
 #endif
+	free(input->oggFlac);
+	input->oggFlac = NULL;
 #if ENABLE_RADIO
 	RADIO_STOP_DEBUG_PRINTF(("radio-stop: InputSourceClose exited\n"));
 #endif
@@ -1942,7 +1948,7 @@ static void radio_input_wait_tick(void)
 #endif
 }
 
-static size_t InputSourceRead(InputSource *input, void *dest, size_t bytes)
+static size_t InputSourceReadRaw(InputSource *input, void *dest, size_t bytes)
 {
 	if (input && input->prefixPos < input->prefixSize) {
 		unsigned long avail = input->prefixSize - input->prefixPos;
@@ -1951,7 +1957,7 @@ static size_t InputSourceRead(InputSource *input, void *dest, size_t bytes)
 		input->prefixPos += (unsigned long)take;
 		if (take == bytes)
 			return take;
-		return take + InputSourceRead(input, (unsigned char *)dest + take, bytes - take);
+		return take + InputSourceReadRaw(input, (unsigned char *)dest + take, bytes - take);
 	}
 	if (input && input->radio) {
 		unsigned long startMs = radio_input_clock_ms();
@@ -2045,6 +2051,53 @@ static size_t InputSourceRead(InputSource *input, void *dest, size_t bytes)
 #endif
 	return fread(dest, 1, bytes, input->file);
 }
+
+static size_t InputSourceReadRawCb(void *ctx, unsigned char *dest, size_t bytes)
+{
+	return InputSourceReadRaw((InputSource *)ctx, dest, bytes);
+}
+
+static size_t InputSourceRead(InputSource *input, void *dest, size_t bytes)
+{
+	if (input && input->oggFlac)
+		return radio_oggflac_read(input->oggFlac, InputSourceReadRawCb, input,
+			(unsigned char *)dest, bytes);
+	return InputSourceReadRaw(input, dest, bytes);
+}
+
+#ifdef HAVE_AMIGA_AUDIO_DEVICE
+/* Reads the first bytes of a radio stream into the replay prefix (so the
+ * decoder still sees them) and reports whether it is FLAC, in Ogg or
+ * native, or Ogg Vorbis (see radio_oggflac.h).  Only for a fresh stream. */
+static int RadioSniffFlac(InputSource *input)
+{
+	unsigned char head[RADIO_SNIFF_BYTES];
+	unsigned long total = 0;
+
+	if (!input || !input->radio || input->prefixSize != 0)
+		return RADIO_SNIFF_UNKNOWN;
+	while (total < sizeof(head)) {
+		size_t got = InputSourceReadRaw(input, head + total, sizeof(head) - (size_t)total);
+		if (got == 0)
+			break;
+		total += (unsigned long)got;
+	}
+	memcpy(input->prefix, head, (size_t)total);
+	input->prefixSize = total;
+	input->prefixPos = 0;
+	return radio_oggflac_sniff(head, (size_t)total);
+}
+
+static int InputSourceStartOggFlac(InputSource *input)
+{
+	unsigned char *mem = (unsigned char *)malloc(sizeof(RadioOggFlac) + RADIO_OGGFLAC_PAGE_MAX);
+	if (!mem)
+		return 0;
+	input->oggFlac = (RadioOggFlac *)mem;
+	radio_oggflac_init(input->oggFlac, mem + sizeof(RadioOggFlac));
+	return 1;
+}
+#endif
 
 static unsigned long InputSourceTell(const InputSource *input)
 {
@@ -6004,6 +6057,8 @@ static const char *RadioDecoderExtFromUrlOrTypeHint(const char *url, const char 
 		return "aac";
 	if (codecHint && StrCaseCmp(codecHint, "MP3") == 0 && !typeExt)
 		return "mp3";
+	if (codecHint && StrCaseCmp(codecHint, "FLAC") == 0)
+		return "flac";
 	if (typeExt)
 		return typeExt;
 	if (ext && (StrCaseCmp(ext, "aac") == 0 ||
@@ -11769,6 +11824,30 @@ int main(int argc, char **argv)
 				return 1;
 			}
 			radioExt = RadioDecoderExtFromUrlOrTypeHint(opt.inName, Radio_GetContentType(radio), opt.radioCodecHint);
+			/* Lossless stations send FLAC inside Ogg under the same
+			 * "audio/ogg" type as Vorbis, so look at the stream itself. */
+			if (radioExt && (StrCaseCmp(radioExt, "ogg") == 0 || StrCaseCmp(radioExt, "flac") == 0)) {
+				int sniff = RadioSniffFlac(&input);
+				if (sniff == RADIO_SNIFF_OGG_FLAC) {
+					if (!InputSourceStartOggFlac(&input)) {
+						fprintf(stderr, "cannot open radio stream: out of memory for Ogg FLAC\n");
+						GuiMarkRadioErrorText("out of memory");
+						Radio_Close(radio);
+						free(resolvedOutName);
+						AmigaFreeNormalizedArgs(&normalized);
+						return 1;
+					}
+					radioExt = "flac";
+				} else if (sniff == RADIO_SNIFF_NATIVE_FLAC) {
+					radioExt = "flac";
+				} else if (sniff == RADIO_SNIFF_OGG_VORBIS) {
+					radioExt = "ogg";
+				}
+				fprintf(stderr, "radio-codec: stream sniff=%s\n",
+					sniff == RADIO_SNIFF_OGG_FLAC ? "Ogg FLAC" :
+					sniff == RADIO_SNIFF_NATIVE_FLAC ? "FLAC" :
+					sniff == RADIO_SNIFF_OGG_VORBIS ? "Ogg Vorbis" : "unknown");
+			}
 			fprintf(stderr, "radio-codec: final selected decoder=%s\n", radioExt ? radioExt : "mp3");
 			if (radioExt && StrCaseCmp(radioExt, "mp3") != 0) {
 				int gret = AmigaGenericInputPlay(opt.inName, &input, radioExt, &opt, &stats, 1);

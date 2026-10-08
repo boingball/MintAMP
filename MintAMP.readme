@@ -178,6 +178,13 @@ both GUI editions.
 Version 1.1 increases the compressed radio input buffer and improves network
 worker scheduling, rebuffer handling and HTTP/HTTPS read throughput.
 
+Lossless FLAC stations play too, whether they send FLAC inside Ogg (as most
+Icecast stations do) or plain FLAC. Pick "FLAC" as the codec in the radio
+search to find them. A 16-bit/44.1 kHz FLAC station needs roughly 1 Mbit/s;
+a 68060 with a fast network card is recommended. 24-bit and high sample-rate
+stations are reduced to 16 bits and the selected output rate, and at 2.5-3.5
+Mbit/s usually exceed what a classic Amiga's network can sustain.
+
 Very high bitrate streams can still depend on the radio server, TCP/IP stack,
 network conditions, processor speed and selected output settings. A 128 kbit
 MP3 station is the safest choice for uninterrupted playback on classic
@@ -185,7 +192,8 @@ hardware. Streams at 192, 256 or 320 kbit may require a lower output rate or
 may occasionally rebuffer.
 
 HLS/M3U8 streams are not supported. Internet stations must provide a direct
-MP3 or ADTS AAC/AAC+ stream URL.
+MP3, ADTS AAC/AAC+, Ogg Vorbis or FLAC stream URL, or a .pls/.m3u playlist
+naming one.
 
 Format Notes
 ------------
@@ -245,6 +253,10 @@ History
        without AmiSSL. MintAMP-GT favourites are checked before playing,
        as in MintAMP, so playlist and redirecting favourites work there
        too. Station icons sent with chunked HTTP encoding now load.
+       Lossless FLAC internet radio now plays, including FLAC inside Ogg,
+       and "FLAC" is a codec choice in the radio search. FLAC files and
+       streams that use blocks larger than 4608 samples, as ffmpeg writes
+       at 88.2 kHz and above, now play instead of stopping after a moment.
 
 1.3.2  Builds again with the GCC 13 Amiga toolchain as well as GCC 16: the
        release link no longer stops with "expected exactly three
