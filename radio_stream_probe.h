@@ -108,7 +108,9 @@ enum {
      * MP3_NO_STREAM_PROBE / MP3_NO_ARTWORK, fatal artwork-disable-for-run,
      * or a busy worker/active transport. MP3_TEST_ENABLE_* are accepted as
      * compatibility/debug flags but are no longer required for RC1 defaults. */
-    RB_STREAM_PROBE_ERR_DISABLED = -19
+    RB_STREAM_PROBE_ERR_DISABLED = -19,
+    /* URL answered with a .pls/.m3u playlist that names no http(s) stream. */
+    RB_STREAM_PROBE_ERR_PLAYLIST_EMPTY = -20
 };
 
 const char *rb_probe_error_text(int rc);
