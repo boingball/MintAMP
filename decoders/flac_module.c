@@ -4,7 +4,8 @@
  * The module implements the DecoderOps vtable declared in decoder_module.h.
  * All memory is allocated via exec AllocMem (MEMF_FAST) on Amiga.
  *
- * Sized for Subset-format FLAC up to 48 kHz, stereo (uses ~50 KB Fast RAM).
+ * Sized from the stream's STREAMINFO: Subset FLAC up to 48 kHz (~75 KB Fast
+ * RAM), larger blocks for high-rate streams (up to ~260 KB at 16384), stereo.
  */
 
 #include "decoder_module.h"
@@ -35,10 +36,14 @@ static void ModuleFree(void *ptr, unsigned long bytes)
     FlacModuleFree(ptr);
 }
 
-/* Maximum block size and channels we support (Subset DAT: 4608 samples, 2 ch).
- * Files outside this range will fail to open. */
-#define FLAC_BLK   FLAC_SUBSET_MAX_BLOCK_SIZE_48KHZ   /* 4608 */
-#define FLAC_CH    2U
+/* Block size the decoder is sized for unless STREAMINFO asks for more:
+ * the Subset limit up to 48 kHz.  Encoders such as ffmpeg use 8192 or 16384
+ * sample blocks at 88.2 kHz and above (the Subset limit there), so a larger
+ * STREAMINFO maximum raises it, up to FLAC_BLK_MAX; beyond that it fails to
+ * open as before. */
+#define FLAC_BLK     FLAC_SUBSET_MAX_BLOCK_SIZE_48KHZ   /* 4608 */
+#define FLAC_BLK_MAX FLAC_SUBSET_MAX_BLOCK_SIZE         /* 16384 */
+#define FLAC_CH      2U
 
 /* Compressed I/O buffer: read this many bytes from file per refill.
  * 64 KB amortises hard-drive seek + rotational latency across many FLAC
@@ -46,8 +51,6 @@ static void ModuleFree(void *ptr, unsigned long bytes)
  * layer so disk reads happen while the previous block is being played. */
 #define FLAC_IO_CAP  (64UL * 1024UL)
 
-/* Output sample buffer capacity: full block * channels (interleaved int32_t) */
-#define FLAC_OUT_CAP ((unsigned long)(FLAC_BLK) * (unsigned long)(FLAC_CH))
 #define FLAC_STALL_LIMIT 64
 #define FLAC_MODULE_BUILD_ID "FLAC MODULE BUILD MARKER 12345 rev 2"
 
@@ -72,6 +75,7 @@ typedef struct FlacState {
     unsigned long  iobufPos;  /* read cursor into iobuf */
 
     int32_t       *outbuf;    /* decoded interleaved int32_t samples */
+    unsigned long  outCap;    /* outbuf capacity: block size * channels */
     unsigned long  outbufFill;/* valid int32_t samples in outbuf */
     unsigned long  outbufPos; /* read cursor (in int32_t samples) */
 
@@ -96,7 +100,7 @@ typedef struct FlacState {
 static void FlacFreeState(FlacState *st)
 {
     if (!st) return;
-    if (st->outbuf)  ModuleFree(st->outbuf,  FLAC_OUT_CAP * sizeof(int32_t));
+    if (st->outbuf)  ModuleFree(st->outbuf,  st->outCap * sizeof(int32_t));
     if (st->iobuf)   ModuleFree(st->iobuf,   FLAC_IO_CAP);
     if (st->flacMem) ModuleFree(st->flacMem, st->flacSize);
     ModuleFree(st, sizeof(FlacState));
@@ -174,7 +178,7 @@ static int FlacRunDecoder(FlacState *st)
                st->iobufFill, st->iobufPos);
 
         in_avail  = (uint32_t)(st->iobufFill - st->iobufPos);
-        out_avail = (uint32_t)FLAC_OUT_CAP;
+        out_avail = (uint32_t)st->outCap;
         fed = in_avail;
         FLAC_DEBUG("flac-debug: fx_flac_process before bytes_available=%lu out_avail=%lu\n",
                (unsigned long)in_avail, (unsigned long)out_avail);
@@ -243,29 +247,13 @@ static DecHandle FlacOpen(DecoderReadCb readFn, DecoderSeekCb seekFn,
 {
     FlacState    *st;
     unsigned long flacSize;
+    unsigned long blockSize;
     int64_t       sr, nch, ss, ns;
     fx_flac_state_t state;
     int tries;
 
-    flacSize = (unsigned long)fx_flac_size(FLAC_BLK, FLAC_CH);
-    if (flacSize == 0)
-        return NULL;
-
     st = (FlacState *)ModuleAlloc(sizeof(FlacState));
     if (!st) return NULL;
-
-    st->flacMem  = ModuleAlloc(flacSize);
-    st->flacSize = flacSize;
-    if (!st->flacMem) {
-        FlacFreeState(st);
-        return NULL;
-    }
-
-    st->flac = fx_flac_init(st->flacMem, (uint16_t)FLAC_BLK, (uint8_t)FLAC_CH);
-    if (!st->flac) {
-        FlacFreeState(st);
-        return NULL;
-    }
 
     st->iobuf = (unsigned char *)ModuleAlloc(FLAC_IO_CAP);
     if (!st->iobuf) {
@@ -273,15 +261,44 @@ static DecHandle FlacOpen(DecoderReadCb readFn, DecoderSeekCb seekFn,
         return NULL;
     }
 
-    st->outbuf = (int32_t *)ModuleAlloc(FLAC_OUT_CAP * sizeof(int32_t));
-    if (!st->outbuf) {
+    st->readFn   = readFn;
+    st->seekFn   = seekFn;
+    st->userData = userData;
+
+    /* The first read starts with "fLaC" and the mandatory STREAMINFO block,
+     * whose maximum block size (bytes 10-11) sizes the decoder below. */
+    blockSize = FLAC_BLK;
+    if (FlacFillBuf(st) && st->iobufFill >= 12 &&
+        st->iobuf[0] == 'f' && st->iobuf[1] == 'L' && st->iobuf[2] == 'a' && st->iobuf[3] == 'C') {
+        unsigned long maxBlock = ((unsigned long)st->iobuf[10] << 8) | st->iobuf[11];
+        if (maxBlock > blockSize)
+            blockSize = maxBlock < FLAC_BLK_MAX ? maxBlock : FLAC_BLK_MAX;
+    }
+
+    flacSize = (unsigned long)fx_flac_size((uint32_t)blockSize, FLAC_CH);
+    if (flacSize == 0) {
+        FlacFreeState(st);
+        return NULL;
+    }
+    st->flacMem  = ModuleAlloc(flacSize);
+    st->flacSize = flacSize;
+    if (!st->flacMem) {
         FlacFreeState(st);
         return NULL;
     }
 
-    st->readFn   = readFn;
-    st->seekFn   = seekFn;
-    st->userData = userData;
+    st->flac = fx_flac_init(st->flacMem, (uint16_t)blockSize, (uint8_t)FLAC_CH);
+    if (!st->flac) {
+        FlacFreeState(st);
+        return NULL;
+    }
+
+    st->outCap = blockSize * (unsigned long)FLAC_CH;
+    st->outbuf = (int32_t *)ModuleAlloc(st->outCap * sizeof(int32_t));
+    if (!st->outbuf) {
+        FlacFreeState(st);
+        return NULL;
+    }
 
     /* Feed until FLAC_END_OF_METADATA so streaminfo is available */
     state = FLAC_INIT;

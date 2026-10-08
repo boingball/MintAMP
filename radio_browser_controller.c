@@ -145,6 +145,7 @@ static RbStreamCodec rb_controller_codec_from_station(const char *codec)
     if (rb_controller_starts_with(codec, "MP3") || rb_controller_starts_with(codec, "mp3")) return RB_STREAM_CODEC_MP3;
     if (rb_controller_starts_with(codec, "AAC") || rb_controller_starts_with(codec, "aac")) return RB_STREAM_CODEC_AAC;
     if (rb_controller_starts_with(codec, "OGG") || rb_controller_starts_with(codec, "ogg")) return RB_STREAM_CODEC_OGG;
+    if (rb_controller_starts_with(codec, "FLAC") || rb_controller_starts_with(codec, "flac")) return RB_STREAM_CODEC_FLAC;
     return RB_STREAM_CODEC_UNKNOWN;
 }
 

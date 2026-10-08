@@ -61,7 +61,9 @@ typedef enum {
     RB_STREAM_CODEC_UNKNOWN = 0,
     RB_STREAM_CODEC_MP3,
     RB_STREAM_CODEC_AAC,
-    RB_STREAM_CODEC_OGG
+    RB_STREAM_CODEC_OGG,
+    /* Native FLAC or FLAC in Ogg (lossless radio); playback tells them apart. */
+    RB_STREAM_CODEC_FLAC
 } RbStreamCodec;
 
 typedef struct RbStreamInfo {

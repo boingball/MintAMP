@@ -736,7 +736,18 @@ static RbStreamCodec rb_probe_detect_codec(const RbProbeUrl *url, const RbStream
             }
         }
     }
+    if (peek && peek_len >= 4 && peek[0] == 'f' && peek[1] == 'L' && peek[2] == 'a' && peek[3] == 'C') {
+        RADIO_DBG(printf("rb-probe codec: initial byte sniff=fLaC final=FLAC\n");)
+        return RB_STREAM_CODEC_FLAC;
+    }
     if (peek && peek_len >= 4 && peek[0] == 'O' && peek[1] == 'g' && peek[2] == 'g' && peek[3] == 'S') {
+        /* Lossless stations put FLAC in Ogg: the first packet starts
+         * 0x7F "FLAC" (after the page header and its lacing table). */
+        if (peek_len >= 28 && peek_len >= 27 + peek[26] + 5 &&
+            memcmp(peek + 27 + peek[26], "\177FLAC", 5) == 0) {
+            RADIO_DBG(printf("rb-probe codec: initial byte sniff=OggS+FLAC final=FLAC\n");)
+            return RB_STREAM_CODEC_FLAC;
+        }
         RADIO_DBG(printf("rb-probe codec: initial byte sniff=OggS final=OGG\n");)
         return RB_STREAM_CODEC_OGG;
     }
@@ -746,6 +757,8 @@ static RbStreamCodec rb_probe_detect_codec(const RbProbeUrl *url, const RbStream
         if (rb_probe_content_type_is_aac(info->content_type)) return RB_STREAM_CODEC_AAC;
         if (rb_probe_contains_nocase(info->content_type, "audio/opus") ||
             rb_probe_contains_nocase(info->content_type, "audio/x-opus")) return RB_STREAM_CODEC_UNKNOWN;
+        if (rb_probe_contains_nocase(info->content_type, "audio/flac") ||
+            rb_probe_contains_nocase(info->content_type, "audio/x-flac")) return RB_STREAM_CODEC_FLAC;
         if (rb_probe_contains_nocase(info->content_type, "audio/ogg") ||
             rb_probe_contains_nocase(info->content_type, "application/ogg") ||
             rb_probe_contains_nocase(info->content_type, "audio/vorbis") ||
@@ -755,6 +768,8 @@ static RbStreamCodec rb_probe_detect_codec(const RbProbeUrl *url, const RbStream
         return RB_STREAM_CODEC_AAC;
     if (url && rb_probe_contains_nocase(url->path, ".opus"))
         return RB_STREAM_CODEC_UNKNOWN;
+    if (url && rb_probe_contains_nocase(url->path, ".flac"))
+        return RB_STREAM_CODEC_FLAC;
     if (url && (rb_probe_contains_nocase(url->path, ".ogg") || rb_probe_contains_nocase(url->path, ".oga")))
         return RB_STREAM_CODEC_OGG;
     if (rb_probe_url_has_mp3_hint(url))
@@ -1412,7 +1427,7 @@ n2 = rb_probe_transport(&transport, (char *)peek_buf + *peek_len, want2);
            current_url, info->content_type, rb_probe_url_has_aac_hint(&parsed) ? "AAC" : (rb_probe_url_has_mp3_hint(&parsed) ? "MP3" : "none"), *peek_len);)
     info->codec = rb_probe_detect_codec(&parsed, info, peek_buf, *peek_len);
     RADIO_DBG(printf("rb-probe codec: final selected codec=%s\n",
-           info->codec == RB_STREAM_CODEC_MP3 ? "MP3" : (info->codec == RB_STREAM_CODEC_AAC ? "AAC" : (info->codec == RB_STREAM_CODEC_OGG ? "OGG" : "unsupported")));)
+           info->codec == RB_STREAM_CODEC_MP3 ? "MP3" : (info->codec == RB_STREAM_CODEC_AAC ? "AAC" : (info->codec == RB_STREAM_CODEC_OGG ? "OGG" : (info->codec == RB_STREAM_CODEC_FLAC ? "FLAC" : "unsupported"))));)
     if (rb_probe_is_hls(&parsed, info)) {
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
 #endif
@@ -1767,6 +1782,7 @@ static const char *rb_probe_codec_name(RbStreamCodec codec)
     case RB_STREAM_CODEC_MP3: return "MP3";
     case RB_STREAM_CODEC_AAC: return "AAC";
     case RB_STREAM_CODEC_OGG: return "OGG";
+    case RB_STREAM_CODEC_FLAC: return "FLAC";
     default: return "unknown";
     }
 }
@@ -1838,6 +1854,21 @@ static int rb_probe_selftest(void)
         if (rb_probe_unwrap_playlist_generator(
                 "https://www.internet-radio.com/servers/tools/playlistgenerator/?u=javascript:x&t=.pls",
                 out, (int)sizeof(out))) return 26;
+    }
+    {
+        static const unsigned char ogg_flac[] = { 'O', 'g', 'g', 'S', 0, 2, 0, 0, 0, 0, 0, 0, 0, 0,
+            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 51, 0x7f, 'F', 'L', 'A', 'C', 1, 0 };
+        static const unsigned char ogg_vorbis[] = { 'O', 'g', 'g', 'S', 0, 2, 0, 0, 0, 0, 0, 0, 0, 0,
+            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 30, 1, 'v', 'o', 'r', 'b', 'i', 's' };
+        static const unsigned char native[] = { 'f', 'L', 'a', 'C', 0, 0, 0, 34 };
+        RbProbeUrl plain;
+        rb_probe_info_init(&info);
+        if (rb_probe_parse_url("http://example.com/live", &plain) != RB_STREAM_PROBE_OK) return 27;
+        if (rb_probe_detect_codec(&plain, &info, ogg_flac, (int)sizeof(ogg_flac)) != RB_STREAM_CODEC_FLAC) return 28;
+        if (rb_probe_detect_codec(&plain, &info, ogg_vorbis, (int)sizeof(ogg_vorbis)) != RB_STREAM_CODEC_OGG) return 29;
+        if (rb_probe_detect_codec(&plain, &info, native, (int)sizeof(native)) != RB_STREAM_CODEC_FLAC) return 30;
+        rb_probe_copy_trim(info.content_type, (int)sizeof(info.content_type), "audio/flac", 10);
+        if (rb_probe_detect_codec(&plain, &info, NULL, 0) != RB_STREAM_CODEC_FLAC) return 31;
     }
     RADIO_DBG(printf("rb-probe selftest: ok\n");)
     return 0;

@@ -68,6 +68,7 @@
 #include "radio_stream.h"
 #include "radio_browser_controller.h"
 #include "radio_browser_http.h"
+#include "playlist_format.h"
 
 /* See the matching comment in amiga_mp3gui.c's GUI_ENV_PREFIX: bare name,
  * no explicit device prefix -- GVF_SAVE_VAR already constructs the
@@ -638,6 +639,10 @@ typedef struct MrApp {
 	Object         *plLoadGad;
 	Object         *plSaveGad;
 	Object         *plCloseGad;
+	Object         *plUrlGad;
+	Object         *plAddUrlGad;
+	Object         *plFromFavsGad;
+	Object         *plToFavsGad;
 	struct List     plList;
 	struct Node    *plNodes[MR_PLAYLIST_MAX];
 	char            plNames[MR_PLAYLIST_MAX][80];
@@ -695,6 +700,9 @@ typedef struct MrApp {
 	char  inputName[MR_MAX_PATH];
 	char  lastDrawer[MR_MAX_PATH];
 	char  playlist[MR_PLAYLIST_MAX][MR_MAX_PATH];
+	/* Name to show for each entry (station name or #EXTINF/TitleN title);
+	 * empty means show the file name or URL. */
+	char  playlistTitles[MR_PLAYLIST_MAX][80];
 	int   rateIndex;
 	int   qualityIndex;
 	int   subbandCapIndex;
@@ -809,6 +817,7 @@ static void SetStatus(MrApp *app, const char *text);
 static void RadioDoProbeAndPlay(MrApp *app);
 static void RadioProbeUrlAndStart(MrApp *app, const char *url, const char *stationName);
 static void RadioSelectResult(MrApp *app, ULONG eventSelected);
+static void PlaylistStartCurrent(MrApp *app);
 
 static void SyncMenuChecks(MrApp *app);
 static void SetDecodeThenPlay(MrApp *app, int enabled);
@@ -1325,6 +1334,8 @@ static void MrSplitStreamTitle(const char *streamTitle, char *artist, unsigned l
 static const char *MrRadioCodecName(const char *contentType)
 {
 	if (!contentType) return "";
+	if (strstr(contentType, "flac") || strstr(contentType, "FLAC"))
+		return "FLAC";
 	if (strstr(contentType, "aac") || strstr(contentType, "AAC") ||
 		strstr(contentType, "aach") || strstr(contentType, "AACH"))
 		return "AAC+";
@@ -2098,7 +2109,11 @@ static void FinalizePlayback(MrApp *app)
 	}
 	if (app->playlistNextPending) {
 		app->playlistNextPending = 0;
-		StartPlayback(app);
+		/* As for a queued stream above: let the old child's teardown
+		 * settle before probing the next entry's stream. */
+		if (MrIsRadioInput(app->inputName))
+			Delay(10);
+		PlaylistStartCurrent(app);
 	}
 }
 
@@ -5177,7 +5192,7 @@ static void PlaylistNext(MrApp *app)
 		StopPlayback(app);
 	} else {
 		SetStatus(app, "Playlist item selected.");
-		StartPlayback(app);
+		PlaylistStartCurrent(app);
 	}
 }
 
@@ -5191,32 +5206,85 @@ static void TrimLine(char *s)
 		*--e = '\0';
 }
 
-static void LoadPlaylistPath(MrApp *app, const char *m3uPath, const char *drawer)
+/* Appends one entry; a location that does not fit is skipped rather than
+ * cut short (a truncated URL or path would only fail later). */
+static int PlaylistAddEntry(MrApp *app, const char *location, const char *title)
+{
+	int n = app->playlistCount;
+	if (n >= MR_PLAYLIST_MAX || !location || !location[0] || strlen(location) >= MR_MAX_PATH)
+		return 0;
+	SafeCopy(app->playlist[n], MR_MAX_PATH, location);
+	SafeCopy(app->playlistTitles[n], sizeof(app->playlistTitles[n]), title ? title : "");
+	app->playlistCount++;
+	return 1;
+}
+
+typedef struct MrPlaylistLoad {
+	MrApp *app;
+	const char *drawer;
+	int skipped;
+} MrPlaylistLoad;
+
+static int MrPlaylistLoadEntry(void *ctx, const char *location, const char *title)
+{
+	MrPlaylistLoad *load = (MrPlaylistLoad *)ctx;
+	char full[MR_MAX_PATH];
+	if (load->app->playlistCount >= MR_PLAYLIST_MAX)
+		return 0;
+	/* URLs and absolute Amiga paths as written; anything else is relative
+	 * to the playlist's drawer. */
+	if (strchr(location, ':') || location[0] == '/') {
+		if (!PlaylistAddEntry(load->app, location, title))
+			load->skipped++;
+		return 1;
+	}
+	SafeCopy(full, sizeof(full), load->drawer ? load->drawer : "");
+	if (!AddPart((STRPTR)full, (STRPTR)location, sizeof(full)) ||
+		!PlaylistAddEntry(load->app, full, title))
+		load->skipped++;
+	return 1;
+}
+
+/* Reads a whole small text file into a NUL-terminated malloc()ed buffer. */
+static char *MrReadTextFile(const char *path, long maxBytes, long *lenOut)
 {
 	BPTR fh;
-	char line[MR_MAX_PATH];
-	char full[MR_MAX_PATH];
+	char *buf;
+	long len = 0, got;
+	*lenOut = 0;
+	fh = Open((STRPTR)path, MODE_OLDFILE);
+	if (!fh)
+		return NULL;
+	buf = (char *)malloc((size_t)maxBytes + 1);
+	if (buf) {
+		while (len < maxBytes && (got = Read(fh, buf + len, maxBytes - len)) > 0)
+			len += got;
+		buf[len] = '\0';
+		*lenOut = len;
+	}
+	Close(fh);
+	return buf;
+}
+
+/* Loads an M3U or PLS playlist, replacing the current one. */
+static void LoadPlaylistPath(MrApp *app, const char *m3uPath, const char *drawer)
+{
+	MrPlaylistLoad load;
+	char *text;
+	long len;
 	app->playlistCount = 0;
 	app->playlistCurrent = -1;
 	app->playlistSelected = -1;
-	fh = Open((STRPTR)m3uPath, MODE_OLDFILE);
-	if (!fh) {
+	text = MrReadTextFile(m3uPath, 96L * 1024L, &len);
+	if (!text) {
 		SetStatus(app, "Could not open playlist.");
 		return;
 	}
-	while (FGets(fh, line, sizeof(line)) && app->playlistCount < MR_PLAYLIST_MAX) {
-		TrimLine(line);
-		if (!line[0] || line[0] == '#')
-			continue;
-		if (strchr(line, ':') || line[0] == '/') {
-			SafeCopy(full, sizeof(full), line);
-		} else {
-			SafeCopy(full, sizeof(full), drawer ? drawer : "");
-			AddPart((STRPTR)full, (STRPTR)line, sizeof(full));
-		}
-		SafeCopy(app->playlist[app->playlistCount++], MR_MAX_PATH, full);
-	}
-	Close(fh);
+	load.app = app;
+	load.drawer = drawer;
+	load.skipped = 0;
+	playlist_parse(text, (size_t)len, MrPlaylistLoadEntry, &load);
+	free(text);
 	if (app->playlistCount > 0) {
 		app->playlistCurrent = 0;
 		app->playlistSelected = 0;
@@ -5225,7 +5293,10 @@ static void LoadPlaylistPath(MrApp *app, const char *m3uPath, const char *drawer
 		RefreshFileInfoAndTags(app);
 		RefreshPlaylistView(app);
 		UpdateNextButtonState(app);
-		SetStatus(app, app->artValid ? "Playlist loaded." : "Playlist loaded (No art).");
+		if (load.skipped > 0)
+			SetStatus(app, "Playlist loaded; some entries were too long or did not fit.");
+		else
+			SetStatus(app, app->artValid ? "Playlist loaded." : "Playlist loaded (No art).");
 	} else {
 		app->playlistSelected = -1;
 		RefreshPlaylistView(app);
@@ -5242,7 +5313,11 @@ enum {
 	PL_GID_PLAY,
 	PL_GID_LOAD_M3U,
 	PL_GID_SAVE_M3U,
-	PL_GID_CLOSE
+	PL_GID_CLOSE,
+	PL_GID_URL,
+	PL_GID_ADD_URL,
+	PL_GID_FROM_FAVS,
+	PL_GID_TO_FAVS
 };
 
 enum {
@@ -5324,6 +5399,7 @@ static const char *RadioCodecFromIndex(int idx)
 	case 1: return "MP3";
 	case 2: return "AAC";
 	case 3: return "AAC+";
+	case 4: return "FLAC";
 	default: return "";
 	}
 }
@@ -5334,6 +5410,7 @@ static int RadioCodecToIndex(const char *codec)
 	if (!strcmp(codec, "MP3")) return 1;
 	if (!strcmp(codec, "AAC")) return 2;
 	if (!strcmp(codec, "AAC+")) return 3;
+	if (!strcmp(codec, "FLAC")) return 4;
 	return 0;
 }
 
@@ -5342,6 +5419,7 @@ static const char *ProbeCodecName(RbStreamCodec codec)
 	if (codec == RB_STREAM_CODEC_MP3) return "MP3";
 	if (codec == RB_STREAM_CODEC_AAC) return "AAC";
 	if (codec == RB_STREAM_CODEC_OGG) return "OGG";
+	if (codec == RB_STREAM_CODEC_FLAC) return "FLAC";
 	return "unknown";
 }
 
@@ -5425,7 +5503,7 @@ static void RadioProbeUrlAndStart(MrApp *app, const char *url, const char *stati
 		return;
 	}
 	if (info.codec != RB_STREAM_CODEC_MP3 && info.codec != RB_STREAM_CODEC_AAC &&
-		info.codec != RB_STREAM_CODEC_OGG) {
+		info.codec != RB_STREAM_CODEC_OGG && info.codec != RB_STREAM_CODEC_FLAC) {
 		sprintf(msg, "Unsupported stream codec: %s (%.48s)", ProbeCodecName(info.codec), info.content_type);
 		RadioSetStatus(app, msg);
 		SetStatus(app, msg);
@@ -5882,7 +5960,7 @@ static void RadioDoProbeAndPlay(MrApp *app)
 		return;
 	}
 	if (info.codec != RB_STREAM_CODEC_MP3 && info.codec != RB_STREAM_CODEC_AAC &&
-		info.codec != RB_STREAM_CODEC_OGG) {
+		info.codec != RB_STREAM_CODEC_OGG && info.codec != RB_STREAM_CODEC_FLAC) {
 		sprintf(msg, "Unsupported stream codec: %s (%.48s)", ProbeCodecName(info.codec), info.content_type);
 		RadioSetStatus(app, msg);
 		return;
@@ -5982,7 +6060,7 @@ static void CloseRadioWindow(MrApp *app)
 static void OpenRadioWindow(MrApp *app)
 {
 	Object *root = NULL;
-	static STRPTR codecs[] = { (STRPTR)"All", (STRPTR)"MP3", (STRPTR)"AAC", (STRPTR)"AAC+", NULL };
+	static STRPTR codecs[] = { (STRPTR)"All", (STRPTR)"MP3", (STRPTR)"AAC", (STRPTR)"AAC+", (STRPTR)"FLAC", NULL };
 	/* Window geometry, fitted to the actual screen.  The radio window's natural
 	 * size is 540x340; on a standard PAL/NTSC Workbench screen (256/200 px tall)
 	 * a 340-tall window centred with WPOS_CENTERSCREEN puts its title/drag bar
@@ -6161,7 +6239,12 @@ static void RefreshPlaylistView(MrApp *app)
 	NewList(&app->plList);
 	memset(app->plNodes, 0, sizeof(app->plNodes));
 	for (i = 0; i < app->playlistCount; i++) {
-		SafeCopy(app->plNames[i], sizeof(app->plNames[i]), PlaylistBaseName(app->playlist[i]));
+		/* A title if the entry has one; else the file name, or the whole
+		 * URL for a stream (its last path part is often "stream" or
+		 * "listen.pls?sid=1", which says nothing). */
+		SafeCopy(app->plNames[i], sizeof(app->plNames[i]),
+			app->playlistTitles[i][0] ? app->playlistTitles[i] :
+			(MrIsRadioInput(app->playlist[i]) ? app->playlist[i] : PlaylistBaseName(app->playlist[i])));
 		app->plNodes[i] = AllocListBrowserNode(1,
 			LBNA_Column, 0,
 				LBNCA_Text, (ULONG)app->plNames[i],
@@ -6213,17 +6296,16 @@ static void PlaylistAddFiles(MrApp *app)
 					SafeCopy(path, sizeof(path), (const char *)fr->fr_ArgList[i].wa_Name);
 				}
 				if (!path[0]) continue;
-				SafeCopy(app->playlist[app->playlistCount++], MR_MAX_PATH, path);
-				added++;
+				if (PlaylistAddEntry(app, path, NULL))
+					added++;
 			}
 		} else if (fr->fr_File && fr->fr_File[0] && app->playlistCount < MR_PLAYLIST_MAX) {
 			path[0] = '\0';
 			if (fr->fr_Drawer && fr->fr_Drawer[0])
 				SafeCopy(path, sizeof(path), (const char *)fr->fr_Drawer);
-			if (AddPart((STRPTR)path, fr->fr_File, sizeof(path))) {
-				SafeCopy(app->playlist[app->playlistCount++], MR_MAX_PATH, path);
+			if (AddPart((STRPTR)path, fr->fr_File, sizeof(path)) &&
+				PlaylistAddEntry(app, path, NULL))
 				added++;
-			}
 		}
 	}
 	FreeAslRequest(fr);
@@ -6250,8 +6332,10 @@ static void PlaylistRemoveSelected(MrApp *app)
 		SetStatus(app, "Select a track to remove first.");
 		return;
 	}
-	for (i = sel; i < app->playlistCount - 1; i++)
+	for (i = sel; i < app->playlistCount - 1; i++) {
 		SafeCopy(app->playlist[i], MR_MAX_PATH, app->playlist[i + 1]);
+		SafeCopy(app->playlistTitles[i], sizeof(app->playlistTitles[i]), app->playlistTitles[i + 1]);
+	}
 	app->playlistCount--;
 	if (app->playlistCurrent > sel) app->playlistCurrent--;
 	else if (app->playlistCurrent == sel) app->playlistCurrent = -1;
@@ -6272,21 +6356,28 @@ static void PlaylistClearAll(MrApp *app)
 	SetStatus(app, "Playlist cleared.");
 }
 
-/* Write the current playlist out as a simple #EXTM3U file. */
+/* Writes a buffer to an open file; 0 on a short write. */
+static int MrWriteAll(BPTR fh, const char *text, size_t len)
+{
+	return len == 0 || Write(fh, (APTR)text, (LONG)len) == (LONG)len;
+}
+
+/* Saves the playlist as PLS when the chosen name ends in .pls, else as an
+ * extended M3U, with each entry's title where it has one. */
 static void PlaylistSaveM3U(MrApp *app)
 {
 	struct FileRequester *fr;
 	char m3uPath[MR_MAX_PATH];
-	char line[MR_MAX_PATH + 2];
+	char text[1024];
 	BPTR fh;
-	int i, len;
+	int i, format, ok;
 
 	if (app->playlistCount <= 0) {
 		SetStatus(app, "Playlist is empty - nothing to save.");
 		return;
 	}
 	fr = (struct FileRequester *)AllocAslRequestTags(ASL_FileRequest,
-		ASLFR_TitleText, (ULONG)"Save M3U playlist",
+		ASLFR_TitleText, (ULONG)"Save playlist (name it .m3u or .pls)",
 		ASLFR_DoSaveMode, TRUE,
 		ASLFR_InitialFile, (ULONG)"playlist.m3u",
 		ASLFR_InitialDrawer, (ULONG)(app->lastDrawer[0] ? app->lastDrawer : NULL),
@@ -6306,24 +6397,107 @@ static void PlaylistSaveM3U(MrApp *app)
 	FreeAslRequest(fr);
 	if (!m3uPath[0])
 		return;
+	format = playlist_format_from_name(m3uPath);
 	fh = Open((STRPTR)m3uPath, MODE_NEWFILE);
 	if (!fh) {
-		SetStatus(app, "Cannot create M3U file.");
+		SetStatus(app, "Cannot create playlist file.");
 		return;
 	}
-	Write(fh, (APTR)"#EXTM3U\n", 8);
-	for (i = 0; i < app->playlistCount; i++) {
-		SafeCopy(line, sizeof(line) - 1, app->playlist[i]);
-		len = (int)strlen(line);
-		line[len++] = '\n';
-		if (Write(fh, (APTR)line, len) != len) {
-			Close(fh);
-			SetStatus(app, "Error writing M3U file.");
-			return;
-		}
-	}
+	ok = MrWriteAll(fh, text, playlist_write_header(text, sizeof(text), format));
+	for (i = 0; ok && i < app->playlistCount; i++)
+		ok = MrWriteAll(fh, text, playlist_write_entry(text, sizeof(text), format, i + 1,
+			app->playlist[i], app->playlistTitles[i]));
+	if (ok)
+		ok = MrWriteAll(fh, text, playlist_write_footer(text, sizeof(text), format, app->playlistCount));
 	Close(fh);
-	SetStatus(app, "Playlist saved as M3U.");
+	SetStatus(app, !ok ? "Error writing playlist file." :
+		format == PLAYLIST_FORMAT_PLS ? "Playlist saved as PLS." : "Playlist saved as M3U.");
+}
+
+/* Adds the URL typed in the playlist window's URL field. */
+static void PlaylistAddUrl(MrApp *app)
+{
+	STRPTR text = NULL;
+	char url[MR_MAX_PATH];
+	if (app->plUrlGad)
+		GetAttr(STRINGA_TextVal, app->plUrlGad, (ULONG *)(void *)&text);
+	if (!text || !text[0] || !strcmp((const char *)text, "http://")) {
+		SetStatus(app, "Type a stream URL first.");
+		return;
+	}
+	SafeCopy(url, sizeof(url), (const char *)text);
+	TrimLine(url);
+	if (!MrIsRadioInput(url)) {
+		SetStatus(app, "Stream URL must start with http:// or https://");
+		return;
+	}
+	if (!PlaylistAddEntry(app, url, NULL)) {
+		SetStatus(app, app->playlistCount >= MR_PLAYLIST_MAX ? "Playlist is full." : "URL is too long.");
+		return;
+	}
+	app->playlistSelected = app->playlistCount - 1;
+	RefreshPlaylistView(app);
+	UpdateNextButtonState(app);
+	if (app->plUrlGad && app->plWin)
+		SetGadgetAttrs((struct Gadget *)app->plUrlGad, app->plWin, NULL,
+			STRINGA_TextVal, (ULONG)"http://", TAG_DONE);
+	SetStatus(app, "Stream added to playlist.");
+}
+
+/* Appends every radio favourite to the playlist (then Save exports them). */
+static void PlaylistAddFavourites(MrApp *app)
+{
+	int i, added = 0;
+	for (i = 0; i < app->rbFavouriteCount; i++)
+		if (PlaylistAddEntry(app, app->rbFavouriteUrls[i], app->rbFavouriteNames[i]))
+			added++;
+	if (added > 0) {
+		char msg[64];
+		if (app->playlistSelected < 0)
+			app->playlistSelected = app->playlistCount - added;
+		RefreshPlaylistView(app);
+		UpdateNextButtonState(app);
+		sprintf(msg, "Added %d favourite%s to playlist.", added, added == 1 ? "" : "s");
+		SetStatus(app, msg);
+	} else {
+		SetStatus(app, app->rbFavouriteCount == 0 ? "No radio favourites yet." :
+			"Playlist is full.");
+	}
+}
+
+/* Adds every stream in the playlist to the radio favourites (so a loaded
+ * .pls/.m3u imports them), updating the name of ones already there. */
+static void PlaylistToFavourites(MrApp *app)
+{
+	int i, j, added = 0, full = 0;
+	char msg[80];
+	for (i = 0; i < app->playlistCount; i++) {
+		const char *url = app->playlist[i];
+		const char *name = app->playlistTitles[i][0] ? app->playlistTitles[i] : url;
+		if (!MrIsRadioInput(url))
+			continue;
+		for (j = 0; j < app->rbFavouriteCount; j++)
+			if (!strcmp(app->rbFavouriteUrls[j], url))
+				break;
+		if (j == app->rbFavouriteCount) {
+			if (app->rbFavouriteCount >= MR_RADIO_FAV_MAX) {
+				full = 1;
+				continue;
+			}
+			app->rbFavouriteCount++;
+			SafeCopy(app->rbFavouriteUrls[j], sizeof(app->rbFavouriteUrls[j]), url);
+			added++;
+		} else if (!app->playlistTitles[i][0]) {
+			continue;   /* keep the existing favourite's name */
+		}
+		SafeCopy(app->rbFavouriteNames[j], sizeof(app->rbFavouriteNames[j]), name);
+	}
+	SaveSettings(app);
+	if (app->rbWinObj && app->rbShowingFavourites)
+		RadioRefreshResults(app);
+	sprintf(msg, "Added %d stream%s to favourites%s", added, added == 1 ? "" : "s",
+		full ? " (favourites full)." : ".");
+	SetStatus(app, msg);
 }
 
 static void ClosePlaylistWindow(MrApp *app)
@@ -6364,6 +6538,10 @@ static void ClosePlaylistWindow(MrApp *app)
 	app->plLoadGad = NULL;
 	app->plSaveGad = NULL;
 	app->plCloseGad = NULL;
+	app->plUrlGad = NULL;
+	app->plAddUrlGad = NULL;
+	app->plFromFavsGad = NULL;
+	app->plToFavsGad = NULL;
 }
 
 static Object *PlaylistButton(ULONG id, const char *text)
@@ -6399,17 +6577,27 @@ static void OpenPlaylistWindow(MrApp *app)
 		LISTBROWSER_AutoFit, TRUE,
 		LISTBROWSER_Separators, TRUE,
 		TAG_DONE);
-	app->plAddGad = PlaylistButton(PL_GID_ADD, "Add");
+	app->plAddGad = PlaylistButton(PL_GID_ADD, "Add Files");
 	app->plRemoveGad = PlaylistButton(PL_GID_REMOVE, "Remove");
 	app->plClearGad = PlaylistButton(PL_GID_CLEAR, "Clear");
 	app->plPlayGad = PlaylistButton(PL_GID_PLAY, "Play");
-	app->plLoadGad = PlaylistButton(PL_GID_LOAD_M3U, "Load M3U");
-	app->plSaveGad = PlaylistButton(PL_GID_SAVE_M3U, "Save M3U");
+	app->plLoadGad = PlaylistButton(PL_GID_LOAD_M3U, "Load...");
+	app->plSaveGad = PlaylistButton(PL_GID_SAVE_M3U, "Save...");
 	app->plCloseGad = PlaylistButton(PL_GID_CLOSE, "Close");
+	app->plUrlGad = (Object *)NewObject(STRING_GetClass(), NULL,
+		GA_ID, PL_GID_URL,
+		GA_RelVerify, TRUE,
+		STRINGA_TextVal, (ULONG)"http://",
+		STRINGA_MaxChars, MR_MAX_PATH,
+		TAG_DONE);
+	app->plAddUrlGad = PlaylistButton(PL_GID_ADD_URL, "Add URL");
+	app->plFromFavsGad = PlaylistButton(PL_GID_FROM_FAVS, "From Favs");
+	app->plToFavsGad = PlaylistButton(PL_GID_TO_FAVS, "To Favs");
 
 	if (!app->plListGad || !app->plAddGad || !app->plRemoveGad ||
 		!app->plClearGad || !app->plPlayGad || !app->plLoadGad ||
-		!app->plSaveGad || !app->plCloseGad)
+		!app->plSaveGad || !app->plCloseGad || !app->plUrlGad ||
+		!app->plAddUrlGad || !app->plFromFavsGad || !app->plToFavsGad)
 		goto fail;
 
 	root = (Object *)NewObject(LAYOUT_GetClass(), NULL,
@@ -6430,9 +6618,18 @@ static void OpenPlaylistWindow(MrApp *app)
 		CHILD_WeightedHeight, 0,
 		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
 			LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
+			ADD_LABELLED(app->plUrlGad, "URL"),
+			LAYOUT_AddChild, (ULONG)app->plAddUrlGad,
+			CHILD_WeightedWidth, 0,
+			TAG_DONE),
+		CHILD_WeightedHeight, 0,
+		LAYOUT_AddChild, (ULONG)NewObject(LAYOUT_GetClass(), NULL,
+			LAYOUT_Orientation, LAYOUT_ORIENT_HORIZ,
 			LAYOUT_EvenSize, TRUE,
 			LAYOUT_AddChild, (ULONG)app->plLoadGad,
 			LAYOUT_AddChild, (ULONG)app->plSaveGad,
+			LAYOUT_AddChild, (ULONG)app->plFromFavsGad,
+			LAYOUT_AddChild, (ULONG)app->plToFavsGad,
 			LAYOUT_AddChild, (ULONG)app->plCloseGad,
 			TAG_DONE),
 		CHILD_WeightedHeight, 0,
@@ -6476,9 +6673,9 @@ static void BrowseForPlaylist(MrApp *app)
 	struct FileRequester *fr;
 	char path[MR_MAX_PATH];
 	fr = (struct FileRequester *)AllocAslRequestTags(ASL_FileRequest,
-		ASLFR_TitleText, (ULONG)"Choose an M3U playlist",
+		ASLFR_TitleText, (ULONG)"Choose an M3U or PLS playlist",
 		ASLFR_DoPatterns, TRUE,
-		ASLFR_InitialPattern, (ULONG)"#?.(m3u|m3u8)",
+		ASLFR_InitialPattern, (ULONG)"#?.(m3u|m3u8|pls)",
 		ASLFR_InitialDrawer, (ULONG)(app->lastDrawer[0] ? app->lastDrawer : NULL),
 		TAG_DONE);
 	if (!fr) {
@@ -6512,6 +6709,24 @@ static void PlaylistLoadCurrent(MrApp *app, int index, int startPlayback)
 	UpdateNextButtonState(app);
 	SetStatus(app, "Playlist item selected.");
 	if (startPlayback)
+		PlaylistStartCurrent(app);
+}
+
+/* Starts app->inputName, the current playlist entry.  A stream goes through
+ * the same probe as Play and favourites (redirects, .pls/.m3u links, codec
+ * check); StartPlayback() on a bare URL skips all of that. */
+static void PlaylistStartCurrent(MrApp *app)
+{
+	int i = app->playlistCurrent;
+	if (app->playbackActive || app->playbackDonePending) {
+		SetStatus(app, "Already playing - press Stop first.");
+		return;
+	}
+	if (MrIsRadioInput(app->inputName))
+		RadioProbeUrlAndStart(app, app->inputName,
+			(i >= 0 && i < app->playlistCount && app->playlistTitles[i][0]) ?
+			app->playlistTitles[i] : NULL);
+	else
 		StartPlayback(app);
 }
 
@@ -6565,6 +6780,16 @@ static void HandlePlaylistWindow(MrApp *app)
 				break;
 			case PL_GID_SAVE_M3U:
 				PlaylistSaveM3U(app);
+				break;
+			case PL_GID_URL:
+			case PL_GID_ADD_URL:
+				PlaylistAddUrl(app);
+				break;
+			case PL_GID_FROM_FAVS:
+				PlaylistAddFavourites(app);
+				break;
+			case PL_GID_TO_FAVS:
+				PlaylistToFavourites(app);
 				break;
 			case PL_GID_CLOSE:
 				ClosePlaylistWindow(app);
