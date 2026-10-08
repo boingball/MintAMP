@@ -157,6 +157,7 @@ The `fast030` target name is retained for compatibility. The actual target CPU i
 | WAV | Working | External `wav.decoder` for uncompressed integer PCM WAV files with 8, 16, 24 or 32-bit samples, mono or stereo. |
 | IFF-8SVX | Working | External `iff.decoder` for mono 8-bit samples, raw or Fibonacci-delta compressed. |
 | HTTP MP3/AAC radio | Working | Direct `http://` MP3 and ADTS AAC/AAC+ streams. ICY metadata supported where provided. |
+| FLAC radio | Working | Lossless stations sending FLAC in Ogg (the usual Icecast form) or plain FLAC, through `flac.decoder`. Needs roughly 1 Mbit/s for 16-bit/44.1 kHz; 24-bit/high-rate streams are reduced to 16-bit and the output rate. |
 | HTTPS MP3/AAC radio | Working with AmiSSL | Build with `RADIO=1 SSL=1`. Uses AmiSSL and classic-Amiga-specific teardown quarantine for stability. |
 | HTTPS certificate verification | Optional | Add `SSLCERTS=1` to use AmiSSL's installed CA certificates for peer/hostname verification. |
 | Radio Browser search | Working | Used by the GUI radio search. |
