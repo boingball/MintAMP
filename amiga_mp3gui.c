@@ -396,7 +396,7 @@ static const char gMintAmpGtVersionTag[] __attribute__((used)) =
 #define ROW_FILEINFO        (ROW_STATUS + GUI_ROW_HEIGHT + GUI_ROW_GAP)
 
 #define PROG_X              (GUI_MARGIN + 4)   /* keep the recessed frame (drawn at PROG_X-4) off the left border */
-#define TIME_W              120                /* fits "-MM:SS / MM:SS" without spilling past the right border */
+#define TIME_W              144                /* includes longer tracks and the radio Live label */
 #define PROG_W              (GUI_WIN_W - PROG_X - TIME_W - GUI_CONTROL_GAP - GUI_MARGIN)
 #define PROG_H              8
 #define PROG_TOP_Y          (ROW_PROGRESS + 4)
@@ -479,6 +479,7 @@ static const char gMintAmpGtVersionTag[] __attribute__((used)) =
 #define ITEMNUM_STREAM    1
 #define ITEMNUM_ICONIFY   2
 #define ITEMNUM_QUIT      3
+#define ITEMNUM_RADIO     4
 #define ITEMNUM_DTP       0
 #define ITEMNUM_BENCH     1
 #define ITEMNUM_ARTWORK   2
@@ -488,6 +489,15 @@ static const char gMintAmpGtVersionTag[] __attribute__((used)) =
 #define ITEMNUM_ARTRELOAD  6
 #define ITEMNUM_ARTCLEAN   7
 #define ITEMNUM_PROGRESS   8
+#define ITEMNUM_HTTPSWAIT_BASE 9
+#define HTTPS_WAIT_COUNT       5
+#define HTTPS_WAIT_MASK        (31L << ITEMNUM_HTTPSWAIT_BASE)
+
+/* Match ReAction's persisted HTTPS teardown settle-gap choices. */
+static const int kHttpsWaitTicks[HTTPS_WAIT_COUNT] = { 4, 25, 50, 100, 200 };
+static const char * const kHttpsWaitDesc[HTTPS_WAIT_COUNT] = {
+	"default (~0.1s)", "0.5s", "1s", "2s", "4s"
+};
 
 enum {
 	GID_FILE = 1,
@@ -745,6 +755,9 @@ typedef struct HelixAmp3Gui {
 	struct DiskObject appIconObject;
 	struct timerequest *timerReq;
 	struct TextFont *smallFont;
+	struct TextFont *controlFont;
+	int httpsWaitIndex;
+	int lastCompletedWasHttps;
 	int timerOpen;
 	int timerPending;
 	int timerIsArt;
@@ -988,12 +1001,14 @@ static struct NewMenu myNewMenus[] = {
 	{ NM_TITLE, (STRPTR)"Project",          0, 0, 0, 0 },
 	{ NM_ITEM,  (STRPTR)"About MintAMP-GT...",0, 0, 0,
 		(APTR)(MENUNUM_PROJECT * 100 + ITEMNUM_ABOUT) },
-	{ NM_ITEM,  (STRPTR)"Internet Radio...",0, 0, 0,
+	{ NM_ITEM,  (STRPTR)"Open HTTP/HTTPS stream...",0, 0, 0,
 		(APTR)(MENUNUM_PROJECT * 100 + ITEMNUM_STREAM) },
 	{ NM_ITEM,  (STRPTR)"Iconify",          (STRPTR)"I", 0, 0,
 		(APTR)(MENUNUM_PROJECT * 100 + ITEMNUM_ICONIFY) },
 	{ NM_ITEM,  (STRPTR)"Quit",             0, 0, 0,
 		(APTR)(MENUNUM_PROJECT * 100 + ITEMNUM_QUIT) },
+	{ NM_ITEM,  (STRPTR)"Internet Radio",   0, 0, 0,
+		(APTR)(MENUNUM_PROJECT * 100 + ITEMNUM_RADIO) },
 	{ NM_TITLE, (STRPTR)"Playback",         0, 0, 0, 0 },
 	{ NM_ITEM,  (STRPTR)"Decode-then-play", 0, CHECKIT | MENUTOGGLE, 0,
 		(APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_DTP) },
@@ -1013,6 +1028,21 @@ static struct NewMenu myNewMenus[] = {
 		(APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_ARTCLEAN) },
 	{ NM_ITEM,  (STRPTR)"Progress Bar",     0, CHECKIT | MENUTOGGLE, 0,
 		(APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_PROGRESS) },
+	{ NM_ITEM, (STRPTR)"HTTPS wait: Default", 0, CHECKIT,
+		HTTPS_WAIT_MASK & ~(1L << (ITEMNUM_HTTPSWAIT_BASE + 0)),
+		(APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_HTTPSWAIT_BASE + 0) },
+	{ NM_ITEM, (STRPTR)"HTTPS wait: 0.5 sec", 0, CHECKIT,
+		HTTPS_WAIT_MASK & ~(1L << (ITEMNUM_HTTPSWAIT_BASE + 1)),
+		(APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_HTTPSWAIT_BASE + 1) },
+	{ NM_ITEM, (STRPTR)"HTTPS wait: 1 sec", 0, CHECKIT,
+		HTTPS_WAIT_MASK & ~(1L << (ITEMNUM_HTTPSWAIT_BASE + 2)),
+		(APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_HTTPSWAIT_BASE + 2) },
+	{ NM_ITEM, (STRPTR)"HTTPS wait: 2 sec", 0, CHECKIT,
+		HTTPS_WAIT_MASK & ~(1L << (ITEMNUM_HTTPSWAIT_BASE + 3)),
+		(APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_HTTPSWAIT_BASE + 3) },
+	{ NM_ITEM, (STRPTR)"HTTPS wait: 4 sec", 0, CHECKIT,
+		HTTPS_WAIT_MASK & ~(1L << (ITEMNUM_HTTPSWAIT_BASE + 4)),
+		(APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_HTTPSWAIT_BASE + 4) },
 	{ NM_END,   NULL,                       0, 0, 0, 0 }
 };
 
@@ -1264,6 +1294,7 @@ static void SaveGuiSettings(HelixAmp3Gui *gui)
 	SaveEnvInt("ArtworkCache", gui->artCacheEnabled);
 	SaveEnvInt("ArtworkColour", gui->artColorEnabled);
 	SaveEnvInt("ProgressBar", gui->progressEnabled);
+	SaveEnvInt("HttpsWaitIndex", gui->httpsWaitIndex);
 	SaveEnvString("LastDrawer", gui->lastDrawer);
 	SaveRadioFavourites(gui);
 }
@@ -2710,17 +2741,30 @@ static void ApplyHardwareAudioFilter(HelixAmp3Gui *gui)
 
 static void DrawFilterButton(HelixAmp3Gui *gui)
 {
+	struct RastPort drawPort;
 	struct RastPort *rp;
-	int x, y;
+	struct Gadget *gad;
+	int x, y, textWidth;
 
 	if (!gui || !gui->win || !gui->gadHardwareFilter)
 		return;
-	rp = gui->win->RPort;
-	x = gui->gadHardwareFilter->LeftEdge + 10;
-	y = gui->gadHardwareFilter->TopEdge + 14;
+	/* Keep gadget redraws from changing our font/mode, and do not leak our
+	 * drawing state back into GadTools or the artwork renderer. */
+	drawPort = *gui->win->RPort;
+	rp = &drawPort;
+	if (gui->controlFont)
+		SetFont(rp, gui->controlFont);
+	SetDrMd(rp, JAM1);
+	gad = gui->gadHardwareFilter;
+	SetAPen(rp, gui->win->DetailPen);
+	RectFill(rp, gad->LeftEdge + 2, gad->TopEdge + 2,
+		gad->LeftEdge + gad->Width - 3, gad->TopEdge + gad->Height - 3);
+	textWidth = TextLength(rp, "FLT", 3);
+	x = gad->LeftEdge + (gad->Width - textWidth) / 2;
+	y = gad->TopEdge + (gad->Height - rp->TxHeight) / 2 + rp->TxBaseline;
 	SetAPen(rp, 1);
 	Move(rp, x, y);
-	Text(rp, (STRPTR)"Filter", 6);
+	Text(rp, (STRPTR)"FLT", 3);
 	if (gui->hardwareFilter) {
 		RectFill(rp, gui->gadHardwareFilter->LeftEdge + 3,
 			gui->gadHardwareFilter->TopEdge + 3,
@@ -4470,15 +4514,20 @@ static void DrawProgressFrame(HelixAmp3Gui *gui)
 
 static void DrawProgress(HelixAmp3Gui *gui)
 {
+	struct RastPort drawPort;
 	struct RastPort *rp;
 	int fill, empty;
 	char timeBuf[32];
 	int elapsed, total, remaining;
-	int textWidth, textX;
+	int textWidth, textX, textLength;
 
 	if (!gui->win)
 		return;
-	rp = gui->win->RPort;
+	drawPort = *gui->win->RPort;
+	rp = &drawPort;
+	if (gui->controlFont)
+		SetFont(rp, gui->controlFont);
+	SetDrMd(rp, JAM1);
 	elapsed = gui->elapsedSecs - gui->launchBufferSecs;
 	total = gui->totalSecs;
 	if (elapsed < 0)
@@ -4492,8 +4541,6 @@ static void DrawProgress(HelixAmp3Gui *gui)
 		fill = PROG_W;
 	empty = PROG_W - fill;
 
-	if (gui->smallFont)
-		SetFont(rp, gui->smallFont);
 	if (fill > 0) {
 		int fillPen = (gui->playbackActive &&
 			gGuiPlaybackStatus.phase == GUIPLAY_PHASE_BUFFERING) ? 2 : 3;
@@ -4511,7 +4558,7 @@ static void DrawProgress(HelixAmp3Gui *gui)
 		if (elapsed > 0)
 			sprintf(timeBuf, "%02d:%02d / Live", elapsed / 60, elapsed % 60);
 		else
-			sprintf(timeBuf, "Live / Live");
+			sprintf(timeBuf, "00:00 / Live");
 	} else if (total > 0) {
 		remaining = total - elapsed;
 		if (remaining < 0)
@@ -4524,18 +4571,22 @@ static void DrawProgress(HelixAmp3Gui *gui)
 	}
 
 	SetAPen(rp, gui->win->DetailPen);
-	/* Clear only the time band, not down to the transport row: the old
-	 * height (PROG_TOP_Y + GUI_GADGET_HEIGHT) reached ROW_BUTTONS and wiped
-	 * the top edge of the FLT/Playlist buttons on every clock tick. */
-	RectFill(rp, TIME_X, PROG_TOP_Y - 1,
-		TIME_X + TIME_W, PROG_TOP_Y + PROG_H + 3);
+	/* The clock owns this whole band, but never a pixel of the buttons below.
+	 * Clear old glyphs before drawing a shorter label (file -> radio, seek). */
+	RectFill(rp, TIME_X, ROW_PROGRESS,
+		TIME_X + TIME_W - 1, ROW_BUTTONS - 1);
 	SetAPen(rp, 1);
-	textWidth = TextLength(rp, timeBuf, strlen(timeBuf));
+	textLength = strlen(timeBuf);
+	/* Bound even unusually long durations to the reserved clock width. */
+	while (textLength > 0 && TextLength(rp, timeBuf, textLength) > TIME_W)
+		textLength--;
+	textWidth = TextLength(rp, timeBuf, textLength);
 	textX = TIME_X + TIME_W - textWidth;
 	if (textX < TIME_X)
 		textX = TIME_X;
-	Move(rp, textX, PROG_TOP_Y + rp->TxBaseline);
-	Text(rp, timeBuf, strlen(timeBuf));
+	Move(rp, textX, ROW_PROGRESS +
+		(ROW_BUTTONS - ROW_PROGRESS - rp->TxHeight) / 2 + rp->TxBaseline);
+	Text(rp, timeBuf, textLength);
 }
 
 
@@ -4792,6 +4843,7 @@ static void FinalizePlayback(HelixAmp3Gui *gui)
 	failedRadioStart = (!stoppedByUser && IsRadioInputName(gui->inputName) &&
 		gGuiPlaybackStatus.radioStatus == RADIO_STATUS_ERROR &&
 		gGuiPlaybackStatus.decodedFrames == 0);
+	gui->lastCompletedWasHttps = !strncmp(gui->inputName, "https://", 8);
 	SafeCopy(queuedInputName, sizeof(queuedInputName), gui->queuedInputName);
 	gui->playbackDonePending = 0;
 	gui->playbackStoppedByUser = 0;
@@ -5231,6 +5283,8 @@ static void GuiRefresh(HelixAmp3Gui *gui)
 	DrawProgressFrame(gui);
 	DrawProgress(gui);
 	DrawArtPanel(gui);
+	DrawTransportIcons(gui);
+	DrawFilterButton(gui);
 }
 
 static void SetMenuItemChecked(HelixAmp3Gui *gui, int menuNum, int itemNum,
@@ -5699,6 +5753,7 @@ static void SetMenuItemChecked(HelixAmp3Gui *gui, int menuNum, int itemNum,
 
 static void SyncMenuChecks(HelixAmp3Gui *gui)
 {
+	int i;
 	SetMenuItemChecked(gui, MENUNUM_PLAYBACK, ITEMNUM_DTP,
 		gui->decodeThenPlay);
 	SetMenuItemChecked(gui, MENUNUM_PLAYBACK, ITEMNUM_BENCH, gui->bench);
@@ -5710,6 +5765,9 @@ static void SyncMenuChecks(HelixAmp3Gui *gui)
 		gui->artColorEnabled);
 	SetMenuItemChecked(gui, MENUNUM_PLAYBACK, ITEMNUM_PROGRESS,
 		gui->progressEnabled);
+	for (i = 0; i < HTTPS_WAIT_COUNT; i++)
+		SetMenuItemChecked(gui, MENUNUM_PLAYBACK,
+			ITEMNUM_HTTPSWAIT_BASE + i, gui->httpsWaitIndex == i);
 }
 
 static void StopPlayback(HelixAmp3Gui *gui);
@@ -6107,6 +6165,7 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	gui->artCacheEnabled = LoadEnvInt("ArtworkCache", 1, 0, 1);
 	gui->artColorEnabled = LoadEnvInt("ArtworkColour", 1, 0, 1);
 	gui->progressEnabled = LoadEnvInt("ProgressBar", 0, 0, 1);
+	gui->httpsWaitIndex = LoadEnvInt("HttpsWaitIndex", 0, 0, HTTPS_WAIT_COUNT - 1);
 	LoadEnvString("LastDrawer", gui->lastDrawer, sizeof(gui->lastDrawer));
 	LoadRadioFavourites(gui);
 	SafeCopy(gui->statusText, sizeof(gui->statusText), "Ready.");
@@ -6153,6 +6212,12 @@ static int GuiOpen(HelixAmp3Gui *gui)
 		gui->appPort = CreateMsgPort();
 	DiskfontBase = OpenLibrary("diskfont.library", 36);
 	gui->smallFont = OpenBestFont();
+	gui->controlFont = OpenFont(&gTopaz8Attr);
+	if (!gui->controlFont) {
+		fprintf(stderr, "cannot open MintAMP-GT control font\n");
+		GuiClose(gui);
+		return -1;
+	}
 
 	gui->win = GuiOpenMainWindow(gui, 40, 30);
 	if (!gui->win) {
@@ -6192,8 +6257,10 @@ static int GuiOpen(HelixAmp3Gui *gui)
 		LayoutMenus(gui->menuStrip, gui->visualInfo, TAG_DONE);
 		SyncMenuChecks(gui);
 		SetMenuStrip(gui->win, gui->menuStrip);
-		if (!gui->hasNetwork)
+		if (!gui->hasNetwork) {
 			OffMenu(gui->win, FULLMENUNUM(MENUNUM_PROJECT, ITEMNUM_STREAM, NOSUB));
+			OffMenu(gui->win, FULLMENUNUM(MENUNUM_PROJECT, ITEMNUM_RADIO, NOSUB));
+		}
 		if (!gui->appPort)
 			OffMenu(gui->win, FULLMENUNUM(MENUNUM_PROJECT, ITEMNUM_ICONIFY, NOSUB));
 	}
@@ -6321,6 +6388,10 @@ static void GuiClose(HelixAmp3Gui *gui)
 	if (gui->smallFont) {
 		CloseFont(gui->smallFont);
 		gui->smallFont = NULL;
+	}
+	if (gui->controlFont) {
+		CloseFont(gui->controlFont);
+		gui->controlFont = NULL;
 	}
 	if (DiskfontBase) {
 		CloseLibrary(DiskfontBase);
@@ -7163,6 +7234,23 @@ static void RadioToggleFavourites(HelixAmp3Gui *app)
 		"Favourites: Add Fav saves the stream that is playing." : "Showing search results.");
 }
 
+static void WaitBeforeHttpsStream(HelixAmp3Gui *gui, const char *url)
+{
+#if defined(AMIGA_M68K)
+	if (gui->lastCompletedWasHttps && url && !strncmp(url, "https://", 8) &&
+		!gui->playbackActive && !gui->playbackDonePending && !PlaybackProcessStillExists()) {
+		int index = gui->httpsWaitIndex;
+		if (index < 0 || index >= HTTPS_WAIT_COUNT)
+			index = 0;
+		SetStatus(gui, "Waiting briefly before next HTTPS stream...");
+		Delay(kHttpsWaitTicks[index]);
+	}
+#else
+	(void)gui;
+	(void)url;
+#endif
+}
+
 static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 {
 	static unsigned char peek[RB_PROBE_PEEK_SIZE];
@@ -7285,6 +7373,7 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 			RADIO_DBG(printf("radio-art: station favicon=\"%s\"\n", app->currentRadioFavicon);)
 		}
 	}
+	WaitBeforeHttpsStream(app, info.final_url);
 	SelectInternetStream(app, info.final_url);
 	SafeCopy(app->currentRadioSourceUrl, sizeof(app->currentRadioSourceUrl),
 		rb_station_play_url(st) ? rb_station_play_url(st) : info.final_url);
@@ -7360,6 +7449,7 @@ static void RadioReplayCurrentUrl(HelixAmp3Gui *gui)
 		SetStatus(gui, "Stream probe did not return a playable URL.");
 		return;
 	}
+	WaitBeforeHttpsStream(gui, info.final_url);
 	SelectInternetStream(gui, info.final_url);
 	SafeCopy(gui->currentRadioSourceUrl, sizeof(gui->currentRadioSourceUrl), url);
 	gui->haveRadioHostAddr = info.have_host_addr;
@@ -9525,6 +9615,8 @@ static void GuiPoll(HelixAmp3Gui *gui)
 					else if (mn == MENUNUM_PROJECT && it == ITEMNUM_ABOUT)
 						ShowAbout(gui);
 					else if (mn == MENUNUM_PROJECT && it == ITEMNUM_STREAM)
+						EnterInternetStream(gui);
+					else if (mn == MENUNUM_PROJECT && it == ITEMNUM_RADIO)
 						OpenRadioWindow(gui);
 					else if (mn == MENUNUM_PROJECT && it == ITEMNUM_ICONIFY)
 						GuiIconify(gui);
@@ -9599,6 +9691,16 @@ static void GuiPoll(HelixAmp3Gui *gui)
 						} else {
 							DrawProgress(gui);
 						}
+						SaveGuiSettings(gui);
+					} else if (mn == MENUNUM_PLAYBACK &&
+						it >= ITEMNUM_HTTPSWAIT_BASE &&
+						it < ITEMNUM_HTTPSWAIT_BASE + HTTPS_WAIT_COUNT) {
+						char msg[64];
+						gui->httpsWaitIndex = it - ITEMNUM_HTTPSWAIT_BASE;
+						SyncMenuChecks(gui);
+						sprintf(msg, "HTTPS stream wait set to %s.",
+							kHttpsWaitDesc[gui->httpsWaitIndex]);
+						SetStatus(gui, msg);
 						SaveGuiSettings(gui);
 					}
 				}
