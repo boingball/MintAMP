@@ -758,6 +758,7 @@ typedef struct HelixAmp3Gui {
 	struct TextFont *controlFont;
 	int httpsWaitIndex;
 	int lastCompletedWasHttps;
+	int settingsSavePending;
 	int timerOpen;
 	int timerPending;
 	int timerIsArt;
@@ -832,6 +833,7 @@ typedef struct HelixAmp3Player {
 } HelixAmp3Player;
 
 static void UpdateTagDisplay(HelixAmp3Gui *gui);
+static void UpdateFastMemGadgetState(HelixAmp3Gui *gui);
 static void SelectInternetStream(HelixAmp3Gui *gui, const char *url);
 static void RadioSetStatus(HelixAmp3Gui *app, const char *text);
 static void CloseRadioWindow(HelixAmp3Gui *gui);
@@ -1272,6 +1274,13 @@ static void SaveRadioFavourites(HelixAmp3Gui *gui)
 
 static void SaveGuiSettings(HelixAmp3Gui *gui)
 {
+	/* Settings use ENVARC: disk writes. Keep them out of the live decoder's
+	 * CPU/I/O budget; FinalizePlayback (or normal exit) saves the latest state. */
+	if (gui->playbackActive || gui->playbackDonePending) {
+		gui->settingsSavePending = 1;
+		return;
+	}
+	gui->settingsSavePending = 0;
 	SaveEnvInt("FastLowrate", gui->fastLowrate);
 	SaveEnvInt("SuperfastLowrate", gui->superfastLowrate);
 	SaveEnvInt("Ultrafast", gui->ultrafast);
@@ -2143,6 +2152,8 @@ static void SetFileDisplay(HelixAmp3Gui *gui, const char *text)
 {
 	if (!text || !text[0])
 		text = "<choose a file>";
+	if (!strcmp(gui->fileText, text))
+		return;
 	SafeCopy(gui->fileText, sizeof(gui->fileText), text);
 	if (gui->win && gui->gadFile) {
 		GT_SetGadgetAttrs(gui->gadFile, gui->win, NULL,
@@ -2244,6 +2255,18 @@ static void SetRadioFailureStatus(HelixAmp3Gui *gui, const char *fallback)
 	RadioSetStatus(gui, status);
 }
 
+static void UpdateRadioTextIfChanged(HelixAmp3Gui *gui, struct Gadget *gad,
+	char *stored, size_t size, const char *text)
+{
+	/* Compare the displayed prefix too: long station/genre values are
+	 * truncated to the tag field and should not cause a redraw every tick. */
+	if (!strncmp(stored, text, size - 1))
+		return;
+	SafeCopy(stored, size, text);
+	if (gui->win && gad)
+		GT_SetGadgetAttrs(gad, gui->win, NULL, GTTX_Text, (ULONG)stored, TAG_DONE);
+}
+
 static void UpdateRadioTagDisplay(HelixAmp3Gui *gui)
 {
 	char streamTitle[128], station[128], genre[64], contentType[64], artist[64], title[64], info[128], status[160];
@@ -2253,11 +2276,18 @@ static void UpdateRadioTagDisplay(HelixAmp3Gui *gui)
 	CopyVolatileGuiString(contentType, sizeof(contentType), gGuiPlaybackStatus.radioContentType);
 	SetFileDisplay(gui, gui->inputName);
 	SplitRadioStreamTitle(streamTitle, artist, sizeof(artist), title, sizeof(title));
-	SafeCopy(gui->tags.title, sizeof(gui->tags.title), title[0] ? title : "-");
-	SafeCopy(gui->tags.artist, sizeof(gui->tags.artist), artist[0] ? artist : "-");
-	SafeCopy(gui->tags.album, sizeof(gui->tags.album), station[0] ? station : "Internet Radio");
-	SafeCopy(gui->tags.track, sizeof(gui->tags.track), "Live");
-	SafeCopy(gui->tags.genre, sizeof(gui->tags.genre), genre[0] ? genre : "-");
+	/* Metadata is usually unchanged for minutes. Avoid repainting every
+	 * text gadget and all five rating buttons on each one-second poll. */
+	UpdateRadioTextIfChanged(gui, gui->gadTitle, gui->tags.title,
+		sizeof(gui->tags.title), title[0] ? title : "-");
+	UpdateRadioTextIfChanged(gui, gui->gadArtist, gui->tags.artist,
+		sizeof(gui->tags.artist), artist[0] ? artist : "-");
+	UpdateRadioTextIfChanged(gui, gui->gadAlbum, gui->tags.album,
+		sizeof(gui->tags.album), station[0] ? station : "Internet Radio");
+	UpdateRadioTextIfChanged(gui, gui->gadTrack, gui->tags.track,
+		sizeof(gui->tags.track), "Live");
+	UpdateRadioTextIfChanged(gui, gui->gadGenre, gui->tags.genre,
+		sizeof(gui->tags.genre), genre[0] ? genre : "-");
 	gui->tags.bitrateKbps = gGuiPlaybackStatus.radioBitrateKbps;
 	gui->tags.durationSecs = 0;
 	gui->totalSecs = 0;
@@ -2265,11 +2295,8 @@ static void UpdateRadioTagDisplay(HelixAmp3Gui *gui)
 		sprintf(info, "Internet Radio MP3, %d kbps, %s", gGuiPlaybackStatus.radioBitrateKbps, contentType[0] ? contentType : "audio/mpeg");
 	else
 		sprintf(info, "Internet Radio MP3, %s", contentType[0] ? contentType : "audio/mpeg");
-	UpdateTagDisplay(gui);
-	SafeCopy(gui->fileInfoText, sizeof(gui->fileInfoText), info);
-	if (gui->gadFileInfo)
-		GT_SetGadgetAttrs(gui->gadFileInfo, gui->win, NULL,
-			GTTX_Text, (ULONG)gui->fileInfoText, TAG_DONE);
+	UpdateRadioTextIfChanged(gui, gui->gadFileInfo, gui->fileInfoText,
+		sizeof(gui->fileInfoText), info);
 	if (gGuiPlaybackStatus.radioStatus == RADIO_STATUS_ERROR) {
 		SetRadioFailureStatus(gui, "radio error");
 		return;
@@ -2739,43 +2766,8 @@ static void ApplyHardwareAudioFilter(HelixAmp3Gui *gui)
 #endif
 }
 
-static void DrawFilterButton(HelixAmp3Gui *gui)
-{
-	struct RastPort drawPort;
-	struct RastPort *rp;
-	struct Gadget *gad;
-	int x, y, textWidth;
-
-	if (!gui || !gui->win || !gui->gadHardwareFilter)
-		return;
-	/* Keep gadget redraws from changing our font/mode, and do not leak our
-	 * drawing state back into GadTools or the artwork renderer. */
-	drawPort = *gui->win->RPort;
-	rp = &drawPort;
-	if (gui->controlFont)
-		SetFont(rp, gui->controlFont);
-	SetDrMd(rp, JAM1);
-	gad = gui->gadHardwareFilter;
-	SetAPen(rp, gui->win->DetailPen);
-	RectFill(rp, gad->LeftEdge + 2, gad->TopEdge + 2,
-		gad->LeftEdge + gad->Width - 3, gad->TopEdge + gad->Height - 3);
-	textWidth = TextLength(rp, "FLT", 3);
-	x = gad->LeftEdge + (gad->Width - textWidth) / 2;
-	y = gad->TopEdge + (gad->Height - rp->TxHeight) / 2 + rp->TxBaseline;
-	SetAPen(rp, 1);
-	Move(rp, x, y);
-	Text(rp, (STRPTR)"FLT", 3);
-	if (gui->hardwareFilter) {
-		RectFill(rp, gui->gadHardwareFilter->LeftEdge + 3,
-			gui->gadHardwareFilter->TopEdge + 3,
-			gui->gadHardwareFilter->LeftEdge + 6,
-			gui->gadHardwareFilter->TopEdge + 6);
-	}
-}
-
 static void DrawArtPanel(HelixAmp3Gui *gui);
 static void DrawTransportIcons(HelixAmp3Gui *gui);
-static void DrawFilterButton(HelixAmp3Gui *gui);
 static void ApplyHardwareAudioFilter(HelixAmp3Gui *gui);
 static void HandleDoneSignal(HelixAmp3Gui *gui);
 static void SaveArtworkCache(HelixAmp3Gui *gui);
@@ -2921,7 +2913,6 @@ static void FinishArtDecode(HelixAmp3Gui *gui, int ok)
 	gui->artLoading = 0;
 	DrawArtPanel(gui);
 	DrawTransportIcons(gui);
-	DrawFilterButton(gui);
 }
 
 static void CancelArtDecode(HelixAmp3Gui *gui)
@@ -4851,6 +4842,9 @@ static void FinalizePlayback(HelixAmp3Gui *gui)
 	gui->playlistNextPending = 0;
 	gui->queuedPlayPending = 0;
 	radio_reset_playback_state_after_stop(gui, stoppedByUser ? "stop-cleanup" : "playback-cleanup");
+	UpdateFastMemGadgetState(gui);
+	if (gui->settingsSavePending && !Radio_IsMemoryPoisoned())
+		SaveGuiSettings(gui);
 	if (gui->totalSecs > 0 && !stoppedByUser)
 		gui->elapsedSecs = gui->totalSecs + gui->launchBufferSecs;
 	DrawProgress(gui);
@@ -5220,9 +5214,9 @@ static void HandleTimerSignal(HelixAmp3Gui *gui)
 			DrawProgressIfChanged(gui);
 	}
 	{
+		/* Give the decoder its headroom back after an audio underrun. */
 		int artCanPump = !gui->playbackActive ||
-			gGuiPlaybackStatus.phase == GUIPLAY_PHASE_PLAYING ||
-			gGuiPlaybackStatus.phase == GUIPLAY_PHASE_UNDERRUN;
+			gGuiPlaybackStatus.phase == GUIPLAY_PHASE_PLAYING;
 
 		if (artCanPump)
 			PumpArtDecode(gui);
@@ -5284,7 +5278,6 @@ static void GuiRefresh(HelixAmp3Gui *gui)
 	DrawProgress(gui);
 	DrawArtPanel(gui);
 	DrawTransportIcons(gui);
-	DrawFilterButton(gui);
 }
 
 static void SetMenuItemChecked(HelixAmp3Gui *gui, int menuNum, int itemNum,
@@ -5558,7 +5551,7 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 		return -1;
 
 	gui->gadFastMem = gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_FAST_MEM,
-		FASTMEM_X, ROW_SPEED + 1, CHECK_W, CHECK_H, "Fast-mem decoding",
+		FASTMEM_X, ROW_SPEED + 1, CHECK_W, CHECK_H, "Preload file into Fast RAM",
 		GTCB_Checked, gui->fastMem,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
@@ -5686,9 +5679,11 @@ static int GuiCreateGadgets(HelixAmp3Gui *gui)
 	if (!gad)
 		return -1;
 
-	gui->gadHardwareFilter = gad = MakeGadget(gui, gad, BUTTON_KIND, GID_HARDWARE_FILTER,
-		FILTER_X, ROW_BUTTONS, FILTER_W, TRANSPORT_H, "",
-		TAG_IGNORE, 0,
+	/* Native checkbox owns its checked state, pressed feedback and label.
+	 * Hand-painting a blank action button raced GadTools' release redraw. */
+	gui->gadHardwareFilter = gad = MakeGadget(gui, gad, CHECKBOX_KIND, GID_HARDWARE_FILTER,
+		FILTER_X, ROW_BUTTONS + (TRANSPORT_H - CHECK_H) / 2, CHECK_W, CHECK_H, "FLT",
+		GTCB_Checked, gui->hardwareFilter,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0,
 		TAG_IGNORE, 0);
@@ -5913,10 +5908,10 @@ static void GuiRestoreFromAppIcon(HelixAmp3Gui *gui)
 	gui->iconified = 0;
 	GT_RefreshWindow(gui->win, NULL);
 	UpdateChannelGadgetState(gui);
+	UpdateFastMemGadgetState(gui);
 	ApplyHardwareAudioFilter(gui);
 	GuiRefresh(gui);
 	DrawTransportIcons(gui);
-	DrawFilterButton(gui);
 	WindowToFront(gui->win);
 	ActivateWindow(gui->win);
 }
@@ -6245,6 +6240,7 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	AddGList(gui->win, gui->gadgets, (UWORD)-1, -1, NULL);
 	RefreshGList(gui->gadgets, gui->win, NULL, -1);
 	UpdateChannelGadgetState(gui);
+	UpdateFastMemGadgetState(gui);
 	ApplyHardwareAudioFilter(gui);
 	if (gui->decodeThenPlay && gui->gadBuffer) {
 		GT_SetGadgetAttrs(gui->gadBuffer, gui->win, NULL,
@@ -6292,7 +6288,6 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	DrawProgress(gui);
 	DrawArtPanel(gui);
 	DrawTransportIcons(gui);
-	DrawFilterButton(gui);
 	if (gui->timerOpen)
 		SendTimerRequest(gui, TIMER_TICK_MICROS);
 	return 0;
@@ -6511,16 +6506,15 @@ static void GuiDisableFastMemIfTooSmall(HelixAmp3Gui *gui)
 	}
 }
 
-static void GuiDisableFastMemForRadio(HelixAmp3Gui *gui)
+static void UpdateFastMemGadgetState(HelixAmp3Gui *gui)
 {
-	if (!gui || !gui->fastMem)
+	if (!gui)
 		return;
-	gui->fastMem = 0;
 	if (gui->win && gui->gadFastMem)
 		GT_SetGadgetAttrs(gui->gadFastMem, gui->win, NULL,
-			GTCB_Checked, FALSE, TAG_DONE);
-	SetStatus(gui, "Fast-mem disabled for internet streams.");
-	SaveGuiSettings(gui);
+			GTCB_Checked, gui->fastMem,
+			GA_Disabled, IsRadioInputName(gui->inputName) ||
+				gui->playbackActive || gui->playbackDonePending, TAG_DONE);
 }
 
 static const int kRadioSearchLimits[] = { 10, 25, 50, 100 };
@@ -7961,9 +7955,9 @@ static void PlaylistLoadAndShow(HelixAmp3Gui *gui, int index)
 	CancelArtDecode(gui);
 	SafeCopy(gui->inputName, sizeof(gui->inputName),
 		gui->playlist.paths[index]);
+	UpdateFastMemGadgetState(gui);
 	SetFileDisplay(gui, gui->inputName);
 	if (IsRadioInputName(gui->inputName)) {
-		GuiDisableFastMemForRadio(gui);
 		FreeTags(&gui->tags);
 		memset(&gui->tags, 0, sizeof(gui->tags));
 		SetInternetStreamMetadata(gui);
@@ -8424,6 +8418,7 @@ static void GuiSelectFile(HelixAmp3Gui *gui, const char *path)
 	}
 	CancelArtDecode(gui);
 	SafeCopy(gui->inputName, sizeof(gui->inputName), path);
+	UpdateFastMemGadgetState(gui);
 	SetFileDisplay(gui, gui->inputName);
 	ReadMp3Tags(gui->inputName, &gui->tags, gui->artEnabled);
 	if (is_url_path(gui->inputName))
@@ -8524,7 +8519,7 @@ static void SelectInternetStream(HelixAmp3Gui *gui, const char *url)
 		return;
 	}
 	if (gui->playbackActive || gui->playbackDonePending) {
-		GuiDisableFastMemForRadio(gui);
+		UpdateFastMemGadgetState(gui);
 		SafeCopy(gui->queuedInputName, sizeof(gui->queuedInputName), url);
 		gui->queuedHaveRadioHostAddr = 0;
 		gui->queuedRadioHostAddrBe = 0;
@@ -8532,8 +8527,8 @@ static void SelectInternetStream(HelixAmp3Gui *gui, const char *url)
 		return;
 	}
 	CancelArtDecode(gui);
-	GuiDisableFastMemForRadio(gui);
 	SafeCopy(gui->inputName, sizeof(gui->inputName), url);
+	UpdateFastMemGadgetState(gui);
 	gui->haveRadioHostAddr = 0;
 	gui->radioHostAddrBe = 0;
 	SetFileDisplay(gui, gui->inputName);
@@ -9077,7 +9072,7 @@ static void StartPlayback(HelixAmp3Gui *gui)
 	gui->launchBufferSecs = gui->decodeThenPlay ? 0 : gui->bufferSeconds;
 	DrawProgress(gui);
 	if (IsRadioInputName(gui->inputName))
-		GuiDisableFastMemForRadio(gui);
+		UpdateFastMemGadgetState(gui);
 	else
 		GuiDisableFastMemIfTooSmall(gui);
 	BuildPlaybackArgs(gui, &gGuiArgs);
@@ -9142,6 +9137,7 @@ static void StartPlayback(HelixAmp3Gui *gui)
 	gui->playbackDonePending = 0;
 	gui->playbackStoppedByUser = 0;
 	gui->playbackActive = 1;
+	UpdateFastMemGadgetState(gui);
 	if (IsRadioInputName(gui->inputName)) {
 		char status[160];
 		sprintf(status, "Buffering - %.140s", gui->currentRadioStationName[0] ? gui->currentRadioStationName : "Internet Radio");
@@ -9388,15 +9384,15 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 		SaveGuiSettings(gui);
 		break;
 	case GID_FAST_MEM:
-		if (gui->playbackActive || gui->playbackDonePending) {
+		if (IsRadioInputName(gui->inputName) || gui->playbackActive || gui->playbackDonePending) {
 			GT_SetGadgetAttrs(gad, gui->win, NULL,
 				GTCB_Checked, gui->fastMem, TAG_DONE);
 			SetStatus(gui, "Stop playback before changing memory mode.");
 			break;
 		}
-		gui->fastMem = !gui->fastMem;
+		gui->fastMem = (code != 0);
 		GT_SetGadgetAttrs(gad, gui->win, NULL, GTCB_Checked, gui->fastMem, TAG_DONE);
-		SetStatus(gui, gui->fastMem ? "Fast memory path enabled." : "Fast memory path disabled.");
+		SetStatus(gui, gui->fastMem ? "File preload into Fast RAM enabled." : "File preload into Fast RAM disabled.");
 		GuiDisableFastMemIfTooSmall(gui);
 		SaveGuiSettings(gui);
 		break;
@@ -9564,9 +9560,8 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 		GuiSeekRelative(gui, SEEK_STEP_SECS);
 		break;
 	case GID_HARDWARE_FILTER:
-		gui->hardwareFilter = !gui->hardwareFilter;
+		gui->hardwareFilter = (code != 0);
 		ApplyHardwareAudioFilter(gui);
-		DrawFilterButton(gui);
 		SetStatus(gui, gui->hardwareFilter ?
 			"Hardware filter enabled." : "Hardware filter disabled.");
 		SaveGuiSettings(gui);
@@ -9708,10 +9703,12 @@ static void GuiPoll(HelixAmp3Gui *gui)
 			}
 		} else if (classValue == IDCMP_GADGETUP) {
 			HandleGuiAction(gui, gad, code, classValue, TRUE);
-			/* GadTools redraws the button face after a press, so repaint our
-			 * hand-drawn transport icons once the gadget has popped back up. */
-			DrawTransportIcons(gui);
-			DrawFilterButton(gui);
+			/* Only the blank transport buttons need custom icons repainted.
+			 * The FLT checkbox and other native gadgets redraw themselves. */
+			if (gad && (gad->GadgetID == GID_PLAY || gad->GadgetID == GID_NEXT ||
+				gad->GadgetID == GID_STOP || gad->GadgetID == GID_REWIND ||
+				gad->GadgetID == GID_FFWD))
+				DrawTransportIcons(gui);
 		} else if (classValue == IDCMP_MOUSEMOVE) {
 			if (gad &&
 				(gad->GadgetID == GID_BUFFER ||
@@ -9786,13 +9783,14 @@ static int GuiMainReal(int argc, char **argv)
 			gui.closeRequested = 1;
 		if (doneMask && (sigs & doneMask))
 			HandleDoneSignal(&gui);
-		if (timerMask && (sigs & timerMask))
-			HandleTimerSignal(&gui);
 		if (appMask && (sigs & appMask))
 			GuiHandleAppIcon(&gui);
+		/* React to main-window controls before artwork or browser work. */
+		GuiPoll(&gui);
+		if (timerMask && (sigs & timerMask))
+			HandleTimerSignal(&gui);
 		HandlePlaylistPoll(&gui);
 		HandleRadioWindow(&gui);
-		GuiPoll(&gui);
 	}
 	if (gui.playbackActive)
 		WaitForPlaybackShutdown(&gui);

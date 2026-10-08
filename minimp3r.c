@@ -1379,6 +1379,15 @@ static int MrIsRadioInput(const char *name)
 		!strncmp(name, "https://", 8));
 }
 
+static void UpdateFastMemGadgetState(MrApp *app)
+{
+	if (app->win && app->fastMemGad)
+		SetGadgetAttrs((struct Gadget *)app->fastMemGad, app->win, NULL,
+			GA_Selected, (ULONG)(app->fastMem ? TRUE : FALSE),
+			GA_Disabled, (ULONG)(MrIsRadioInput(app->inputName) ||
+				app->playbackActive || app->playbackDonePending), TAG_DONE);
+}
+
 /* A local .m3u/.m3u8/.pls file (URLs ending so are station links, which the
  * stream probe follows instead). */
 static int MrIsPlaylistFile(const char *name)
@@ -1586,6 +1595,7 @@ static void EnablePlayStop(MrApp *app, int playing)
 	MrSetGadgetAttr(app->playGad, app->win, GA_Disabled, (ULONG)(playing ? TRUE : FALSE));
 	MrSetGadgetAttr(app->stopGad, app->win, GA_Disabled, (ULONG)(playing ? FALSE : TRUE));
 	UpdateNextButtonState(app);
+	UpdateFastMemGadgetState(app);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -2818,11 +2828,11 @@ static int MrOpenWindow(MrApp *app)
 	 * FDCT32 paths, with fewer of them at each higher-quality step.  The old
 	 * "Fast Polyphase", "Reduced-tap dewindowing" and "Fast low-rate decode"
 	 * checkboxes duplicated that (and were silently overridden at "Faster"), so
-	 * only the genuinely independent "Decode from Fast RAM" toggle remains. */
+	 * only the independent whole-file preload toggle remains. */
 	app->fastMemGad = (Object *)NewObject(CHECKBOX_GetClass(), NULL,
 	                GA_ID, GID_FASTMEM,
 	                GA_RelVerify, TRUE,
-	                GA_Text, (ULONG)"Decode from Fast RAM",
+	                GA_Text, (ULONG)"Preload file into Fast RAM",
 	                GA_Selected, (ULONG)(app->fastMem ? TRUE : FALSE),
 	                TAG_DONE);
 
@@ -5115,6 +5125,7 @@ static const char *MrChannelModeName(const MrMp3Info *info)
 static void RefreshFileInfoAndTags(MrApp *app)
 {
 	MrMp3Info info; char fileInfo[128]; const char *ch; unsigned long kb;
+	UpdateFastMemGadgetState(app);
 	if (!app->inputName[0]) {
 		SetReadonlyString(app->fileInfoGad, app->win, app->shownFileInfo, sizeof(app->shownFileInfo), "No file info");
 		return;
@@ -7136,6 +7147,7 @@ static void MrUniconify(MrApp *app)
 	app->win = (struct Window *)RA_OpenWindow(app->winObj);
 	if (!app->win)
 		return;
+	UpdateFastMemGadgetState(app);
 	DrawArtPanel(app);
 	WindowToFront(app->win);
 	ActivateWindow(app->win);
@@ -7266,6 +7278,7 @@ static void SyncFromGadgets(MrApp *app)
 		app->bufferSeconds = ClampInt((int)v, 1, 10);
 	if (app->fastMemGad && GetAttr(GA_Selected, app->fastMemGad, &v))
 		app->fastMem = (v != 0);
+	UpdateFastMemGadgetState(app);
 	if (app->speedGad && GetAttr(CHOOSER_Selected, app->speedGad, &v)) {
 		app->cd32Ultrafast = (app->rateIndex == MR_RATE_22050_INDEX && (int)v == 3);
 		app->ultrafast = ((int)v == 2);
@@ -7468,6 +7481,7 @@ static int MrMainReal(int argc, char **argv)
 	 * in effect. */
 	UpdateSpeedGadgetChoices(&app);
 	UpdateChannelGadgetState(&app);
+	UpdateFastMemGadgetState(&app);
 
 	GetAttr(WINDOW_SigMask, app.winObj, &winSig);
 	appSig   = 1UL << app.appPort->mp_SigBit;
