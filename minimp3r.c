@@ -1244,6 +1244,20 @@ static void SaveSettings(MrApp *app)
 	SaveRadioFavourites(app);
 }
 
+/* Sets one gadget attribute.  While iconified there is no window, but the
+ * object must still change: the callers cache what they last set, so an
+ * update skipped then is never repeated, and the window would reopen
+ * showing the old title, artist, buttons or progress. */
+static void MrSetGadgetAttr(Object *gad, struct Window *win, ULONG tag, ULONG value)
+{
+	if (!gad)
+		return;
+	if (win)
+		SetGadgetAttrs((struct Gadget *)gad, win, NULL, tag, value, TAG_DONE);
+	else
+		SetAttrs(gad, tag, value, TAG_DONE);
+}
+
 static int SetReadonlyString(Object *gad, struct Window *win, char *cache, size_t cacheSize, const char *text)
 {
 	if (!text)
@@ -1252,19 +1266,15 @@ static int SetReadonlyString(Object *gad, struct Window *win, char *cache, size_
 		return 0;
 	if (cache && cacheSize > 0)
 		SafeCopy(cache, cacheSize, text);
-	if (gad && win) {
-		SetGadgetAttrs((struct Gadget *)gad, win, NULL,
-			STRINGA_TextVal, (ULONG)text,
-			TAG_DONE);
+	if (gad) {
+		MrSetGadgetAttr(gad, win, STRINGA_TextVal, (ULONG)text);
 		/* STRINGA_TextVal parks the cursor/view at the END of the new string, so
 		 * a long value (e.g. the album/station name) renders with its left edge
 		 * clipped off.  Reset the view to the start in a SEPARATE SetGadgetAttrs
 		 * pass - doing it in the same tag list as STRINGA_TextVal gets overridden
 		 * when the gadget re-derives its display offset from the cursor. */
-		SetGadgetAttrs((struct Gadget *)gad, win, NULL,
-			STRINGA_BufferPos, 0,
-			STRINGA_DispPos, 0,
-			TAG_DONE);
+		MrSetGadgetAttr(gad, win, STRINGA_BufferPos, 0);
+		MrSetGadgetAttr(gad, win, STRINGA_DispPos, 0);
 	}
 	return 1;
 }
@@ -1502,10 +1512,7 @@ static void SetGauge(MrApp *app, int level)
 	if (level == app->shownGaugeLevel)
 		return;
 	app->shownGaugeLevel = level;
-	if (app->gaugeGad && app->win)
-		SetGadgetAttrs((struct Gadget *)app->gaugeGad, app->win, NULL,
-			FUELGAUGE_Level, (ULONG)level,
-			TAG_DONE);
+	MrSetGadgetAttr(app->gaugeGad, app->win, FUELGAUGE_Level, (ULONG)level);
 }
 
 static int SpeedChoiceFromApp(const MrApp *app)
@@ -1571,21 +1578,13 @@ static void UpdateNextButtonState(MrApp *app)
 	if (disabled == app->shownNextDisabled)
 		return;
 	app->shownNextDisabled = disabled;
-	if (app->win && app->nextGad)
-		SetGadgetAttrs((struct Gadget *)app->nextGad, app->win, NULL,
-			GA_Disabled, (ULONG)disabled, TAG_DONE);
+	MrSetGadgetAttr(app->nextGad, app->win, GA_Disabled, (ULONG)disabled);
 }
 
 static void EnablePlayStop(MrApp *app, int playing)
 {
-	if (app->win) {
-		if (app->playGad)
-			SetGadgetAttrs((struct Gadget *)app->playGad, app->win, NULL,
-				GA_Disabled, (ULONG)(playing ? TRUE : FALSE), TAG_DONE);
-		if (app->stopGad)
-			SetGadgetAttrs((struct Gadget *)app->stopGad, app->win, NULL,
-				GA_Disabled, (ULONG)(playing ? FALSE : TRUE), TAG_DONE);
-	}
+	MrSetGadgetAttr(app->playGad, app->win, GA_Disabled, (ULONG)(playing ? TRUE : FALSE));
+	MrSetGadgetAttr(app->stopGad, app->win, GA_Disabled, (ULONG)(playing ? FALSE : TRUE));
 	UpdateNextButtonState(app);
 }
 
