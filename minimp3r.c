@@ -75,13 +75,13 @@
  * in here doubled up into a malformed path that silently failed to persist
  * across reboots while the plain ENV: (RAM) write kept working. */
 #define MR_ENV_PREFIX "MintAMP"
-#define MINTAMP_VERSION "1.3.2"
+#define MINTAMP_VERSION "1.3.3"
 #define MR_SETTINGS_VERSION 1
 #define MR_RADIO_FAV_MAX 20
 
 /* AmigaOS Version command metadata; unrelated to MR_SETTINGS_VERSION. */
 static const char gMintAmpVersionTag[] __attribute__((used)) =
-	"\0$VER: MintAMP " MINTAMP_VERSION " (26.09.2026)";
+	"\0$VER: MintAMP " MINTAMP_VERSION " (08.10.2026)";
 #if !defined(__AROS__) && !defined(MR_DISABLE_CIA_FILTER)
 #define MR_ENABLE_CIA_FILTER 1
 #endif
@@ -5357,6 +5357,7 @@ static void RadioSetStatus(MrApp *app, const char *text)
 static void RadioProbeUrlAndStart(MrApp *app, const char *url, const char *stationName)
 {
 	static unsigned char peek[512];
+	static char unwrapped[512];
 	RbStreamInfo info;
 	int peekLen = 0;
 	int rc;
@@ -5370,6 +5371,8 @@ static void RadioProbeUrlAndStart(MrApp *app, const char *url, const char *stati
 		SetStatus(app, "No stream URL to play.");
 		return;
 	}
+	if (rb_probe_unwrap_playlist_generator(url, unwrapped, (int)sizeof(unwrapped)))
+		url = unwrapped;
 	if (!MrIsRadioInput(url)) {
 		RadioSetStatus(app, "Stream URL must start with HTTP or HTTPS.");
 		SetStatus(app, "Stream URL must start with HTTP or HTTPS.");

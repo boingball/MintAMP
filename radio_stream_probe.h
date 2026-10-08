@@ -80,6 +80,8 @@ typedef struct RbStreamInfo {
      * actually tried -- surfaced in the GUI status so a headless Amiga has some
      * diagnostic to read. Empty on success. */
     char error_detail[96];
+    /* Response body uses HTTP/1.1 chunked transfer-coding. */
+    int chunked;
 } RbStreamInfo;
 
 enum {
@@ -108,11 +110,18 @@ enum {
      * MP3_NO_STREAM_PROBE / MP3_NO_ARTWORK, fatal artwork-disable-for-run,
      * or a busy worker/active transport. MP3_TEST_ENABLE_* are accepted as
      * compatibility/debug flags but are no longer required for RC1 defaults. */
-    RB_STREAM_PROBE_ERR_DISABLED = -19
+    RB_STREAM_PROBE_ERR_DISABLED = -19,
+    /* URL answered with a .pls/.m3u playlist that names no http(s) stream. */
+    RB_STREAM_PROBE_ERR_PLAYLIST_EMPTY = -20
 };
 
 const char *rb_probe_error_text(int rc);
 int rb_probe_url_looks_hls(const char *url);
+/* For an internet-radio.com "playlist generator" link (?u=STATION&t=.pls),
+ * copies the wrapped station URL to out and returns 1; otherwise returns 0.
+ * rb_probe_stream_url() applies this itself; callers that refuse https://
+ * before probing apply it first, as the station URL is usually plain http. */
+int rb_probe_unwrap_playlist_generator(const char *url, char *out, int out_size);
 int rb_probe_stream_probe_test_enabled(void);
 int rb_probe_stream_probe_disabled(void);
 int rb_probe_artwork_test_enabled(void);

@@ -260,7 +260,7 @@ static void GuiTaskIdentityLog(const char *phase)
 
 #define HELIXAMP3_MAX_PATH 256
 #define HELIXAMP3_ARGC_MAX 28
-#define MINTAMP_GT_VERSION "1.3.2"
+#define MINTAMP_GT_VERSION "1.3.3"
 #define HELIXAMP3_SETTINGS_VERSION 2
 #define HELIXAMP3_RADIO_FAV_MAX 20
 #define HELIXAMP3_QUALITY_MIN 0
@@ -270,7 +270,7 @@ static void GuiTaskIdentityLog(const char *phase)
 /* AmigaOS Version command metadata.  Keep this independent of the settings
  * schema version above: release numbering does not imply a settings migration. */
 static const char gMintAmpGtVersionTag[] __attribute__((used)) =
-	"\0$VER: MintAMP-GT " MINTAMP_GT_VERSION " (26.09.2026)";
+	"\0$VER: MintAMP-GT " MINTAMP_GT_VERSION " (08.10.2026)";
 /* Bare name, no explicit "ENV:"/"ENVARC:" device prefix -- SaveEnvString()
  * below passes this through SetVar() with GVF_GLOBAL_ONLY (writes ENV:) and
  * separately with GVF_SAVE_VAR (which internally constructs the persistent
@@ -803,6 +803,7 @@ static void CloseRadioWindow(HelixAmp3Gui *gui);
 static void OpenRadioWindow(HelixAmp3Gui *gui);
 static void HandleRadioWindow(HelixAmp3Gui *gui);
 static void RadioDoProbeAndPlay(HelixAmp3Gui *app);
+static void RadioReplayCurrentUrl(HelixAmp3Gui *gui);
 
 struct IntuitionBase *IntuitionBase;
 extern struct CIA ciaa;
@@ -6965,11 +6966,12 @@ static void RadioDoProbeAndPlay(HelixAmp3Gui *app)
 		app->currentRadioFavicon[0] = '\0';
 		SelectInternetStream(app, app->rbFavouriteUrls[app->rbSelectedFavourite]);
 		SafeCopy(app->currentRadioStationName, sizeof(app->currentRadioStationName), app->rbFavouriteNames[app->rbSelectedFavourite]);
-		app->haveRadioHostAddr = 0;
-		app->radioHostAddrBe = 0;
-		sprintf(msg, "Buffering - %.120s", app->rbFavouriteNames[app->rbSelectedFavourite]);
+		/* Probe like the Play button does: a favourite can be a .pls/.m3u
+		 * playlist or redirect, which StartPlayback() on the bare URL can't
+		 * play. */
+		sprintf(msg, "Checking stream - %.120s", app->rbFavouriteNames[app->rbSelectedFavourite]);
 		RadioSetStatus(app, msg);
-		StartPlayback(app);
+		RadioReplayCurrentUrl(app);
 		return;
 	}
 	if (app->rbController.selected_index < 0) {
@@ -7065,7 +7067,8 @@ static void RadioReplayCurrentUrl(HelixAmp3Gui *gui)
 	char url[HELIXAMP3_MAX_PATH];
 	const char *err;
 
-	SafeCopy(url, sizeof(url), gui->inputName);
+	if (!rb_probe_unwrap_playlist_generator(gui->inputName, url, (int)sizeof(url)))
+		SafeCopy(url, sizeof(url), gui->inputName);
 	if (Radio_IsMemoryPoisoned()) {
 		SetStatus(gui, "Memory corruption detected; restart MintAMP before playing radio.");
 		return;

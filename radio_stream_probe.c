@@ -240,6 +240,14 @@ static int rb_probe_set_final_url(RbStreamInfo *info, const char *url)
         return RB_STREAM_PROBE_ERR_URL_TOO_LONG;
     }
     memcpy(info->final_url, url, (size_t)len + 1);
+    /* The probe accepts any scheme case, but playback (radio_stream.c's
+     * parse_url()) only accepts lowercase, so a playlist entry or redirect
+     * to "HTTP://..." must not reach it as such. */
+    {
+        int i;
+        for (i = 0; i < len && info->final_url[i] != ':'; i++)
+            info->final_url[i] = (char)tolower((unsigned char)info->final_url[i]);
+    }
     return RB_STREAM_PROBE_OK;
 }
 
@@ -547,6 +555,50 @@ static int rb_probe_parse_int(const char *s)
     return value;
 }
 
+static int rb_probe_contains_nocase(const char *s, const char *needle);
+
+/* Decodes HTTP/1.1 chunked transfer-coding in place (the decoded body is
+ * never longer than its encoding, so compacting toward the front is safe).
+ * The requests here are HTTP/1.1, so a server may legitimately answer this
+ * way; left encoded, the hex chunk-size lines corrupt a playlist or image.
+ * A body cut short by the caller's buffer keeps the data it did get.
+ * Returns the decoded length, or -1 on malformed framing. */
+static int rb_probe_dechunk(unsigned char *body, int body_len)
+{
+    int read_pos = 0;
+    int write_pos = 0;
+
+    for (;;) {
+        int chunk_size = 0;
+        int digits = 0;
+
+        while (read_pos < body_len) {
+            unsigned char c = body[read_pos];
+            int v;
+            if (c >= '0' && c <= '9') v = c - '0';
+            else if (c >= 'a' && c <= 'f') v = c - 'a' + 10;
+            else if (c >= 'A' && c <= 'F') v = c - 'A' + 10;
+            else break;
+            if (chunk_size > (0x7fffffff - v) / 16) return -1;
+            chunk_size = chunk_size * 16 + v;
+            digits++;
+            read_pos++;
+        }
+        if (read_pos >= body_len) return write_pos;
+        if (digits == 0) return -1;
+        while (read_pos < body_len && body[read_pos] != '\n') read_pos++;
+        if (read_pos >= body_len) return write_pos;
+        read_pos++;
+        if (chunk_size == 0) return write_pos;
+        if (chunk_size > body_len - read_pos) chunk_size = body_len - read_pos;
+        if (write_pos != read_pos) memmove(body + write_pos, body + read_pos, (size_t)chunk_size);
+        write_pos += chunk_size;
+        read_pos += chunk_size;
+        if (read_pos < body_len && body[read_pos] == '\r') read_pos++;
+        if (read_pos < body_len && body[read_pos] == '\n') read_pos++;
+    }
+}
+
 static void rb_probe_parse_headers(char *headers, int header_len, RbStreamInfo *info,
                                    char *location, int location_size)
 {
@@ -585,6 +637,8 @@ static void rb_probe_parse_headers(char *headers, int header_len, RbStreamInfo *
                 info->icy_metaint = rb_probe_parse_int(value);
             else if (name_len == 7 && rb_probe_ascii_starts_nocase(line, "icy-url"))
                 rb_probe_copy_trim(info->icy_url, (int)sizeof(info->icy_url), value, (int)strlen(value));
+            else if (name_len == 17 && rb_probe_ascii_starts_nocase(line, "Transfer-Encoding"))
+                info->chunked = rb_probe_contains_nocase(value, "chunked");
             else if (name_len == 8 && rb_probe_ascii_starts_nocase(line, "Location") &&
                      location && location_size > 0)
                 rb_probe_copy_trim(location, location_size, value, (int)strlen(value));
@@ -730,6 +784,187 @@ int rb_probe_url_looks_hls(const char *url)
     return rb_probe_contains_nocase(url, ".m3u8");
 }
 
+/* Many station links (Shoutcast "listen.pls?sid=1", Icecast "mount.m3u")
+ * return a small playlist that names the real stream rather than the audio
+ * itself.  Handing that text to a decoder plays nothing, so the probe opens
+ * the playlist and follows its first http(s) entry, as AmigaAMP does. */
+#define RB_PROBE_MAX_PLAYLIST_HOPS 3
+#define RB_PROBE_FOLLOW_PLAYLIST 1
+
+static int rb_probe_content_type_is_playlist(const char *content_type)
+{
+    return rb_probe_contains_nocase(content_type, "scpls") ||
+           rb_probe_contains_nocase(content_type, "application/pls") ||
+           rb_probe_contains_nocase(content_type, "mpegurl");
+}
+
+static int rb_probe_url_has_playlist_hint(const RbProbeUrl *url)
+{
+    if (!url) return 0;
+    return rb_probe_contains_nocase(url->path, ".pls") ||
+           rb_probe_contains_nocase(url->path, ".m3u");
+}
+
+/* Audio frames contain control bytes (and 0xFF frame syncs, never valid
+ * UTF-8) almost immediately; playlists don't. */
+static int rb_probe_body_is_text(const unsigned char *body, int len)
+{
+    int i;
+
+    if (!body || len <= 0) return 0;
+    for (i = 0; i < len; i++) {
+        unsigned char c = body[i];
+        if ((c < 32 && c != '\r' && c != '\n' && c != '\t') || c == 0x7f || c >= 0xfe) return 0;
+    }
+    return 1;
+}
+
+static const unsigned char *rb_probe_skip_bom_space(const unsigned char *body, int *len)
+{
+    if (*len >= 3 && body[0] == 0xef && body[1] == 0xbb && body[2] == 0xbf) {
+        body += 3;
+        *len -= 3;
+    }
+    while (*len > 0 && (body[0] == ' ' || body[0] == '\t' || body[0] == '\r' || body[0] == '\n')) {
+        body++;
+        (*len)--;
+    }
+    return body;
+}
+
+static int rb_probe_body_starts_nocase(const unsigned char *body, int len, const char *prefix)
+{
+    int n = (int)strlen(prefix);
+    int i;
+
+    if (len < n) return 0;
+    for (i = 0; i < n; i++)
+        if (tolower(body[i]) != tolower((unsigned char)prefix[i])) return 0;
+    return 1;
+}
+
+static int rb_probe_body_has_playlist_magic(const unsigned char *body, int len)
+{
+    if (!body) return 0;
+    body = rb_probe_skip_bom_space(body, &len);
+    return rb_probe_body_starts_nocase(body, len, "[playlist]") ||
+           rb_probe_body_starts_nocase(body, len, "#EXTM3U") ||
+           rb_probe_body_starts_nocase(body, len, "http://") ||
+           rb_probe_body_starts_nocase(body, len, "https://");
+}
+
+/* Copies the first entry of a PLS ("FileN=URL") or plain M3U (bare URL
+ * line) body into out: an absolute http(s) URL or a relative one.  complete says the whole body was read;
+ * otherwise an unterminated last line may be cut short and is ignored. */
+static int rb_probe_playlist_first_url(const unsigned char *body, int len, int complete,
+                                       char *out, int out_size)
+{
+    int pos;
+    int pls;
+
+    if (!body || !out || out_size <= 0) return RB_STREAM_PROBE_ERR_BAD_ARG;
+    out[0] = '\0';
+    body = rb_probe_skip_bom_space(body, &len);
+    pls = rb_probe_body_starts_nocase(body, len, "[playlist]");
+    pos = 0;
+    while (pos < len) {
+        int start = pos;
+        int end;
+        const unsigned char *line;
+        int line_len;
+        int is_file_entry;
+
+        while (pos < len && body[pos] != '\r' && body[pos] != '\n') pos++;
+        end = pos;
+        if (end >= len && !complete) break;
+        while (pos < len && (body[pos] == '\r' || body[pos] == '\n')) pos++;
+
+        while (start < end && (body[start] == ' ' || body[start] == '\t')) start++;
+        line = body + start;
+        line_len = end - start;
+        is_file_entry = 0;
+        if (line_len >= 5 && rb_probe_body_starts_nocase(line, line_len, "File")) {
+            int k = 4;
+            while (k < line_len && isdigit(line[k])) k++;
+            if (k > 4 && k < line_len && line[k] == '=') {
+                line += k + 1;
+                line_len -= k + 1;
+                is_file_entry = 1;
+                while (line_len > 0 && (line[0] == ' ' || line[0] == '\t')) { line++; line_len--; }
+            }
+        }
+        while (line_len > 0 && (line[line_len - 1] == ' ' || line[line_len - 1] == '\t')) line_len--;
+        if (line_len <= 0) continue;
+        if (!is_file_entry && pls) continue;
+        if (!rb_probe_body_starts_nocase(line, line_len, "http://") &&
+            !rb_probe_body_starts_nocase(line, line_len, "https://")) {
+            /* Relative entry ("/stream", "live.mp3"), resolved against the
+             * playlist URL by the caller.  Comments, PLS keys, HTML and
+             * local paths ("C:\x.mp3", "Work:Music/x.mp3") are not streams. */
+            int k;
+            int ok = line[0] != '#' && line[0] != '[';
+            for (k = 0; ok && k < line_len; k++)
+                if (strchr(":\\= <>\"", line[k])) ok = 0;
+            if (!ok) continue;
+        }
+        if (line_len >= out_size) return RB_STREAM_PROBE_ERR_URL_TOO_LONG;
+        memcpy(out, line, (size_t)line_len);
+        out[line_len] = '\0';
+        return RB_STREAM_PROBE_OK;
+    }
+    return RB_STREAM_PROBE_ERR_PLAYLIST_EMPTY;
+}
+
+static int rb_probe_hex_value(int c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Station links shared from internet-radio.com (and pasted on forums) are
+ * "playlist generator" downloads wrapping the real station URL:
+ *   https://www.internet-radio.com/servers/tools/playlistgenerator/?u=URL&t=.pls
+ * Taking URL straight from u= skips an HTTPS fetch of the wrapper, so these
+ * links also work on builds or machines without AmiSSL.  u= is usually not
+ * percent-encoded and can carry its own query ("listen.pls?sid=1"), so it
+ * runs to the generator's own "&t=" parameter, or the end. */
+int rb_probe_unwrap_playlist_generator(const char *url, char *out, int out_size)
+{
+    const char *p;
+    const char *u;
+    const char *end;
+    int pos;
+
+    if (!url || !out || out_size <= 0) return 0;
+    if (rb_probe_ascii_starts_nocase(url, "https://")) p = url + 8;
+    else if (rb_probe_ascii_starts_nocase(url, "http://")) p = url + 7;
+    else return 0;
+    if (rb_probe_ascii_starts_nocase(p, "www.")) p += 4;
+    if (!rb_probe_ascii_starts_nocase(p, "internet-radio.com/servers/tools/playlistgenerator"))
+        return 0;
+    u = strchr(p, '?');
+    while (u && !rb_probe_ascii_starts_nocase(u + 1, "u=")) u = strchr(u + 1, '&');
+    if (!u) return 0;
+    u += 3;
+    end = strstr(u, "&t=");
+    if (!end) end = u + strlen(u);
+    pos = 0;
+    while (u < end) {
+        int c = (unsigned char)*u++;
+        if (c == '%' && end - u >= 2 &&
+            rb_probe_hex_value(u[0]) >= 0 && rb_probe_hex_value(u[1]) >= 0) {
+            c = rb_probe_hex_value(u[0]) * 16 + rb_probe_hex_value(u[1]);
+            u += 2;
+        }
+        if (pos >= out_size - 1) return 0;
+        out[pos++] = (char)c;
+    }
+    out[pos] = '\0';
+    return rb_probe_ascii_starts_nocase(out, "http://") || rb_probe_ascii_starts_nocase(out, "https://");
+}
+
 const char *rb_probe_error_text(int rc)
 {
     switch (rc) {
@@ -752,6 +987,7 @@ const char *rb_probe_error_text(int rc)
     case RB_STREAM_PROBE_ERR_MEM_POISONED: return "Memory corruption detected; restart MintAMP before playing radio.";
     case RB_STREAM_PROBE_ERR_DISABLED: return "Probe/fetch disabled by runtime flag or staged optional-network gate";
     case RB_STREAM_PROBE_ERR_HTTP_STATUS: return "Stream unavailable (server returned an error status)";
+    case RB_STREAM_PROBE_ERR_PLAYLIST_EMPTY: return "Playlist contains no playable stream URL";
     default: return "Stream probe failed";
     }
 }
@@ -936,8 +1172,12 @@ int rb_probe_stream_url(const char *url, RbStreamInfo *info,
 #endif
 }
 
-static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
-                        unsigned char *peek_buf, int peek_buf_size, int *peek_len)
+/* One probe of url, following HTTP redirects.  Returns
+ * RB_PROBE_FOLLOW_PLAYLIST with the playlist's stream URL in playlist_url
+ * when the response is a .pls/.m3u playlist rather than audio. */
+static int rb_probe_stream_url_hop(const char *url, RbStreamInfo *info,
+                        unsigned char *peek_buf, int peek_buf_size, int *peek_len,
+                        char *playlist_url, int playlist_url_size)
 {
     RbProbeUrl parsed;
     RbProbeTransport transport;
@@ -953,6 +1193,7 @@ static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
     int header_end;
     int done;
     int redirects;
+    int body_complete;
 
     if (!url || !info || !peek_len || peek_buf_size < 0 || (peek_buf_size > 0 && !peek_buf))
         return RB_STREAM_PROBE_ERR_BAD_ARG;
@@ -1113,6 +1354,7 @@ n = rb_probe_transport(&transport, (char *)header_buf + total, want);
         rb_probe_transport_close_mode(&transport, RB_PROBE_CLOSE_ABORT, info->http_status);
         return RB_STREAM_PROBE_ERR_HTTP_STATUS;
     }
+    body_complete = 0;
     while (*peek_len < peek_buf_size) {
         int want2;
         int n2;
@@ -1124,7 +1366,7 @@ n2 = rb_probe_transport(&transport, (char *)peek_buf + *peek_len, want2);
             rb_probe_transport_close(&transport);
             return RB_STREAM_PROBE_ERR_RECV;
         }
-        if (n2 == 0) break;
+        if (n2 == 0) { body_complete = 1; break; }
         *peek_len += n2;
     }
     /* Successful 2xx probe completion is a healthy close: send one best-effort
@@ -1137,6 +1379,34 @@ n2 = rb_probe_transport(&transport, (char *)peek_buf + *peek_len, want2);
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
 #endif
         return rc;
+    }
+    if (info->chunked && *peek_len > 0) {
+        int plain_len = rb_probe_dechunk(peek_buf, *peek_len);
+        if (plain_len >= 0) *peek_len = plain_len;
+    }
+    if (rb_probe_body_is_text(peek_buf, *peek_len) &&
+        (rb_probe_content_type_is_playlist(info->content_type) ||
+         rb_probe_url_has_playlist_hint(&parsed) ||
+         rb_probe_body_has_playlist_magic(peek_buf, *peek_len))) {
+        /* Static: see rb_probe_stream_url_impl()'s buffers. */
+        static char entry[RB_PROBE_MAX_URL];
+        int i;
+
+        for (i = 0; i + 7 <= *peek_len; i++) {
+            if (rb_probe_body_starts_nocase(peek_buf + i, *peek_len - i, "#EXT-X-"))
+                return RB_STREAM_PROBE_ERR_HLS_UNSUPPORTED;
+        }
+        rc = rb_probe_playlist_first_url(peek_buf, *peek_len, body_complete, entry, (int)sizeof(entry));
+        if (rc == RB_STREAM_PROBE_OK) {
+            rc = rb_probe_resolve_location(&parsed, entry, playlist_url, playlist_url_size);
+            if (rc < 0) return rc;
+            printf("rb-probe: playlist %.200s -> stream %.200s\n", current_url, playlist_url);
+            return RB_PROBE_FOLLOW_PLAYLIST;
+        }
+        if (rc == RB_STREAM_PROBE_ERR_URL_TOO_LONG) return rc;
+        if (rb_probe_content_type_is_playlist(info->content_type) ||
+            rb_probe_body_has_playlist_magic(peek_buf, *peek_len))
+            return RB_STREAM_PROBE_ERR_PLAYLIST_EMPTY;
     }
     RADIO_DBG(printf("rb-probe codec: final URL=%s content-type=%s URL codec hint=%s initial-bytes=%d\n",
            current_url, info->content_type, rb_probe_url_has_aac_hint(&parsed) ? "AAC" : (rb_probe_url_has_mp3_hint(&parsed) ? "MP3" : "none"), *peek_len);)
@@ -1158,6 +1428,42 @@ n2 = rb_probe_transport(&transport, (char *)peek_buf + *peek_len, want2);
 #if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
 #endif
     return RB_STREAM_PROBE_OK;
+}
+
+static int rb_probe_stream_url_impl(const char *url, RbStreamInfo *info,
+                        unsigned char *peek_buf, int peek_buf_size, int *peek_len)
+{
+    /* Static rather than stack-local: without AmiSSL this runs on the
+     * calling GUI task, whose stack rb_probe_stream_url_hop() already uses
+     * heavily (see rb_probe_fetch_binary_impl()).  Probes never overlap. */
+    static char current_url[RB_PROBE_MAX_URL];
+    static char playlist_url[RB_PROBE_MAX_URL];
+    int hops;
+    int redirects;
+    int rc;
+
+    if (!url || !info || !peek_len) return RB_STREAM_PROBE_ERR_BAD_ARG;
+    if (rb_probe_unwrap_playlist_generator(url, playlist_url, (int)sizeof(playlist_url))) {
+        printf("rb-probe: playlist generator link -> %.200s\n", playlist_url);
+        url = playlist_url;
+    }
+    rc = rb_probe_copy_string(current_url, (int)sizeof(current_url), url);
+    if (rc < 0) return rc;
+    redirects = 0;
+    for (hops = 0; ; hops++) {
+        playlist_url[0] = '\0';
+        rc = rb_probe_stream_url_hop(current_url, info, peek_buf, peek_buf_size, peek_len,
+                                     playlist_url, (int)sizeof(playlist_url));
+        redirects += info->redirect_count;
+        info->redirect_count = redirects;
+        if (rc != RB_PROBE_FOLLOW_PLAYLIST) return rc;
+        *peek_len = 0;
+        /* A playlist may name another playlist (a generator link wrapping a
+         * station's listen.pls); any deeper than this is most likely a loop. */
+        if (hops + 1 >= RB_PROBE_MAX_PLAYLIST_HOPS) return RB_STREAM_PROBE_ERR_TOO_MANY_REDIRECTS;
+        rc = rb_probe_copy_string(current_url, (int)sizeof(current_url), playlist_url);
+        if (rc < 0) return rc;
+    }
 }
 
 static int rb_probe_fetch_binary_impl(const char *url, unsigned char *out_buf, int out_buf_size,
@@ -1301,6 +1607,11 @@ n = rb_probe_transport(&transport, (char *)out_buf + *out_len, want);
 
     if (info.http_status < 200 || info.http_status > 299)
         return RB_STREAM_PROBE_ERR_HTTP_STATUS;
+    if (info.chunked && *out_len > 0) {
+        int plain_len = rb_probe_dechunk(out_buf, *out_len);
+        if (plain_len < 0) return RB_STREAM_PROBE_ERR_RECV;
+        *out_len = plain_len;
+    }
     if (out_content_type && out_content_type_size > 0) {
         int n = (int)strlen(info.content_type);
         if (n > out_content_type_size - 1) n = out_content_type_size - 1;
@@ -1480,6 +1791,54 @@ static int rb_probe_selftest(void)
     rb_probe_copy_trim(info.content_type, (int)sizeof(info.content_type), "audio/mp4", 9);
     if (rb_probe_detect_codec(&url, &info, NULL, 0) != RB_STREAM_CODEC_AAC) return 8;
     if (!rb_probe_url_looks_hls("http://example.com/live.m3u8")) return 9;
+    {
+        static const char pls[] =
+            "[playlist]\r\nNumberOfEntries=2\r\nFile1=http://s6.reliastream.com:8008/stream\r\n"
+            "Title1=Radio\r\nFile2=http://backup.example.com/\r\nVersion=2\r\n";
+        static const char m3u[] =
+            "#EXTM3U\n#EXTINF:-1,Radio\nhttps://ice.example.com/live.mp3\n";
+        static const char cut[] = "[playlist]\nFile1=http://example.com/stre";
+        char out[RB_PROBE_MAX_URL];
+
+        if (rb_probe_playlist_first_url((const unsigned char *)pls, (int)strlen(pls), 1, out, (int)sizeof(out)) != RB_STREAM_PROBE_OK ||
+            strcmp(out, "http://s6.reliastream.com:8008/stream") != 0) return 10;
+        if (rb_probe_playlist_first_url((const unsigned char *)m3u, (int)strlen(m3u), 1, out, (int)sizeof(out)) != RB_STREAM_PROBE_OK ||
+            strcmp(out, "https://ice.example.com/live.mp3") != 0) return 11;
+        if (rb_probe_playlist_first_url((const unsigned char *)cut, (int)strlen(cut), 0, out, (int)sizeof(out)) != RB_STREAM_PROBE_ERR_PLAYLIST_EMPTY) return 12;
+        if (rb_probe_playlist_first_url((const unsigned char *)"[playlist]\nNumberOfEntries=0\n", 29, 1, out, (int)sizeof(out)) != RB_STREAM_PROBE_ERR_PLAYLIST_EMPTY) return 13;
+        if (rb_probe_playlist_first_url((const unsigned char *)"#EXTM3U\n/stream\n", 16, 1, out, (int)sizeof(out)) != RB_STREAM_PROBE_OK ||
+            strcmp(out, "/stream") != 0) return 18;
+        if (rb_probe_playlist_first_url((const unsigned char *)"<html>\n<body>\n", 15, 1, out, (int)sizeof(out)) != RB_STREAM_PROBE_ERR_PLAYLIST_EMPTY) return 19;
+        if (rb_probe_playlist_first_url((const unsigned char *)"C:\\x.mp3\n", 9, 1, out, (int)sizeof(out)) != RB_STREAM_PROBE_ERR_PLAYLIST_EMPTY) return 20;
+        if (!rb_probe_body_has_playlist_magic((const unsigned char *)pls, (int)strlen(pls))) return 14;
+        if (rb_probe_body_is_text(mpeg, (int)sizeof(mpeg))) return 15;
+        if (!rb_probe_content_type_is_playlist("audio/x-scpls")) return 16;
+        if (rb_probe_parse_url("http://s6.reliastream.com:8008/listen.pls?sid=1", &url) != RB_STREAM_PROBE_OK ||
+            !rb_probe_url_has_playlist_hint(&url)) return 17;
+    }
+    {
+        unsigned char ch[] = "19\r\n[playlist]\nFile1=/stream\n\r\n0\r\n\r\n";
+        unsigned char part[] = "5\r\nabcde\r\n9\r\nfgh";
+        int n = rb_probe_dechunk(ch, (int)sizeof(ch) - 1);
+        if (n != 25 || memcmp(ch, "[playlist]\nFile1=/stream\n", 25) != 0) return 21;
+        n = rb_probe_dechunk(part, (int)sizeof(part) - 1);
+        if (n != 8 || memcmp(part, "abcdefgh", 8) != 0) return 22;
+    }
+    {
+        char out[RB_PROBE_MAX_URL];
+        if (!rb_probe_unwrap_playlist_generator(
+                "https://www.internet-radio.com/servers/tools/playlistgenerator/?u=http://s6.reliastream.com:8008/listen.pls?sid=1&t=.pls",
+                out, (int)sizeof(out)) ||
+            strcmp(out, "http://s6.reliastream.com:8008/listen.pls?sid=1") != 0) return 23;
+        if (!rb_probe_unwrap_playlist_generator(
+                "https://www.internet-radio.com/servers/tools/playlistgenerator/?u=http%3A%2F%2Fuk1.example.com%3A8000%2Flive&t=.m3u",
+                out, (int)sizeof(out)) ||
+            strcmp(out, "http://uk1.example.com:8000/live") != 0) return 24;
+        if (rb_probe_unwrap_playlist_generator("http://example.com/?u=http://x/", out, (int)sizeof(out))) return 25;
+        if (rb_probe_unwrap_playlist_generator(
+                "https://www.internet-radio.com/servers/tools/playlistgenerator/?u=javascript:x&t=.pls",
+                out, (int)sizeof(out))) return 26;
+    }
     RADIO_DBG(printf("rb-probe selftest: ok\n");)
     return 0;
 }
