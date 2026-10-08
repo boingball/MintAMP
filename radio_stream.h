@@ -214,30 +214,38 @@ int Radio_CheckMiniMem(const char *where);
  * AN_MemCorrupt) and log OK/CORRUPT with a location tag. No-op in release. */
 void Radio_DebugCheckExecMem(const char *where);
 #else
-static RadioStream *Radio_OpenWithHostAddr(const char *url, int haveHostAddr, unsigned long hostAddrBe) { (void)url; (void)haveHostAddr; (void)hostAddrBe; return (RadioStream *)0; }
-static RadioStream *Radio_Open(const char *url) { (void)url; return (RadioStream *)0; }
-static void Radio_RequestStop(RadioStream *rs) { (void)rs; }
-static void Radio_SetStopFlag(const volatile int *flag) { (void)flag; }
-static void Radio_Close(RadioStream *rs) { (void)rs; }
-static int Radio_Pump(RadioStream *rs) { (void)rs; return -1; }
-static int Radio_ReadAudio(RadioStream *rs, unsigned char *buf, int maxBytes) { (void)rs; (void)buf; (void)maxBytes; return 0; }
-static int Radio_ReadStartupAudio(RadioStream *rs, unsigned char *buf, int maxBytes, unsigned long timeoutMs) { (void)rs; (void)buf; (void)maxBytes; (void)timeoutMs; return 0; }
-static void Radio_FailStartup(RadioStream *rs, const char *message) { (void)rs; (void)message; }
-static RadioStatus Radio_GetStatus(RadioStream *rs) { (void)rs; return RADIO_STATUS_CLOSED; }
-static const char *Radio_GetTitle(RadioStream *rs) { (void)rs; return ""; }
-static const char *Radio_GetStationName(RadioStream *rs) { (void)rs; return ""; }
-static const char *Radio_GetGenre(RadioStream *rs) { (void)rs; return ""; }
-static const char *Radio_GetStreamUrl(RadioStream *rs) { (void)rs; return ""; }
-static int Radio_GetMetaInt(RadioStream *rs) { (void)rs; return 0; }
-static const char *Radio_GetContentType(RadioStream *rs) { (void)rs; return ""; }
-static const char *Radio_GetError(RadioStream *rs) { (void)rs; return "radio support not built"; }
-static int Radio_GetBitrate(RadioStream *rs) { (void)rs; return 0; }
-static int Radio_GetBufferedBytes(RadioStream *rs) { (void)rs; return 0; }
-static unsigned long Radio_GetSessionId(RadioStream *rs) { (void)rs; return 0; }
-static int Radio_IsSessionFatal(RadioStream *rs) { (void)rs; return 0; }
-static void Radio_NetworkInit(void) { }
-static void Radio_NetworkShutdown(void) { }
-static void Radio_GetNetworkStats(long *active_stream_sessions, long *active_stream_tasks,
+/* Without radio support these stubs keep callers compiling.  A file that
+ * includes this header only for one of them (the Ogg module uses
+ * Radio_CheckMiniMem()) must not warn about the rest being unused. */
+#if defined(__GNUC__)
+#define RADIO_STUB static __attribute__((unused))
+#else
+#define RADIO_STUB static
+#endif
+RADIO_STUB RadioStream *Radio_OpenWithHostAddr(const char *url, int haveHostAddr, unsigned long hostAddrBe) { (void)url; (void)haveHostAddr; (void)hostAddrBe; return (RadioStream *)0; }
+RADIO_STUB RadioStream *Radio_Open(const char *url) { (void)url; return (RadioStream *)0; }
+RADIO_STUB void Radio_RequestStop(RadioStream *rs) { (void)rs; }
+RADIO_STUB void Radio_SetStopFlag(const volatile int *flag) { (void)flag; }
+RADIO_STUB void Radio_Close(RadioStream *rs) { (void)rs; }
+RADIO_STUB int Radio_Pump(RadioStream *rs) { (void)rs; return -1; }
+RADIO_STUB int Radio_ReadAudio(RadioStream *rs, unsigned char *buf, int maxBytes) { (void)rs; (void)buf; (void)maxBytes; return 0; }
+RADIO_STUB int Radio_ReadStartupAudio(RadioStream *rs, unsigned char *buf, int maxBytes, unsigned long timeoutMs) { (void)rs; (void)buf; (void)maxBytes; (void)timeoutMs; return 0; }
+RADIO_STUB void Radio_FailStartup(RadioStream *rs, const char *message) { (void)rs; (void)message; }
+RADIO_STUB RadioStatus Radio_GetStatus(RadioStream *rs) { (void)rs; return RADIO_STATUS_CLOSED; }
+RADIO_STUB const char *Radio_GetTitle(RadioStream *rs) { (void)rs; return ""; }
+RADIO_STUB const char *Radio_GetStationName(RadioStream *rs) { (void)rs; return ""; }
+RADIO_STUB const char *Radio_GetGenre(RadioStream *rs) { (void)rs; return ""; }
+RADIO_STUB const char *Radio_GetStreamUrl(RadioStream *rs) { (void)rs; return ""; }
+RADIO_STUB int Radio_GetMetaInt(RadioStream *rs) { (void)rs; return 0; }
+RADIO_STUB const char *Radio_GetContentType(RadioStream *rs) { (void)rs; return ""; }
+RADIO_STUB const char *Radio_GetError(RadioStream *rs) { (void)rs; return "radio support not built"; }
+RADIO_STUB int Radio_GetBitrate(RadioStream *rs) { (void)rs; return 0; }
+RADIO_STUB int Radio_GetBufferedBytes(RadioStream *rs) { (void)rs; return 0; }
+RADIO_STUB unsigned long Radio_GetSessionId(RadioStream *rs) { (void)rs; return 0; }
+RADIO_STUB int Radio_IsSessionFatal(RadioStream *rs) { (void)rs; return 0; }
+RADIO_STUB void Radio_NetworkInit(void) { }
+RADIO_STUB void Radio_NetworkShutdown(void) { }
+RADIO_STUB void Radio_GetNetworkStats(long *active_stream_sessions, long *active_stream_tasks,
     long *open_socket_count, long *active_ssl_count, long *active_ssl_ctx_count)
 {
     if (active_stream_sessions) *active_stream_sessions = 0;
@@ -246,7 +254,7 @@ static void Radio_GetNetworkStats(long *active_stream_sessions, long *active_str
     if (active_ssl_count) *active_ssl_count = 0;
     if (active_ssl_ctx_count) *active_ssl_ctx_count = 0;
 }
-static void Radio_GetTeardownStats(long *active_stream_sessions, long *active_stream_tasks,
+RADIO_STUB void Radio_GetTeardownStats(long *active_stream_sessions, long *active_stream_tasks,
     long *open_socket_count, long *playback_open_socket_count,
     long *active_decoder_count, long *active_audio_buffer_count,
     long *active_stream_buffer_count)
@@ -259,30 +267,30 @@ static void Radio_GetTeardownStats(long *active_stream_sessions, long *active_st
     if (active_audio_buffer_count) *active_audio_buffer_count = 0;
     if (active_stream_buffer_count) *active_stream_buffer_count = 0;
 }
-static void Radio_GetNetworkBases(void **socket_base, void **amissl_base, void **amissl_master_base)
+RADIO_STUB void Radio_GetNetworkBases(void **socket_base, void **amissl_base, void **amissl_master_base)
 {
     if (socket_base) *socket_base = 0;
     if (amissl_base) *amissl_base = 0;
     if (amissl_master_base) *amissl_master_base = 0;
 }
-static int Radio_HasNetwork(void) { return 0; }
-static int Radio_HasHttps(void) { return 0; }
-static int Radio_PlaybackOwnsNetwork(void) { return 0; }
-static int Radio_WorkerIsIdle(void) { return 1; }
-static const char *Radio_WorkerStateName(void) { return "idle"; }
-static void Radio_GetAmiSslShared(void **amissl_base, void **amissl_ext_base, void **amissl_master_base)
+RADIO_STUB int Radio_HasNetwork(void) { return 0; }
+RADIO_STUB int Radio_HasHttps(void) { return 0; }
+RADIO_STUB int Radio_PlaybackOwnsNetwork(void) { return 0; }
+RADIO_STUB int Radio_WorkerIsIdle(void) { return 1; }
+RADIO_STUB const char *Radio_WorkerStateName(void) { return "idle"; }
+RADIO_STUB void Radio_GetAmiSslShared(void **amissl_base, void **amissl_ext_base, void **amissl_master_base)
 {
     if (amissl_base) *amissl_base = 0;
     if (amissl_ext_base) *amissl_ext_base = 0;
     if (amissl_master_base) *amissl_master_base = 0;
 }
-static void *Radio_GetWorkerSslCtx(const char *category, unsigned long session_id) { (void)category; (void)session_id; return 0; }
-static void Radio_MarkWorkerSslCtxPoisoned(const char *where) { (void)where; }
-static RadioNetTransport *RadioNet_Open(const char *url, const char *host, int port, int use_tls, const char *category, unsigned long session_id) { (void)url; (void)host; (void)port; (void)use_tls; (void)category; (void)session_id; return 0; }
-static int RadioNet_Write(RadioNetTransport *transport, const void *buffer, int length) { (void)transport; (void)buffer; (void)length; return -1; }
-static int RadioNet_Read(RadioNetTransport *transport, void *buffer, int length) { (void)transport; (void)buffer; (void)length; return -1; }
-static void RadioNet_Close(RadioNetTransport *transport, int graceful) { (void)transport; (void)graceful; }
-static unsigned long RadioNet_HostAddr(RadioNetTransport *transport) { (void)transport; return 0; }
+RADIO_STUB void *Radio_GetWorkerSslCtx(const char *category, unsigned long session_id) { (void)category; (void)session_id; return 0; }
+RADIO_STUB void Radio_MarkWorkerSslCtxPoisoned(const char *where) { (void)where; }
+RADIO_STUB RadioNetTransport *RadioNet_Open(const char *url, const char *host, int port, int use_tls, const char *category, unsigned long session_id) { (void)url; (void)host; (void)port; (void)use_tls; (void)category; (void)session_id; return 0; }
+RADIO_STUB int RadioNet_Write(RadioNetTransport *transport, const void *buffer, int length) { (void)transport; (void)buffer; (void)length; return -1; }
+RADIO_STUB int RadioNet_Read(RadioNetTransport *transport, void *buffer, int length) { (void)transport; (void)buffer; (void)length; return -1; }
+RADIO_STUB void RadioNet_Close(RadioNetTransport *transport, int graceful) { (void)transport; (void)graceful; }
+RADIO_STUB unsigned long RadioNet_HostAddr(RadioNetTransport *transport) { (void)transport; return 0; }
 enum {
     RADIO_NET_OPEN_OK = 0,
     RADIO_NET_OPEN_ERR_DNS = 1,
@@ -291,23 +299,23 @@ enum {
     RADIO_NET_OPEN_ERR_TLS = 4,
     RADIO_NET_OPEN_ERR_OTHER = 5
 };
-static int RadioNet_LastOpenError(void) { return RADIO_NET_OPEN_OK; }
-static unsigned long RadioNet_LastOpenAddr(void) { return 0; }
-static int Radio_AmiSslTaskIsOpener(void) { return 0; }
-static int Radio_AmiSslLock(void) { return 0; }
-static void Radio_AmiSslUnlock(void) { }
-static int Radio_RunOnNetWorker(void (*fn)(void *arg), void *arg) { (void)fn; (void)arg; return 0; }
-static int Radio_IsMemoryPoisoned(void) { return 0; }
-static void Radio_MarkMemoryPoisoned(const char *where) { (void)where; }
-static int Radio_IsTlsPoisoned(void) { return 0; }
-static void Radio_MarkTlsPoisoned(const char *where) { (void)where; }
-static void Radio_SetTlsFaultContext(unsigned long session_id, const char *url) { (void)session_id; (void)url; }
-static void Radio_ReportTlsFault(const char *where) { (void)where; }
-static const char *Radio_TlsPoisonedMessage(void) { return "HTTPS disabled after TLS/memory poison; restart the app before using HTTPS."; }
-static const char *Radio_TlsPoisonReason(void) { return "not-poisoned"; }
-static int Radio_CheckMiniMem(const char *where) { (void)where; return 0; }
-static void Radio_DebugCheckExecMem(const char *where) { (void)where; }
-static const char *Radio_StatusText(RadioStatus status)
+RADIO_STUB int RadioNet_LastOpenError(void) { return RADIO_NET_OPEN_OK; }
+RADIO_STUB unsigned long RadioNet_LastOpenAddr(void) { return 0; }
+RADIO_STUB int Radio_AmiSslTaskIsOpener(void) { return 0; }
+RADIO_STUB int Radio_AmiSslLock(void) { return 0; }
+RADIO_STUB void Radio_AmiSslUnlock(void) { }
+RADIO_STUB int Radio_RunOnNetWorker(void (*fn)(void *arg), void *arg) { (void)fn; (void)arg; return 0; }
+RADIO_STUB int Radio_IsMemoryPoisoned(void) { return 0; }
+RADIO_STUB void Radio_MarkMemoryPoisoned(const char *where) { (void)where; }
+RADIO_STUB int Radio_IsTlsPoisoned(void) { return 0; }
+RADIO_STUB void Radio_MarkTlsPoisoned(const char *where) { (void)where; }
+RADIO_STUB void Radio_SetTlsFaultContext(unsigned long session_id, const char *url) { (void)session_id; (void)url; }
+RADIO_STUB void Radio_ReportTlsFault(const char *where) { (void)where; }
+RADIO_STUB const char *Radio_TlsPoisonedMessage(void) { return "HTTPS disabled after TLS/memory poison; restart the app before using HTTPS."; }
+RADIO_STUB const char *Radio_TlsPoisonReason(void) { return "not-poisoned"; }
+RADIO_STUB int Radio_CheckMiniMem(const char *where) { (void)where; return 0; }
+RADIO_STUB void Radio_DebugCheckExecMem(const char *where) { (void)where; }
+RADIO_STUB const char *Radio_StatusText(RadioStatus status)
 {
     switch (status) {
     case RADIO_STATUS_CONNECTING: return "Connecting";
@@ -328,6 +336,9 @@ static const char *Radio_StatusText(RadioStatus status)
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
+#if defined(__GNUC__)
+__attribute__((unused))
+#endif
 static int radio_release_printf(const char *fmt, ...)
 {
     int r;

@@ -25,7 +25,7 @@ __attribute__((section(".text")))
 struct DecoderOps *DecoderModuleEntry(void)
 {
 #ifdef HAVE_AMIGA_AUDIO_DEVICE
-    WmaModuleSetExecBase(*((void **)4L));
+    WmaModuleSetExecBase(DecoderModuleAbsExecBase());
 #endif
     return &gWmaOps;
 }

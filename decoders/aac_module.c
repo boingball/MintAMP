@@ -174,6 +174,8 @@ static void *AacTraceOpenLibrary(const char *name, unsigned long version)
     return (void *)d0;
 }
 
+/* Only reached from trace/debug code. */
+__attribute__((unused))
 static long AacTraceOutput(void)
 {
     register void *a6 __asm("a6") = gAacTraceDos;
@@ -188,6 +190,8 @@ static long AacTraceOutput(void)
     return d0;
 }
 
+/* Only reached from trace/debug code. */
+__attribute__((unused))
 static void AacTraceWrite(long fh, const char *buf, unsigned long len)
 {
     register void *a6 __asm("a6") = gAacTraceDos;
@@ -258,6 +262,8 @@ static void AacTraceAppendULong(char *buf, unsigned long *pos, unsigned long cap
         AacTraceAppendChar(buf, pos, cap, tmp[--n]);
 }
 
+/* Only reached from trace/debug code. */
+__attribute__((unused))
 static void AacTraceAppendFieldUL(char *buf, unsigned long *pos, unsigned long cap,
                                   const char *name, unsigned long v)
 {
@@ -267,6 +273,8 @@ static void AacTraceAppendFieldUL(char *buf, unsigned long *pos, unsigned long c
     AacTraceAppendULong(buf, pos, cap, v);
 }
 
+/* Only reached from trace/debug code. */
+__attribute__((unused))
 static void AacTraceAppendFieldL(char *buf, unsigned long *pos, unsigned long cap,
                                  const char *name, long v)
 {
@@ -545,7 +553,7 @@ static DecHandle AacOpen(DecoderReadCb readFn, DecoderSeekCb seekFn,
     if (!readFn || !infoOut) return NULL;
 
 #ifdef HAVE_AMIGA_AUDIO_DEVICE
-    AacModuleSetExecBase(*((void **)4L));
+    AacModuleSetExecBase(DecoderModuleAbsExecBase());
 #endif
 
     st = (AacState *)ModuleAlloc(sizeof(AacState));

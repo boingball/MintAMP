@@ -1009,7 +1009,7 @@ static int wma_decode_block(WMADecodeContext *s)
             VLC *coef_vlc;
             int level, run, sign, tindex;
             int16_t *ptr, *eptr;
-            const int16_t *level_table, *run_table;
+            const uint16_t *level_table, *run_table;
 
             /* special VLC tables are used for ms stereo because
                there is potentially less energy there */
@@ -1281,7 +1281,7 @@ static int wma_decode_block(WMADecodeContext *s)
     for(ch = 0; ch < s->nb_channels; ++ch)
     { 
         /* BLOCK_MAX_SIZE is 2048 (samples) and MAX_CHANNELS is 2. */
-        static uint32_t scratch_buf[BLOCK_MAX_SIZE * MAX_CHANNELS] IBSS_ATTR MEM_ALIGN_ATTR;
+        static fixed32 scratch_buf[BLOCK_MAX_SIZE * MAX_CHANNELS] IBSS_ATTR MEM_ALIGN_ATTR;
         if (s->channel_coded[ch])
         {
             int n4, index;

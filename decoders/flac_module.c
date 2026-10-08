@@ -54,6 +54,8 @@ static void ModuleFree(void *ptr, unsigned long bytes)
 #define FLAC_STALL_LIMIT 64
 #define FLAC_MODULE_BUILD_ID "FLAC MODULE BUILD MARKER 12345 rev 2"
 
+/* Only reached from trace/debug code. */
+__attribute__((unused))
 static const char *FlacStateName(fx_flac_state_t state)
 {
     switch (state) {
