@@ -5357,6 +5357,7 @@ static void RadioSetStatus(MrApp *app, const char *text)
 static void RadioProbeUrlAndStart(MrApp *app, const char *url, const char *stationName)
 {
 	static unsigned char peek[512];
+	static char unwrapped[512];
 	RbStreamInfo info;
 	int peekLen = 0;
 	int rc;
@@ -5370,6 +5371,8 @@ static void RadioProbeUrlAndStart(MrApp *app, const char *url, const char *stati
 		SetStatus(app, "No stream URL to play.");
 		return;
 	}
+	if (rb_probe_unwrap_playlist_generator(url, unwrapped, (int)sizeof(unwrapped)))
+		url = unwrapped;
 	if (!MrIsRadioInput(url)) {
 		RadioSetStatus(app, "Stream URL must start with HTTP or HTTPS.");
 		SetStatus(app, "Stream URL must start with HTTP or HTTPS.");
