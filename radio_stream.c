@@ -326,6 +326,8 @@ static void radio_net_job_free(RadioNetWorkerJob *job)
 #endif
 }
 
+#endif /* HAVE_AMISSL: the allocators below also serve plain HTTP. */
+
 /* Every per-request / per-connection network object -- the open+IO request
  * blocks, their duplicated URL/host/category strings, the payload buffers and
  * the RadioNetTransport itself -- is allocated with AllocVec/FreeVec instead
@@ -368,6 +370,7 @@ static void radio_net_free(void *p)
 #endif
 }
 
+#if defined(HAVE_AMISSL)
 static int radio_net_worker_is_self(void)
 {
     return radio_net_worker_task != NULL && FindTask(NULL) == radio_net_worker_task;
@@ -1749,6 +1752,8 @@ static int radio_ssl_wait_ready(RADIO_SOCKET sock, int ssl_error)
 #endif
 }
 
+#endif /* HAVE_AMISSL: SO_ERROR is also used by plain HTTP transports. */
+
 static int radio_socket_connect_error(RADIO_SOCKET sock, long *out_error)
 {
     int so_error = 0;
@@ -1766,7 +1771,6 @@ static int radio_socket_connect_error(RADIO_SOCKET sock, long *out_error)
     if (out_error) *out_error = so_error;
     return so_error == 0 ? 0 : -1;
 }
-#endif
 
 static void radio_log_socket_failure(RadioStream *rs, const char *context, const char *where)
 {
