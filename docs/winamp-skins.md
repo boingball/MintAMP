@@ -29,6 +29,10 @@ native frontend remains usable. The last successfully selected skin and scale
 are saved separately for SGT and SR. Audio settings and radio favourites use
 the existing frontend's settings.
 
+With a valid skin, only the skin player opens at startup. The native settings
+gadgets are prepared without displaying their window; use Settings/EQ to open
+it. The skin's native menu uses the Workbench menu colours and screen font.
+
 Shell examples:
 
 ```text

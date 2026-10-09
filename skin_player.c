@@ -201,13 +201,14 @@ static void close_window(SkinPlayer *p)
     while ((m=GetMsg(p->win->UserPort))!=NULL) ReplyMsg(m);
     CloseWindow(p->win); p->win=NULL;
 }
-static void build_menu(SkinPlayer *p)
+static void build_menu(SkinPlayer *p,UWORD text_pen,UWORD background_pen)
 {
     static const char * const labels[]={"Load skin...","Double size","Settings","Internet Radio","Playlist","Open audio...","Quit"};
     int i, h=p->screen->Font->ta_YSize+4, width=0;
     memset(&p->menu,0,sizeof(p->menu));
     p->menu.Flags=MENUENABLED; p->menu.MenuName=(STRPTR)"MintAMP";
-    p->menu.Width=64; p->menu.Height=h; p->menu.FirstItem=p->items;
+    p->menu.Width=TextLength(&p->screen->RastPort,p->menu.MenuName,strlen((const char *)p->menu.MenuName))+16;
+    p->menu.Height=h; p->menu.FirstItem=p->items;
     for (i=0;i<7;++i) {
         int w=TextLength(&p->screen->RastPort,(STRPTR)labels[i],strlen(labels[i]))+16;
         if (w>width) width=w;
@@ -218,24 +219,40 @@ static void build_menu(SkinPlayer *p)
         p->items[i].TopEdge=i*h; p->items[i].Width=width; p->items[i].Height=h;
         p->items[i].Flags=ITEMTEXT|ITEMENABLED|HIGHCOMP;
         p->items[i].ItemFill=&p->labels[i]; p->items[i].NextSelect=MENUNULL;
-        p->labels[i].FrontPen=1; p->labels[i].DrawMode=JAM1;
+        p->labels[i].FrontPen=(UBYTE)text_pen;
+        p->labels[i].BackPen=(UBYTE)background_pen; p->labels[i].DrawMode=JAM1;
+        p->labels[i].ITextFont=p->screen->Font;
         p->labels[i].LeftEdge=4; p->labels[i].TopEdge=2; p->labels[i].IText=(UBYTE *)labels[i];
     }
 }
 static int open_window(SkinPlayer *p,WORD left,WORD top)
 {
     int scale=p->resources->scale;
+    struct DrawInfo *dri;
+    UWORD text_pen=p->screen->DetailPen, background_pen=p->screen->BlockPen;
     if (SKIN_WIDTH*scale>p->screen->Width || SKIN_HEIGHT*scale>p->screen->Height) return 0;
+    /* Menus use window pens even on a borderless window. Zero defaults make
+     * the menu title disappear. V39 adds dedicated menu-bar pens; V37/38
+     * have the standard text/background pens. Never assume palette indices. */
+    dri=GetScreenDrawInfo(p->screen);
+    if (dri) {
+        text_pen=dri->dri_Pens[dri->dri_NumPens>BARDETAILPEN ? BARDETAILPEN : TEXTPEN];
+        background_pen=dri->dri_Pens[dri->dri_NumPens>BARBLOCKPEN ? BARBLOCKPEN : BACKGROUNDPEN];
+        FreeScreenDrawInfo(p->screen,dri);
+    }
     p->win=OpenWindowTags(NULL,WA_CustomScreen,(ULONG)p->screen,
         WA_Left,(ULONG)left,WA_Top,(ULONG)top,
         WA_Width,SKIN_WIDTH*scale,WA_Height,SKIN_HEIGHT*scale,
         WA_Borderless,TRUE,WA_Activate,TRUE,WA_RMBTrap,FALSE,
+        WA_DetailPen,(ULONG)text_pen,WA_BlockPen,(ULONG)background_pen,
+        WA_NewLookMenus,(ULONG)(GfxBase->LibNode.lib_Version>=39),
         WA_ReportMouse,TRUE,WA_SimpleRefresh,TRUE,
         WA_IDCMP,IDCMP_MOUSEBUTTONS|IDCMP_MOUSEMOVE|IDCMP_REFRESHWINDOW|
                    IDCMP_MENUPICK|IDCMP_VANILLAKEY|IDCMP_INACTIVEWINDOW,
         TAG_DONE);
     if (!p->win) return 0;
-    build_menu(p); SetMenuStrip(p->win,&p->menu); p->have_drawn=0; repaint(p,1); return 1;
+    build_menu(p,text_pen,background_pen); SetMenuStrip(p->win,&p->menu);
+    p->have_drawn=0; repaint(p,1); return 1;
 }
 static int request_path(SkinPlayer *p,char *path)
 {

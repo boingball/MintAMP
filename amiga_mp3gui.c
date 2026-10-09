@@ -279,7 +279,7 @@ static void GuiTaskIdentityLog(const char *phase)
  * schema version above: release numbering does not imply a settings migration. */
 static const char gMintAmpGtVersionTag[] __attribute__((used)) =
 #ifdef MINTAMP_SKIN
-	"\0$VER: MintAMP-SGT " MINTAMP_GT_VERSION " (09.10.2026)";
+	"\0$VER: MintAMP-SGT " MINTAMP_GT_VERSION " (10.10.2026)";
 #else
 	"\0$VER: MintAMP-GT " MINTAMP_GT_VERSION " (08.10.2026)";
 #endif
@@ -5845,8 +5845,15 @@ static struct Window *GuiOpenMainWindow(HelixAmp3Gui *gui, WORD left, WORD top)
 		AddGList(gui->win, gui->gadgets, (UWORD)-1, -1, NULL);
 		RefreshGList(gui->gadgets, gui->win, NULL, -1);
 	}
-	if (gui->menuStrip)
+	if (gui->menuStrip) {
 		SetMenuStrip(gui->win, gui->menuStrip);
+		if (!gui->hasNetwork) {
+			OffMenu(gui->win, FULLMENUNUM(MENUNUM_PROJECT, ITEMNUM_STREAM, NOSUB));
+			OffMenu(gui->win, FULLMENUNUM(MENUNUM_PROJECT, ITEMNUM_RADIO, NOSUB));
+		}
+		if (!gui->appPort)
+			OffMenu(gui->win, FULLMENUNUM(MENUNUM_PROJECT, ITEMNUM_ICONIFY, NOSUB));
+	}
 	return gui->win;
 }
 
@@ -6099,8 +6106,10 @@ static void ScanDecoderModules(void)
 #endif
 }
 
-static int GuiOpen(HelixAmp3Gui *gui)
+static int GuiOpen(HelixAmp3Gui *gui,int argc,char **argv)
 {
+	struct Screen *screen;
+	(void)argc; (void)argv;
 	/* Discover decoder modules and build the ASL file-browser pattern first,
 	 * so gSupportedExtPattern and gDecoderModulesPath are ready for playback. */
 	ScanDecoderModules();
@@ -6227,31 +6236,42 @@ static int GuiOpen(HelixAmp3Gui *gui)
 		return -1;
 	}
 
-	gui->win = GuiOpenMainWindow(gui, 40, 30);
-	if (!gui->win) {
-		fprintf(stderr, "cannot open MintAMP-GT window\n");
-		GuiClose(gui);
-		return -1;
+#ifdef MINTAMP_SKIN
+	/* Open the player first. GadTools gadgets can be built without opening
+	 * their settings window; the restore path attaches them on demand. */
+	gSkinPlayer=skin_player_open("MintAMP-SGT",argc,argv);
+	if (gSkinPlayer) {
+		screen=skin_player_window(gSkinPlayer)->WScreen;
+		gui->iconified=1;
+		gui->iconifyLeft=40; gui->iconifyTop=30;
+	} else
+#endif
+	{
+		gui->win = GuiOpenMainWindow(gui, 40, 30);
+		if (!gui->win) {
+			fprintf(stderr, "cannot open MintAMP-GT window\n");
+			GuiClose(gui);
+			return -1;
+		}
+		screen=gui->win->WScreen;
 	}
-	if (gui->smallFont)
-		SetFont(gui->win->RPort, gui->smallFont);
-
-	gui->visualInfo = GetVisualInfo(gui->win->WScreen,
-		TAG_DONE);
+	gui->visualInfo = GetVisualInfo(screen,TAG_DONE);
 	if (!gui->visualInfo) {
 		fprintf(stderr, "cannot create GadTools visual info\n");
 		GuiClose(gui);
 		return -1;
 	}
-	if (gui->smallFont)
+	if (gui->win && gui->smallFont)
 		SetFont(gui->win->RPort, gui->smallFont);
 	if (GuiCreateGadgets(gui) != 0) {
 		fprintf(stderr, "cannot create MintAMP-GT gadgets\n");
 		GuiClose(gui);
 		return -1;
 	}
-	AddGList(gui->win, gui->gadgets, (UWORD)-1, -1, NULL);
-	RefreshGList(gui->gadgets, gui->win, NULL, -1);
+	if (gui->win) {
+		AddGList(gui->win, gui->gadgets, (UWORD)-1, -1, NULL);
+		RefreshGList(gui->gadgets, gui->win, NULL, -1);
+	}
 	UpdateChannelGadgetState(gui);
 	UpdateFastMemGadgetState(gui);
 	ApplyHardwareAudioFilter(gui);
@@ -6265,12 +6285,12 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	if (gui->menuStrip) {
 		LayoutMenus(gui->menuStrip, gui->visualInfo, TAG_DONE);
 		SyncMenuChecks(gui);
-		SetMenuStrip(gui->win, gui->menuStrip);
-		if (!gui->hasNetwork) {
+		if (gui->win) SetMenuStrip(gui->win, gui->menuStrip);
+		if (gui->win && !gui->hasNetwork) {
 			OffMenu(gui->win, FULLMENUNUM(MENUNUM_PROJECT, ITEMNUM_STREAM, NOSUB));
 			OffMenu(gui->win, FULLMENUNUM(MENUNUM_PROJECT, ITEMNUM_RADIO, NOSUB));
 		}
-		if (!gui->appPort)
+		if (gui->win && !gui->appPort)
 			OffMenu(gui->win, FULLMENUNUM(MENUNUM_PROJECT, ITEMNUM_ICONIFY, NOSUB));
 	}
 	gui->timerPort = CreateMsgPort();
@@ -6296,11 +6316,13 @@ static int GuiOpen(HelixAmp3Gui *gui)
 		gDoneMsg.mn_Length = sizeof(gDoneMsg);
 		gDoneMsg.mn_Node.ln_Type = NT_MESSAGE;
 	}
-	GT_RefreshWindow(gui->win, NULL);
-	DrawProgressFrame(gui);
-	DrawProgress(gui);
-	DrawArtPanel(gui);
-	DrawTransportIcons(gui);
+	if (gui->win) {
+		GT_RefreshWindow(gui->win, NULL);
+		DrawProgressFrame(gui);
+		DrawProgress(gui);
+		DrawArtPanel(gui);
+		DrawTransportIcons(gui);
+	}
 	if (gui->timerOpen)
 		SendTimerRequest(gui, TIMER_TICK_MICROS);
 	return 0;
@@ -6308,6 +6330,10 @@ static int GuiOpen(HelixAmp3Gui *gui)
 
 static void GuiClose(HelixAmp3Gui *gui)
 {
+#ifdef MINTAMP_SKIN
+	/* Also handles an initialization failure after the skin opened. */
+	skin_player_close(gSkinPlayer); gSkinPlayer=NULL;
+#endif
 	RADIO_DBG(printf("gui-close: enter win=%p rbWin=%p plWin=%p playbackActive=%d\n",
 		(void *)gui->win, (void *)gui->rbWin, (void *)gui->plWin, gui->playbackActive);)
 	CancelArtDecode(gui);
@@ -9804,14 +9830,11 @@ static int GuiMainReal(int argc, char **argv)
 	 * recoverable AN_FreeTwice/AN_BadFreeAddr alerts to be pinned on the GUI
 	 * task rather than the net worker or a playback child. */
 	GUI_TASK_IDENTITY("application-startup-main-task");
-	if (GuiOpen(&gui) != 0)
+	if (GuiOpen(&gui,argc,argv) != 0)
 		return 1;
-#ifdef MINTAMP_SKIN
-	gSkinPlayer=skin_player_open("MintAMP-SGT",argc,argv);
-#endif
 	GuiOpenStartupArg(&gui, argc, argv);
 #ifdef MINTAMP_SKIN
-	if (gSkinPlayer) { GuiSkinUpdate(&gui,0); GuiSkinHideSettings(&gui); }
+	if (gSkinPlayer) GuiSkinUpdate(&gui,0);
 #endif
 	GUI_TASK_IDENTITY("gui-event-loop");
 	while (!gui.closeRequested) {

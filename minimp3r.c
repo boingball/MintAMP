@@ -89,7 +89,7 @@ static int gSkinPendingTrack = -1;
 /* AmigaOS Version command metadata; unrelated to MR_SETTINGS_VERSION. */
 static const char gMintAmpVersionTag[] __attribute__((used)) =
 #ifdef MINTAMP_SKIN
-	"\0$VER: MintAMP-SR " MINTAMP_VERSION " (09.10.2026)";
+	"\0$VER: MintAMP-SR " MINTAMP_VERSION " (10.10.2026)";
 #else
 	"\0$VER: MintAMP " MINTAMP_VERSION " (08.10.2026)";
 #endif
@@ -3180,6 +3180,19 @@ static int MrOpenWindow(MrApp *app)
 		return 0;
 	}
 
+#ifdef MINTAMP_SKIN
+	/* The BOOPSI tree retains settings while closed. Do not open its native
+	 * window merely to close it again once the skin is visible. */
+	if (gSkinPlayer) {
+		MrSetGadgetAttr(app->bufferGad,NULL,GA_Disabled,(ULONG)app->decodeThenPlay);
+		if (!app->hasNetwork) {
+			struct MenuItem *item=ItemAddress(app->menuStrip,
+				FULLMENUNUM(MENUNUM_PROJECT,ITEMNUM_RADIO,NOSUB));
+			if (item) item->Flags &= ~ITEMENABLED;
+		}
+		return 1;
+	}
+#endif
 	app->win = (struct Window *)RA_OpenWindow(app->winObj);
 	if (!app->win) {
 		fprintf(stderr, "MintAMP: could not open the window.\n");
@@ -3196,6 +3209,10 @@ static int MrOpenWindow(MrApp *app)
 
 static void MrCloseWindow(MrApp *app)
 {
+#ifdef MINTAMP_SKIN
+	/* Also release the player if creating the native settings tree failed. */
+	skin_player_close(gSkinPlayer); gSkinPlayer=NULL;
+#endif
 	RADIO_DBG(printf("app-close: MrCloseWindow enter rbWin=%p plWin=%p menuStrip=%p winObj=%p\n",
 		app->rbWin, app->plWin, app->menuStrip, app->winObj);)
 	CloseRadioWindow(app);
@@ -7164,6 +7181,15 @@ static void MrUniconify(MrApp *app)
 	app->win = (struct Window *)RA_OpenWindow(app->winObj);
 	if (!app->win)
 		return;
+#ifdef MINTAMP_SKIN
+	/* On the first open the full chooser label list reserves its width, then
+	 * narrow it as in the standard startup path. Reapply current enablement
+	 * after the hidden period, including a saved mono-only speed mode. */
+	UpdateSpeedGadgetChoices(app);
+	app->shownChannelDisabled=app->shownWidthDisabled=-1;
+	UpdateChannelGadgetState(app);
+	MrSetGadgetAttr(app->bufferGad,app->win,GA_Disabled,(ULONG)app->decodeThenPlay);
+#endif
 	UpdateFastMemGadgetState(app);
 	DrawArtPanel(app);
 	WindowToFront(app->win);
@@ -7489,6 +7515,9 @@ static int MrMainReal(int argc, char **argv)
 		return 1;
 	}
 
+#ifdef MINTAMP_SKIN
+	gSkinPlayer=skin_player_open("MintAMP-SR",argc,argv);
+#endif
 	if (!MrOpenWindow(&app)) {
 		SyncFromGadgets(&app);
 		SaveSettings(&app);
@@ -7521,12 +7550,9 @@ static int MrMainReal(int argc, char **argv)
 	 * placeholder, so the recessed box is shown before the first file loads. */
 	DrawArtPanel(&app);
 
-#ifdef MINTAMP_SKIN
-	gSkinPlayer=skin_player_open("MintAMP-SR",argc,argv);
-#endif
 	MrOpenStartupArg(&app, argc, argv);
 #ifdef MINTAMP_SKIN
-	if (gSkinPlayer) { MrSkinUpdate(&app,0); MrSkinHideSettings(&app); }
+	if (gSkinPlayer) MrSkinUpdate(&app,0);
 #endif
 
 	MR_TASK_IDENTITY("gui-event-loop");
