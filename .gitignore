@@ -6,3 +6,11 @@
 *.decoder
 *.fastexp
 *.exp
+
+/MintAMP
+/MintAMP-GT
+/MintAMP-SGT
+/MintAMP-SR
+/skin_format_test
+*.freeall-discovery
+*.freeall-heads

@@ -58,6 +58,9 @@ jobs:
       - name: Check the libnix ___free_all head finder
         run: make -f Makefile.amiga freeall-heads-test
 
+      - name: Check classic Winamp skin loading and rendering
+        run: make -f Makefile.amiga skin-format-test
+
       - name: Compile with the Amiga cross-compiler
         env:
           CPU: ${{ matrix.cpu }}
@@ -67,11 +70,11 @@ jobs:
             -e CPU -e ASM60_GROUPS \
             -v "$PWD":/src -w /src \
             amigadev/crosstools:m68k-amigaos \
-            bash -c 'make -f Makefile.amiga fast030 CPU="$CPU" ASM60_GROUPS="$ASM60_GROUPS"'
+            bash -c 'make -f Makefile.amiga fast030 sgt sr RADIO=1 CPU="$CPU" ASM60_GROUPS="$ASM60_GROUPS"'
 
       - name: Confirm the player and decoder modules were produced
         run: |
-          ls -la amiga_mp3dec.fastexp
+          ls -la amiga_mp3dec.fastexp MintAMP-SGT MintAMP-SR
           ls -la decoders/{aac,flac,ogg,wma,wav,iff}.decoder
           file amiga_mp3dec.fastexp || true
 
@@ -81,5 +84,10 @@ jobs:
           name: MintAMP-${{ matrix.label }}-AmigaOS
           path: |
             amiga_mp3dec.fastexp
+            MintAMP-SGT
+            MintAMP-SR
+            MintAMP-SGT.info
+            MintAMP-SR.info
+            docs/winamp-skins.md
             decoders/*.decoder
           if-no-files-found: error

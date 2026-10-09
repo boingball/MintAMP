@@ -25,6 +25,11 @@
 #include "radio_runtime_flags.h"
 #include "amiga_display_text.h"
 #include "miniamp_memguard.h"
+#if defined(MINTAMP_SKIN) && defined(AMIGA_M68K)
+#include "skin_player.h"
+static SkinPlayer *gSkinPlayer;
+static int gSkinPendingTrack = -1;
+#endif
 
 #if defined(AMIGA_M68K)
 
@@ -83,7 +88,11 @@
 
 /* AmigaOS Version command metadata; unrelated to MR_SETTINGS_VERSION. */
 static const char gMintAmpVersionTag[] __attribute__((used)) =
+#ifdef MINTAMP_SKIN
+	"\0$VER: MintAMP-SR " MINTAMP_VERSION " (09.10.2026)";
+#else
 	"\0$VER: MintAMP " MINTAMP_VERSION " (08.10.2026)";
+#endif
 #if !defined(__AROS__) && !defined(MR_DISABLE_CIA_FILTER)
 #define MR_ENABLE_CIA_FILTER 1
 #endif
@@ -587,7 +596,11 @@ static volatile unsigned long gEntryRunId;
 static volatile unsigned long gDoneRunId;
 #define MR_APP_MAGIC 0x4d523047UL
 #define MR_DONE_MAGIC 0x4d52444fUL
+#ifdef MINTAMP_SKIN
+#define MR_WINDOW_TITLE "MintAMP-SR Settings"
+#else
 #define MR_WINDOW_TITLE "MintAMP"
+#endif
 
 /* ------------------------------------------------------------------------- */
 /* Application state                                                         */
@@ -5235,11 +5248,7 @@ SafeCopy(app->inputName, sizeof(app->inputName), path);
 CopyDrawerFromPath(app->lastDrawer, sizeof(app->lastDrawer), app->inputName);
 SaveSettings(app);
 
-if (app->fileGad && app->win) {
-SetGadgetAttrs((struct Gadget *)app->fileGad, app->win, NULL,
-GETFILE_FullFile, (ULONG)app->inputName,
-TAG_DONE);
-}
+MrSetGadgetAttr(app->fileGad, app->win, GETFILE_FullFile, (ULONG)app->inputName);
 
 app->playlistCount = 0;
 app->playlistCurrent = -1;
@@ -5255,9 +5264,7 @@ FreeAslRequest(fr);
 
 static void UpdateFileGadget(MrApp *app)
 {
-	if (app->fileGad && app->win)
-		SetGadgetAttrs((struct Gadget *)app->fileGad, app->win, NULL,
-			GETFILE_FullFile, (ULONG)app->inputName, TAG_DONE);
+	MrSetGadgetAttr(app->fileGad, app->win, GETFILE_FullFile, (ULONG)app->inputName);
 }
 
 static void PlaylistNext(MrApp *app)
@@ -6335,6 +6342,11 @@ static void CloseRadioWindow(MrApp *app)
 
 static void OpenRadioWindow(MrApp *app)
 {
+	struct Window *parent = app->win;
+#ifdef MINTAMP_SKIN
+	if (!parent) parent = skin_player_window(gSkinPlayer);
+#endif
+
 	Object *root = NULL;
 	static STRPTR codecs[] = { (STRPTR)"All", (STRPTR)"MP3", (STRPTR)"AAC", (STRPTR)"AAC+", (STRPTR)"FLAC", NULL };
 	/* Window geometry, fitted to the actual screen.  The radio window's natural
@@ -6343,7 +6355,7 @@ static void OpenRadioWindow(MrApp *app)
 	 * ABOVE the top of the screen, so it can't be dragged.  Cap the size to the
 	 * screen and anchor the top below the screen title bar so the drag bar is
 	 * always reachable. */
-	struct Screen *rbScreen = app->win ? app->win->WScreen : NULL;
+	struct Screen *rbScreen = parent ? parent->WScreen : NULL;
 	LONG rbScrW = rbScreen ? (LONG)rbScreen->Width : 640;
 	LONG rbScrH = rbScreen ? (LONG)rbScreen->Height : 256;
 	LONG rbBarH = rbScreen ? (LONG)rbScreen->BarHeight + 1 : 11;
@@ -6361,7 +6373,7 @@ static void OpenRadioWindow(MrApp *app)
 		}
 		return;
 	}
-	if (!app->win || !app->hasNetwork)
+	if (!parent || !app->hasNetwork)
 		return;
 	if (app->rbController.limit <= 0) { rb_controller_init(&app->rbController); app->rbShowHttps = FALSE; app->rbSchemeMode = 0; app->rbCountryMode = 0; }
 	app->rbCountryMode = RadioCountryToIndex(app->rbController.countrycode); app->rbShowingFavourites = FALSE; app->rbSelectedFavourite = -1; NewList(&app->rbList);
@@ -6405,8 +6417,8 @@ static void OpenRadioWindow(MrApp *app)
 	 * Offsetting keeps the two title bars apart (the GadTools frontend already
 	 * opens its radio window at main + 30 for this reason).  Clamp so the whole
 	 * window still lands on-screen. */
-	rbWinLeft = (app->win ? (LONG)app->win->LeftEdge : 0) + 30;
-	rbWinTop  = (app->win ? (LONG)app->win->TopEdge : rbBarH) + 30;
+	rbWinLeft = (parent ? (LONG)parent->LeftEdge : 0) + 30;
+	rbWinTop  = (parent ? (LONG)parent->TopEdge : rbBarH) + 30;
 	if (rbWinLeft + rbWinW > rbScrW) rbWinLeft = rbScrW - rbWinW;
 	if (rbWinLeft < 0) rbWinLeft = 0;
 	if (rbWinTop + rbWinH > rbScrH) rbWinTop = rbScrH - rbWinH;
@@ -6847,10 +6859,15 @@ static Object *PlaylistButton(ULONG id, const char *text)
 
 static void OpenPlaylistWindow(MrApp *app)
 {
+	struct Window *parent = app->win;
+#ifdef MINTAMP_SKIN
+	if (!parent) parent = skin_player_window(gSkinPlayer);
+#endif
+
 	Object *root = NULL;
 	int sel;
 
-	if (app->plWinObj || !app->win)
+	if (app->plWinObj || !parent)
 		return;
 
 	RefreshPlaylistView(app);
@@ -7340,8 +7357,13 @@ static void MrOpenStartupArg(MrApp *app, int argc, char **argv)
 {
 	char path[MR_MAX_PATH];
 	path[0] = '\0';
+#ifdef MINTAMP_SKIN
+	if (argc > 0 && skin_player_audio_arg(argc, argv)) {
+		SafeCopy(path, sizeof(path), skin_player_audio_arg(argc, argv));
+#else
 	if (argc >= 2 && argv[1] && argv[1][0] && argv[1][0] != '-') {
 		SafeCopy(path, sizeof(path), argv[1]);
+#endif
 	} else if (argc == 0 && argv) {
 		struct WBStartup *wb = (struct WBStartup *)argv;
 		if (wb->sm_NumArgs >= 2 && wb->sm_ArgList[1].wa_Lock &&
@@ -7351,6 +7373,9 @@ static void MrOpenStartupArg(MrApp *app, int argc, char **argv)
 	}
 	if (!path[0])
 		return;
+#ifdef MINTAMP_SKIN
+	if (skin_player_is_skin(path)) return;
+#endif
 	if (MrIsPlaylistFile(path)) {
 		char drawer[MR_MAX_PATH];
 		CopyDrawerFromPath(drawer, sizeof(drawer), path);
@@ -7366,6 +7391,10 @@ static void MrOpenStartupArg(MrApp *app, int argc, char **argv)
 		StartPlayback(app);
 	}
 }
+
+#ifdef MINTAMP_SKIN
+#include "skin_reaction.inc"
+#endif
 
 static int MrMainReal(int argc, char **argv)
 {
@@ -7492,7 +7521,13 @@ static int MrMainReal(int argc, char **argv)
 	 * placeholder, so the recessed box is shown before the first file loads. */
 	DrawArtPanel(&app);
 
+#ifdef MINTAMP_SKIN
+	gSkinPlayer=skin_player_open("MintAMP-SR",argc,argv);
+#endif
 	MrOpenStartupArg(&app, argc, argv);
+#ifdef MINTAMP_SKIN
+	if (gSkinPlayer) { MrSkinUpdate(&app,0); MrSkinHideSettings(&app); }
+#endif
 
 	MR_TASK_IDENTITY("gui-event-loop");
 	while (!done) {
@@ -7503,7 +7538,12 @@ static int MrMainReal(int argc, char **argv)
 			GetAttr(WINDOW_SigMask, app.plWinObj, &plSig);
 		if (app.rbWinObj)
 			GetAttr(WINDOW_SigMask, app.rbWinObj, &rbSig);
+#ifdef MINTAMP_SKIN
+		GetAttr(WINDOW_SigMask, app.winObj, &winSig);
+		sigs = Wait(skin_player_signal(gSkinPlayer) | winSig | appSig | timerSig | doneSig | plSig | rbSig |
+#else
 		sigs = Wait(winSig | appSig | timerSig | doneSig | plSig | rbSig |
+#endif
 			SIGBREAKF_CTRL_C);
 
 		if (sigs & SIGBREAKF_CTRL_C)
@@ -7511,6 +7551,9 @@ static int MrMainReal(int argc, char **argv)
 
 		if (sigs & doneSig)
 			HandleDoneSignal(&app);
+#ifdef MINTAMP_SKIN
+		MrSkinPoll(&app,&done);
+#endif
 
 		if (sigs & timerSig) {
 			struct Message *tmsg;
@@ -7534,6 +7577,9 @@ static int MrMainReal(int argc, char **argv)
 			while ((result = RA_HandleInput(app.winObj, &code)) != WMHI_LASTMSG) {
 				switch (result & WMHI_CLASSMASK) {
 				case WMHI_CLOSEWINDOW:
+#ifdef MINTAMP_SKIN
+					if (gSkinPlayer) MrSkinHideSettings(&app); else
+#endif
 					done = 1;
 					break;
 				case WMHI_ICONIFY:
@@ -7609,6 +7655,9 @@ static int MrMainReal(int argc, char **argv)
 			 * metadata gadgets continuously. */
 			UpdateAlbumHover(&app);
 		}
+#ifdef MINTAMP_SKIN
+		MrSkinUpdate(&app,(sigs & timerSig)!=0);
+#endif
 	}
 
 	/* Ordered, idempotent app-close teardown. Only proceed to dispose the
@@ -7632,6 +7681,9 @@ static int MrMainReal(int argc, char **argv)
 		return 0;
 	}
 
+#ifdef MINTAMP_SKIN
+	skin_player_close(gSkinPlayer); gSkinPlayer=NULL;
+#endif
 	SyncFromGadgets(&app);
 	SaveSettings(&app);
 	RADIO_DBG(printf("app-close: SaveSettings done\n");)

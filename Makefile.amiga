@@ -180,6 +180,9 @@ OPTFLAGS ?= -O2 -fomit-frame-pointer
 TARGET ?= amiga_mp3dec
 GUI_TARGET ?= MintAMP-GT
 GUIR_TARGET ?= MintAMP
+SKINGT_TARGET ?= MintAMP-SGT
+SKINR_TARGET ?= MintAMP-SR
+SKIN ?= 0
 
 RELEASE_ROOT ?= release
 RELEASE_NAME ?= MintAMP
@@ -306,6 +309,15 @@ GUIR_SOURCES := minimp3r.c picojpeg.c lodepng.c webpdec.c svgdec.c miniamp_memgu
 	radio_browser_controller.c radio_browser.c radio_browser_url.c \
 	radio_browser_http.c radio_browser_json.c radio_stream_probe.c
 
+SKIN_SOURCES := winamp_skin.c winamp_skin_render.c skin_player.c
+SKIN_HEADERS := winamp_skin.h skin_player.h skin_gadtools.inc skin_reaction.inc
+ifeq ($(SKIN),1)
+CPPFLAGS_COMMON += -DMINTAMP_SKIN
+GUI_SOURCES += $(SKIN_SOURCES)
+GUIR_SOURCES += $(SKIN_SOURCES)
+GUI_EXTRA_DEPS := $(SKIN_HEADERS)
+endif
+
 # FAST030_* names are kept for backward compatibility (every target rule
 # below still refers to them) even though they're no longer hardcoded to
 # -m68030 -- the actual CPU is now CPU_MFLAG/CPU_ASM_*, set above from the
@@ -321,7 +333,7 @@ HALFASM_TEST_CPPFLAGS := -DAMIGA_M68K_ASM_FDCT32
 FAST030_ASM_SOURCES := $(CPU_ASM_SOURCES)
 AMIGA_HUNK_FAST_PREFERRED := python3 tools/amiga_fast_preferred_hunks.py
 
-.PHONY: all fast030 radio030 sslradio030 amissl-get-test amissl-free-repro-test amissl-spawn-repro-test amissl-exec-repro-test rb-stream-probe-test prof030 gui guir miniamp3 minimp3r sslgui sslguir fast030-halfasm-test gui-halfasm-test decoder-modules release release-clean clean print-command print-fast030-command print-gui-command print-guir-command cpu60-baseline cpu60-huffman cpu60-huffman-dequant cpu60-huffman-dequant-imdct cpu60-huffman-dequant-imdct-fdct32 cpu60-audit-stages poly60-ref-test aac-mulshift60-ref-test ogg-mulshift60-ref-test wma-mulshift-ref-test flac-lpc-ref-test radio-metadata-test radio-oggflac-test playlist-format-test display-text-test radio-favourites-test freeall-heads-test
+.PHONY: skins sgt sr sslsgt sslsr skin-format-test all fast030 radio030 sslradio030 amissl-get-test amissl-free-repro-test amissl-spawn-repro-test amissl-exec-repro-test rb-stream-probe-test prof030 gui guir miniamp3 minimp3r sslgui sslguir fast030-halfasm-test gui-halfasm-test decoder-modules release release-clean clean print-command print-fast030-command print-gui-command print-guir-command cpu60-baseline cpu60-huffman cpu60-huffman-dequant cpu60-huffman-dequant-imdct cpu60-huffman-dequant-imdct-fdct32 cpu60-audit-stages poly60-ref-test aac-mulshift60-ref-test ogg-mulshift60-ref-test wma-mulshift-ref-test flac-lpc-ref-test radio-metadata-test radio-oggflac-test playlist-format-test display-text-test radio-favourites-test freeall-heads-test
 
 all: $(TARGET) decoder-modules
 
@@ -393,6 +405,28 @@ sslguir:
 
 prof030: $(PROF030_TARGET)
 
+# Separate executables reuse the existing frontend/link recipes, including
+# task-safe allocation and the exact-binary libnix ___free_all fix.
+sgt:
+	$(MAKE) -f Makefile.amiga gui SKIN=1 GUI_TARGET="$(SKINGT_TARGET)"
+sr:
+	$(MAKE) -f Makefile.amiga guir SKIN=1 GUIR_TARGET="$(SKINR_TARGET)"
+skins: sgt sr
+sslsgt:
+	$(MAKE) -f Makefile.amiga sgt RADIO=1 SSL=1
+sslsr:
+	$(MAKE) -f Makefile.amiga sr RADIO=1 SSL=1
+ifneq ($(SKIN),1)
+$(SKINGT_TARGET): sgt
+$(SKINR_TARGET): sr
+endif
+
+skin-format-test:
+	$(HOSTCC) -O2 -std=gnu99 -Wall -Wextra -I. -DLODEPNG_NO_COMPILE_ENCODER \
+		-DLODEPNG_NO_COMPILE_DISK tests/winamp_skin_test.c winamp_skin.c \
+		winamp_skin_render.c lodepng.c -o skin_format_test
+	python3 tests/winamp_skin_test.py $(SKIN_TEST_FILE)
+
 gui: $(GUI_TARGET) decoder-modules
 
 guir: $(GUIR_TARGET) decoder-modules
@@ -405,7 +439,7 @@ fast030-halfasm-test: $(FAST030_HALFASM_TEST_TARGET)
 
 gui-halfasm-test: $(GUI_HALFASM_TEST_TARGET)
 
-$(GUI_TARGET): $(GUI_SOURCES) amiga_mp3dec.c $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(LIBNIX_FREEALL_COMPAT_SOURCES)
+$(GUI_TARGET): $(GUI_EXTRA_DEPS) $(GUI_SOURCES) amiga_mp3dec.c $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(LIBNIX_FREEALL_COMPAT_SOURCES)
 	set -e; \
 	trap 'rm -f $@.freeall-discovery $@.freeall-heads' EXIT; \
 	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(PROBE_CPPFLAGS) $(SSL_CPPFLAGS) $(SSLCERTS_CPPFLAGS) $(PNG_CPPFLAGS) $(DEBUG_CPPFLAGS) $(FREEALL_PROBE_CPPFLAGS) $(EXTRA_CFLAGS) \
@@ -422,7 +456,7 @@ $(GUI_TARGET): $(GUI_SOURCES) amiga_mp3dec.c $(DECODER_SOURCES) $(FAST030_ASM_SO
 # MintAMP — ReAction/ClassAct frontend.  Built with the same fast030 ASM path
 # as the GadTools GUI since it targets 030+/3.5/3.9 machines.  minimp3r.c
 # #includes amiga_mp3dec.c, so only the shared decoder modules are linked.
-$(GUIR_TARGET): $(GUIR_SOURCES) amiga_mp3dec.c $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(LIBNIX_FREEALL_COMPAT_SOURCES)
+$(GUIR_TARGET): $(GUI_EXTRA_DEPS) $(GUIR_SOURCES) amiga_mp3dec.c $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(LIBNIX_FREEALL_COMPAT_SOURCES)
 	set -e; \
 	trap 'rm -f $@.freeall-discovery $@.freeall-heads' EXIT; \
 	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(PROBE_CPPFLAGS) $(SSL_CPPFLAGS) $(SSLCERTS_CPPFLAGS) $(PNG_CPPFLAGS) $(DEBUG_CPPFLAGS) $(FREEALL_PROBE_CPPFLAGS) $(EXTRA_CFLAGS) \
@@ -647,19 +681,20 @@ decoder-modules:
 # fallback; amiga_mp3dec.fastexp is the fast command-line edition. The
 # applications create PROGDIR:ArtCache themselves when needed, but the empty
 # drawer is included here for a tidy unpacked layout.
-release: $(GUIR_TARGET) $(GUI_TARGET) $(FAST030_TARGET) decoder-modules
+release: skins $(GUIR_TARGET) $(GUI_TARGET) $(FAST030_TARGET) decoder-modules
 	rm -rf "$(RELEASE_DIR)"
-	mkdir -p "$(RELEASE_DIR)/decoders" "$(RELEASE_DIR)/ArtCache"
+	mkdir -p "$(RELEASE_DIR)/decoders" "$(RELEASE_DIR)/ArtCache" "$(RELEASE_DIR)/Skins"
 	@test -f "$(RELEASE_ICON_SOURCE)" || { echo "ERROR: missing drawer icon $(RELEASE_ICON_SOURCE)"; exit 1; }
 	@test -f "$(RELEASE_README_SOURCE)" || { echo "ERROR: missing release readme $(RELEASE_README_SOURCE)"; exit 1; }
 	cp "$(RELEASE_ICON_SOURCE)" "$(RELEASE_ROOT)/$(RELEASE_NAME).info"
 	cp "$(RELEASE_README_SOURCE)" "$(RELEASE_ROOT)/MintAMP.readme"
 	cp "$(RELEASE_README_SOURCE)" "$(RELEASE_DIR)/ReadMe"
 	@test -f "$(FAST030_TARGET)" || { echo "ERROR: missing $(FAST030_TARGET)"; exit 1; }
-	cp "$(GUIR_TARGET)" "$(GUI_TARGET)" "$(FAST030_TARGET)" "$(RELEASE_DIR)/"
+	cp "$(GUIR_TARGET)" "$(GUI_TARGET)" "$(SKINGT_TARGET)" "$(SKINR_TARGET)" "$(FAST030_TARGET)" "$(RELEASE_DIR)/"
 	@test -f "$(GUIR_TARGET).info" || { echo "ERROR: missing $(GUIR_TARGET).info"; exit 1; }
 	@test -f "$(GUI_TARGET).info" || { echo "ERROR: missing $(GUI_TARGET).info"; exit 1; }
-	cp "$(GUIR_TARGET).info" "$(GUI_TARGET).info" "$(RELEASE_DIR)/"
+	cp "$(GUIR_TARGET).info" "$(GUI_TARGET).info" "$(SKINGT_TARGET).info" "$(SKINR_TARGET).info" "$(RELEASE_DIR)/"
+	cp docs/winamp-skins.md "$(RELEASE_DIR)/Skins/ReadMe"
 	@set -e; \
 	found=0; \
 	for decoder in decoders/*.decoder; do \
@@ -684,7 +719,7 @@ release-clean:
 	rm -rf "$(RELEASE_ROOT)"
 
 clean:
-	rm -f $(TARGET) $(FAST030_TARGET) $(PROF030_TARGET) $(FAST030_HALFASM_TEST_TARGET) $(GUI_TARGET) $(GUIR_TARGET) $(GUI_TARGET).freeall-discovery $(GUIR_TARGET).freeall-discovery $(GUI_TARGET).freeall-heads $(GUIR_TARGET).freeall-heads $(GUI_HALFASM_TEST_TARGET) \
+	rm -f $(SKINGT_TARGET) $(SKINR_TARGET) skin_format_test $(TARGET) $(FAST030_TARGET) $(PROF030_TARGET) $(FAST030_HALFASM_TEST_TARGET) $(GUI_TARGET) $(GUIR_TARGET) $(GUI_TARGET).freeall-discovery $(GUIR_TARGET).freeall-discovery $(GUI_TARGET).freeall-heads $(GUIR_TARGET).freeall-heads $(GUI_HALFASM_TEST_TARGET) \
 		amissl_https_get amissl_ssl_free_repro amissl_spawn_repro amissl_exec_repro amissl_child_worker_repro rb_stream_probe_test \
 		aac_mulshift60_ref_test ogg_mulshift60_ref_test wma_mulshift030_ref_test wma_mulshift060_ref_test \
 		flac_lpc030_ref_test flac_lpc060_ref_test polyphase60_ref_test radio_metadata_test radio_oggflac_test playlist_format_test \

@@ -9,6 +9,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include "miniamp_memguard.h"
+#if defined(MINTAMP_SKIN) && defined(AMIGA_M68K)
+#include "skin_player.h"
+static SkinPlayer *gSkinPlayer;
+static int gSkinPendingTrack = -1;
+#endif
 #include "amiga_display_text.h"
 #include "radio_runtime_flags.h"
 
@@ -273,7 +278,11 @@ static void GuiTaskIdentityLog(const char *phase)
 /* AmigaOS Version command metadata.  Keep this independent of the settings
  * schema version above: release numbering does not imply a settings migration. */
 static const char gMintAmpGtVersionTag[] __attribute__((used)) =
+#ifdef MINTAMP_SKIN
+	"\0$VER: MintAMP-SGT " MINTAMP_GT_VERSION " (09.10.2026)";
+#else
 	"\0$VER: MintAMP-GT " MINTAMP_GT_VERSION " (08.10.2026)";
+#endif
 /* Bare name, no explicit "ENV:"/"ENVARC:" device prefix -- SaveEnvString()
  * below passes this through SetVar() with GVF_GLOBAL_ONLY (writes ENV:) and
  * separately with GVF_SAVE_VAR (which internally constructs the persistent
@@ -5812,7 +5821,11 @@ static struct Window *GuiOpenMainWindow(HelixAmp3Gui *gui, WORD left, WORD top)
 		WFLG_SIZEGADGET | WFLG_SIZEBBOTTOM | WFLG_ACTIVATE |
 		WFLG_SMART_REFRESH;
 	nw.FirstGadget = NULL;
+#ifdef MINTAMP_SKIN
+	nw.Title = (UBYTE *)"MintAMP-SGT Settings";
+#else
 	nw.Title = (UBYTE *)"MintAMP-GT";
+#endif
 	nw.MinWidth = GUI_WIN_W;
 	nw.MinHeight = GUI_WIN_H;
 	nw.MaxWidth = 680;
@@ -7499,6 +7512,11 @@ static void CloseRadioWindow(HelixAmp3Gui *app)
 
 static void OpenRadioWindow(HelixAmp3Gui *app)
 {
+	struct Window *parent = app->win;
+#ifdef MINTAMP_SKIN
+	if (!parent) parent = skin_player_window(gSkinPlayer);
+#endif
+
 	struct NewWindow nw;
 	struct NewGadget ng;
 	struct Gadget *gad;
@@ -7508,7 +7526,7 @@ static void OpenRadioWindow(HelixAmp3Gui *app)
 		ActivateWindow(app->rbWin);
 		return;
 	}
-	if (!app->win || !GadToolsBase || !app->hasNetwork)
+	if (!parent || !GadToolsBase || !app->hasNetwork)
 		return;
 	if (app->rbController.limit <= 0) {
 		rb_controller_init(&app->rbController);
@@ -7520,7 +7538,7 @@ static void OpenRadioWindow(HelixAmp3Gui *app)
 	app->rbShowingFavourites = FALSE;
 	app->rbSelectedFavourite = -1;
 	app->rbSearchInProgress = 0;
-	app->rbVisualInfo = GetVisualInfoA(app->win->WScreen, NULL);
+	app->rbVisualInfo = GetVisualInfoA(parent->WScreen, NULL);
 	if (!app->rbVisualInfo) return;
 	app->rbGadContext = CreateContext(&app->rbGadgets);
 	if (!app->rbGadContext) goto fail;
@@ -7579,7 +7597,7 @@ static void OpenRadioWindow(HelixAmp3Gui *app)
 		GTTX_Text, (ULONG)(app->rbStatusText[0] ? app->rbStatusText : "Ready."),
 		GTTX_Border, TRUE, TAG_DONE); if (!gad) goto fail;
 	memset(&nw, 0, sizeof(nw));
-	nw.LeftEdge = app->win->LeftEdge + 30; nw.TopEdge = app->win->TopEdge + 30;
+	nw.LeftEdge = parent->LeftEdge + 30; nw.TopEdge = parent->TopEdge + 30;
 	nw.Width = RB_WIN_W; nw.Height = RB_WIN_H;
 	/* LISTVIEWIDCMP includes the gadget-down, mouse, and IntuiTicks events
 	 * consumed by GadTools' composite scroller and auto-repeat arrow gadgets.
@@ -7793,16 +7811,21 @@ free_resources:
 
 static void OpenPlaylistWindow(HelixAmp3Gui *gui)
 {
+	struct Window *parent = gui->win;
+#ifdef MINTAMP_SKIN
+	if (!parent) parent = skin_player_window(gSkinPlayer);
+#endif
+
 	struct NewWindow nw;
 	struct Gadget *gad;
 	struct NewGadget ng;
 	int bw;
 	int bx;
 
-	if (gui->plWin || !gui->win)
+	if (gui->plWin || !parent)
 		return;
 
-	gui->plVisualInfo = GetVisualInfoA(gui->win->WScreen, NULL);
+	gui->plVisualInfo = GetVisualInfoA(parent->WScreen, NULL);
 	if (!gui->plVisualInfo)
 		return;
 	gui->plGadContext = CreateContext(&gui->plGadgets);
@@ -7919,8 +7942,8 @@ static void OpenPlaylistWindow(HelixAmp3Gui *gui)
 	if (!gad) goto fail;
 
 	memset(&nw, 0, sizeof(nw));
-	nw.LeftEdge = gui->win->LeftEdge + 20;
-	nw.TopEdge  = gui->win->TopEdge + 20;
+	nw.LeftEdge = parent->LeftEdge + 20;
+	nw.TopEdge  = parent->TopEdge + 20;
 	nw.Width    = PL_WIN_W;
 	nw.Height   = PL_WIN_H;
 	nw.IDCMPFlags = IDCMP_GADGETUP | IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW;
@@ -9581,6 +9604,10 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 	}
 }
 
+#ifdef MINTAMP_SKIN
+#include "skin_gadtools.inc"
+#endif
+
 static void GuiPoll(HelixAmp3Gui *gui)
 {
 	struct IntuiMessage *msg;
@@ -9593,8 +9620,12 @@ static void GuiPoll(HelixAmp3Gui *gui)
 		code = msg->Code;
 		gad = (struct Gadget *)msg->IAddress;
 		GT_ReplyIMsg(msg);
-		if (classValue == IDCMP_CLOSEWINDOW)
+		if (classValue == IDCMP_CLOSEWINDOW) {
+#ifdef MINTAMP_SKIN
+			if (gSkinPlayer) GuiSkinHideSettings(gui); else
+#endif
 			gui->closeRequested = 1;
+		}
 		else if (classValue == IDCMP_REFRESHWINDOW) {
 			GuiRefresh(gui);
 		} else if (classValue == IDCMP_MENUPICK && gui->menuStrip) {
@@ -9733,8 +9764,13 @@ static void GuiOpenStartupArg(HelixAmp3Gui *gui, int argc, char **argv)
 {
 	char path[HELIXAMP3_MAX_PATH];
 	path[0] = '\0';
+#ifdef MINTAMP_SKIN
+	if (argc > 0 && skin_player_audio_arg(argc, argv)) {
+		SafeCopy(path, sizeof(path), skin_player_audio_arg(argc, argv));
+#else
 	if (argc >= 2 && argv[1] && argv[1][0] && argv[1][0] != '-') {
 		SafeCopy(path, sizeof(path), argv[1]);
+#endif
 	} else if (argc == 0 && argv) {
 		struct WBStartup *wb = (struct WBStartup *)argv;
 		if (wb->sm_NumArgs >= 2 && wb->sm_ArgList[1].wa_Lock &&
@@ -9744,6 +9780,9 @@ static void GuiOpenStartupArg(HelixAmp3Gui *gui, int argc, char **argv)
 	}
 	if (!path[0])
 		return;
+#ifdef MINTAMP_SKIN
+	if (skin_player_is_skin(path)) return;
+#endif
 	if (GuiIsPlaylistFile(path)) {
 		if (GuiOpenPlaylistFile(gui, path) > 0)
 			PlaylistStartCurrent(gui);
@@ -9767,7 +9806,13 @@ static int GuiMainReal(int argc, char **argv)
 	GUI_TASK_IDENTITY("application-startup-main-task");
 	if (GuiOpen(&gui) != 0)
 		return 1;
+#ifdef MINTAMP_SKIN
+	gSkinPlayer=skin_player_open("MintAMP-SGT",argc,argv);
+#endif
 	GuiOpenStartupArg(&gui, argc, argv);
+#ifdef MINTAMP_SKIN
+	if (gSkinPlayer) { GuiSkinUpdate(&gui,0); GuiSkinHideSettings(&gui); }
+#endif
 	GUI_TASK_IDENTITY("gui-event-loop");
 	while (!gui.closeRequested) {
 		ULONG winMask = (gui.win && gui.win->UserPort) ?
@@ -9777,7 +9822,12 @@ static int GuiMainReal(int argc, char **argv)
 		ULONG doneMask = gui.donePort ? (1UL << gui.donePort->mp_SigBit) : 0;
 		ULONG plMask = gui.plWin ? (1UL << gui.plWin->UserPort->mp_SigBit) : 0;
 		ULONG rbMask = gui.rbWin ? (1UL << gui.rbWin->UserPort->mp_SigBit) : 0;
-		ULONG sigs = Wait(winMask | appMask | timerMask |
+#ifdef MINTAMP_SKIN
+		ULONG skinMask=skin_player_signal(gSkinPlayer);
+#else
+		ULONG skinMask=0;
+#endif
+		ULONG sigs = Wait(skinMask | winMask | appMask | timerMask |
 			doneMask | plMask | rbMask | SIGBREAKF_CTRL_C);
 		if (sigs & SIGBREAKF_CTRL_C)
 			gui.closeRequested = 1;
@@ -9785,12 +9835,18 @@ static int GuiMainReal(int argc, char **argv)
 			HandleDoneSignal(&gui);
 		if (appMask && (sigs & appMask))
 			GuiHandleAppIcon(&gui);
+#ifdef MINTAMP_SKIN
+		GuiSkinPoll(&gui);
+#endif
 		/* React to main-window controls before artwork or browser work. */
 		GuiPoll(&gui);
 		if (timerMask && (sigs & timerMask))
 			HandleTimerSignal(&gui);
 		HandlePlaylistPoll(&gui);
 		HandleRadioWindow(&gui);
+#ifdef MINTAMP_SKIN
+		GuiSkinUpdate(&gui,timerMask && (sigs & timerMask) && !gui.timerIsArt);
+#endif
 	}
 	if (gui.playbackActive)
 		WaitForPlaybackShutdown(&gui);
@@ -9814,6 +9870,9 @@ static int GuiMainReal(int argc, char **argv)
 		RADIO_DBG(printf("app-close: memory corruption detected -- skipping SaveGuiSettings/GuiClose to avoid a corrupting free, exiting directly\n");)
 		return 0;
 	}
+#ifdef MINTAMP_SKIN
+	skin_player_close(gSkinPlayer); gSkinPlayer=NULL;
+#endif
 	SaveGuiSettings(&gui);
 	GuiClose(&gui);
 	return 0;
