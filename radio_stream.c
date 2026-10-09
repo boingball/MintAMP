@@ -1067,7 +1067,9 @@ void Radio_ReportTlsFault(const char *where)
 {
     radio_tls_fault_count++;
     radio_tls_shutdown_quarantine = 1;
+#if defined(AMIGA_M68K) && defined(HAVE_AMISSL)
     radio_worker_ssl_ctx_poisoned = 1;
+#endif
     Radio_MarkTlsPoisoned(where && where[0] ? where : "fatal TLS fault");
     RADIO_DBG(printf("radio-tls: TLS fault %ld where=%s session=%lu url=\"%s\" -- objects quarantined, shared SSL_CTX poisoned, HTTPS disabled for this run\n",
         radio_tls_fault_count, where ? where : "",
