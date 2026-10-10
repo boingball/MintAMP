@@ -105,18 +105,19 @@ bad_rle:
     free(indices); free(rgb); return fail(error,en,"Truncated or invalid BMP RLE stream");
 }
 
-static const char * const names[SKIN_ASSET_COUNT] = {
+static const char * const names[SKIN_ASSET_COUNT+1] = {
     "main.bmp", "cbuttons.bmp", "titlebar.bmp", "numbers.bmp", "text.bmp",
-    "volume.bmp", "balance.bmp", "posbar.bmp", "playpaus.bmp", "monoster.bmp", "shufrep.bmp"
+    "volume.bmp", "balance.bmp", "posbar.bmp", "playpaus.bmp", "monoster.bmp", "shufrep.bmp",
+    "pledit.bmp", "pledit.txt"
 };
-static const unsigned min_w[SKIN_ASSET_COUNT]={275,136,302,90,155,68,47,277,27,56,46};
-static const unsigned min_h[SKIN_ASSET_COUNT]={116,36,29,13,12,433,433,10,9,24,73};
+static const unsigned min_w[SKIN_ASSET_COUNT]={275,136,302,90,155,68,47,277,27,56,46,276};
+static const unsigned min_h[SKIN_ASSET_COUNT]={116,36,29,13,12,433,433,10,9,24,73,110};
 
 static int asset_id(const unsigned char *name, unsigned len)
 {
     unsigned start=0, k; int i;
     for (k=0;k<len;++k) if (name[k]=='/' || name[k]=='\\') start=k+1;
-    for (i=0;i<SKIN_ASSET_COUNT;++i) {
+    for (i=0;i<=SKIN_ASSET_COUNT;++i) {
         size_t n=strlen(names[i]);
         if (len-start!=n) continue;
         for (k=0;k<n;++k) if (tolower((unsigned char)name[start+k])!=names[i][k]) break;
@@ -125,12 +126,49 @@ static int asset_id(const unsigned char *name, unsigned len)
     return -1;
 }
 
+/* Read only bounded colour values in [Text]. Windows font names are not
+ * filesystem paths; the native view uses its small Amiga font instead. */
+static void playlist_colors(WinampSkin *skin,const unsigned char *data,size_t size)
+{
+    size_t at=0; int text_section=0;
+    while (at<size) {
+        char line[128]; size_t n=0; char *key,*value,*end; unsigned rgb=0; int i;
+        while (at<size && data[at]!='\n') {
+            if (n<sizeof(line)-1) line[n++]=(char)tolower(data[at]);
+            ++at;
+        }
+        if (at<size) ++at;
+        line[n]=0; key=line;
+        while (*key && isspace((unsigned char)*key)) ++key;
+        end=key+strlen(key);
+        while (end>key && isspace((unsigned char)end[-1])) *--end=0;
+        if (*key=='[') { text_section=!strcmp(key,"[text]"); continue; }
+        if (!text_section || !(value=strchr(key,'='))) continue;
+        *value++=0; end=key+strlen(key);
+        while (end>key && isspace((unsigned char)end[-1])) *--end=0;
+        while (*value && isspace((unsigned char)*value)) ++value;
+        if (*value++!='#' || strlen(value)!=6) continue;
+        for (i=0;i<6;++i) {
+            int c=(unsigned char)value[i];
+            if (!isxdigit(c)) break;
+            rgb=(rgb<<4)|(unsigned)(c<='9' ? c-'0' : c-'a'+10);
+        }
+        if (i!=6) continue;
+        if (!strcmp(key,"normal")) skin->playlist_normal=rgb;
+        else if (!strcmp(key,"current")) skin->playlist_current=rgb;
+        else if (!strcmp(key,"normalbg")) skin->playlist_background=rgb;
+        else if (!strcmp(key,"selectedbg")) skin->playlist_selected=rgb;
+    }
+}
+
 int skin_load_memory(WinampSkin *skin, const unsigned char *z, size_t size,
                      char *error, size_t en)
 {
     WinampSkin tmp; size_t eocd, cd, cd_end, at; unsigned entries, i;
-    int found=0; unsigned long cd_len, total_rgb=0;
+    int found=0, have_colors=0; unsigned long cd_len, total_rgb=0;
     memset(&tmp,0,sizeof(tmp));
+    tmp.playlist_normal=0x00ff00; tmp.playlist_current=0xffffff;
+    tmp.playlist_selected=0x0000c6;
     if (!z || size<22 || size>SKIN_MAX_FILE) return fail(error,en,"Invalid or oversized skin archive");
     eocd=size-22;
     for (;;) {
@@ -154,11 +192,13 @@ int skin_load_memory(WinampSkin *skin, const unsigned char *z, size_t size,
         if (!span(at+46,(size_t)len+extra+comment,cd_end)) goto invalid_zip;
         id=asset_id(z+at+46,len);
         if (id<0) { at+=46+len+extra+comment; continue; }
-        if (tmp.assets[id].rgb) { fail(error,en,"Duplicate bitmap names in skin"); goto failed; }
+        if (id==SKIN_ASSET_COUNT ? have_colors : tmp.assets[id].rgb!=NULL) {
+            fail(error,en,"Duplicate skin asset names"); goto failed;
+        }
         flags=u16(z+at+8); method=u16(z+at+10); crc=u32(z+at+16);
         packed=u32(z+at+20); unpacked=u32(z+at+24); local=u32(z+at+42);
         if ((flags&1) || (method!=0 && method!=8) || !unpacked ||
-            unpacked>SKIN_MAX_BITMAP || !span(local,30,cd) || u32(z+local)!=0x04034b50UL ||
+            unpacked>(id==SKIN_ASSET_COUNT ? 8192UL : SKIN_MAX_BITMAP) || !span(local,30,cd) || u32(z+local)!=0x04034b50UL ||
             u16(z+local+8)!=method || u16(z+local+6)!=flags) goto invalid_zip;
         payload=local+30+u16(z+local+26)+u16(z+local+28);
         if (!span(payload,packed,cd)) goto invalid_zip;
@@ -177,6 +217,10 @@ int skin_load_memory(WinampSkin *skin, const unsigned char *z, size_t size,
         }
         if (lodepng_crc32(bmp,unpacked)!=crc) {
             free(out); fail(error,en,"Skin bitmap CRC check failed"); goto failed;
+        }
+        if (id==SKIN_ASSET_COUNT) {
+            playlist_colors(&tmp,bmp,unpacked); have_colors=1; free(out);
+            at+=46+len+extra+comment; continue;
         }
         if (!skin_decode_bmp(&tmp.assets[id],bmp,unpacked,error,en)) { free(out); goto failed; }
         free(out);

@@ -9,6 +9,8 @@
 #include <graphics/gfxbase.h>
 #include <graphics/rastport.h>
 #include <graphics/view.h>
+#include <graphics/scale.h>
+#include <graphics/text.h>
 #include <intuition/intuition.h>
 #include <libraries/asl.h>
 #include <workbench/startup.h>
@@ -33,14 +35,25 @@ typedef struct SkinResources {
 
 struct SkinPlayer {
     struct Screen *screen;
-    struct Window *win;
+    struct Window *win, *plwin, *target;
+    struct BitMap *text_source, *text_scaled;
+    struct TextFont *playlist_font;
     SkinResources *resources;
     struct Menu menu;
-    struct MenuItem items[7];
-    struct IntuiText labels[7];
+    struct MenuItem items[8];
+    struct IntuiText labels[8];
+    struct Menu playlist_menu;
+    struct MenuItem playlist_items[8];
+    struct IntuiText playlist_labels[8];
     SkinState now, drawn;
     int have_drawn, pressed, drag_x, drag_y;
     int notice_ticks;
+    SkinPlaylistState playlist, playlist_drawn;
+    int playlist_have_drawn, playlist_pressed, playlist_drag_x, playlist_drag_y;
+    int click_row, pending_options;
+    ULONG click_seconds, click_micros;
+    SkinPlaylistName playlist_name;
+    void *playlist_ctx;
     char notice[256], name[32], path[512];
 };
 
@@ -177,21 +190,153 @@ no_memory:
 static void blit(void *ctx,int id,int sx,int sy,int w,int h,int x,int y)
 {
     SkinPlayer *p=(SkinPlayer *)ctx; int s=p->resources->scale;
-    if (p->win && p->resources->bitmaps[id])
-        BltBitMapRastPort(p->resources->bitmaps[id],sx*s,sy*s,p->win->RPort,x*s,y*s,w*s,h*s,0xc0);
+    if (p->target && p->resources->bitmaps[id])
+        BltBitMapRastPort(p->resources->bitmaps[id],sx*s,sy*s,p->target->RPort,x*s,y*s,w*s,h*s,0xc0);
 }
 static void fill(void *ctx,unsigned rgb,int x,int y,int w,int h)
 {
     SkinPlayer *p=(SkinPlayer *)ctx; int s=p->resources->scale;
-    SetAPen(p->win->RPort,(ULONG)color_pen(p,p->resources,rgb));
-    RectFill(p->win->RPort,x*s,y*s,(x+w)*s-1,(y+h)*s-1);
+    SetAPen(p->target->RPort,(ULONG)color_pen(p,p->resources,rgb));
+    RectFill(p->target->RPort,x*s,y*s,(x+w)*s-1,(y+h)*s-1);
 }
 static void repaint(SkinPlayer *p,int all)
 {
     if (!p->win || !p->resources) return;
+    p->target=p->win;
     p->now.pressed=p->pressed;
+    p->now.playlist_visible=p->plwin!=NULL;
     skin_render(&p->resources->skin,&p->now,(all || !p->have_drawn) ? NULL : &p->drawn,blit,fill,p);
     p->drawn=p->now; p->have_drawn=1;
+}
+static struct BitMap *text_bitmap(SkinPlayer *p,int width,int height)
+{
+    struct BitMap *bm; int i;
+    if (GfxBase->LibNode.lib_Version>=39)
+        return AllocBitMap(width,height,p->screen->RastPort.BitMap->Depth,
+                           BMF_CLEAR,p->screen->RastPort.BitMap);
+    bm=(struct BitMap *)calloc(1,sizeof(*bm));
+    if (!bm) return NULL;
+    InitBitMap(bm,p->screen->RastPort.BitMap->Depth,width,height);
+    for (i=0;i<bm->Depth;++i) {
+        bm->Planes[i]=AllocRaster(width,height);
+        if (!bm->Planes[i]) {
+            while (i--) FreeRaster(bm->Planes[i],width,height);
+            free(bm); return NULL;
+        }
+    }
+    return bm;
+}
+static void free_text_bitmap(struct BitMap *bm,int width,int height)
+{
+    int i;
+    if (!bm) return;
+    WaitBlit();
+    if (GfxBase->LibNode.lib_Version>=39) { FreeBitMap(bm); return; }
+    for (i=0;i<bm->Depth;++i) FreeRaster(bm->Planes[i],width,height);
+    free(bm);
+}
+static void playlist_label(void *ctx,const char *text,unsigned rgb,unsigned bg,int x,int y,int width)
+{
+    SkinPlayer *p=(SkinPlayer *)ctx; struct RastPort rp;
+    struct BitScaleArgs args; char line[96]; int i,n,scale=p->resources->scale;
+    n=(int)strlen(text); if (n>width/8) n=width/8;
+    for (i=0;i<n;++i) line[i]=(unsigned char)text[i]<32 ? ' ' : text[i];
+    InitRastPort(&rp); rp.BitMap=p->text_source; SetFont(&rp,p->playlist_font);
+    SetAPen(&rp,(ULONG)color_pen(p,p->resources,bg)); RectFill(&rp,0,0,242,7);
+    SetDrMd(&rp,JAM1); SetAPen(&rp,(ULONG)color_pen(p,p->resources,rgb));
+    Move(&rp,0,p->playlist_font->tf_Baseline); Text(&rp,line,n);
+    if (scale==2) {
+        memset(&args,0,sizeof(args));
+        args.bsa_SrcWidth=width; args.bsa_SrcHeight=8;
+        args.bsa_XSrcFactor=args.bsa_YSrcFactor=1;
+        args.bsa_XDestFactor=args.bsa_YDestFactor=2;
+        args.bsa_SrcBitMap=p->text_source; args.bsa_DestBitMap=p->text_scaled;
+        WaitBlit(); BitMapScale(&args);
+    }
+    BltBitMapRastPort(scale==2 ? p->text_scaled : p->text_source,0,0,
+                     p->plwin->RPort,x*scale,y*scale,width*scale,8*scale,0xc0);
+    /* The next row reuses the source, and must not race a queued blit. */
+    WaitBlit();
+}
+static void playlist_repaint(SkinPlayer *p,int all)
+{
+    if (!p->plwin) return;
+    p->target=p->plwin;
+    skin_playlist_render(&p->resources->skin,&p->playlist,
+        all || !p->playlist_have_drawn ? NULL : &p->playlist_drawn,
+        blit,fill,playlist_label,p);
+    p->playlist_drawn=p->playlist; p->playlist_have_drawn=1;
+}
+static void playlist_close(SkinPlayer *p)
+{
+    struct Message *m;
+    if (!p->plwin) return;
+    ClearMenuStrip(p->plwin);
+    while ((m=GetMsg(p->plwin->UserPort))!=NULL) ReplyMsg(m);
+    CloseWindow(p->plwin); p->plwin=NULL;
+    p->playlist_pressed=0; p->click_row=-1; p->playlist_have_drawn=0;
+    repaint(p,0);
+}
+static int playlist_open(SkinPlayer *p)
+{
+    struct TextAttr font={(STRPTR)"topaz.font",8,FS_NORMAL,FPF_ROMFONT};
+    int scale=p->resources->scale, left,top,i;
+    if (!p->win || !p->resources->skin.assets[SKIN_PLEDIT].rgb ||
+        275*scale>p->screen->Width || SKIN_PLAYLIST_HEIGHT*scale>p->screen->Height) return 0;
+    if (!p->playlist_font) p->playlist_font=OpenFont(&font);
+    if (!p->text_source) p->text_source=text_bitmap(p,243,8);
+    if (!p->text_scaled) p->text_scaled=text_bitmap(p,486,16);
+    if (!p->playlist_font || !p->text_source || !p->text_scaled) return 0;
+    left=p->win->LeftEdge; top=p->win->TopEdge+SKIN_HEIGHT*scale;
+    if (left+275*scale>p->screen->Width) left=p->screen->Width-275*scale;
+    if (top+SKIN_PLAYLIST_HEIGHT*scale>p->screen->Height) top=p->screen->Height-SKIN_PLAYLIST_HEIGHT*scale;
+    p->plwin=OpenWindowTags(NULL,WA_CustomScreen,(ULONG)p->screen,
+        WA_Left,left,WA_Top,top,WA_Width,275*scale,WA_Height,SKIN_PLAYLIST_HEIGHT*scale,
+        WA_Borderless,TRUE,WA_Activate,TRUE,WA_RMBTrap,FALSE,
+        WA_DetailPen,p->win->DetailPen,WA_BlockPen,p->win->BlockPen,
+        WA_NewLookMenus,(ULONG)(GfxBase->LibNode.lib_Version>=39),
+        WA_ReportMouse,TRUE,WA_SimpleRefresh,TRUE,
+        WA_IDCMP,IDCMP_MOUSEBUTTONS|IDCMP_MOUSEMOVE|IDCMP_REFRESHWINDOW|
+                   IDCMP_MENUPICK|IDCMP_VANILLAKEY|IDCMP_RAWKEY|IDCMP_INACTIVEWINDOW,TAG_DONE);
+    if (!p->plwin) return 0;
+    /* Intuition may annotate menu structures. Each window owns its strip. */
+    p->playlist_menu=p->menu; p->playlist_menu.FirstItem=p->playlist_items;
+    for (i=0;i<8;++i) {
+        p->playlist_items[i]=p->items[i]; p->playlist_labels[i]=p->labels[i];
+        p->playlist_items[i].NextItem=i<7 ? &p->playlist_items[i+1] : NULL;
+        p->playlist_items[i].ItemFill=&p->playlist_labels[i];
+    }
+    SetMenuStrip(p->plwin,&p->playlist_menu); p->click_row=-1;
+    playlist_repaint(p,1); repaint(p,0); return 1;
+}
+int skin_player_playlist_toggle(SkinPlayer *p)
+{
+    if (!p) return 0;
+    if (p->plwin) { playlist_close(p); return 1; }
+    return playlist_open(p);
+}
+void skin_player_playlist_update(SkinPlayer *p,int count,int selected,int current,
+                                SkinPlaylistName name,void *ctx)
+{
+    int i, top;
+    if (!p) return;
+    p->playlist_name=name; p->playlist_ctx=ctx;
+    top=skin_playlist_top(p->playlist.top,count);
+    if (selected!=p->playlist.selected && selected>=0 && selected<count) {
+        if (selected<top) top=selected;
+        if (selected>=top+SKIN_PLAYLIST_ROWS) top=selected-SKIN_PLAYLIST_ROWS+1;
+    }
+    if (count!=p->playlist.count || selected!=p->playlist.selected || current!=p->playlist.current)
+        p->click_row=-1;
+    p->playlist.count=count; p->playlist.selected=selected; p->playlist.current=current;
+    p->playlist.top=skin_playlist_top(top,count);
+    for (i=0;i<SKIN_PLAYLIST_ROWS;++i) {
+        int index=p->playlist.top+i;
+        const char *s=index<count && name ? name(ctx,index) : "";
+        if (strncmp(p->playlist.rows[i],s,79)) p->click_row=-1;
+        strncpy(p->playlist.rows[i],s,79); p->playlist.rows[i][79]=0;
+    }
+    playlist_repaint(p,0);
 }
 static void close_window(SkinPlayer *p)
 {
@@ -203,19 +348,19 @@ static void close_window(SkinPlayer *p)
 }
 static void build_menu(SkinPlayer *p,UWORD text_pen,UWORD background_pen)
 {
-    static const char * const labels[]={"Load skin...","Double size","Settings","Internet Radio","Playlist","Open audio...","Quit"};
+    static const char * const labels[]={"Load skin...","Double size","Settings","Internet Radio","Playlist","Full playlist options...","Open audio...","Quit"};
     int i, h=p->screen->Font->ta_YSize+4, width=0;
     memset(&p->menu,0,sizeof(p->menu));
     p->menu.Flags=MENUENABLED; p->menu.MenuName=(STRPTR)"MintAMP";
     p->menu.Width=TextLength(&p->screen->RastPort,p->menu.MenuName,strlen((const char *)p->menu.MenuName))+16;
     p->menu.Height=h; p->menu.FirstItem=p->items;
-    for (i=0;i<7;++i) {
+    for (i=0;i<8;++i) {
         int w=TextLength(&p->screen->RastPort,(STRPTR)labels[i],strlen(labels[i]))+16;
         if (w>width) width=w;
     }
-    for (i=0;i<7;++i) {
+    for (i=0;i<8;++i) {
         memset(&p->items[i],0,sizeof(p->items[i])); memset(&p->labels[i],0,sizeof(p->labels[i]));
-        p->items[i].NextItem=i<6 ? &p->items[i+1] : NULL;
+        p->items[i].NextItem=i<7 ? &p->items[i+1] : NULL;
         p->items[i].TopEdge=i*h; p->items[i].Width=width; p->items[i].Height=h;
         p->items[i].Flags=ITEMTEXT|ITEMENABLED|HIGHCOMP;
         p->items[i].ItemFill=&p->labels[i]; p->items[i].NextSelect=MENUNULL;
@@ -272,6 +417,7 @@ static void change_skin(SkinPlayer *p,int choose)
 {
     char path[512], error[160]; SkinResources *next, *old; int scale;
     WORD left=p->win->LeftEdge,top=p->win->TopEdge;
+    int had_playlist=p->plwin!=NULL;
     strcpy(path,p->path); scale=p->resources->scale;
     if (choose) { if (!request_path(p,path)) return; }
     else scale=scale==1 ? 2 : 1;
@@ -280,14 +426,16 @@ static void change_skin(SkinPlayer *p,int choose)
     }
     next=load_resources(p,path,scale,error);
     if (!next) { error_request(p,error); return; }
-    old=p->resources; close_window(p); p->resources=next;
+    old=p->resources; playlist_close(p); close_window(p); p->resources=next;
     if (!open_window(p,left,top)) {
         p->resources=old; free_resources(p,next);
         if (!open_window(p,left,top)) p->win=NULL;
+        if (had_playlist && p->win && !playlist_open(p)) p->pending_options=1;
         error_request(p,"Could not open the new skin window.");
         return;
     }
     free_resources(p,old); strcpy(p->path,path); save_choice(p);
+    if (had_playlist && !playlist_open(p)) p->pending_options=1;
 }
 SkinPlayer *skin_player_open(const char *name,int argc,char **argv)
 {
@@ -345,12 +493,15 @@ SkinPlayer *skin_player_open(const char *name,int argc,char **argv)
 void skin_player_close(SkinPlayer *p)
 {
     if (!p) return;
-    close_window(p); free_resources(p,p->resources);
+    playlist_close(p); close_window(p); free_resources(p,p->resources);
+    free_text_bitmap(p->text_source,243,8); free_text_bitmap(p->text_scaled,486,16);
+    if (p->playlist_font) CloseFont(p->playlist_font);
     if (p->screen) UnlockPubScreen(NULL,p->screen);
     free(p);
 }
 ULONG skin_player_signal(SkinPlayer *p)
-{ return p && p->win ? 1UL<<p->win->UserPort->mp_SigBit : 0; }
+{ return p ? (p->win ? 1UL<<p->win->UserPort->mp_SigBit : 0) |
+            (p->plwin ? 1UL<<p->plwin->UserPort->mp_SigBit : 0) : 0; }
 struct Window *skin_player_window(SkinPlayer *p) { return p ? p->win : NULL; }
 void skin_player_notice(SkinPlayer *p,const char *message)
 {
@@ -371,11 +522,94 @@ void skin_player_update(SkinPlayer *p,const SkinState *s,int tick)
     }
     repaint(p,0);
 }
+static int menu_action(SkinPlayer *p,UWORD code,SkinEvent *event)
+{
+    static const int actions[8]={SKIN_SELECT,SKIN_SIZE,SKIN_SETTINGS,SKIN_RADIO,
+        SKIN_PLAYLIST,SKIN_PLAYLIST_OPTIONS,SKIN_BROWSE,SKIN_QUIT};
+    int item=ITEMNUM(code);
+    if (code==MENUNULL || MENUNUM(code)!=0 || item>=8) return 0;
+    if (item<2) { change_skin(p,item==0); return 0; }
+    event->action=actions[item]; event->released=1; return 1;
+}
+static void playlist_scroll(SkinPlayer *p,int top)
+{
+    p->playlist.top=skin_playlist_top(top,p->playlist.count); p->click_row=-1;
+    skin_player_playlist_update(p,p->playlist.count,p->playlist.selected,
+        p->playlist.current,p->playlist_name,p->playlist_ctx);
+}
+static int playlist_poll(SkinPlayer *p,SkinEvent *event)
+{
+    struct IntuiMessage *msg;
+    while (p->plwin && (msg=(struct IntuiMessage *)GetMsg(p->plwin->UserPort))!=NULL) {
+        ULONG type=msg->Class,seconds=msg->Seconds,micros=msg->Micros;
+        UWORD code=msg->Code;
+        int x=msg->MouseX/p->resources->scale,y=msg->MouseY/p->resources->scale;
+        int sx=p->screen->MouseX,sy=p->screen->MouseY;
+        ReplyMsg((struct Message *)msg); memset(event,0,sizeof(*event));
+        if (type==IDCMP_REFRESHWINDOW) {
+            BeginRefresh(p->plwin); playlist_repaint(p,1); EndRefresh(p->plwin,TRUE);
+        } else if (type==IDCMP_INACTIVEWINDOW) p->playlist_pressed=0;
+        else if (type==IDCMP_MENUPICK) {
+            if (menu_action(p,code,event)) return 1;
+        } else if (type==IDCMP_VANILLAKEY && (code=='\r' || code==' ')) {
+            if (p->playlist.selected>=0 && p->playlist.selected<p->playlist.count) {
+                event->action=SKIN_TRACK_PLAY; event->value=p->playlist.selected; return 1;
+            }
+        } else if (type==IDCMP_VANILLAKEY && (code=='p' || code=='P' || code==27)) {
+            playlist_close(p);
+        } else if (type==IDCMP_VANILLAKEY && (code=='o' || code=='O')) {
+            event->action=SKIN_PLAYLIST_OPTIONS; return 1;
+        } else if (type==IDCMP_RAWKEY && (code==0x4c || code==0x4d)) {
+            int index=p->playlist.selected+(code==0x4c ? -1 : 1);
+            if (index<0) index=0;
+            if (index<p->playlist.count) {
+                event->action=SKIN_TRACK_SELECT; event->value=index; p->click_row=-1; return 1;
+            }
+        } else if (type==IDCMP_MOUSEBUTTONS && code==SELECTDOWN) {
+            p->playlist_pressed=skin_playlist_hit_test(x,y);
+            p->playlist_drag_x=sx; p->playlist_drag_y=sy;
+            if (p->playlist_pressed==SKIN_TRACK_SELECT) {
+                int index=p->playlist.top+(y-22)/10;
+                if (index<p->playlist.count) {
+                    int twice=index==p->click_row && DoubleClick(p->click_seconds,p->click_micros,seconds,micros);
+                    /* Selection is mirrored immediately so the backend's next
+                     * refresh does not invalidate the second click. */
+                    p->playlist.selected=index; playlist_repaint(p,0);
+                    p->click_row=twice ? -1 : index;
+                    p->click_seconds=seconds; p->click_micros=micros;
+                    event->action=twice ? SKIN_TRACK_PLAY : SKIN_TRACK_SELECT;
+                    event->value=index; return 1;
+                }
+            } else if (p->playlist_pressed==SKIN_PLAYLIST_SCROLL) {
+                int maximum=skin_playlist_top(p->playlist.count,p->playlist.count);
+                playlist_scroll(p,(y-29)*maximum/156);
+            }
+        } else if (type==IDCMP_MOUSEMOVE && p->playlist_pressed==SKIN_DRAG) {
+            MoveWindow(p->plwin,sx-p->playlist_drag_x,sy-p->playlist_drag_y);
+            p->playlist_drag_x=sx; p->playlist_drag_y=sy;
+        } else if (type==IDCMP_MOUSEMOVE && p->playlist_pressed==SKIN_PLAYLIST_SCROLL) {
+            int maximum=skin_playlist_top(p->playlist.count,p->playlist.count);
+            playlist_scroll(p,(y-29)*maximum/156);
+        } else if (type==IDCMP_MOUSEBUTTONS && code==SELECTUP) {
+            int action=p->playlist_pressed; p->playlist_pressed=0;
+            if (action==skin_playlist_hit_test(x,y)) {
+                if (action==SKIN_PLAYLIST_CLOSE) playlist_close(p);
+                else if (action==SKIN_PLAYLIST_OPTIONS) { event->action=action; return 1; }
+            }
+        }
+    }
+    return 0;
+}
 int skin_player_poll(SkinPlayer *p,SkinEvent *event)
 {
     struct IntuiMessage *msg;
     if (!p) return 0;
     if (!p->win) { event->action=SKIN_QUIT; return 1; }
+    if (p->pending_options) {
+        p->pending_options=0; memset(event,0,sizeof(*event));
+        event->action=SKIN_PLAYLIST_OPTIONS; return 1;
+    }
+    if (playlist_poll(p,event)) return 1;
     while ((msg=(struct IntuiMessage *)GetMsg(p->win->UserPort))!=NULL) {
         ULONG type=msg->Class; UWORD code=msg->Code;
         int x=msg->MouseX/p->resources->scale,y=msg->MouseY/p->resources->scale;
@@ -386,12 +620,7 @@ int skin_player_poll(SkinPlayer *p,SkinEvent *event)
             BeginRefresh(p->win); repaint(p,1); EndRefresh(p->win,TRUE);
         } else if (type==IDCMP_INACTIVEWINDOW) { p->pressed=0; repaint(p,0); }
         else if (type==IDCMP_MENUPICK && code!=MENUNULL) {
-            static const int actions[7]={SKIN_SELECT,SKIN_SIZE,SKIN_SETTINGS,SKIN_RADIO,SKIN_PLAYLIST,SKIN_BROWSE,SKIN_QUIT};
-            int item=ITEMNUM(code);
-            if (MENUNUM(code)==0 && item<7) {
-                if (item<2) { change_skin(p,item==0); continue; }
-                event->action=actions[item]; event->released=1; return 1;
-            }
+            if (menu_action(p,code,event)) return 1;
         } else if (type==IDCMP_VANILLAKEY) {
             if (code=='s' || code=='S') change_skin(p,1);
             else if (code=='d' || code=='D') change_skin(p,0);

@@ -7,13 +7,14 @@
 
 typedef struct Canvas {
     const WinampSkin *skin;
-    unsigned char pixels[275*116*3];
+    unsigned char pixels[275*232*3];
     unsigned draws;
+    int height;
 } Canvas;
 static void blit(void *ctx,int id,int sx,int sy,int w,int h,int x,int y)
 {
     Canvas *c=ctx; const SkinBitmap *b=&c->skin->assets[id]; int row;
-    assert(x>=0 && y>=0 && x+w<=275 && y+h<=116);
+    assert(x>=0 && y>=0 && x+w<=275 && y+h<=c->height);
     assert(sx>=0 && sy>=0 && sx+w<=(int)b->width && sy+h<=(int)b->height);
     for (row=0;row<h;++row)
         memcpy(c->pixels+((y+row)*275+x)*3,b->rgb+((sy+row)*b->width+sx)*3,w*3);
@@ -22,12 +23,20 @@ static void blit(void *ctx,int id,int sx,int sy,int w,int h,int x,int y)
 static void fill(void *ctx,unsigned rgb,int x,int y,int w,int h)
 {
     Canvas *c=ctx; int i,j;
-    assert(x>=0 && y>=0 && x+w<=275 && y+h<=116);
+    assert(x>=0 && y>=0 && x+w<=275 && y+h<=c->height);
     for (j=y;j<y+h;++j) for (i=x;i<x+w;++i) {
         unsigned char *p=c->pixels+(j*275+i)*3;
         p[0]=rgb>>16; p[1]=rgb>>8; p[2]=rgb;
     }
     ++c->draws;
+}
+static void label(void *ctx,const char *text,unsigned rgb,unsigned bg,int x,int y,int width)
+{
+    int i; (void)bg;
+    /* Deterministic glyph marks test clipping, colours and redraws. Native
+     * runtime uses Topaz; these marks are not a font-fidelity preview. */
+    for (i=0;text[i] && i*8+7<=width;++i)
+        fill(ctx,rgb,x+i*8,y+(text[i]&3),6,4);
 }
 static unsigned char *read_file(const char *name,size_t *size)
 {
@@ -47,8 +56,13 @@ int main(int argc,char **argv)
         free(b.rgb); return 0;
     }
     assert(argc>=2);
-    if (!skin_load_file(&skin,argv[1],error,sizeof(error))) {
+    if (!skin_load_file(&skin,argc>2 && !strcmp(argv[1],"--colours") ? argv[2] : argv[1],error,sizeof(error))) {
         fprintf(stderr,"%s\n",error); return 1;
+    }
+    if (argc>2 && !strcmp(argv[1],"--colours")) {
+        printf("%06x %06x %06x %06x\n",skin.playlist_normal,skin.playlist_current,
+               skin.playlist_background,skin.playlist_selected);
+        skin_free(&skin); return 0;
     }
     for (i=0;i<SKIN_ASSET_COUNT;++i) if (skin.assets[i].rgb)
         printf("%d %u %u %08x\n",i,skin.assets[i].width,skin.assets[i].height,
@@ -62,7 +76,7 @@ int main(int argc,char **argv)
     {
         Canvas *c=calloc(1,sizeof(*c)); SkinState state={0},old;
         unsigned char *full=malloc(sizeof(c->pixels)); unsigned draws;
-        assert(c && full); c->skin=&skin;
+        assert(c && full); c->skin=&skin; c->height=116;
         strcpy(state.title,"MINTAMP CLASSIC SKIN TEST - LIVE RADIO METADATA");
         state.elapsed=125; state.total=300; state.volume=75; state.playing=1;
         state.rate=44100; state.bitrate=128;
@@ -88,8 +102,38 @@ int main(int argc,char **argv)
         if (argc>2) {
             FILE *f=fopen(argv[2],"wb"); assert(f);
             state=old; skin_render(&skin,&state,NULL,blit,fill,c);
-            fprintf(f,"P6\n275 116\n255\n"); fwrite(c->pixels,1,sizeof(c->pixels),f); fclose(f);
+            fprintf(f,"P6\n275 116\n255\n"); fwrite(c->pixels,1,275*116*3,f); fclose(f);
         }
+        free(full); free(c);
+    }
+    if (skin.assets[SKIN_PLEDIT].rgb) {
+        Canvas *c=calloc(1,sizeof(*c)); SkinPlaylistState state={0},old;
+        unsigned char *full=malloc(sizeof(c->pixels)); unsigned draws;
+        assert(c && full); c->skin=&skin; c->height=232;
+        state.count=30; state.selected=2; state.current=1;
+        for (i=0;i<SKIN_PLAYLIST_ROWS;++i) snprintf(state.rows[i],80,"Track %d",i+1);
+        skin_playlist_render(&skin,&state,NULL,blit,fill,label,c);
+        draws=c->draws; old=state;
+        skin_playlist_render(&skin,&state,&old,blit,fill,label,c); assert(c->draws==draws);
+        state.top=13; state.selected=29; state.current=20;
+        for (i=0;i<SKIN_PLAYLIST_ROWS;++i) snprintf(state.rows[i],80,"Track %d",i+14);
+        skin_playlist_render(&skin,&state,&old,blit,fill,label,c);
+        memcpy(full,c->pixels,sizeof(c->pixels));
+        skin_playlist_render(&skin,&state,NULL,blit,fill,label,c);
+        assert(!memcmp(full,c->pixels,sizeof(c->pixels)));
+        old=state; state.count=0; state.top=0; state.selected=state.current=-1;
+        memset(state.rows,0,sizeof(state.rows));
+        skin_playlist_render(&skin,&state,&old,blit,fill,label,c);
+        memcpy(full,c->pixels,sizeof(c->pixels));
+        skin_playlist_render(&skin,&state,NULL,blit,fill,label,c);
+        assert(!memcmp(full,c->pixels,sizeof(c->pixels)));
+        assert(skin_playlist_top(-99,30)==0 && skin_playlist_top(99,30)==13);
+        assert(skin_playlist_top(99,0)==0 && skin_playlist_top(99,17)==0);
+        assert(skin_playlist_hit_test(14,22)==SKIN_TRACK_SELECT);
+        assert(skin_playlist_hit_test(258,20)==SKIN_PLAYLIST_SCROLL);
+        assert(skin_playlist_hit_test(230,202)==SKIN_PLAYLIST_OPTIONS);
+        assert(skin_playlist_hit_test(265,4)==SKIN_PLAYLIST_CLOSE);
+        assert(skin_playlist_hit_test(275,0)==SKIN_NONE);
         free(full); free(c);
     }
     skin_free(&skin); return 0;

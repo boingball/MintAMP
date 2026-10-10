@@ -10,6 +10,16 @@ static void GuiSkinHideSettings(HelixAmp3Gui *gui)
      * an AppIcon or a standard edition's .info file just to hide settings. */
     gui->iconified=1;
 }
+static const char *GuiSkinPlaylistName(void *ctx,int index)
+{
+    HelixAmp3Gui *gui=(HelixAmp3Gui *)ctx;
+    return gui->playlist.names[index];
+}
+static void GuiSkinPlaylistUpdate(HelixAmp3Gui *gui)
+{
+    skin_player_playlist_update(gSkinPlayer,gui->playlist.count,gui->playlist.selected,
+        gui->playlist.current,GuiSkinPlaylistName,gui);
+}
 static void GuiSkinPoll(HelixAmp3Gui *gui)
 {
     SkinEvent e;
@@ -32,8 +42,14 @@ static void GuiSkinPoll(HelixAmp3Gui *gui)
             gad.GadgetID=GID_PLAY; HandleGuiAction(gui,&gad,0,IDCMP_GADGETUP,TRUE); break;
         case SKIN_STOP:
             gSkinPendingTrack=-1; StopPlayback(gui); break;
-        case SKIN_PREVIOUS: case SKIN_NEXT: {
-            int index=gui->playlist.current+(e.action==SKIN_NEXT ? 1 : -1);
+        case SKIN_TRACK_SELECT:
+            if (e.value>=0 && e.value<gui->playlist.count) {
+                gui->playlist.selected=e.value; RefreshPlaylistView(gui); GuiSkinPlaylistUpdate(gui);
+            }
+            break;
+        case SKIN_TRACK_PLAY: case SKIN_PREVIOUS: case SKIN_NEXT: {
+            int index=e.action==SKIN_TRACK_PLAY ? e.value :
+                gui->playlist.current+(e.action==SKIN_NEXT ? 1 : -1);
             if (index<0 || index>=gui->playlist.count) {
                 skin_player_notice(gSkinPlayer,"NO PLAYLIST TRACK IN THAT DIRECTION"); break;
             }
@@ -49,8 +65,14 @@ static void GuiSkinPoll(HelixAmp3Gui *gui)
             else skin_player_notice(gSkinPlayer,"NO TCP/IP STACK AVAILABLE");
             break;
         case SKIN_PLAYLIST:
-            gSkinPendingTrack=-1;
+            GuiSkinPlaylistUpdate(gui);
+            if (skin_player_playlist_toggle(gSkinPlayer)) break;
+            /* Missing artwork or a small screen uses the full native view. */
             if (gui->plWin) ClosePlaylistWindow(gui); else OpenPlaylistWindow(gui); break;
+        case SKIN_PLAYLIST_OPTIONS:
+            if (!gui->plWin) OpenPlaylistWindow(gui);
+            if (gui->plWin) { WindowToFront(gui->plWin); ActivateWindow(gui->plWin); }
+            break;
         case SKIN_VOLUME_SET:
             SetGuiVolume(gui,e.value,e.released,IDCMP_MOUSEMOVE,0); break;
         case SKIN_SEEK:
@@ -86,4 +108,5 @@ static void GuiSkinUpdate(HelixAmp3Gui *gui,int tick)
     state.mono=gui->mono; state.rate=gGuiPlaybackStatus.sampleRate;
     state.bitrate=gGuiPlaybackStatus.radioBitrateKbps;
     skin_player_update(gSkinPlayer,&state,tick);
+    GuiSkinPlaylistUpdate(gui);
 }

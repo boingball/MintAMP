@@ -69,11 +69,11 @@ def run_tests(extra_skin=None):
     with tempfile.TemporaryDirectory(prefix="mintamp-skins-") as tmp:
         tmp = Path(tmp)
 
-        def invoke(data, *, is_bmp=False, good=True):
+        def invoke(data, *, is_bmp=False, good=True, colours=False):
             nonlocal count
             path = tmp / ("sample.bmp" if is_bmp else "sample.wsz")
             path.write_bytes(data)
-            cmd = [str(RUNNER)] + (["--bmp"] if is_bmp else []) + [str(path)]
+            cmd = [str(RUNNER)] + (["--bmp"] if is_bmp else ["--colours"] if colours else []) + [str(path)]
             proc = subprocess.run(cmd, capture_output=True, text=True)
             assert proc.returncode == (0 if good else 1), (cmd, proc.returncode, proc.stdout, proc.stderr)
             count += 1
@@ -111,6 +111,20 @@ def run_tests(extra_skin=None):
         invoke(archive(assets[:-1]), good=False)
         invoke(archive(assets+[('MAIN.BMP',assets[0][1])]),good=False)
         invoke(archive([('MAIN.BMP',bmp(20,20)[0])]+assets[1:]),good=False)
+        playlist = ('Theme/PLEDIT.BMP', bmp(280,186,8)[0])
+        theme = ('Theme/PLEDIT.TXT', b'[Text]\r\nNormal=#102030\r\nCurrent=#aBcDeF\r\nNormalBG=#223344\r\nSelectedBG=#556677\r\nFont=Arial\r\n')
+        invoke(archive(assets+[playlist]))
+        invoke(archive(assets+[playlist,theme]))
+        assert invoke(archive(assets+[theme]),colours=True).strip() == '102030 abcdef 223344 556677'
+        assert invoke(archive(assets),colours=True).strip() == '00ff00 ffffff 000000 0000c6'
+        invalid = ('pledit.txt', b'[Other]\nNormal=#112233\n[Text]\nNormal=#zzzzzz\nCurrent=#12345\n')
+        assert invoke(archive(assets+[invalid]),colours=True).strip() == '00ff00 ffffff 000000 0000c6'
+        spaced = ('pledit.txt', b' [TEXT] \r\n Normal = #AbCdEf \r\n Current=#001122\n[Other]\nCurrent=#ffffff\n')
+        assert invoke(archive(assets+[spaced]),colours=True).strip() == 'abcdef 001122 000000 0000c6'
+        invoke(archive(assets+[playlist,playlist]),good=False)
+        invoke(archive(assets+[theme,theme]),good=False)
+        invoke(archive(assets+[('pledit.txt',b'x'*8193)]),good=False)
+        invoke(archive(assets+[('pledit.bmp',bmp(275,109)[0])]),good=False)
         packed=archive(assets)
         for n in (0, 1, 21, len(packed)-1, len(packed)//2): invoke(packed[:n],good=False)
         broken=bytearray(packed)
@@ -125,7 +139,7 @@ def run_tests(extra_skin=None):
             assert proc.returncode==0,proc.stderr
             # Pillow is an independent decoder for the user's reference skin.
             from PIL import Image
-            names=('main','cbuttons','titlebar','numbers','text','volume','balance','posbar','playpaus','monoster','shufrep')
+            names=('main','cbuttons','titlebar','numbers','text','volume','balance','posbar','playpaus','monoster','shufrep','pledit')
             reported={int(line.split()[0]): line.split()[1:] for line in proc.stdout.splitlines()}
             with zipfile.ZipFile(extra_skin) as z:
                 for name in z.namelist():

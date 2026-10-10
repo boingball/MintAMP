@@ -64,7 +64,8 @@ to move the player. Right-click for the native MintAMP menu.
 | Volume | Change playback volume immediately; save on release |
 | Position bar | Seek a playing local track with known duration; live radio cannot seek |
 | EQ / T / menu Settings | Toggle the native settings window |
-| PL / P | Open/close the native playlist window |
+| PL / P | Open/close the skinned playlist; native fallback if artwork or screen space is unavailable |
+| List opts / other playlist bottom controls / menu Full playlist options | Open or bring forward the full native playlist window |
 | Visualizer area / R | Open the native Internet Radio browser |
 | S / menu Load skin | Select a different classic skin |
 | D / upper-right size buttons | Toggle normal/double size |
@@ -80,6 +81,31 @@ clicking their graphics displays an explicit notice. EQ opens MintAMP's
 settings, not a ten-band equalizer. Winamp skins supply appearance, not DSP or
 additional playback features.
 
+## Playlist
+
+The compact playlist uses PLEDIT.BMP's classic borders and controls, plus
+Normal, Current, NormalBG and SelectedBG colours from PLEDIT.TXT's [Text]
+section. Missing or invalid colour values use classic defaults. Playlist
+labels use the Amiga ROM Topaz 8 font; Windows Font names such as Arial are
+not loaded. Text and artwork both scale at double size.
+
+This is another view of the existing playlist, not a separate list. Click to
+select; double-click or press Return/Space to play that row. Up/Down changes
+selection, and dragging/clicking the right scrollbar scrolls the list. The
+current entry uses the skin's Current colour. Changes made in the native
+window appear in the compact view, including load/add/remove/reorder actions.
+
+The playlist is a fixed 275x232 window (550x464 at double size), with 17 visible
+rows. Drag its title bar to move it; its close button, Escape or P hides only
+that window. The shade button and bottom controls, including List opts, open
+the full native playlist for all editing and additional controls. The native
+view can remain open alongside the skin. Menu Quit still exits the player.
+
+If PLEDIT.BMP is absent, the window does not fit the screen, or graphics memory
+is insufficient, PL uses the native window. Changing skin/scale while the
+compact playlist is open reopens it with the new skin, or opens the native
+view when the new artwork/scale cannot support it.
+
 ## Format and display compatibility
 
 Supported: classic `.wsz` / `.zip` archives with stored or deflated entries;
@@ -89,8 +115,8 @@ MAIN.BMP, CBUTTONS.BMP and TEXT.BMP are required. Optional standard player
 images use the skin background, bitmap font, or neutral slider controls when
 absent. Present but malformed/undersized images are rejected with an error.
 
-Optional playlist and equalizer skin images are not used: those windows retain
-their native toolkit appearance. REGION.TXT shaped windows, custom cursors,
+The optional PLEDIT.BMP playlist sheet must be at least 276x110. Equalizer
+skin images are not used. REGION.TXT shaped windows, custom cursors,
 windowshade, modern `.wal` skins, and Winamp plug-ins are not supported.
 
 Archives and BMPs are bounded and CRC checked. Failed skin replacements keep
@@ -115,7 +141,9 @@ make -f Makefile.amiga skin-format-test SKIN_TEST_FILE=/path/to/base-2.91.wsz
 Host tests cover generated BMP encodings, stored/deflated archives, missing
 optional images, invalid dimensions, truncated RLE/ZIP, CRC failures, case and
 directory handling, failed replacement preservation, hit testing, and identical
-full/incremental rendering. The optional reference-skin check independently
+full/incremental rendering, playlist empty/scroll/selection/current rendering,
+scroll bounds, playlist colour parsing/defaults and duplicate/oversized
+playlist assets. The optional reference-skin check independently
 compares decoded pixels using Pillow/ImageMagick. CI compiles both editions for
 68030 and 68060; this is compile validation, not an emulated Amiga runtime test.
 

@@ -5,6 +5,17 @@ static void MrSkinHideSettings(MrApp *app)
     SyncFromGadgets(app);
     RA_CloseWindow(app->winObj); app->win=NULL;
 }
+static const char *MrSkinPlaylistName(void *ctx,int index)
+{
+    MrApp *app=(MrApp *)ctx;
+    return app->playlistTitles[index][0] ? app->playlistTitles[index] :
+        (MrIsRadioInput(app->playlist[index]) ? app->playlist[index] : PlaylistBaseName(app->playlist[index]));
+}
+static void MrSkinPlaylistUpdate(MrApp *app)
+{
+    skin_player_playlist_update(gSkinPlayer,app->playlistCount,app->playlistSelected,
+        app->playlistCurrent,MrSkinPlaylistName,app);
+}
 static void MrSkinPoll(MrApp *app,int *done)
 {
     SkinEvent e;
@@ -26,8 +37,14 @@ static void MrSkinPoll(MrApp *app,int *done)
             break;
         case SKIN_STOP:
             gSkinPendingTrack=-1; StopPlayback(app); break;
-        case SKIN_PREVIOUS: case SKIN_NEXT: {
-            int index=app->playlistCurrent+(e.action==SKIN_NEXT ? 1 : -1);
+        case SKIN_TRACK_SELECT:
+            if (e.value>=0 && e.value<app->playlistCount) {
+                app->playlistSelected=e.value; RefreshPlaylistView(app); MrSkinPlaylistUpdate(app);
+            }
+            break;
+        case SKIN_TRACK_PLAY: case SKIN_PREVIOUS: case SKIN_NEXT: {
+            int index=e.action==SKIN_TRACK_PLAY ? e.value :
+                app->playlistCurrent+(e.action==SKIN_NEXT ? 1 : -1);
             if (index<0 || index>=app->playlistCount) {
                 skin_player_notice(gSkinPlayer,"NO PLAYLIST TRACK IN THAT DIRECTION"); break;
             }
@@ -44,8 +61,13 @@ static void MrSkinPoll(MrApp *app,int *done)
             else skin_player_notice(gSkinPlayer,"NO TCP/IP STACK AVAILABLE");
             break;
         case SKIN_PLAYLIST:
-            gSkinPendingTrack=-1;
+            MrSkinPlaylistUpdate(app);
+            if (skin_player_playlist_toggle(gSkinPlayer)) break;
             if (app->plWinObj) ClosePlaylistWindow(app); else OpenPlaylistWindow(app); break;
+        case SKIN_PLAYLIST_OPTIONS:
+            if (!app->plWinObj) OpenPlaylistWindow(app);
+            if (app->plWin) { WindowToFront(app->plWin); ActivateWindow(app->plWin); }
+            break;
         case SKIN_VOLUME_SET:
             if (app->volumePercent!=e.value) {
                 app->volumePercent=e.value;
@@ -85,4 +107,5 @@ static void MrSkinUpdate(MrApp *app,int tick)
     state.mono=app->mono; state.rate=gGuiPlaybackStatus.sampleRate;
     state.bitrate=gGuiPlaybackStatus.radioBitrateKbps;
     skin_player_update(gSkinPlayer,&state,tick);
+    MrSkinPlaylistUpdate(app);
 }

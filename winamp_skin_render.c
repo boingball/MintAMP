@@ -75,14 +75,15 @@ void skin_render(const WinampSkin *skin,const SkinState *s,const SkinState *old,
         sprite(skin,blit,ctx,SKIN_BALANCE,9,13*15,38,13,177,57);
         sprite(skin,blit,ctx,SKIN_BALANCE,15,422,14,11,189,58);
     }
-    if (all || s->pressed!=old->pressed) {
+    if (all || s->pressed!=old->pressed || s->playlist_visible!=old->playlist_visible) {
         static const int actions[5]={SKIN_PREVIOUS,SKIN_PLAY,SKIN_UNSUPPORTED,SKIN_STOP,SKIN_NEXT};
         for (i=0;i<5;++i)
             sprite(skin,blit,ctx,SKIN_BUTTONS,i*23,s->pressed==actions[i] ? 18 : 0,
                    i==4 ? 22 : 23,18,16+i*23,88);
         sprite(skin,blit,ctx,SKIN_BUTTONS,114,s->pressed==SKIN_BROWSE ? 16 : 0,22,16,136,89);
         sprite(skin,blit,ctx,SKIN_SHUFREP,s->pressed==SKIN_SETTINGS ? 46 : 0,61,23,12,219,58);
-        sprite(skin,blit,ctx,SKIN_SHUFREP,s->pressed==SKIN_PLAYLIST ? 69 : 23,61,23,12,242,58);
+        sprite(skin,blit,ctx,SKIN_SHUFREP,s->pressed==SKIN_PLAYLIST ? 69 : 23,
+               s->playlist_visible ? 73 : 61,23,12,242,58);
     }
     if (all || s->elapsed!=old->elapsed) {
         int elapsed=s->elapsed<0 ? 0 : s->elapsed;
@@ -129,4 +130,66 @@ void skin_render(const WinampSkin *skin,const SkinState *s,const SkinState *old,
     if (all || strcmp(s->title,old->title) || s->scroll!=old->scroll)
         text(skin,blit,ctx,s->title[0] ? s->title : "MINTAMP",111,27,155,
              strlen(s->title)>31 ? s->scroll : 0);
+}
+
+int skin_playlist_top(int top,int count)
+{
+    int maximum=count>SKIN_PLAYLIST_ROWS ? count-SKIN_PLAYLIST_ROWS : 0;
+    return top<0 ? 0 : top>maximum ? maximum : top;
+}
+int skin_playlist_hit_test(int x,int y)
+{
+    if (x<0 || x>=275 || y<0 || y>=SKIN_PLAYLIST_HEIGHT) return SKIN_NONE;
+    if (inside(x,y,264,3,9,9)) return SKIN_PLAYLIST_CLOSE;
+    if (inside(x,y,254,3,9,9)) return SKIN_PLAYLIST_OPTIONS;
+    if (y<20) return SKIN_DRAG;
+    if (inside(x,y,12,22,243,170)) return SKIN_TRACK_SELECT;
+    if (inside(x,y,258,20,8,174)) return SKIN_PLAYLIST_SCROLL;
+    if (y>=194) return SKIN_PLAYLIST_OPTIONS;
+    return SKIN_NONE;
+}
+void skin_playlist_render(const WinampSkin *skin,const SkinPlaylistState *s,
+                          const SkinPlaylistState *old,SkinBlit blit,
+                          SkinFill fill,SkinLabel label,void *ctx)
+{
+    int all=old==NULL, i;
+    if (all) {
+        for (i=25;i<250;i+=25)
+            sprite(skin,blit,ctx,SKIN_PLEDIT,127,0,25,20,i,0);
+        sprite(skin,blit,ctx,SKIN_PLEDIT,0,0,25,20,0,0);
+        sprite(skin,blit,ctx,SKIN_PLEDIT,26,0,100,20,87,0);
+        sprite(skin,blit,ctx,SKIN_PLEDIT,153,0,25,20,250,0);
+        for (i=20;i<194;i+=29) {
+            sprite(skin,blit,ctx,SKIN_PLEDIT,0,42,12,29,0,i);
+            sprite(skin,blit,ctx,SKIN_PLEDIT,31,42,20,29,255,i);
+        }
+        sprite(skin,blit,ctx,SKIN_PLEDIT,0,72,125,38,0,194);
+        sprite(skin,blit,ctx,SKIN_PLEDIT,126,72,150,38,125,194);
+        fill(ctx,skin->playlist_background,12,20,243,174);
+    }
+    for (i=0;i<SKIN_PLAYLIST_ROWS;++i) {
+        int index=s->top+i, old_index=old ? old->top+i : -1;
+        int selected=index<s->count && index==s->selected;
+        unsigned bg=selected ? skin->playlist_selected : skin->playlist_background;
+        if (all || s->top!=old->top || s->count!=old->count ||
+            (index==s->selected)!=(old_index==old->selected) ||
+            (index==s->current)!=(old_index==old->current) || strcmp(s->rows[i],old->rows[i])) {
+            char line[96];
+            fill(ctx,bg,12,22+i*10,243,10);
+            if (index<s->count) {
+                snprintf(line,sizeof(line),"%d. %s",index+1,s->rows[i]);
+                label(ctx,line,index==s->current ? skin->playlist_current : skin->playlist_normal,
+                      bg,14,23+i*10,239);
+            } else if (!s->count && i==0) {
+                label(ctx,"List opts: add or load tracks",skin->playlist_normal,bg,14,23,239);
+            }
+        }
+    }
+    if (all || s->top!=old->top || s->count!=old->count) {
+        int maximum=skin_playlist_top(s->count,s->count);
+        for (i=20;i<194;i+=29)
+            sprite(skin,blit,ctx,SKIN_PLEDIT,34,42,8,29,258,i);
+        sprite(skin,blit,ctx,SKIN_PLEDIT,52,53,8,18,258,
+               20+(maximum ? s->top*156/maximum : 0));
+    }
 }
