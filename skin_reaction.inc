@@ -46,6 +46,7 @@ static void MrSkinPoll(MrApp *app,int *done)
     while (skin_player_poll(gSkinPlayer,&e)) {
         switch (e.action) {
         case SKIN_QUIT: *done=1; return;
+        case SKIN_ABOUT: ShowAbout(app); break;
         case SKIN_SETTINGS:
             if (app->win) MrSkinHideSettings(app); else MrUniconify(app); break;
         case SKIN_BROWSE:

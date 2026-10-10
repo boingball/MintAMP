@@ -50,6 +50,7 @@ static void GuiSkinPoll(HelixAmp3Gui *gui)
         memset(&gad,0,sizeof(gad));
         switch (e.action) {
         case SKIN_QUIT: gui->closeRequested=1; return;
+        case SKIN_ABOUT: ShowAbout(gui); break;
         case SKIN_SETTINGS:
             if (gui->win) GuiSkinHideSettings(gui);
             else GuiRestoreFromAppIcon(gui);
@@ -117,7 +118,10 @@ static void GuiSkinPoll(HelixAmp3Gui *gui)
         case SKIN_RADIO:
             skin_player_order_cancel(gSkinPlayer);
             gSkinPendingTrack=-1;
-            if (gui->hasNetwork) OpenRadioWindow(gui);
+            if (gui->hasNetwork) {
+                OpenRadioWindow(gui);
+                if (!gui->rbWin) skin_player_notice(gSkinPlayer,gui->statusText);
+            }
             else skin_player_notice(gSkinPlayer,"NO TCP/IP STACK AVAILABLE");
             break;
         case SKIN_PLAYLIST:

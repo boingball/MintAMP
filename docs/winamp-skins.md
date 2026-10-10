@@ -70,6 +70,7 @@ EQ, playlist and text. Oversized windows/scales are refused or fall back.
 | PL / P | Toggle the compact playlist, with native fallback |
 | T / menu Settings | Existing native settings and utility window |
 | R / menu Internet Radio | Existing browser, favourites and network options |
+| Menu About | Existing frontend version and decoder credits requester |
 | Visualisation area / menu | Cycle off, spectrum and oscilloscope |
 | Menu Visual rate | 1, 2 or 4 analysis updates per second |
 | Menu Playback statistics | Buffer length, spare time, underruns, radio buffered bytes and source/output details; optional title-line overlay |
@@ -77,6 +78,11 @@ EQ, playlist and text. Oversized windows/scales are refused or fall back.
 | D / upper-right size button | Normal/double size |
 | W / shade button | Main windowshade; graphics and visual analysis stop while shaded |
 | Close / menu Quit / Ctrl-C | Stop and quit |
+
+The GadTools radio browser opens on the player's public screen and shortens
+its results list to fit 256-line screens. It requires at least 548x200; screen
+or allocation failures are reported in the player instead of silently doing
+nothing. About remains available without opening the native settings window.
 
 Play/pause/stopped indicators follow backend state. Pause is acknowledged only
 when the queued audio has finished: latency can be several configured buffers.
@@ -187,6 +193,11 @@ stopped or main-shaded. Snapshot freshness is **limited by buffer submissions**:
 large audio buffers can make even a 4 Hz visualisation refresh look static for
 several seconds. A GUI-only quarter-second timer also scrolls long titles and
 expires notices; it does not poll the network or alter the native playback timer.
+The initial analysis rate is 2 Hz; existing saved choices take precedence.
+Mode/rate changes show a confirmation in the title strip. Enabling a visualiser
+requests the next available PCM snapshot immediately, avoiding an extra initial
+analysis interval. The 4 Hz option improves drawing cadence but cannot make
+the backend submit samples more often.
 
 Cached native bitmaps and incremental rendering remain in use. Stationary
 states produce no draw calls. Palette/bitmap memory is bounded, but optional EQ

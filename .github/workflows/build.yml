@@ -46,6 +46,9 @@ jobs:
       - name: Check ICY RadioInfo metadata handling
         run: make -f Makefile.amiga radio-metadata-test
 
+      - name: Check GadTools radio window screen bounds
+        run: make -f Makefile.amiga gadtools-radio-layout-test
+
       - name: Check Ogg FLAC radio stream conversion
         run: make -f Makefile.amiga radio-oggflac-test
 

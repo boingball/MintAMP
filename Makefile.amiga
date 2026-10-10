@@ -439,7 +439,7 @@ fast030-halfasm-test: $(FAST030_HALFASM_TEST_TARGET)
 
 gui-halfasm-test: $(GUI_HALFASM_TEST_TARGET)
 
-$(GUI_TARGET): $(GUI_EXTRA_DEPS) $(GUI_SOURCES) amiga_mp3dec.c integer_stats.h $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(LIBNIX_FREEALL_COMPAT_SOURCES)
+$(GUI_TARGET): $(GUI_EXTRA_DEPS) $(GUI_SOURCES) amiga_mp3dec.c integer_stats.h gadtools_radio_layout.h $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(LIBNIX_FREEALL_COMPAT_SOURCES)
 	set -e; \
 	trap 'rm -f $@.freeall-discovery $@.freeall-heads' EXIT; \
 	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(PROBE_CPPFLAGS) $(SSL_CPPFLAGS) $(SSLCERTS_CPPFLAGS) $(PNG_CPPFLAGS) $(DEBUG_CPPFLAGS) $(FREEALL_PROBE_CPPFLAGS) $(EXTRA_CFLAGS) \
@@ -727,7 +727,11 @@ clean:
 		mpeg25_decode_test
 	$(MAKE) -C decoders clean
 
-.PHONY: skin-controls-test skin-eq-decode-test integer-stats-test
+.PHONY: skin-controls-test skin-eq-decode-test integer-stats-test gadtools-radio-layout-test
+
+gadtools-radio-layout-test:
+	$(HOSTCC) -O2 -std=gnu89 -Wall -Wextra -Werror -I. tests/gadtools_radio_layout_test.c -o gadtools_radio_layout_test
+	./gadtools_radio_layout_test
 integer-stats-test:
 	$(HOSTCC) -O2 -std=gnu89 -Wall -Wextra -Werror -I. tests/integer_stats_test.c -o integer_stats_test
 	./integer_stats_test

@@ -35,6 +35,8 @@ typedef struct SkinResources {
     int owned_count, scale;
 } SkinResources;
 
+#define SKIN_MENU_ITEMS 13
+
 struct SkinPlayer {
     struct Screen *screen;
     struct Window *win, *plwin, *eqwin, *target;
@@ -45,11 +47,11 @@ struct SkinPlayer {
     int visual_device,visual_pending;
     SkinResources *resources;
     struct Menu menu;
-    struct MenuItem items[12];
-    struct IntuiText labels[12];
+    struct MenuItem items[SKIN_MENU_ITEMS];
+    struct IntuiText labels[SKIN_MENU_ITEMS];
     struct Menu playlist_menu;
-    struct MenuItem playlist_items[12];
-    struct IntuiText playlist_labels[12];
+    struct MenuItem playlist_items[SKIN_MENU_ITEMS];
+    struct IntuiText playlist_labels[SKIN_MENU_ITEMS];
     SkinState now, drawn;
     SkinOrderQueue sequence;
     SkinSelection selection;
@@ -362,9 +364,9 @@ static int playlist_open(SkinPlayer *p)
     if (!p->plwin) return 0;
     /* Intuition may annotate menu structures. Each window owns its strip. */
     p->playlist_menu=p->menu; p->playlist_menu.FirstItem=p->playlist_items;
-    for (i=0;i<12;++i) {
+    for (i=0;i<SKIN_MENU_ITEMS;++i) {
         p->playlist_items[i]=p->items[i]; p->playlist_labels[i]=p->labels[i];
-        p->playlist_items[i].NextItem=i<11 ? &p->playlist_items[i+1] : NULL;
+        p->playlist_items[i].NextItem=i<SKIN_MENU_ITEMS-1 ? &p->playlist_items[i+1] : NULL;
         p->playlist_items[i].ItemFill=&p->playlist_labels[i];
     }
     SetMenuStrip(p->plwin,&p->playlist_menu); p->click_row=-1;
@@ -421,19 +423,19 @@ static void close_window(SkinPlayer *p)
 }
 static void build_menu(SkinPlayer *p,UWORD text_pen,UWORD background_pen)
 {
-    static const char * const labels[]={"Load skin...","Double size","Settings","Internet Radio","Playlist","Full playlist options...","Open audio...","Quit","Equaliser","Visualisation","Visual rate","Playback statistics"};
+    static const char * const labels[]={"Load skin...","Double size","Settings","Internet Radio","Playlist","Full playlist options...","Open audio...","Quit","Equaliser","Visualisation","Visual rate","Playback statistics","About..."};
     int i, h=p->screen->Font->ta_YSize+4, width=0;
     memset(&p->menu,0,sizeof(p->menu));
     p->menu.Flags=MENUENABLED; p->menu.MenuName=(STRPTR)"MintAMP";
     p->menu.Width=TextLength(&p->screen->RastPort,p->menu.MenuName,strlen((const char *)p->menu.MenuName))+16;
     p->menu.Height=h; p->menu.FirstItem=p->items;
-    for (i=0;i<12;++i) {
+    for (i=0;i<SKIN_MENU_ITEMS;++i) {
         int w=TextLength(&p->screen->RastPort,(STRPTR)labels[i],strlen(labels[i]))+16;
         if (w>width) width=w;
     }
-    for (i=0;i<12;++i) {
+    for (i=0;i<SKIN_MENU_ITEMS;++i) {
         memset(&p->items[i],0,sizeof(p->items[i])); memset(&p->labels[i],0,sizeof(p->labels[i]));
-        p->items[i].NextItem=i<11 ? &p->items[i+1] : NULL;
+        p->items[i].NextItem=i<SKIN_MENU_ITEMS-1 ? &p->items[i+1] : NULL;
         p->items[i].TopEdge=i*h; p->items[i].Width=width; p->items[i].Height=h;
         p->items[i].Flags=ITEMTEXT|ITEMENABLED|HIGHCOMP;
         p->items[i].ItemFill=&p->labels[i]; p->items[i].NextSelect=MENUNULL;
@@ -694,9 +696,26 @@ static int internal_action(SkinPlayer *p,int action)
     else if (action==SKIN_REPEAT) { p->sequence.order.repeat=(p->sequence.order.repeat+1)%3; skin_player_notice(p,p->sequence.order.repeat==2 ? "REPEAT TRACK" : p->sequence.order.repeat==1 ? "REPEAT PLAYLIST" : "REPEAT OFF"); }
     else if (action==SKIN_VISUAL) {
         if (!p->visual_device) skin_player_notice(p,"VISUALISATION TIMER UNAVAILABLE");
-        else p->visual_mode=(p->visual_mode+1)%3;
+        else {
+            char notice[80];
+            p->visual_mode=(p->visual_mode+1)%3; p->visual_ticks=0;
+            if (p->visual_mode && p->now.playing && !p->now.paused &&
+                gSkinAudio.visual_request==gSkinAudio.visual_sequence) ++gSkinAudio.visual_request;
+            snprintf(notice,sizeof(notice),"VISUAL: %s - %d HZ",
+                p->visual_mode==1 ? "SPECTRUM" : p->visual_mode==2 ? "OSCILLOSCOPE" : "OFF",
+                4/p->visual_interval);
+            skin_player_notice(p,notice);
+        }
     }
-    else if (action==SKIN_VIS_RATE) { int n=skin_player_choice(p,"Visualisation rate (GUI timer)","1 Hz|2 Hz|4 Hz|Cancel"); if (n>=1 && n<=3) p->visual_interval=n==1 ? 4 : n==2 ? 2 : 1; }
+    else if (action==SKIN_VIS_RATE) {
+        int n=skin_player_choice(p,"Visualisation rate (GUI timer)","1 Hz|2 Hz|4 Hz|Cancel");
+        if (n>=1 && n<=3) {
+            char notice[80];
+            p->visual_interval=n==1 ? 4 : n==2 ? 2 : 1; p->visual_ticks=0;
+            snprintf(notice,sizeof(notice),"VISUAL RATE: %d HZ - AUDIO BUFFER LIMITED",4/p->visual_interval);
+            skin_player_notice(p,notice);
+        }
+    }
     else if (action==SKIN_SHADE) {
         p->shaded=!p->shaded;
         ChangeWindowBox(p->win,p->win->LeftEdge,p->win->TopEdge,275*p->resources->scale,(p->shaded ? 14 : 116)*p->resources->scale);
@@ -884,10 +903,10 @@ void skin_player_update(SkinPlayer *p,const SkinState *s,int tick)
 }
 static int menu_action(SkinPlayer *p,UWORD code,SkinEvent *event)
 {
-    static const int actions[12]={SKIN_SELECT,SKIN_SIZE,SKIN_SETTINGS,SKIN_RADIO,
-        SKIN_PLAYLIST,SKIN_PLAYLIST_OPTIONS,SKIN_BROWSE,SKIN_QUIT,SKIN_EQ,SKIN_VISUAL,SKIN_VIS_RATE,SKIN_DEBUG};
+    static const int actions[SKIN_MENU_ITEMS]={SKIN_SELECT,SKIN_SIZE,SKIN_SETTINGS,SKIN_RADIO,
+        SKIN_PLAYLIST,SKIN_PLAYLIST_OPTIONS,SKIN_BROWSE,SKIN_QUIT,SKIN_EQ,SKIN_VISUAL,SKIN_VIS_RATE,SKIN_DEBUG,SKIN_ABOUT};
     int item=ITEMNUM(code);
-    if (code==MENUNULL || MENUNUM(code)!=0 || item>=12) return 0;
+    if (code==MENUNULL || MENUNUM(code)!=0 || item>=SKIN_MENU_ITEMS) return 0;
     if (item<2) { change_skin(p,item==0); return 0; }
     if (internal_action(p,actions[item])) return 0;
     event->action=actions[item]; event->released=1; return 1;

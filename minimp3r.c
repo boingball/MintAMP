@@ -7247,6 +7247,21 @@ static void SetDecodeThenPlay(MrApp *app, int enabled)
 	SaveSettings(app);
 }
 
+static void ShowAbout(MrApp *app)
+{
+	struct Window *parent=app->win;
+	struct EasyStruct es;
+#ifdef MINTAMP_SKIN
+	if (!parent) parent=skin_player_window(gSkinPlayer);
+#endif
+	es.es_StructSize = sizeof(es);
+	es.es_Flags = 0;
+	es.es_Title = (UBYTE *)"About MintAMP";
+	es.es_TextFormat = (UBYTE *)"MintAMP\nMini Internet Amiga Media Player\nReAction Edition\nMade by boingball\n(C)2026 - v" MINTAMP_VERSION "\nTo support this application visit:\nhttps://buymeacoffee.com/boingball\n-----\nMade with decoders from\nHelix MP3 / AAC\nby Real Networks\nlibfoxenflac\nby astoeckel\n\nESP8266Audio\nby earlephilhower\n-----\nAI Used\nClaude and Codex\nLate Nights\nMany";
+	es.es_GadgetFormat = (UBYTE *)"OK";
+	EasyRequest(parent, &es, NULL, TAG_DONE);
+}
+
 static void HandleMenu(MrApp *app, UWORD code, int *done)
 {
 	while (code != MENUNULL) {
@@ -7255,13 +7270,7 @@ static void HandleMenu(MrApp *app, UWORD code, int *done)
 			int mn = (int)MENUNUM(code), it = (int)ITEMNUM(code);
 			if (mn == MENUNUM_PROJECT && it == ITEMNUM_QUIT) *done = 1;
 			else if (mn == MENUNUM_PROJECT && it == ITEMNUM_ABOUT) {
-				struct EasyStruct es;
-				es.es_StructSize = sizeof(es);
-				es.es_Flags = 0;
-				es.es_Title = (UBYTE *)"About MintAMP";
-				es.es_TextFormat = (UBYTE *)"MintAMP\nMini Internet Amiga Media Player\nReAction Edition\nMade by boingball\n(C)2026 - v" MINTAMP_VERSION "\nTo support this application visit:\nhttps://buymeacoffee.com/boingball\n-----\nMade with decoders from\nHelix MP3 / AAC\nby Real Networks\nlibfoxenflac\nby astoeckel\n\nESP8266Audio\nby earlephilhower\n-----\nAI Used\nClaude and Codex\nLate Nights\nMany";
-				es.es_GadgetFormat = (UBYTE *)"OK";
-				EasyRequest(app->win, &es, NULL, TAG_DONE);
+				ShowAbout(app);
 			}
 			else if (mn == MENUNUM_PROJECT && it == ITEMNUM_RADIO)
 				OpenRadioWindow(app);

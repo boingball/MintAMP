@@ -16,6 +16,7 @@ static int gSkinPendingTrack = -1;
 #endif
 #include "amiga_display_text.h"
 #include "radio_runtime_flags.h"
+#include "gadtools_radio_layout.h"
 
 #if defined(AMIGA_M68K)
 /* amiga_mp3dec.c InitSemaphore()s the shared cross-task stdout lock
@@ -5339,13 +5340,17 @@ static void SetArtworkEnabled(HelixAmp3Gui *gui, int enabled)
 static void ShowAbout(HelixAmp3Gui *gui)
 {
 	struct EasyStruct es;
+	struct Window *parent=gui->win;
+#ifdef MINTAMP_SKIN
+	if (!parent) parent=skin_player_window(gSkinPlayer);
+#endif
 
 	es.es_StructSize = sizeof(es);
 	es.es_Flags = 0;
 	es.es_Title = (UBYTE *)"About MintAMP-GT";
 	es.es_TextFormat = (UBYTE *)"MintAMP-GT\nMini Internet Amiga Media Player\nGadTools Edition\nMade by boingball\n(C)2026 - v" MINTAMP_GT_VERSION "\nTo support this application visit:\nhttps://buymeacoffee.com/boingball\n-----\nMade with decoders from\nHelix MP3 / AAC\nby Real Networks\nlibfoxenflac\nby astoeckel\n\nESP8266Audio\nby earlephilhower\n-----\nAI Used\nClaude and Codex\nLate Nights\nMany";
 	es.es_GadgetFormat = (UBYTE *)"OK";
-	EasyRequest(gui->win, &es, NULL, TAG_DONE);
+	EasyRequest(parent, &es, NULL, TAG_DONE);
 }
 
 static struct Gadget *MakeGadgetWithTextAttr(HelixAmp3Gui *gui, struct Gadget *prev,
@@ -7554,6 +7559,7 @@ static void OpenRadioWindow(HelixAmp3Gui *app)
 #endif
 
 	struct NewWindow nw;
+	GadToolsRadioLayout layout;
 	struct NewGadget ng;
 	struct Gadget *gad;
 	static STRPTR codecs[] = { (STRPTR)"All", (STRPTR)"MP3", (STRPTR)"AAC", (STRPTR)"AAC+", (STRPTR)"FLAC", NULL };
@@ -7564,6 +7570,10 @@ static void OpenRadioWindow(HelixAmp3Gui *app)
 	}
 	if (!parent || !GadToolsBase || !app->hasNetwork)
 		return;
+	if (!gadtools_radio_layout(&layout,parent->WScreen->Width,parent->WScreen->Height,
+		parent->LeftEdge,parent->TopEdge)) {
+		SetStatus(app,"Radio browser needs a screen at least 548 x 200."); return;
+	}
 	if (app->rbController.limit <= 0) {
 		rb_controller_init(&app->rbController);
 		app->rbShowHttps = FALSE;
@@ -7575,7 +7585,9 @@ static void OpenRadioWindow(HelixAmp3Gui *app)
 	app->rbSelectedFavourite = -1;
 	app->rbSearchInProgress = 0;
 	app->rbVisualInfo = GetVisualInfoA(parent->WScreen, NULL);
-	if (!app->rbVisualInfo) return;
+	if (!app->rbVisualInfo) {
+		SetStatus(app,"Cannot allocate radio browser visual info."); return;
+	}
 	app->rbGadContext = CreateContext(&app->rbGadgets);
 	if (!app->rbGadContext) goto fail;
 	NewList(&app->rbList);
@@ -7604,7 +7616,7 @@ static void OpenRadioWindow(HelixAmp3Gui *app)
 			(app->rbController.max_bitrate <= 56 ? 1 :
 			(app->rbController.max_bitrate <= 64 ? 2 :
 			(app->rbController.max_bitrate <= 96 ? 3 : 4))), TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 8; ng.ng_TopEdge = RB_RESULTS_Y; ng.ng_Width = 524; ng.ng_Height = RB_RESULTS_H; ng.ng_GadgetText = NULL; ng.ng_GadgetID = RB_GID_RADIO_RESULTS; ng.ng_Flags = 0;
+	ng.ng_LeftEdge = 8; ng.ng_TopEdge = RB_RESULTS_Y; ng.ng_Width = 524; ng.ng_Height = layout.results_height; ng.ng_GadgetText = NULL; ng.ng_GadgetID = RB_GID_RADIO_RESULTS; ng.ng_Flags = 0;
 	app->rbGadList = gad = CreateGadget(LISTVIEW_KIND, gad, &ng,
 		GTLV_Labels, (ULONG)&app->rbList,
 		GTLV_Selected, (ULONG)~0,
@@ -7612,7 +7624,7 @@ static void OpenRadioWindow(HelixAmp3Gui *app)
 		TAG_DONE); if (!gad) goto fail;
 	/* Favourites edit row: enabled by RadioFavEditSync() while the
 	 * favourites are shown. */
-	ng.ng_TopEdge = RB_FAVEDIT_Y; ng.ng_Height = 18;
+	ng.ng_TopEdge = layout.favourites_y; ng.ng_Height = 18;
 	ng.ng_LeftEdge = 56; ng.ng_Width = 176; ng.ng_GadgetText = (UBYTE *)"Name"; ng.ng_GadgetID = RB_GID_FAV_NAME; ng.ng_Flags = PLACETEXT_LEFT;
 	gad = CreateGadget(STRING_KIND, gad, &ng, GTST_MaxChars, RB_MAX_NAME - 1, GTST_String, (ULONG)"", GA_Disabled, TRUE, TAG_DONE); if (!gad) goto fail;
 	ng.ng_Width = 68; ng.ng_Flags = PLACETEXT_IN;
@@ -7620,7 +7632,7 @@ static void OpenRadioWindow(HelixAmp3Gui *app)
 	ng.ng_LeftEdge = 310; ng.ng_GadgetText = (UBYTE *)"Remove"; ng.ng_GadgetID = RB_GID_FAV_REMOVE; gad = CreateGadget(BUTTON_KIND, gad, &ng, GA_Disabled, TRUE, TAG_DONE); if (!gad) goto fail;
 	ng.ng_LeftEdge = 382; ng.ng_GadgetText = (UBYTE *)"Move Up"; ng.ng_GadgetID = RB_GID_FAV_MOVE_UP; gad = CreateGadget(BUTTON_KIND, gad, &ng, GA_Disabled, TRUE, TAG_DONE); if (!gad) goto fail;
 	ng.ng_LeftEdge = 454; ng.ng_GadgetText = (UBYTE *)"Move Dn"; ng.ng_GadgetID = RB_GID_FAV_MOVE_DOWN; gad = CreateGadget(BUTTON_KIND, gad, &ng, GA_Disabled, TRUE, TAG_DONE); if (!gad) goto fail;
-	ng.ng_TopEdge = RB_BUTTONS_Y; ng.ng_Width = 86; ng.ng_Height = 18; ng.ng_Flags = PLACETEXT_IN;
+	ng.ng_TopEdge = layout.buttons_y; ng.ng_Width = 86; ng.ng_Height = 18; ng.ng_Flags = PLACETEXT_IN;
 	ng.ng_LeftEdge = 8; ng.ng_GadgetText = (UBYTE *)"Search"; ng.ng_GadgetID = RB_GID_SEARCH; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
 	ng.ng_LeftEdge = 100; ng.ng_GadgetText = (UBYTE *)"Play"; ng.ng_GadgetID = RB_GID_PROBE; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
 	ng.ng_LeftEdge = 192; ng.ng_GadgetText = (UBYTE *)"Add Fav"; ng.ng_GadgetID = RB_GID_ADD_FAV; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
@@ -7628,23 +7640,24 @@ static void OpenRadioWindow(HelixAmp3Gui *app)
 	ng.ng_LeftEdge = 376; ng.ng_Width = 40; ng.ng_GadgetText = (UBYTE *)"Up"; ng.ng_GadgetID = RB_GID_UP; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
 	ng.ng_LeftEdge = 420; ng.ng_GadgetText = (UBYTE *)"Down"; ng.ng_GadgetID = RB_GID_DOWN; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
 	ng.ng_LeftEdge = 464; ng.ng_GadgetText = (UBYTE *)"Close"; ng.ng_GadgetID = RB_GID_CLOSE; gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE); if (!gad) goto fail;
-	ng.ng_LeftEdge = 8; ng.ng_TopEdge = RB_STATUS_Y; ng.ng_Width = 524; ng.ng_GadgetText = NULL; ng.ng_GadgetID = RB_GID_STATUS; ng.ng_Flags = 0;
+	ng.ng_LeftEdge = 8; ng.ng_TopEdge = layout.status_y; ng.ng_Width = 524; ng.ng_GadgetText = NULL; ng.ng_GadgetID = RB_GID_STATUS; ng.ng_Flags = 0;
 	gad = CreateGadget(TEXT_KIND, gad, &ng,
 		GTTX_Text, (ULONG)(app->rbStatusText[0] ? app->rbStatusText : "Ready."),
 		GTTX_Border, TRUE, TAG_DONE); if (!gad) goto fail;
 	memset(&nw, 0, sizeof(nw));
-	nw.LeftEdge = parent->LeftEdge + 30; nw.TopEdge = parent->TopEdge + 30;
-	nw.Width = RB_WIN_W; nw.Height = RB_WIN_H;
+	nw.LeftEdge = layout.left; nw.TopEdge = layout.top;
+	nw.Width = layout.width; nw.Height = layout.height;
 	/* LISTVIEWIDCMP includes the gadget-down, mouse, and IntuiTicks events
 	 * consumed by GadTools' composite scroller and auto-repeat arrow gadgets.
 	 * Requesting only GADGETUP leaves the arrows drawn but unable to scroll. */
 	nw.IDCMPFlags = LISTVIEWIDCMP | IDCMP_CLOSEWINDOW |
 		IDCMP_REFRESHWINDOW | IDCMP_VANILLAKEY;
-	nw.Flags = WFLG_CLOSEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET | WFLG_SMART_REFRESH;
+	nw.Flags = WFLG_CLOSEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET | WFLG_SMART_REFRESH | WFLG_ACTIVATE;
 	nw.Title = (UBYTE *)"Internet Radio";
-	nw.MinWidth = nw.MaxWidth = RB_WIN_W; nw.MinHeight = nw.MaxHeight = RB_WIN_H;
+	nw.MinWidth = nw.MaxWidth = layout.width; nw.MinHeight = nw.MaxHeight = layout.height;
 	nw.Type = WBENCHSCREEN;
-	app->rbWin = OpenWindowTags(&nw, TAG_DONE);
+	app->rbWin = OpenWindowTags(&nw, WA_PubScreen,(ULONG)parent->WScreen,
+		WA_AutoAdjust,TRUE,TAG_DONE);
 	if (!app->rbWin) goto fail;
 	AddGList(app->rbWin, app->rbGadgets, (UWORD)-1, -1, NULL);
 	RefreshGList(app->rbGadgets, app->rbWin, NULL, -1);
@@ -7653,6 +7666,7 @@ static void OpenRadioWindow(HelixAmp3Gui *app)
 	return;
 fail:
 	CloseRadioWindow(app);
+	SetStatus(app,"Cannot open radio browser: check available memory and screen size.");
 }
 
 /* Double-clicking a station plays it, the same as pressing Play (as MintVID's
