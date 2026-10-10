@@ -61,6 +61,9 @@ jobs:
       - name: Check classic Winamp skin loading and rendering
         run: make -f Makefile.amiga skin-format-test
 
+      - name: Check shared skin controls and MP3 equaliser bypass
+        run: make -f Makefile.amiga skin-controls-test skin-eq-decode-test
+
       - name: Compile with the Amiga cross-compiler
         env:
           CPU: ${{ matrix.cpu }}
@@ -70,7 +73,7 @@ jobs:
             -e CPU -e ASM60_GROUPS \
             -v "$PWD":/src -w /src \
             amigadev/crosstools:m68k-amigaos \
-            bash -c 'make -f Makefile.amiga fast030 sgt sr RADIO=1 CPU="$CPU" ASM60_GROUPS="$ASM60_GROUPS"'
+            bash -c 'make -f Makefile.amiga fast030 sgt sr gui guir RADIO=1 CPU="$CPU" ASM60_GROUPS="$ASM60_GROUPS"'
 
       - name: Confirm the player and decoder modules were produced
         run: |

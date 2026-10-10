@@ -108,10 +108,10 @@ bad_rle:
 static const char * const names[SKIN_ASSET_COUNT+1] = {
     "main.bmp", "cbuttons.bmp", "titlebar.bmp", "numbers.bmp", "text.bmp",
     "volume.bmp", "balance.bmp", "posbar.bmp", "playpaus.bmp", "monoster.bmp", "shufrep.bmp",
-    "pledit.bmp", "pledit.txt"
+    "pledit.bmp", "eqmain.bmp", "pledit.txt"
 };
-static const unsigned min_w[SKIN_ASSET_COUNT]={275,136,302,90,155,68,47,277,27,56,46,276};
-static const unsigned min_h[SKIN_ASSET_COUNT]={116,36,29,13,12,433,433,10,9,24,73,110};
+static const unsigned min_w[SKIN_ASSET_COUNT]={275,136,302,90,155,68,47,277,27,56,46,276,275};
+static const unsigned min_h[SKIN_ASSET_COUNT]={116,36,29,13,12,433,433,10,9,24,73,110,315};
 
 static int asset_id(const unsigned char *name, unsigned len)
 {

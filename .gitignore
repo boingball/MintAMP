@@ -14,3 +14,7 @@
 /skin_format_test
 *.freeall-discovery
 *.freeall-heads
+
+skin_controls_test
+skin_eq_decode_test
+playlist_format_test

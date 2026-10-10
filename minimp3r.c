@@ -764,6 +764,9 @@ typedef struct MrApp {
 	unsigned char artRGBBuf[MR_ART_W * MR_ART_H * 3];
 	unsigned char artPenIdx[MR_ART_W * MR_ART_H];
 	int   playlistCount;
+#ifdef MINTAMP_SKIN
+    int playlistDurations[MR_PLAYLIST_MAX];
+#endif
 	int   playlistCurrent;
 	int   playlistSelected;
 	int   playlistNextPending;
@@ -2206,7 +2209,11 @@ static void FinalizePlayback(MrApp *app)
 		if (MrIsRadioInput(app->inputName))
 			Delay(10);
 		PlaylistStartCurrent(app);
-	}
+    }
+#if defined(MINTAMP_SKIN) && defined(AMIGA_M68K)
+    else if (gSkinPlayer && !stoppedByUser && !failedStart && gSkinAudio.completed_ok)
+        gSkinPendingTrack=skin_player_order(gSkinPlayer,app->playlistCount,app->playlistCurrent,1,1);
+#endif
 }
 
 static void HandleDoneSignal(MrApp *app)
@@ -5328,6 +5335,9 @@ static int PlaylistAddEntry(MrApp *app, const char *location, const char *title)
 		return 0;
 	SafeCopy(app->playlist[n], MR_MAX_PATH, location);
 	SafeCopy(app->playlistTitles[n], sizeof(app->playlistTitles[n]), title ? title : "");
+#ifdef MINTAMP_SKIN
+    app->playlistDurations[n]=-1;
+#endif
 	app->playlistCount++;
 	return 1;
 }
@@ -5336,6 +5346,9 @@ typedef struct MrPlaylistLoad {
 	MrApp *app;
 	const char *drawer;
 	int skipped;
+#ifdef MINTAMP_SKIN
+    int before;
+#endif
 } MrPlaylistLoad;
 
 static int MrPlaylistLoadEntry(void *ctx, const char *location, const char *title)
@@ -5343,6 +5356,9 @@ static int MrPlaylistLoadEntry(void *ctx, const char *location, const char *titl
 	MrPlaylistLoad *load = (MrPlaylistLoad *)ctx;
 	char full[MR_MAX_PATH];
 	char shown[PLAYLIST_TITLE_MAX];
+#ifdef MINTAMP_SKIN
+    load->before=load->app->playlistCount;
+#endif
 	if (load->app->playlistCount >= MR_PLAYLIST_MAX)
 		return 0;
 	/* Downloaded playlists are usually UTF-8; the location stays as is. */
@@ -5362,6 +5378,10 @@ static int MrPlaylistLoadEntry(void *ctx, const char *location, const char *titl
 	return 1;
 }
 
+#ifdef MINTAMP_SKIN
+static void MrPlaylistDuration(void *ctx,int seconds)
+{ MrPlaylistLoad *load=(MrPlaylistLoad *)ctx; if (load->app->playlistCount>load->before) load->app->playlistDurations[load->app->playlistCount-1]=seconds; }
+#endif
 /* Reads a whole small text file into a NUL-terminated malloc()ed buffer. */
 static char *MrReadTextFile(const char *path, long maxBytes, long *lenOut)
 {
@@ -5400,7 +5420,11 @@ static void LoadPlaylistPath(MrApp *app, const char *m3uPath, const char *drawer
 	load.app = app;
 	load.drawer = drawer;
 	load.skipped = 0;
-	playlist_parse(text, (size_t)len, MrPlaylistLoadEntry, &load);
+	#ifdef MINTAMP_SKIN
+    playlist_parse_ex(text,(size_t)len,MrPlaylistLoadEntry,&load,MrPlaylistDuration);
+#else
+    playlist_parse(text, (size_t)len, MrPlaylistLoadEntry, &load);
+#endif
 	free(text);
 	if (app->playlistCount > 0) {
 		app->playlistCurrent = 0;
@@ -6548,6 +6572,10 @@ static const char *PlaylistBaseName(const char *path)
 
 static void RefreshPlaylistView(MrApp *app)
 {
+#if defined(MINTAMP_SKIN) && defined(AMIGA_M68K)
+    if (skin_player_paths(gSkinPlayer,&app->playlist[0][0],sizeof(app->playlist[0]),
+        app->playlistCount,app->playlistCurrent,app->playlistSelected)) gSkinPendingTrack=-1;
+#endif
 	int i;
 	int sel = app->playlistSelected >= 0 ? app->playlistSelected : app->playlistCurrent;
 	if (app->plWin && app->plListGad) {
@@ -6654,6 +6682,9 @@ static void PlaylistRemoveSelected(MrApp *app)
 		return;
 	}
 	for (i = sel; i < app->playlistCount - 1; i++) {
+#ifdef MINTAMP_SKIN
+        app->playlistDurations[i]=app->playlistDurations[i+1];
+#endif
 		SafeCopy(app->playlist[i], MR_MAX_PATH, app->playlist[i + 1]);
 		SafeCopy(app->playlistTitles[i], sizeof(app->playlistTitles[i]), app->playlistTitles[i + 1]);
 	}
@@ -6726,8 +6757,13 @@ static void PlaylistSaveM3U(MrApp *app)
 	}
 	ok = MrWriteAll(fh, text, playlist_write_header(text, sizeof(text), format));
 	for (i = 0; ok && i < app->playlistCount; i++)
-		ok = MrWriteAll(fh, text, playlist_write_entry(text, sizeof(text), format, i + 1,
-			app->playlist[i], app->playlistTitles[i]));
+		ok = MrWriteAll(fh,text,
+#ifdef MINTAMP_SKIN
+            playlist_write_entry_ex(text,sizeof(text),format,i+1,app->playlist[i],app->playlistTitles[i],app->playlistDurations[i])
+#else
+            playlist_write_entry(text,sizeof(text),format,i+1,app->playlist[i],app->playlistTitles[i])
+#endif
+        );
 	if (ok)
 		ok = MrWriteAll(fh, text, playlist_write_footer(text, sizeof(text), format, app->playlistCount));
 	Close(fh);

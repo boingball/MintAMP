@@ -309,8 +309,8 @@ GUIR_SOURCES := minimp3r.c picojpeg.c lodepng.c webpdec.c svgdec.c miniamp_memgu
 	radio_browser_controller.c radio_browser.c radio_browser_url.c \
 	radio_browser_http.c radio_browser_json.c radio_stream_probe.c
 
-SKIN_SOURCES := winamp_skin.c winamp_skin_render.c skin_player.c
-SKIN_HEADERS := winamp_skin.h skin_player.h skin_gadtools.inc skin_reaction.inc
+SKIN_SOURCES := winamp_skin.c winamp_skin_render.c skin_player.c skin_controls.c
+SKIN_HEADERS := winamp_skin.h skin_player.h skin_controls.h skin_playlist_actions.inc skin_gadtools.inc skin_reaction.inc
 ifeq ($(SKIN),1)
 CPPFLAGS_COMMON += -DMINTAMP_SKIN
 GUI_SOURCES += $(SKIN_SOURCES)
@@ -725,3 +725,11 @@ clean:
 		flac_lpc030_ref_test flac_lpc060_ref_test polyphase60_ref_test radio_metadata_test radio_oggflac_test playlist_format_test \
 		mpeg25_decode_test
 	$(MAKE) -C decoders clean
+
+.PHONY: skin-controls-test skin-eq-decode-test
+skin-controls-test:
+	$(HOSTCC) -O2 -std=gnu89 -Wall -Wextra -Werror -I. tests/skin_controls_test.c skin_controls.c winamp_skin_render.c -o skin_controls_test
+	./skin_controls_test
+skin-eq-decode-test:
+	$(HOSTCC) -O2 -std=gnu99 -DAMIGA_M68K -DMINTAMP_SKIN -I. -Ipub -Ireal tests/skin_eq_decode_test.c mp3dec.c mp3tabs.c real/*.c skin_controls.c -o skin_eq_decode_test
+	./skin_eq_decode_test

@@ -62,7 +62,19 @@ int main(int argc,char **argv)
     if (argc>2 && !strcmp(argv[1],"--colours")) {
         printf("%06x %06x %06x %06x\n",skin.playlist_normal,skin.playlist_current,
                skin.playlist_background,skin.playlist_selected);
-        skin_free(&skin); return 0;
+        {
+        Canvas *c=calloc(1,sizeof(*c)); SkinEqState state={0},old;
+        unsigned char *full=malloc(sizeof(c->pixels)); unsigned draws;
+        assert(c && full); c->skin=&skin; c->height=116;
+        skin_eq_render(&skin,&state,NULL,blit,fill,c); draws=c->draws; old=state;
+        skin_eq_render(&skin,&state,&old,blit,fill,c); assert(c->draws==draws);
+        state.preamp=12; state.enabled=1; state.pressed=3;
+        for (i=0;i<10;++i) state.bands[i]=i%2 ? -12 : 12;
+        skin_eq_render(&skin,&state,&old,blit,fill,c); memcpy(full,c->pixels,sizeof(c->pixels));
+        skin_eq_render(&skin,&state,NULL,blit,fill,c); assert(!memcmp(full,c->pixels,sizeof(c->pixels)));
+        free(full); free(c);
+    }
+    skin_free(&skin); return 0;
     }
     for (i=0;i<SKIN_ASSET_COUNT;++i) if (skin.assets[i].rgb)
         printf("%d %u %u %08x\n",i,skin.assets[i].width,skin.assets[i].height,
@@ -86,10 +98,15 @@ int main(int argc,char **argv)
         /* Incremental and full renders must produce identical pixels. */
         state.elapsed=5999; state.total=6000; state.volume=0; state.scroll=7;
         state.pressed=SKIN_VOLUME_SET; state.playing=0; state.mono=1;
+        state.balance=-100; state.shuffle=1; state.repeat=2; state.remaining=1; state.paused=1;
+        state.visual_mode=1; for (i=0;i<16;++i) state.levels[i]=i;
         skin_render(&skin,&state,&old,blit,fill,c);
         memcpy(full,c->pixels,sizeof(c->pixels));
         skin_render(&skin,&state,NULL,blit,fill,c);
         assert(!memcmp(full,c->pixels,sizeof(c->pixels)));
+        old=state; state.visual_mode=2; for (i=0;i<64;++i) state.scope[i]=(signed char)(i*4-128);
+        skin_render(&skin,&state,&old,blit,fill,c); memcpy(full,c->pixels,sizeof(c->pixels));
+        skin_render(&skin,&state,NULL,blit,fill,c); assert(!memcmp(full,c->pixels,sizeof(c->pixels)));
         assert(skin_hit_test(39,88)==SKIN_PLAY);
         assert(skin_hit_test(85,88)==SKIN_STOP);
         assert(skin_hit_test(136,89)==SKIN_BROWSE);
@@ -110,12 +127,14 @@ int main(int argc,char **argv)
         Canvas *c=calloc(1,sizeof(*c)); SkinPlaylistState state={0},old;
         unsigned char *full=malloc(sizeof(c->pixels)); unsigned draws;
         assert(c && full); c->skin=&skin; c->height=232;
-        state.count=30; state.selected=2; state.current=1;
+        state.count=30; state.selected=2; state.current=1; state.selection[2]=state.selection[4]=1;
+        state.total_seconds=600; state.unknown_durations=1;
         for (i=0;i<SKIN_PLAYLIST_ROWS;++i) snprintf(state.rows[i],80,"Track %d",i+1);
         skin_playlist_render(&skin,&state,NULL,blit,fill,label,c);
         draws=c->draws; old=state;
         skin_playlist_render(&skin,&state,&old,blit,fill,label,c); assert(c->draws==draws);
-        state.top=13; state.selected=29; state.current=20;
+        state.top=13; state.selected=29; state.current=20; memset(state.selection,0,128); state.selection[29]=1;
+        state.total_seconds=800; state.unknown_durations=0;
         for (i=0;i<SKIN_PLAYLIST_ROWS;++i) snprintf(state.rows[i],80,"Track %d",i+14);
         skin_playlist_render(&skin,&state,&old,blit,fill,label,c);
         memcpy(full,c->pixels,sizeof(c->pixels));

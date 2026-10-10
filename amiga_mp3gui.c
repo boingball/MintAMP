@@ -612,6 +612,9 @@ typedef struct {
 	int count;
 	int selected;
 	int current;
+#ifdef MINTAMP_SKIN
+    int durations[HELIXAMP3_PLAYLIST_MAX];
+#endif
 } Playlist;
 
 typedef struct {
@@ -4917,7 +4920,14 @@ static void FinalizePlayback(HelixAmp3Gui *gui)
 		}
 		else if (!gui->artDecode.active)
 			SetStatus(gui, "Next file ready.");
-	} else if ((!stoppedByUser || nextPending) &&
+	}
+#if defined(MINTAMP_SKIN) && defined(AMIGA_M68K)
+    else if (gSkinPlayer && !stoppedByUser && !nextPending) {
+        if (gSkinAudio.completed_ok && !failedRadioStart)
+            gSkinPendingTrack=skin_player_order(gSkinPlayer,gui->playlist.count,gui->playlist.current,1,1);
+    }
+#endif
+    else if ((!stoppedByUser || nextPending) &&
 		gui->playlist.current >= 0 &&
 		gui->playlist.current + 1 < gui->playlist.count) {
 		/* Auto-advance to next playlist item (or forced via Next button) */
@@ -7761,6 +7771,9 @@ static int PlaylistAddEntry(Playlist *pl, const char *location, const char *titl
 	SafeCopy(pl->names[n], sizeof(pl->names[n]),
 		pl->titles[n][0] ? pl->titles[n] :
 		(is_url_path(location) ? location : PlaylistBaseName(location)));
+#ifdef MINTAMP_SKIN
+    pl->durations[n]=-1;
+#endif
 	pl->count++;
 	return 1;
 }
@@ -7779,6 +7792,10 @@ static void PlaylistRebuildList(Playlist *pl)
 
 static void RefreshPlaylistView(HelixAmp3Gui *gui)
 {
+#if defined(MINTAMP_SKIN) && defined(AMIGA_M68K)
+    if (skin_player_paths(gSkinPlayer,&gui->playlist.paths[0][0],sizeof(gui->playlist.paths[0]),
+        gui->playlist.count,gui->playlist.current,gui->playlist.selected)) gSkinPendingTrack=-1;
+#endif
 	PlaylistRebuildList(&gui->playlist);
 	if (gui->plWin && gui->plGadList) {
 		ULONG sel = (gui->playlist.selected >= 0) ?
@@ -8028,6 +8045,9 @@ typedef struct GtPlaylistLoad {
 	const char *drawer;
 	int added;
 	int skipped;
+#ifdef MINTAMP_SKIN
+    int before;
+#endif
 } GtPlaylistLoad;
 
 static int GtPlaylistLoadEntry(void *ctx, const char *location, const char *title)
@@ -8037,6 +8057,9 @@ static int GtPlaylistLoadEntry(void *ctx, const char *location, const char *titl
 	char shown[PLAYLIST_TITLE_MAX];
 	int isAbsolute = 0;
 	int j;
+#ifdef MINTAMP_SKIN
+    load->before=load->pl->count;
+#endif
 	if (load->pl->count >= HELIXAMP3_PLAYLIST_MAX)
 		return 0;
 	/* Downloaded playlists are usually UTF-8; the location stays as is. */
@@ -8062,6 +8085,10 @@ static int GtPlaylistLoadEntry(void *ctx, const char *location, const char *titl
 
 /* Appends the entries of the M3U or PLS playlist at path to the current
  * one; relative entries are taken from drawer. Returns the number added. */
+#ifdef MINTAMP_SKIN
+static void GtPlaylistDuration(void *ctx,int seconds)
+{ GtPlaylistLoad *load=(GtPlaylistLoad *)ctx; if (load->pl->count>load->before) load->pl->durations[load->pl->count-1]=seconds; }
+#endif
 static int PlaylistLoadFromPath(HelixAmp3Gui *gui, const char *path, const char *drawer)
 {
 	BPTR fh;
@@ -8092,7 +8119,11 @@ static int PlaylistLoadFromPath(HelixAmp3Gui *gui, const char *path, const char 
 	load.drawer = drawer ? drawer : "";
 	load.added = 0;
 	load.skipped = 0;
-	playlist_parse(text, (size_t)len, GtPlaylistLoadEntry, &load);
+	#ifdef MINTAMP_SKIN
+    playlist_parse_ex(text,(size_t)len,GtPlaylistLoadEntry,&load,GtPlaylistDuration);
+#else
+    playlist_parse(text, (size_t)len, GtPlaylistLoadEntry, &load);
+#endif
 	free(text);
 	RefreshPlaylistView(gui);
 	if (load.skipped > 0)
@@ -8203,8 +8234,18 @@ static void PlaylistSaveM3U(HelixAmp3Gui *gui)
 	}
 	ok = GtWriteAll(fh, text, playlist_write_header(text, sizeof(text), format));
 	for (i = 0; ok && i < gui->playlist.count; i++)
-		ok = GtWriteAll(fh, text, playlist_write_entry(text, sizeof(text), format, i + 1,
-			gui->playlist.paths[i], gui->playlist.titles[i]));
+		ok = GtWriteAll(fh, text,
+#ifdef MINTAMP_SKIN
+        playlist_write_entry_ex(text,
+#else
+        playlist_write_entry(text,
+#endif
+        sizeof(text), format, i + 1,
+			gui->playlist.paths[i], gui->playlist.titles[i]
+#ifdef MINTAMP_SKIN
+            ,gui->playlist.durations[i]
+#endif
+        ));
 	if (ok)
 		ok = GtWriteAll(fh, text, playlist_write_footer(text, sizeof(text), format, gui->playlist.count));
 	Close(fh);
@@ -8317,39 +8358,9 @@ static void PlaylistStartCurrent(HelixAmp3Gui *gui)
 	}
 }
 
-static void HandlePlaylistPoll(HelixAmp3Gui *gui)
+static void PlaylistAddFiles(HelixAmp3Gui *gui)
 {
-	struct IntuiMessage *msg;
-	ULONG classValue;
-	UWORD code;
-	struct Gadget *gad;
-	UWORD gid;
-
-	if (!gui->plWin)
-		return;
-	while ((msg = GT_GetIMsg(gui->plWin->UserPort)) != NULL) {
-		classValue = msg->Class;
-		code = msg->Code;
-		gad = (struct Gadget *)msg->IAddress;
-		gid = gad ? gad->GadgetID : 0;
-		GT_ReplyIMsg(msg);
-		if (classValue == IDCMP_CLOSEWINDOW) {
-			ClosePlaylistWindow(gui);
-			return;
-		}
-		if (classValue == IDCMP_REFRESHWINDOW) {
-			GT_BeginRefresh(gui->plWin);
-			GT_EndRefresh(gui->plWin, TRUE);
-			continue;
-		}
-		if (classValue != IDCMP_GADGETUP || !gid)
-			continue;
-		switch ((int)gid) {
-		case PL_GID_LIST:
-			gui->playlist.selected = (int)code;
-			break;
-		case PL_GID_ADD: {
-			struct FileRequester *req;
+	struct FileRequester *req;
 			req = (struct FileRequester *)AllocAslRequestTags(ASL_FileRequest,
 				ASLFR_TitleText, (ULONG)"Add to playlist",
 				ASLFR_DoMultiSelect, TRUE,
@@ -8358,7 +8369,7 @@ static void HandlePlaylistPoll(HelixAmp3Gui *gui)
 				ASLFR_InitialDrawer,
 					(ULONG)(gui->lastDrawer[0] ? gui->lastDrawer : NULL),
 				TAG_DONE);
-			if (!req) break;
+			if (!req) return;
 			if (AslRequestTags(req, ASLFR_Window, (ULONG)gui->plWin,
 				ASLFR_SleepWindow, TRUE, TAG_DONE)) {
 				char path[HELIXAMP3_MAX_PATH];
@@ -8394,13 +8405,48 @@ static void HandlePlaylistPoll(HelixAmp3Gui *gui)
 				RefreshPlaylistView(gui);
 			}
 			FreeAslRequest(req);
-			break;
+}
+
+static void HandlePlaylistPoll(HelixAmp3Gui *gui)
+{
+	struct IntuiMessage *msg;
+	ULONG classValue;
+	UWORD code;
+	struct Gadget *gad;
+	UWORD gid;
+
+	if (!gui->plWin)
+		return;
+	while ((msg = GT_GetIMsg(gui->plWin->UserPort)) != NULL) {
+		classValue = msg->Class;
+		code = msg->Code;
+		gad = (struct Gadget *)msg->IAddress;
+		gid = gad ? gad->GadgetID : 0;
+		GT_ReplyIMsg(msg);
+		if (classValue == IDCMP_CLOSEWINDOW) {
+			ClosePlaylistWindow(gui);
+			return;
 		}
+		if (classValue == IDCMP_REFRESHWINDOW) {
+			GT_BeginRefresh(gui->plWin);
+			GT_EndRefresh(gui->plWin, TRUE);
+			continue;
+		}
+		if (classValue != IDCMP_GADGETUP || !gid)
+			continue;
+		switch ((int)gid) {
+		case PL_GID_LIST:
+			gui->playlist.selected = (int)code;
+			break;
+		case PL_GID_ADD: PlaylistAddFiles(gui); break;
 		case PL_GID_REMOVE:
 			if (gui->playlist.selected >= 0 && gui->playlist.selected < gui->playlist.count) {
 				int i;
 				int sel = gui->playlist.selected;
 				for (i = sel; i < gui->playlist.count - 1; i++) {
+#ifdef MINTAMP_SKIN
+                    gui->playlist.durations[i]=gui->playlist.durations[i+1];
+#endif
 					SafeCopy(gui->playlist.paths[i], sizeof(gui->playlist.paths[0]),
 						gui->playlist.paths[i + 1]);
 					SafeCopy(gui->playlist.names[i], sizeof(gui->playlist.names[0]),

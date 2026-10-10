@@ -1,3 +1,6 @@
+#ifdef MINTAMP_SKIN
+#include "skin_controls.h"
+#endif
 /* Minimal AmigaOS/m68k-friendly command-line MP3 decoder.
  *
  * Builds the public decoder (mp3dec.c, mp3tabs.c) plus the portable real C files and writes raw
@@ -2762,6 +2765,11 @@ static unsigned long UpdatePcmChecksum(unsigned long checksum, const short *pcm,
 
 static void UpdateFirstFrameStats(DecodeStats *stats, const MP3FrameInfo *info)
 {
+#ifdef MINTAMP_SKIN
+	gSkinAudio.channels=info->nChans;
+	gSkinAudio.bitrate=info->bitrate/1000;
+	gSkinAudio.eq_supported=1;
+#endif
 	if (!stats->sampleRate && info->samprate)
 		stats->sampleRate = info->samprate;
 	if (!stats->channels && info->nChans)
@@ -7014,6 +7022,14 @@ int MP3ResetStatics(void)
 	gPlaybackInterrupted = 0;
 	gSeekRequest = 0;
 	gSeekTargetSecs = 0;
+#ifdef MINTAMP_SKIN
+	gSkinAudio.pause_requested=gSkinAudio.paused=0;
+	gSkinAudio.channels=gSkinAudio.bitrate=gSkinAudio.eq_supported=0;
+	gSkinAudio.completed_ok=0; gSkinAudio.pause_catchup=0;
+    gSkinAudio.position_ms=0; gSkinAudio.position_valid=0; gSkinAudio.seek_sequence=0;
+    gSkinAudio.visual_sequence=gSkinAudio.visual_request;
+    memset((void *)gSkinAudio.visual_pcm,0,sizeof(gSkinAudio.visual_pcm));
+#endif
 	memset((void *)&gGuiPlaybackStatus, 0, sizeof(gGuiPlaybackStatus));
 	gTiming = NULL;
 	MP3SetExperimentalHuffman(0);
@@ -7128,6 +7144,11 @@ typedef enum {
 } AudioCleanupState;
 
 typedef struct AmigaAudioPlayer {
+#ifdef MINTAMP_SKIN
+    SkinClock skin_clock;
+    unsigned long skin_seek_sequence;
+    unsigned char skin_counted[3];
+#endif
 	struct MsgPort *port;
 	struct IOAudio *req[3][2];
 	struct IOAudio *closeReq[2]; /* dedicated close request per channel */
@@ -8144,11 +8165,73 @@ static void AmigaAudioApplyPreparedVolume(AmigaAudioPlayer *player, int index)
 	if (!player || !player->prepared[index])
 		return;
 	if (player->req[index][0])
-		player->req[index][0]->ioa_Volume = player->requestVolume;
+		player->req[index][0]->ioa_Volume =
+#ifdef MINTAMP_SKIN
+            VolumePercentToAudioDevice(skin_balance_volume(player->lastVolumePercent,gSkinAudio.balance,0));
+#else
+            player->requestVolume;
+#endif
 	if (player->stereo && player->req[index][1])
-		player->req[index][1]->ioa_Volume = player->requestVolume;
+		player->req[index][1]->ioa_Volume =
+#ifdef MINTAMP_SKIN
+            VolumePercentToAudioDevice(skin_balance_volume(player->lastVolumePercent,gSkinAudio.balance,1));
+#else
+            player->requestVolume;
+#endif
 }
 
+#ifdef MINTAMP_SKIN
+/* Count output samples once per completed paired slot, including the
+ * slots drained for Pause. This handles MPEG-2/2.5 and variable-size decoder
+ * blocks without the native UI's historical frames*1152 assumption. */
+static void AmigaAudioSkinComplete(AmigaAudioPlayer *player,int index)
+{
+    if (player->skin_counted[index]) return;
+    player->skin_counted[index]=1;
+    skin_clock_advance(&player->skin_clock,player->req[index][0]->ioa_Length,
+                       gGuiPlaybackStatus.effectiveRate);
+    gSkinAudio.position_ms=player->skin_clock.milliseconds;
+}
+/* Finish queued DMA without reaping requests here. The regular ring still
+ * owns/reaps every completion after resume; decoder and prepared PCM survive. */
+static int AmigaAudioSkinPause(AmigaAudioPlayer *player)
+{
+    int i,ch;
+    if (!gSkinAudio.pause_requested) return 0;
+    ++gSkinAudio.pause_epoch;
+    for (i=0;i<AMIGA_AUDIO_PLAYBACK_SLOTS;++i)
+        for (ch=0;ch<(player->stereo ? 2 : 1);++ch)
+            if (player->sent[i][ch]) {
+                struct IORequest *r=(struct IORequest *)player->req[i][ch];
+                while (!CheckIO(r)) {
+                    if (!gSkinAudio.pause_requested) return 0;
+                    if (Wait((1UL<<player->port->mp_SigBit)|SIGBREAKF_CTRL_C|SIGBREAKF_CTRL_D)&SIGBREAKF_CTRL_C) {
+                        gPlaybackInterrupted=1; return -1;
+                    }
+                }
+                if (ch==0) AmigaAudioSkinComplete(player,i);
+            }
+    if (!gSkinAudio.pause_requested) return 0;
+    gSkinAudio.paused=1;
+    while (gSkinAudio.pause_requested && !gPlaybackInterrupted)
+        if (Wait(SIGBREAKF_CTRL_C|SIGBREAKF_CTRL_D)&SIGBREAKF_CTRL_C)
+            gPlaybackInterrupted=1;
+    gSkinAudio.paused=0;
+    return gPlaybackInterrupted ? -1 : 0;
+}
+static void AmigaAudioSkinSnapshot(AmigaAudioPlayer *player,int index)
+{
+    int n;
+    unsigned long request=gSkinAudio.visual_request;
+    const signed char *left=(const signed char *)player->req[index][0]->ioa_Data;
+    const signed char *right=player->stereo ? (const signed char *)player->req[index][1]->ioa_Data : left;
+    gSkinAudio.output_stereo=player->stereo;
+    gSkinAudio.output_rate=gGuiPlaybackStatus.effectiveRate;
+    if (request==gSkinAudio.visual_sequence || player->req[index][0]->ioa_Length<SKIN_VIS_SAMPLES) return;
+    for (n=0;n<SKIN_VIS_SAMPLES;++n) gSkinAudio.visual_pcm[n]=(signed char)(((int)left[n]+right[n])/2);
+    gSkinAudio.visual_sequence=request;
+}
+#endif
 static int AmigaAudioCommit(AmigaAudioPlayer *player, int index)
 {
 	if (AmigaPlaybackStopRequested(NULL, "before first buffer submission"))
@@ -8157,6 +8240,19 @@ static int AmigaAudioCommit(AmigaAudioPlayer *player, int index)
 		return -1;
 	if (!player->prepared[index])
 		return -1;
+#ifdef MINTAMP_SKIN
+    if (AmigaAudioSkinPause(player)!=0) return -1;
+    if (player->skin_seek_sequence!=gSkinAudio.seek_sequence) {
+        int slot;
+        player->skin_seek_sequence=gSkinAudio.seek_sequence;
+        player->skin_clock.milliseconds=(unsigned long)gSkinAudio.seek_seconds*1000UL;
+        player->skin_clock.remainder=0;
+        for (slot=0;slot<3;++slot) player->skin_counted[slot]=1;
+        gSkinAudio.position_ms=player->skin_clock.milliseconds;
+    }
+    player->skin_counted[index]=0; gSkinAudio.position_valid=1;
+    AmigaAudioSkinSnapshot(player,index);
+#endif
 	AmigaAudioRefreshRequestedVolume(player);
 	AmigaAudioApplyPreparedVolume(player, index);
 	AmigaAudioPrintStartupVolumeDebug(player, index);
@@ -8221,6 +8317,9 @@ static int AmigaAudioWaitOne(AmigaAudioPlayer *player, int index, int ch)
 		printf("debug-play: WaitIO buffer=%s ch=%d result=%d io_Error=%d CheckIOAfter=%ld\n",
 			PlaybackBufferName(index), ch, err,
 			(int)player->req[index][ch]->ioa_Request.io_Error, (long)CheckIO(req));
+#ifdef MINTAMP_SKIN
+    if (!err && ch==0) AmigaAudioSkinComplete(player,index);
+#endif
 	player->sent[index][ch] = 0;
 	return err;
 }
@@ -8273,13 +8372,21 @@ static int AmigaAudioWait(AmigaAudioPlayer *player, int index)
 		int err2 = AmigaAudioAbortOutstanding(player);
 		if (!err)
 			err = err2;
-		return err;
+	#ifdef MINTAMP_SKIN
+    if (!err && !gPlaybackInterrupted && gSkinAudio.pause_requested)
+        err=AmigaAudioSkinPause(player);
+#endif
+	return err;
 	}
 	if (player->stereo && player->sent[index][1]) {
 		int err2 = AmigaAudioWaitOne(player, index, 1);
 		if (!err)
 			err = err2;
 	}
+#ifdef MINTAMP_SKIN
+    if (!err && !gPlaybackInterrupted && gSkinAudio.pause_requested)
+        err=AmigaAudioSkinPause(player);
+#endif
 	return err;
 }
 
@@ -8589,6 +8696,9 @@ static void DecodeStreamApplySeek(DecodeStream *stream, const DecodeOptions *opt
 	halfMs = gGuiPlaybackStatus.halfBufferMs;
 	compSecs = halfMs ? (halfMs + 999UL) / 1000UL : (unsigned long)opt->bufferSeconds;
 	frames += compSecs * (unsigned long)sourceRate / 1152UL;
+#ifdef MINTAMP_SKIN
+    gSkinAudio.seek_seconds=(int)targetSecs; ++gSkinAudio.seek_sequence;
+#endif
 	stream->stats->decodedFrames = frames;
 	gGuiPlaybackStatus.decodedFrames = frames;
 }
@@ -9034,6 +9144,10 @@ static int AmigaPlayWholeBuffer(const signed char *pcm, unsigned long totalBytes
 	}
 	err = 0;
 cleanup:
+#ifdef MINTAMP_SKIN
+    gSkinAudio.paused=0; gSkinAudio.pause_requested=0;
+    gSkinAudio.completed_ok=(err==0 && !gPlaybackInterrupted);
+#endif
 	GuiPublishStartupStage(err == 0 ? GUISTART_CLEANUP : GUISTART_FAILED);
 	gGuiPlaybackStatus.phase = GUIPLAY_PHASE_STOPPING;
 	gGuiPlaybackStatus.cleanupComplete = 0;
@@ -9089,6 +9203,10 @@ static int AmigaPlayDecodeThenPlay(InputSource *input, HMP3Decoder decoder,
 	printf("decode-then-play bytes: %lu\n", used);
 	err = AmigaPlayWholeBuffer(all, used, opt, stats);
 cleanup:
+#ifdef MINTAMP_SKIN
+    gSkinAudio.paused=0; gSkinAudio.pause_requested=0;
+    gSkinAudio.completed_ok=(err==0 && !gPlaybackInterrupted);
+#endif
 	free(all);
 	all = NULL;
 	if (!gGuiPlaybackStatus.cleanupComplete) {
@@ -10477,6 +10595,9 @@ static int AmigaPlayStreamingGeneric(InputSource *input,
 	if (playbackRate <= 0)
 		playbackRate = 8287;
 
+#ifdef MINTAMP_SKIN
+    gSkinAudio.eq_supported=0; gSkinAudio.channels=(int)sinfo->channels;
+#endif
 	stats->sampleRate      = (int)sinfo->sampleRate;
 	stats->channels        = (int)sinfo->channels;
 	stats->outputSampleRate = playbackRate;
@@ -10680,6 +10801,9 @@ static int AmigaPlayStreamingGeneric(InputSource *input,
 			break;
 		}
 #endif
+#ifdef MINTAMP_SKIN
+        unsigned long skinPauseEpoch=gSkinAudio.pause_epoch;
+#endif
 		waitStartedAt = clock();
 		if (gPlaybackInterrupted)
 			break;
@@ -10760,6 +10884,13 @@ static int AmigaPlayStreamingGeneric(InputSource *input,
 
 		active = (active + 1) % liveSlots;
 		elapsedMilliseconds = PlaybackElapsedMilliseconds(waitStartedAt, refillFinishedAt);
+#ifdef MINTAMP_SKIN
+        if (gSkinAudio.pause_epoch!=skinPauseEpoch || gSkinAudio.pause_catchup>0) {
+            elapsedMilliseconds=0; underrun=0;
+            if (gSkinAudio.pause_epoch!=skinPauseEpoch) gSkinAudio.pause_catchup=liveSlots;
+            else --gSkinAudio.pause_catchup;
+        }
+#endif
 		spareMilliseconds   = (long)activeMilliseconds - (long)elapsedMilliseconds;
 		late = (spareMilliseconds < 0) || underrun;
 		if (!stats->spareTimeMeasured || spareMilliseconds < stats->minimumSpareMilliseconds) {
@@ -10782,6 +10913,10 @@ static int AmigaPlayStreamingGeneric(InputSource *input,
 	}
 
 cleanup:
+#ifdef MINTAMP_SKIN
+    gSkinAudio.paused=0; gSkinAudio.pause_requested=0;
+    gSkinAudio.completed_ok=(err==0 && !gPlaybackInterrupted);
+#endif
 	if (err != 0 && ops && ops->info && ops->info->extensions &&
 		StrCaseCmp(ops->info->extensions, "aac") == 0) {
 		GuiSetPlaybackPhase(GUIPLAY_PHASE_ERROR);
@@ -11275,6 +11410,9 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 		 * WaitIO-reaps both channels in the completed A/B pair, then copies the
 		 * prepared Fast RAM C decode-ahead block into that chip pair before
 		 * resubmitting it and decoding the next block into C. */
+#ifdef MINTAMP_SKIN
+        unsigned long skinPauseEpoch=gSkinAudio.pause_epoch;
+#endif
 		waitStartedAt = clock();
 		if (gPlaybackInterrupted)
 			break;
@@ -11366,6 +11504,13 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 		active = (active + 1) % liveSlots;
 		elapsedMilliseconds = PlaybackElapsedMilliseconds(waitStartedAt,
 			refillFinishedAt);
+#ifdef MINTAMP_SKIN
+        if (gSkinAudio.pause_epoch!=skinPauseEpoch || gSkinAudio.pause_catchup>0) {
+            elapsedMilliseconds=0; underrun=0;
+            if (gSkinAudio.pause_epoch!=skinPauseEpoch) gSkinAudio.pause_catchup=liveSlots;
+            else --gSkinAudio.pause_catchup;
+        }
+#endif
 		spareMilliseconds = (long)activeMilliseconds - (long)elapsedMilliseconds;
 		late = (spareMilliseconds < 0) || underrun;
 		if (!stats->spareTimeMeasured || spareMilliseconds < stats->minimumSpareMilliseconds) {
@@ -11418,6 +11563,10 @@ static int AmigaPlayStreaming(InputSource *input, HMP3Decoder decoder,
 		err = -1;
 	}
 cleanup:
+#ifdef MINTAMP_SKIN
+    gSkinAudio.paused=0; gSkinAudio.pause_requested=0;
+    gSkinAudio.completed_ok=(err==0 && !gPlaybackInterrupted);
+#endif
 	gGuiPlaybackStatus.phase = GUIPLAY_PHASE_STOPPING;
 	gGuiPlaybackStatus.cleanupComplete = 0;
 	AmigaAudioClose(&player, &cleanupStatus);
