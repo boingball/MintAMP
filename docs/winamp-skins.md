@@ -41,7 +41,7 @@ EQ, playlist and text. Oversized windows/scales are refused or fall back.
 
 | Control | Behaviour |
 | --- | --- |
-| Play / X | Start playback; resume a paused decoder; no restart while already playing |
+| Play / X | Start playback; with no loaded input, play the selected/first playlist entry; resume a paused decoder; no restart while already playing |
 | Pause / C / Space | Toggle buffer-boundary pause/resume |
 | Stop / V | Existing interrupt, IO retirement and child shutdown path |
 | Previous / Z; Next / B | Play a playlist entry after the old child exits; shuffle uses previous/forward history |

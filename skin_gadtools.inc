@@ -62,6 +62,12 @@ static void GuiSkinPoll(HelixAmp3Gui *gui)
             if (gui->playbackActive) break;
             gSkinPendingTrack=-1;
             if (!gui->inputName[0] && !gui->queuedInputName[0]) {
+                if (gui->playlist.count>0) {
+                    skin_player_order_cancel(gSkinPlayer);
+                    gSkinPendingTrack=gui->playlist.selected>=0 && gui->playlist.selected<gui->playlist.count ? gui->playlist.selected : 0;
+                    gui->queuedPlayPending=gui->playlistNextPending=0;
+                    break;
+                }
                 skin_player_notice(gSkinPlayer,"OPEN AUDIO OR CHOOSE INTERNET RADIO"); break;
             }
             gad.GadgetID=GID_PLAY; HandleGuiAction(gui,&gad,0,IDCMP_GADGETUP,TRUE); break;

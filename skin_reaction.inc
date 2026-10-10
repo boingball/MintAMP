@@ -57,6 +57,12 @@ static void MrSkinPoll(MrApp *app,int *done)
             gSkinPendingTrack=-1;
             if (app->win) SyncFromGadgets(app);
             if (!app->inputName[0]) {
+                if (app->playlistCount>0) {
+                    skin_player_order_cancel(gSkinPlayer);
+                    gSkinPendingTrack=app->playlistSelected>=0 && app->playlistSelected<app->playlistCount ? app->playlistSelected : 0;
+                    app->queuedStreamUrl[0]=0; app->playlistNextPending=0;
+                    break;
+                }
                 skin_player_notice(gSkinPlayer,"OPEN AUDIO OR CHOOSE INTERNET RADIO"); break;
             }
             if (MrIsRadioInput(app->inputName)) RadioProbeUrlAndStart(app,app->inputName,NULL);
