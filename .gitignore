@@ -18,3 +18,4 @@
 skin_controls_test
 skin_eq_decode_test
 playlist_format_test
+integer_stats_test

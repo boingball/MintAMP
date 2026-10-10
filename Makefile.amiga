@@ -337,7 +337,7 @@ AMIGA_HUNK_FAST_PREFERRED := python3 tools/amiga_fast_preferred_hunks.py
 
 all: $(TARGET) decoder-modules
 
-$(TARGET): $(SOURCES)
+$(TARGET): $(SOURCES) integer_stats.h
 	$(CC) $(CFLAGS_COMMON) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(SSL_CPPFLAGS) $(SSLCERTS_CPPFLAGS) $(DEBUG_CPPFLAGS) $(EXTRA_CFLAGS) -o $@ $(SOURCES)
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
 
@@ -439,7 +439,7 @@ fast030-halfasm-test: $(FAST030_HALFASM_TEST_TARGET)
 
 gui-halfasm-test: $(GUI_HALFASM_TEST_TARGET)
 
-$(GUI_TARGET): $(GUI_EXTRA_DEPS) $(GUI_SOURCES) amiga_mp3dec.c $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(LIBNIX_FREEALL_COMPAT_SOURCES)
+$(GUI_TARGET): $(GUI_EXTRA_DEPS) $(GUI_SOURCES) amiga_mp3dec.c integer_stats.h $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(LIBNIX_FREEALL_COMPAT_SOURCES)
 	set -e; \
 	trap 'rm -f $@.freeall-discovery $@.freeall-heads' EXIT; \
 	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(PROBE_CPPFLAGS) $(SSL_CPPFLAGS) $(SSLCERTS_CPPFLAGS) $(PNG_CPPFLAGS) $(DEBUG_CPPFLAGS) $(FREEALL_PROBE_CPPFLAGS) $(EXTRA_CFLAGS) \
@@ -456,7 +456,7 @@ $(GUI_TARGET): $(GUI_EXTRA_DEPS) $(GUI_SOURCES) amiga_mp3dec.c $(DECODER_SOURCES
 # MintAMP — ReAction/ClassAct frontend.  Built with the same fast030 ASM path
 # as the GadTools GUI since it targets 030+/3.5/3.9 machines.  minimp3r.c
 # #includes amiga_mp3dec.c, so only the shared decoder modules are linked.
-$(GUIR_TARGET): $(GUI_EXTRA_DEPS) $(GUIR_SOURCES) amiga_mp3dec.c $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(LIBNIX_FREEALL_COMPAT_SOURCES)
+$(GUIR_TARGET): $(GUI_EXTRA_DEPS) $(GUIR_SOURCES) amiga_mp3dec.c integer_stats.h $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(LIBNIX_FREEALL_COMPAT_SOURCES)
 	set -e; \
 	trap 'rm -f $@.freeall-discovery $@.freeall-heads' EXIT; \
 	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(PROBE_CPPFLAGS) $(SSL_CPPFLAGS) $(SSLCERTS_CPPFLAGS) $(PNG_CPPFLAGS) $(DEBUG_CPPFLAGS) $(FREEALL_PROBE_CPPFLAGS) $(EXTRA_CFLAGS) \
@@ -470,7 +470,7 @@ $(GUIR_TARGET): $(GUI_EXTRA_DEPS) $(GUIR_SOURCES) amiga_mp3dec.c $(DECODER_SOURC
 	trap - EXIT
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
 
-$(FAST030_TARGET): $(SOURCES) $(FAST030_ASM_SOURCES)
+$(FAST030_TARGET): $(SOURCES) integer_stats.h $(FAST030_ASM_SOURCES)
 	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(SSL_CPPFLAGS) $(SSLCERTS_CPPFLAGS) $(DEBUG_CPPFLAGS) $(EXTRA_CFLAGS) -o $@ $(SOURCES) $(FAST030_ASM_SOURCES)
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
 
@@ -478,15 +478,15 @@ $(FAST030_TARGET): $(SOURCES) $(FAST030_ASM_SOURCES)
 # core timing split (huffman/dequant/imdct/subband-dct32/polyphase/stereo).
 # The clock() calls add overhead, so use it for relative bucket sizing, not for
 # absolute realtime numbers.
-$(PROF030_TARGET): $(SOURCES) $(FAST030_ASM_SOURCES)
+$(PROF030_TARGET): $(SOURCES) integer_stats.h $(FAST030_ASM_SOURCES)
 	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(PROF030_CPPFLAGS) $(SSL_CPPFLAGS) $(SSLCERTS_CPPFLAGS) $(DEBUG_CPPFLAGS) $(EXTRA_CFLAGS) -o $@ $(SOURCES) $(FAST030_ASM_SOURCES)
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
 
-$(FAST030_HALFASM_TEST_TARGET): $(SOURCES) $(FAST030_ASM_SOURCES)
+$(FAST030_HALFASM_TEST_TARGET): $(SOURCES) integer_stats.h $(FAST030_ASM_SOURCES)
 	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(HALFASM_TEST_CPPFLAGS) $(EXTRA_CFLAGS) -o $@ $(SOURCES) $(FAST030_ASM_SOURCES)
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
 
-$(GUI_HALFASM_TEST_TARGET): $(GUI_SOURCES) amiga_mp3dec.c $(DECODER_SOURCES) $(FAST030_ASM_SOURCES)
+$(GUI_HALFASM_TEST_TARGET): $(GUI_SOURCES) amiga_mp3dec.c integer_stats.h $(DECODER_SOURCES) $(FAST030_ASM_SOURCES)
 	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(HALFASM_TEST_CPPFLAGS) $(PNG_CPPFLAGS) $(EXTRA_CFLAGS) \
 		-o $@ $(GUI_SOURCES) $(DECODER_SOURCES) $(FAST030_ASM_SOURCES)
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
@@ -726,7 +726,11 @@ clean:
 		mpeg25_decode_test
 	$(MAKE) -C decoders clean
 
-.PHONY: skin-controls-test skin-eq-decode-test
+.PHONY: skin-controls-test skin-eq-decode-test integer-stats-test
+integer-stats-test:
+	$(HOSTCC) -O2 -std=gnu89 -Wall -Wextra -Werror -I. tests/integer_stats_test.c -o integer_stats_test
+	./integer_stats_test
+	PYTHONDONTWRITEBYTECODE=1 python3 tests/integer_source_test.py
 skin-controls-test:
 	$(HOSTCC) -O2 -std=gnu89 -Wall -Wextra -Werror -I. tests/skin_controls_test.c skin_controls.c winamp_skin_render.c -o skin_controls_test
 	./skin_controls_test

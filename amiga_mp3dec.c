@@ -9,6 +9,7 @@
  */
 
 #include <stdio.h>
+#include "integer_stats.h"
 #include <stdlib.h>
 #include <string.h>
 #include "miniamp_memguard.h"
@@ -2364,11 +2365,26 @@ static int FillReadBuffer(unsigned char *readBuf, unsigned char *readPtr, int bu
 
 static TimingStats *gTiming;
 
-static double ClocksToSeconds(clock_t c)
+static unsigned long ClocksToMilliseconds(clock_t c)
 {
-	if (CLOCKS_PER_SEC <= 0)
-		return 0.0;
-	return (double)c / (double)CLOCKS_PER_SEC;
+	if (CLOCKS_PER_SEC <= 0 || c <= 0)
+		return 0;
+	return IntegerScale((uint32_t)c, (uint32_t)CLOCKS_PER_SEC, 1000, 0);
+}
+
+static void PrintIntegerRatio(const char *label, unsigned long numerator,
+	unsigned long denominator, int digits, const char *suffix)
+{
+	char value[32];
+	IntegerRatioText(value, sizeof(value), (uint32_t)numerator,
+		(uint32_t)denominator, digits);
+	printf("%s%s%s", label, value, suffix);
+}
+
+static void PrintClockSeconds(const char *label, clock_t ticks)
+{
+	PrintIntegerRatio(label, ticks > 0 ? (unsigned long)ticks : 0,
+		CLOCKS_PER_SEC > 0 ? (unsigned long)CLOCKS_PER_SEC : 0, 3, " s\n");
 }
 
 static int TimedFputc(int c, FILE *fp)
@@ -2863,14 +2879,14 @@ static unsigned long PerChannelEmittedSamples(const DecodeOptions *opt,
 		stats->outputSamples / (unsigned long)outputChannels : stats->outputSamples;
 }
 
-static double DecodedAudioSeconds(const DecodeOptions *opt,
+static unsigned long DecodedAudioMilliseconds(const DecodeOptions *opt,
 	const DecodeStats *stats)
 {
 	int sampleRate;
 	unsigned long perChannelSamples;
 
 	if (stats->outputSamples == 0)
-		return 0.0;
+		return 0;
 
 	if (opt->fastLowrate)
 		sampleRate = PlaybackOutputSampleRate(opt, stats);
@@ -2879,27 +2895,45 @@ static double DecodedAudioSeconds(const DecodeOptions *opt,
 			stats->outputSampleRate : stats->sampleRate;
 
 	if (sampleRate <= 0)
-		return 0.0;
+		return 0;
 
 	perChannelSamples = PerChannelEmittedSamples(opt, stats);
-	return (double)perChannelSamples / (double)sampleRate;
+	return IntegerScale((uint32_t)perChannelSamples, (uint32_t)sampleRate, 1000, 0);
+}
+
+static void PrintDecodedSeconds(const char *label, const DecodeOptions *opt,
+	const DecodeStats *stats)
+{
+	int rate = opt->fastLowrate ? PlaybackOutputSampleRate(opt, stats) :
+		(stats->outputSampleRate ? stats->outputSampleRate : stats->sampleRate);
+	PrintIntegerRatio(label, PerChannelEmittedSamples(opt, stats),
+		rate > 0 ? (unsigned long)rate : 0, 6, "\n");
+}
+
+static void PrintBenchmarkSeconds(const DecodeOptions *opt, const DecodeStats *stats,
+	clock_t start, clock_t end)
+{
+	unsigned long elapsed = end > start && start != (clock_t)-1 && end != (clock_t)-1 ?
+		ClocksToMilliseconds((clock_t)((unsigned long)end - (unsigned long)start)) : 0;
+	unsigned long audio = DecodedAudioMilliseconds(opt, stats);
+	PrintIntegerRatio("elapsed seconds: ", elapsed, 1000, 3, "\n");
+	if (elapsed && audio)
+		PrintIntegerRatio("decode speed: ", audio, elapsed, 2, "x realtime\n");
 }
 
 static void PrintOutputStats(const DecodeOptions *opt, const DecodeStats *stats)
 {
 	unsigned long perChannelSamples;
 	int outputChannels;
-	double audioSeconds;
 
 	outputChannels = OutputChannelCount(opt, stats);
 	perChannelSamples = PerChannelEmittedSamples(opt, stats);
-	audioSeconds = DecodedAudioSeconds(opt, stats);
 
 	printf("input channels: %d\n", stats->channels);
 	printf("output channels: %d\n", outputChannels);
 	printf("total emitted samples: %lu\n", stats->outputSamples);
 	printf("per-channel emitted samples: %lu\n", perChannelSamples);
-	printf("decoded audio seconds used for realtime calculation: %.6f\n", audioSeconds);
+	PrintDecodedSeconds("decoded audio seconds used for realtime calculation: ", opt, stats);
 }
 
 static int DownsampleFrame(RateState *rate, const short *in, short *out, int nSamps,
@@ -4970,17 +5004,12 @@ static int SelftestPolyphaseStride4AllPhases(void)
 }
 
 
-static double SqrtApprox(double x)
+static void PrintIntegerRms(const char *label, const IntegerRms *rms,
+	const char *suffix)
 {
-	double g;
-	int i;
-
-	if (x <= 0.0)
-		return 0.0;
-	g = x >= 1.0 ? x : 1.0;
-	for (i = 0; i < 24; i++)
-		g = 0.5 * (g + x / g);
-	return g;
+	char value[32];
+	IntegerRmsText(value, sizeof(value), rms);
+	printf("%s%s%s", label, value, suffix);
 }
 
 #if defined(AMIGA_M68K) && defined(AMIGA_FAST_POLYPHASE) && defined(AMIGA_FAST_FDCT32_QUARTER)
@@ -5018,15 +5047,13 @@ static int SelftestFdct32Quarter(void)
 	unsigned long i;
 	unsigned long activeScatterMismatches;
 	unsigned long staleMismatches;
-	double squares;
-	double samples;
+	IntegerRms rms;
 	int j;
 
 	seed = 0x4d504733UL;
 	activeScatterMismatches = 0;
 	staleMismatches = 0;
-	squares = 0.0;
-	samples = 0.0;
+	memset(&rms, 0, sizeof(rms));
 
 	for (i = 0; i < CASES; i++) {
 		int offset;
@@ -5078,9 +5105,7 @@ static int SelftestFdct32Quarter(void)
 				hdest[idx + 8] != hdest[idx] || qdest[idx + 8] != qdest[idx])
 				activeScatterMismatches++;
 			else {
-				double d = (double)hdest[idx] - (double)qdest[idx];
-				squares += d * d;
-				samples += 1.0;
+				IntegerRmsAdd(&rms, hdest[idx], qdest[idx]);
 			}
 		}
 		for (j = 0; j < 16; j++) {
@@ -5107,8 +5132,8 @@ static int SelftestFdct32Quarter(void)
 		activeScatterMismatches);
 	printf("FDCT32Quarter stale quarter-rate row clears: %lu mismatches\n",
 		staleMismatches);
-	printf("FDCT32Quarter RMS difference vs FDCT32Half active rows: %.2f counts\n",
-		SqrtApprox(squares / (samples > 0.0 ? samples : 1.0)));
+	PrintIntegerRms("FDCT32Quarter RMS difference vs FDCT32Half active rows: ",
+		&rms, " counts (integer)\n");
 	MP3SetExperimentalFDCT32Quarter(1);
 	printf("FDCT32Quarter stride gate: stride 2 call=%s, stride 4 call=%s\n",
 		(2 == 4 && MP3ExperimentalFDCT32QuarterEnabled()) ? "yes" : "no",
@@ -5135,8 +5160,7 @@ static int SelftestFdct32QuarterStereo(void)
 	unsigned long i;
 	unsigned long activationMismatches;
 	unsigned long independenceMismatches;
-	double squares[2];
-	double samples[2];
+	IntegerRms rms[2];
 	int ch;
 	int j;
 
@@ -5144,8 +5168,7 @@ static int SelftestFdct32QuarterStereo(void)
 	seed[1] = 0x53544552UL;
 	activationMismatches = 0;
 	independenceMismatches = 0;
-	squares[0] = squares[1] = 0.0;
-	samples[0] = samples[1] = 0.0;
+	memset(rms, 0, sizeof(rms));
 	MP3SetExperimentalFDCT32Quarter(1);
 
 	for (i = 0; i < CASES; i++) {
@@ -5202,9 +5225,7 @@ static int SelftestFdct32QuarterStereo(void)
 				if (got == sentinel)
 					activationMismatches++;
 				else {
-					double d = (double)reference[ch][idx] - (double)got;
-					squares[ch] += d * d;
-					samples[ch] += 1.0;
+					IntegerRmsAdd(&rms[ch], reference[ch][idx], got);
 				}
 			}
 		}
@@ -5216,10 +5237,10 @@ static int SelftestFdct32QuarterStereo(void)
 		activationMismatches);
 	printf("FDCT32Quarter stereo channel-independence mismatches: %lu\n",
 		independenceMismatches);
-	printf("FDCT32Quarter stereo channel 0 RMS difference vs full FDCT32 (active rows): %.2f counts\n",
-		SqrtApprox(squares[0] / (samples[0] > 0.0 ? samples[0] : 1.0)));
-	printf("FDCT32Quarter stereo channel 1 RMS difference vs full FDCT32 (active rows): %.2f counts\n",
-		SqrtApprox(squares[1] / (samples[1] > 0.0 ? samples[1] : 1.0)));
+	PrintIntegerRms("FDCT32Quarter stereo channel 0 RMS difference vs full FDCT32 (active rows): ",
+		&rms[0], " counts (integer)\n");
+	PrintIntegerRms("FDCT32Quarter stereo channel 1 RMS difference vs full FDCT32 (active rows): ",
+		&rms[1], " counts (integer)\n");
 	if (activationMismatches || independenceMismatches) {
 		printf("FDCT32Quarter stereo selftest FAIL\n");
 		return 1;
@@ -5252,14 +5273,7 @@ static int SelftestReducedTaps(void)
 	unsigned long stride2MonoCountMismatches;
 	unsigned long stride2MonoOverrunMismatches;
 	unsigned long stride2StereoIndependenceMismatches;
-	double monoSquares;
-	double stereoSquares;
-	double stride2StereoSquares[2];
-	double stride2MonoSquares;
-	double monoSamples;
-	double stereoSamples;
-	double stride2StereoSamples[2];
-	double stride2MonoSamples;
+	IntegerRms monoRms, stereoRms, stride2MonoRms, stride2StereoRms[2];
 	int j;
 
 	seed = 0x8a7c4d11UL;
@@ -5269,16 +5283,10 @@ static int SelftestReducedTaps(void)
 	stride2MonoCountMismatches = 0;
 	stride2MonoOverrunMismatches = 0;
 	stride2StereoIndependenceMismatches = 0;
-	monoSquares = 0.0;
-	stereoSquares = 0.0;
-	stride2StereoSquares[0] = 0.0;
-	stride2StereoSquares[1] = 0.0;
-	stride2MonoSquares = 0.0;
-	monoSamples = 0.0;
-	stereoSamples = 0.0;
-	stride2StereoSamples[0] = 0.0;
-	stride2StereoSamples[1] = 0.0;
-	stride2MonoSamples = 0.0;
+	memset(&monoRms, 0, sizeof(monoRms));
+	memset(&stereoRms, 0, sizeof(stereoRms));
+	memset(&stride2MonoRms, 0, sizeof(stride2MonoRms));
+	memset(stride2StereoRms, 0, sizeof(stride2StereoRms));
 
 	for (i = 0; i < CASES; i++) {
 		int phase;
@@ -5341,36 +5349,25 @@ static int SelftestReducedTaps(void)
 		}
 		if (reducedMonoCount == 8) {
 			for (j = 0; j < 8; j++) {
-				double d = (double)((int)fullMono[j] - (int)reducedMono[j]);
-				monoSquares += d * d;
-				monoSamples += 1.0;
+				IntegerRmsAdd(&monoRms, fullMono[j], reducedMono[j]);
 			}
 		}
 		if (reducedStereoCount == 16) {
 			for (j = 0; j < 16; j++) {
-				double d = (double)((int)fullStereo[j] - (int)reducedStereo[j]);
-				stereoSquares += d * d;
-				stereoSamples += 1.0;
+				IntegerRmsAdd(&stereoRms, fullStereo[j], reducedStereo[j]);
 			}
 		}
 		if (reducedStride2MonoCount == 16) {
 			for (j = 0; j < 16; j++) {
-				double d = (double)((int)fullStride2Mono[j] -
-					(int)reducedStride2Mono[j]);
-				stride2MonoSquares += d * d;
-				stride2MonoSamples += 1.0;
+				IntegerRmsAdd(&stride2MonoRms, fullStride2Mono[j], reducedStride2Mono[j]);
 			}
 		}
 		if (reducedStride2StereoCount == 32) {
 			for (j = 0; j < 16; j++) {
-				double dl = (double)((int)fullStride2Stereo[j * 2] -
-					(int)reducedStride2Stereo[j * 2]);
-				double dr = (double)((int)fullStride2Stereo[j * 2 + 1] -
-					(int)reducedStride2Stereo[j * 2 + 1]);
-				stride2StereoSquares[0] += dl * dl;
-				stride2StereoSquares[1] += dr * dr;
-				stride2StereoSamples[0] += 1.0;
-				stride2StereoSamples[1] += 1.0;
+				IntegerRmsAdd(&stride2StereoRms[0], fullStride2Stereo[j * 2],
+					reducedStride2Stereo[j * 2]);
+				IntegerRmsAdd(&stride2StereoRms[1], fullStride2Stereo[j * 2 + 1],
+					reducedStride2Stereo[j * 2 + 1]);
 			}
 		}
 
@@ -5416,18 +5413,14 @@ static int SelftestReducedTaps(void)
 		stride2MonoOverrunMismatches);
 	printf("Reduced taps stride2 stereo channel-independence mismatches: %lu\n",
 		stride2StereoIndependenceMismatches);
-	printf("Reduced taps mono RMS difference: %.2f counts (target < 500)\n",
-		SqrtApprox(monoSquares / (monoSamples > 0.0 ? monoSamples : 1.0)));
-	printf("Reduced taps stereo RMS difference: %.2f counts (target < 500)\n",
-		SqrtApprox(stereoSquares / (stereoSamples > 0.0 ? stereoSamples : 1.0)));
-	printf("Reduced taps stride2 mono RMS difference: %.2f counts (informational)\n",
-		SqrtApprox(stride2MonoSquares / (stride2MonoSamples > 0.0 ?
-			stride2MonoSamples : 1.0)));
-	printf("Reduced taps stride2 stereo RMS difference: L=%.2f R=%.2f counts (informational)\n",
-		SqrtApprox(stride2StereoSquares[0] / (stride2StereoSamples[0] > 0.0 ?
-			stride2StereoSamples[0] : 1.0)),
-		SqrtApprox(stride2StereoSquares[1] / (stride2StereoSamples[1] > 0.0 ?
-			stride2StereoSamples[1] : 1.0)));
+	PrintIntegerRms("Reduced taps mono RMS difference: ", &monoRms,
+		" counts (integer; target < 500)\n");
+	PrintIntegerRms("Reduced taps stereo RMS difference: ", &stereoRms,
+		" counts (integer; target < 500)\n");
+	PrintIntegerRms("Reduced taps stride2 mono RMS difference: ", &stride2MonoRms,
+		" counts (integer; informational)\n");
+	PrintIntegerRms("Reduced taps stride2 stereo RMS difference: L=", &stride2StereoRms[0], " R=");
+	PrintIntegerRms("", &stride2StereoRms[1], " counts (integer; informational)\n");
 	if (stride2StereoCountMismatches || stride2MonoCountMismatches ||
 		stride2MonoOverrunMismatches ||
 		stride2StereoIndependenceMismatches) {
@@ -5501,11 +5494,11 @@ static int SelftestMonoFastLowrateStereo(void)
 			PerChannelEmittedSamples(&opt, &stats), EXPECTED);
 		failures++;
 	}
-	if (DecodedAudioSeconds(&opt, &stats) < 0.999 ||
-		DecodedAudioSeconds(&opt, &stats) > 1.001) {
+	if (DecodedAudioMilliseconds(&opt, &stats) < 999 ||
+		DecodedAudioMilliseconds(&opt, &stats) > 1001) {
 		fprintf(stderr,
-			"mono fast-lowrate stereo selftest seconds mismatch: got=%.6f expected=1.000000\n",
-			DecodedAudioSeconds(&opt, &stats));
+			"mono fast-lowrate stereo selftest milliseconds mismatch: got=%lu expected=1000\n",
+			DecodedAudioMilliseconds(&opt, &stats));
 		failures++;
 	}
 	if (!failures)
@@ -8596,10 +8589,9 @@ static unsigned long PlaybackBufferDurationMilliseconds(const DecodeOptions *opt
  * glitches. */
 static unsigned long PlaybackElapsedMilliseconds(clock_t start, clock_t end)
 {
-	if (CLOCKS_PER_SEC <= 0 || end <= start)
+	if (start == (clock_t)-1 || end == (clock_t)-1 || end <= start)
 		return 0;
-	return (unsigned long)(((double)(end - start) * 1000.0) /
-		(double)CLOCKS_PER_SEC);
+	return ClocksToMilliseconds((clock_t)((unsigned long)end - (unsigned long)start));
 }
 
 static const char *PlaybackBufferName(int index)
@@ -12415,14 +12407,7 @@ int main(int argc, char **argv)
 			printf("fast-lowrate stride: %d (fast-lowrate: IMDCT/DCT32 full-rate)\n",
 				MP3GetFastLowrateStride(decoder));
 		if (opt.bench) {
-			double elapsed = 0.0;
-			double audioSeconds;
-			if (CLOCKS_PER_SEC > 0)
-				elapsed = (double)(endClock - startClock) / (double)CLOCKS_PER_SEC;
-			audioSeconds = DecodedAudioSeconds(&opt, &stats);
-			printf("elapsed seconds: %.3f\n", elapsed);
-			if (elapsed > 0.0 && audioSeconds > 0.0)
-				printf("decode speed: %.2fx realtime\n", audioSeconds / elapsed);
+			PrintBenchmarkSeconds(&opt, &stats, startClock, endClock);
 			printf("playback underruns: %lu\n", stats.underruns);
 			printf("playback underruns buffer 0: %lu\n", stats.underrunBuffers[0]);
 			printf("playback underruns buffer 1: %lu\n", stats.underrunBuffers[1]);
@@ -12433,8 +12418,8 @@ int main(int argc, char **argv)
 					stats.minimumSpareMilliseconds);
 			else
 				printf("playback minimum spare before buffer end: n/a\n");
-			printf("timing frame decode: %.3f s\n", ClocksToSeconds(timing.frameDecode));
-			printf("timing PCM conversion: %.3f s\n", ClocksToSeconds(timing.pcmConvert));
+			PrintClockSeconds("timing frame decode: ", timing.frameDecode);
+			PrintClockSeconds("timing PCM conversion: ", timing.pcmConvert);
 		}
 #ifndef AMIGA_M68K
 		signal(SIGINT, SIG_DFL);
@@ -12751,14 +12736,7 @@ int main(int argc, char **argv)
 	}
 
 	if (opt.bench) {
-		double elapsed = 0.0;
-		double audioSeconds = 0.0;
-		if (CLOCKS_PER_SEC > 0)
-			elapsed = (double)(endClock - startClock) / (double)CLOCKS_PER_SEC;
-		audioSeconds = DecodedAudioSeconds(&opt, &stats);
-		printf("elapsed seconds: %.3f\n", elapsed);
-		if (elapsed > 0.0 && audioSeconds > 0.0)
-			printf("decode speed: %.2fx realtime\n", audioSeconds / elapsed);
+		PrintBenchmarkSeconds(&opt, &stats, startClock, endClock);
 		{
 			MP3DecodeCoreProfile coreProfile;
 
@@ -12766,20 +12744,13 @@ int main(int argc, char **argv)
 			printf("decode-core profiling: %s\n",
 				MP3DecodeCoreProfileIsEnabled() ? "enabled" : "disabled");
 			if (MP3DecodeCoreProfileIsEnabled()) {
-				printf("timing core bitstream/frame parsing: %.3f s\n",
-					ClocksToSeconds(coreProfile.bitstreamFrameParsing));
-				printf("timing core huffman: %.3f s\n",
-					ClocksToSeconds(coreProfile.huffman));
-				printf("timing core dequant: %.3f s\n",
-					ClocksToSeconds(coreProfile.dequant));
-				printf("timing core stereo/post: %.3f s\n",
-					ClocksToSeconds(coreProfile.stereoPost));
-				printf("timing core imdct: %.3f s\n",
-					ClocksToSeconds(coreProfile.imdct));
-				printf("timing core subband/dct32: %.3f s\n",
-					ClocksToSeconds(coreProfile.subbandDct32));
-				printf("timing core polyphase: %.3f s\n",
-					ClocksToSeconds(coreProfile.polyphase));
+				PrintClockSeconds("timing core bitstream/frame parsing: ", coreProfile.bitstreamFrameParsing);
+				PrintClockSeconds("timing core huffman: ", coreProfile.huffman);
+				PrintClockSeconds("timing core dequant: ", coreProfile.dequant);
+				PrintClockSeconds("timing core stereo/post: ", coreProfile.stereoPost);
+				PrintClockSeconds("timing core imdct: ", coreProfile.imdct);
+				PrintClockSeconds("timing core subband/dct32: ", coreProfile.subbandDct32);
+				PrintClockSeconds("timing core polyphase: ", coreProfile.polyphase);
 				{
 					unsigned long m2Asm = 0, m2C = 0, m2Reduced = 0;
 					MP3GetMonoStride2PolyphaseCounters(&m2Asm, &m2C, &m2Reduced);
@@ -12808,9 +12779,9 @@ int main(int argc, char **argv)
 					coreProfile.imdctSubbandsExecuted, coreProfile.imdctSubbandsSkipped);
 				{
 					unsigned long imdctTotalBlocks = coreProfile.imdct36BlockCount + coreProfile.imdct12x3BlockCount;
-					double shortPct = imdctTotalBlocks ? (100.0 * (double)coreProfile.imdct12x3BlockCount / (double)imdctTotalBlocks) : 0.0;
-					printf("imdct block kind: IMDCT36(long)=%lu IMDCT12x3(short)=%lu short-block%%=%.1f\n",
-						coreProfile.imdct36BlockCount, coreProfile.imdct12x3BlockCount, shortPct);
+					printf("imdct block kind: IMDCT36(long)=%lu IMDCT12x3(short)=%lu short-block%%=",
+						coreProfile.imdct36BlockCount, coreProfile.imdct12x3BlockCount);
+					PrintIntegerRatio("", IntegerScale(coreProfile.imdct12x3BlockCount, imdctTotalBlocks, 1000, 1), 10, 1, "\n");
 				}
 				printf("mono M/S side-channel skip: eligible=%lu huffman=%lu dequant=%lu imdct=%lu synthesis=%lu\n",
 					coreProfile.monoMSSideSkipEligible,
@@ -12841,11 +12812,11 @@ int main(int argc, char **argv)
 						"FDCT32Half" : "FDCT32"));
 			}
 		}
-		printf("timing frame decode: %.3f s\n", ClocksToSeconds(timing.frameDecode));
-		printf("timing PCM conversion: %.3f s\n", ClocksToSeconds(timing.pcmConvert));
-		printf("timing 8SVX write: %.3f s\n", ClocksToSeconds(timing.svxWrite));
-		printf("timing Fibonacci compression: %.3f s\n", ClocksToSeconds(timing.fibCompress));
-		printf("timing file writing: %.3f s\n", ClocksToSeconds(timing.fileWrite));
+		PrintClockSeconds("timing frame decode: ", timing.frameDecode);
+		PrintClockSeconds("timing PCM conversion: ", timing.pcmConvert);
+		PrintClockSeconds("timing 8SVX write: ", timing.svxWrite);
+		PrintClockSeconds("timing Fibonacci compression: ", timing.fibCompress);
+		PrintClockSeconds("timing file writing: ", timing.fileWrite);
 	}
 
 	MP3FreeDecoder(decoder);

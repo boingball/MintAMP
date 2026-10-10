@@ -22,6 +22,16 @@ soft-float application build, pass `EXTRA_CFLAGS=-msoft-float`; also validate
 external modules and installed libraries on the intended FPU-less machine.
 The existing compiler/CPU optimisation recipes are unchanged.
 
+Application playback timing, output-duration/benchmark reports and decoder
+self-test RMS diagnostics now use integer arithmetic, with no runtime
+`float`/`double` calculations or floating-point printf arguments. Millisecond
+conversion preserves the Amiga clock's 20 ms resolution and guards overflow.
+Decimal reports keep their usual precision; benchmark speed uses integer
+milliseconds, and self-test RMS is reported in whole counts (rounded down).
+Rare oversized diagnostic sums report overflow explicitly. Explicit 32-bit
+limbs avoid introducing emulated 64-bit multiply/divide instructions. External
+libraries are outside this application-source check.
+
 Place a user-supplied classic skin at `PROGDIR:Skins/base-2.91.wsz`, or choose
 one at first launch. The uploaded Winamp 2.91 base skin is a validation input,
 not repository artwork. If selection is cancelled or the skin window cannot

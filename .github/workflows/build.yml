@@ -64,6 +64,9 @@ jobs:
       - name: Check shared skin controls and MP3 equaliser bypass
         run: make -f Makefile.amiga skin-controls-test skin-eq-decode-test
 
+      - name: Check integer-only timing and diagnostics
+        run: make -f Makefile.amiga integer-stats-test
+
       - name: Compile with the Amiga cross-compiler
         env:
           CPU: ${{ matrix.cpu }}
