@@ -59,7 +59,9 @@ jobs:
         run: make -f Makefile.amiga freeall-heads-test
 
       - name: Check classic Winamp skin loading and rendering
-        run: make -f Makefile.amiga skin-format-test
+        run: |
+          make -f Makefile.amiga skin-format-test
+          ./skin_format_test Skins/MintAMP-mintleaf.wsz
 
       - name: Check shared skin controls and MP3 equaliser bypass
         run: make -f Makefile.amiga skin-controls-test skin-eq-decode-test
@@ -81,6 +83,7 @@ jobs:
       - name: Confirm the player and decoder modules were produced
         run: |
           ls -la amiga_mp3dec.fastexp MintAMP-SGT MintAMP-SR
+          ls -la Skins/MintAMP-mintleaf.wsz
           ls -la decoders/{aac,flac,ogg,wma,wav,iff}.decoder
           file amiga_mp3dec.fastexp || true
 
@@ -95,5 +98,6 @@ jobs:
             MintAMP-SGT.info
             MintAMP-SR.info
             docs/winamp-skins.md
+            Skins/MintAMP-mintleaf.wsz
             decoders/*.decoder
           if-no-files-found: error

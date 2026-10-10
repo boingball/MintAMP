@@ -143,7 +143,7 @@ def run_tests(extra_skin=None):
             assert proc.returncode==0,proc.stderr
             # Pillow is an independent decoder for the user's reference skin.
             from PIL import Image
-            names=('main','cbuttons','titlebar','numbers','text','volume','balance','posbar','playpaus','monoster','shufrep','pledit')
+            names=('main','cbuttons','titlebar','numbers','text','volume','balance','posbar','playpaus','monoster','shufrep','pledit','eqmain')
             reported={int(line.split()[0]): line.split()[1:] for line in proc.stdout.splitlines()}
             with zipfile.ZipFile(extra_skin) as z:
                 for name in z.namelist():

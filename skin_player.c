@@ -782,7 +782,7 @@ SkinPlayer *skin_player_open(const char *name,int argc,char **argv)
     p->selection.focus=p->selection.anchor=-1; p->move_row=-1;
     p->screen=LockPubScreen(NULL);
     if (!p->screen) { free(p); return NULL; }
-    strcpy(p->path,"PROGDIR:Skins/base-2.91.wsz");
+    strcpy(p->path,"PROGDIR:Skins/MintAMP-mintleaf.wsz");
     env_name(p,key,"Skin");
     if (GetVar(key,value,sizeof(value),GVF_GLOBAL_ONLY)>0) {
         value[sizeof(value)-1]=0; strcpy(p->path,value);
@@ -816,8 +816,8 @@ SkinPlayer *skin_player_open(const char *name,int argc,char **argv)
     if (275*scale>p->screen->Width || 116*scale>p->screen->Height) scale=1;
     p->resources=load_resources(p,p->path,scale,error);
     if (!p->resources) {
-        /* Missing default is normal on a fresh install. Choose a skin instead
-         * of shipping someone else's artwork as part of the application. */
+        /* An unavailable saved/custom skin or incomplete installation can
+         * still use the existing skin requester and native fallback. */
         if (!request_path(p,p->path)) { skin_player_close(p); return NULL; }
         p->resources=load_resources(p,p->path,scale,error);
         if (!p->resources) { error_request(p,error); skin_player_close(p); return NULL; }

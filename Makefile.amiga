@@ -681,7 +681,7 @@ decoder-modules:
 # fallback; amiga_mp3dec.fastexp is the fast command-line edition. The
 # applications create PROGDIR:ArtCache themselves when needed, but the empty
 # drawer is included here for a tidy unpacked layout.
-release: skins $(GUIR_TARGET) $(GUI_TARGET) $(FAST030_TARGET) decoder-modules
+release: skins $(GUIR_TARGET) $(GUI_TARGET) $(FAST030_TARGET) decoder-modules Skins/MintAMP-mintleaf.wsz
 	rm -rf "$(RELEASE_DIR)"
 	mkdir -p "$(RELEASE_DIR)/decoders" "$(RELEASE_DIR)/ArtCache" "$(RELEASE_DIR)/Skins"
 	@test -f "$(RELEASE_ICON_SOURCE)" || { echo "ERROR: missing drawer icon $(RELEASE_ICON_SOURCE)"; exit 1; }
@@ -695,6 +695,7 @@ release: skins $(GUIR_TARGET) $(GUI_TARGET) $(FAST030_TARGET) decoder-modules
 	@test -f "$(GUI_TARGET).info" || { echo "ERROR: missing $(GUI_TARGET).info"; exit 1; }
 	cp "$(GUIR_TARGET).info" "$(GUI_TARGET).info" "$(SKINGT_TARGET).info" "$(SKINR_TARGET).info" "$(RELEASE_DIR)/"
 	cp docs/winamp-skins.md "$(RELEASE_DIR)/Skins/ReadMe"
+	cp Skins/MintAMP-mintleaf.wsz "$(RELEASE_DIR)/Skins/"
 	@set -e; \
 	found=0; \
 	for decoder in decoders/*.decoder; do \

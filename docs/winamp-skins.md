@@ -32,18 +32,22 @@ Rare oversized diagnostic sums report overflow explicitly. Explicit 32-bit
 limbs avoid introducing emulated 64-bit multiply/divide instructions. External
 libraries are outside this application-source check.
 
-Place a user-supplied classic skin at `PROGDIR:Skins/base-2.91.wsz`, or choose
-one at first launch. The uploaded Winamp 2.91 base skin is a validation input,
-not repository artwork. If selection is cancelled or the skin window cannot
-open, the native frontend remains available. Valid skins open directly, without
-first flashing the native main window. Workbench menu colours/fonts are used.
+The supplied mint-leaf skin is bundled at `PROGDIR:Skins/MintAMP-mintleaf.wsz`
+and opens by default in both editions on a fresh installation. Keep the `Skins`
+drawer beside the executables; `make release` and CI artifacts include it.
+Saved skin choices, the `SKIN` tooltype and `--skin` override the default.
+Other classic `.wsz` skins remain selectable through the player menu. If the
+chosen skin is unavailable, the skin requester opens; cancelling or failure to
+open the skin window retains the native frontend. Valid skins open directly,
+without first flashing the native main window. Workbench menu colours/fonts
+are used.
 
 ```text
-MintAMP-SGT --skin Work:Skins/base-2.91.wsz
+MintAMP-SGT --skin Work:Skins/MintAMP-mintleaf.wsz
 MintAMP-SR Music:track.mp3 --skin Work:Skins/another.wsz --double
 ```
 
-Workbench tooltypes are `SKIN=Work:Skins/base-2.91.wsz` and `DOUBLESIZE=YES`.
+Workbench tooltypes are `SKIN=Work:Skins/MintAMP-mintleaf.wsz` and `DOUBLESIZE=YES`.
 Normal/double sizes are 275x116 and 550x232. Scaling covers artwork, hit testing,
 EQ, playlist and text. Oversized windows/scales are refused or fall back.
 
