@@ -9,6 +9,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include "miniamp_memguard.h"
+#if defined(MINTAMP_SKIN) && defined(AMIGA_M68K)
+#include "skin_player.h"
+static SkinPlayer *gSkinPlayer;
+static int gSkinPendingTrack = -1;
+#endif
 #include "amiga_display_text.h"
 #include "radio_runtime_flags.h"
 
@@ -273,7 +278,11 @@ static void GuiTaskIdentityLog(const char *phase)
 /* AmigaOS Version command metadata.  Keep this independent of the settings
  * schema version above: release numbering does not imply a settings migration. */
 static const char gMintAmpGtVersionTag[] __attribute__((used)) =
+#ifdef MINTAMP_SKIN
+	"\0$VER: MintAMP-SGT " MINTAMP_GT_VERSION " (10.10.2026)";
+#else
 	"\0$VER: MintAMP-GT " MINTAMP_GT_VERSION " (08.10.2026)";
+#endif
 /* Bare name, no explicit "ENV:"/"ENVARC:" device prefix -- SaveEnvString()
  * below passes this through SetVar() with GVF_GLOBAL_ONLY (writes ENV:) and
  * separately with GVF_SAVE_VAR (which internally constructs the persistent
@@ -603,6 +612,9 @@ typedef struct {
 	int count;
 	int selected;
 	int current;
+#ifdef MINTAMP_SKIN
+    int durations[HELIXAMP3_PLAYLIST_MAX];
+#endif
 } Playlist;
 
 typedef struct {
@@ -4908,7 +4920,14 @@ static void FinalizePlayback(HelixAmp3Gui *gui)
 		}
 		else if (!gui->artDecode.active)
 			SetStatus(gui, "Next file ready.");
-	} else if ((!stoppedByUser || nextPending) &&
+	}
+#if defined(MINTAMP_SKIN) && defined(AMIGA_M68K)
+    else if (gSkinPlayer && !stoppedByUser && !nextPending) {
+        if (gSkinAudio.completed_ok && !failedRadioStart)
+            gSkinPendingTrack=skin_player_order(gSkinPlayer,gui->playlist.count,gui->playlist.current,1,1);
+    }
+#endif
+    else if ((!stoppedByUser || nextPending) &&
 		gui->playlist.current >= 0 &&
 		gui->playlist.current + 1 < gui->playlist.count) {
 		/* Auto-advance to next playlist item (or forced via Next button) */
@@ -5812,7 +5831,11 @@ static struct Window *GuiOpenMainWindow(HelixAmp3Gui *gui, WORD left, WORD top)
 		WFLG_SIZEGADGET | WFLG_SIZEBBOTTOM | WFLG_ACTIVATE |
 		WFLG_SMART_REFRESH;
 	nw.FirstGadget = NULL;
+#ifdef MINTAMP_SKIN
+	nw.Title = (UBYTE *)"MintAMP-SGT Settings";
+#else
 	nw.Title = (UBYTE *)"MintAMP-GT";
+#endif
 	nw.MinWidth = GUI_WIN_W;
 	nw.MinHeight = GUI_WIN_H;
 	nw.MaxWidth = 680;
@@ -5832,8 +5855,15 @@ static struct Window *GuiOpenMainWindow(HelixAmp3Gui *gui, WORD left, WORD top)
 		AddGList(gui->win, gui->gadgets, (UWORD)-1, -1, NULL);
 		RefreshGList(gui->gadgets, gui->win, NULL, -1);
 	}
-	if (gui->menuStrip)
+	if (gui->menuStrip) {
 		SetMenuStrip(gui->win, gui->menuStrip);
+		if (!gui->hasNetwork) {
+			OffMenu(gui->win, FULLMENUNUM(MENUNUM_PROJECT, ITEMNUM_STREAM, NOSUB));
+			OffMenu(gui->win, FULLMENUNUM(MENUNUM_PROJECT, ITEMNUM_RADIO, NOSUB));
+		}
+		if (!gui->appPort)
+			OffMenu(gui->win, FULLMENUNUM(MENUNUM_PROJECT, ITEMNUM_ICONIFY, NOSUB));
+	}
 	return gui->win;
 }
 
@@ -6086,8 +6116,10 @@ static void ScanDecoderModules(void)
 #endif
 }
 
-static int GuiOpen(HelixAmp3Gui *gui)
+static int GuiOpen(HelixAmp3Gui *gui,int argc,char **argv)
 {
+	struct Screen *screen;
+	(void)argc; (void)argv;
 	/* Discover decoder modules and build the ASL file-browser pattern first,
 	 * so gSupportedExtPattern and gDecoderModulesPath are ready for playback. */
 	ScanDecoderModules();
@@ -6214,31 +6246,42 @@ static int GuiOpen(HelixAmp3Gui *gui)
 		return -1;
 	}
 
-	gui->win = GuiOpenMainWindow(gui, 40, 30);
-	if (!gui->win) {
-		fprintf(stderr, "cannot open MintAMP-GT window\n");
-		GuiClose(gui);
-		return -1;
+#ifdef MINTAMP_SKIN
+	/* Open the player first. GadTools gadgets can be built without opening
+	 * their settings window; the restore path attaches them on demand. */
+	gSkinPlayer=skin_player_open("MintAMP-SGT",argc,argv);
+	if (gSkinPlayer) {
+		screen=skin_player_window(gSkinPlayer)->WScreen;
+		gui->iconified=1;
+		gui->iconifyLeft=40; gui->iconifyTop=30;
+	} else
+#endif
+	{
+		gui->win = GuiOpenMainWindow(gui, 40, 30);
+		if (!gui->win) {
+			fprintf(stderr, "cannot open MintAMP-GT window\n");
+			GuiClose(gui);
+			return -1;
+		}
+		screen=gui->win->WScreen;
 	}
-	if (gui->smallFont)
-		SetFont(gui->win->RPort, gui->smallFont);
-
-	gui->visualInfo = GetVisualInfo(gui->win->WScreen,
-		TAG_DONE);
+	gui->visualInfo = GetVisualInfo(screen,TAG_DONE);
 	if (!gui->visualInfo) {
 		fprintf(stderr, "cannot create GadTools visual info\n");
 		GuiClose(gui);
 		return -1;
 	}
-	if (gui->smallFont)
+	if (gui->win && gui->smallFont)
 		SetFont(gui->win->RPort, gui->smallFont);
 	if (GuiCreateGadgets(gui) != 0) {
 		fprintf(stderr, "cannot create MintAMP-GT gadgets\n");
 		GuiClose(gui);
 		return -1;
 	}
-	AddGList(gui->win, gui->gadgets, (UWORD)-1, -1, NULL);
-	RefreshGList(gui->gadgets, gui->win, NULL, -1);
+	if (gui->win) {
+		AddGList(gui->win, gui->gadgets, (UWORD)-1, -1, NULL);
+		RefreshGList(gui->gadgets, gui->win, NULL, -1);
+	}
 	UpdateChannelGadgetState(gui);
 	UpdateFastMemGadgetState(gui);
 	ApplyHardwareAudioFilter(gui);
@@ -6252,12 +6295,12 @@ static int GuiOpen(HelixAmp3Gui *gui)
 	if (gui->menuStrip) {
 		LayoutMenus(gui->menuStrip, gui->visualInfo, TAG_DONE);
 		SyncMenuChecks(gui);
-		SetMenuStrip(gui->win, gui->menuStrip);
-		if (!gui->hasNetwork) {
+		if (gui->win) SetMenuStrip(gui->win, gui->menuStrip);
+		if (gui->win && !gui->hasNetwork) {
 			OffMenu(gui->win, FULLMENUNUM(MENUNUM_PROJECT, ITEMNUM_STREAM, NOSUB));
 			OffMenu(gui->win, FULLMENUNUM(MENUNUM_PROJECT, ITEMNUM_RADIO, NOSUB));
 		}
-		if (!gui->appPort)
+		if (gui->win && !gui->appPort)
 			OffMenu(gui->win, FULLMENUNUM(MENUNUM_PROJECT, ITEMNUM_ICONIFY, NOSUB));
 	}
 	gui->timerPort = CreateMsgPort();
@@ -6283,11 +6326,13 @@ static int GuiOpen(HelixAmp3Gui *gui)
 		gDoneMsg.mn_Length = sizeof(gDoneMsg);
 		gDoneMsg.mn_Node.ln_Type = NT_MESSAGE;
 	}
-	GT_RefreshWindow(gui->win, NULL);
-	DrawProgressFrame(gui);
-	DrawProgress(gui);
-	DrawArtPanel(gui);
-	DrawTransportIcons(gui);
+	if (gui->win) {
+		GT_RefreshWindow(gui->win, NULL);
+		DrawProgressFrame(gui);
+		DrawProgress(gui);
+		DrawArtPanel(gui);
+		DrawTransportIcons(gui);
+	}
 	if (gui->timerOpen)
 		SendTimerRequest(gui, TIMER_TICK_MICROS);
 	return 0;
@@ -6295,6 +6340,10 @@ static int GuiOpen(HelixAmp3Gui *gui)
 
 static void GuiClose(HelixAmp3Gui *gui)
 {
+#ifdef MINTAMP_SKIN
+	/* Also handles an initialization failure after the skin opened. */
+	skin_player_close(gSkinPlayer); gSkinPlayer=NULL;
+#endif
 	RADIO_DBG(printf("gui-close: enter win=%p rbWin=%p plWin=%p playbackActive=%d\n",
 		(void *)gui->win, (void *)gui->rbWin, (void *)gui->plWin, gui->playbackActive);)
 	CancelArtDecode(gui);
@@ -7499,6 +7548,11 @@ static void CloseRadioWindow(HelixAmp3Gui *app)
 
 static void OpenRadioWindow(HelixAmp3Gui *app)
 {
+	struct Window *parent = app->win;
+#ifdef MINTAMP_SKIN
+	if (!parent) parent = skin_player_window(gSkinPlayer);
+#endif
+
 	struct NewWindow nw;
 	struct NewGadget ng;
 	struct Gadget *gad;
@@ -7508,7 +7562,7 @@ static void OpenRadioWindow(HelixAmp3Gui *app)
 		ActivateWindow(app->rbWin);
 		return;
 	}
-	if (!app->win || !GadToolsBase || !app->hasNetwork)
+	if (!parent || !GadToolsBase || !app->hasNetwork)
 		return;
 	if (app->rbController.limit <= 0) {
 		rb_controller_init(&app->rbController);
@@ -7520,7 +7574,7 @@ static void OpenRadioWindow(HelixAmp3Gui *app)
 	app->rbShowingFavourites = FALSE;
 	app->rbSelectedFavourite = -1;
 	app->rbSearchInProgress = 0;
-	app->rbVisualInfo = GetVisualInfoA(app->win->WScreen, NULL);
+	app->rbVisualInfo = GetVisualInfoA(parent->WScreen, NULL);
 	if (!app->rbVisualInfo) return;
 	app->rbGadContext = CreateContext(&app->rbGadgets);
 	if (!app->rbGadContext) goto fail;
@@ -7579,7 +7633,7 @@ static void OpenRadioWindow(HelixAmp3Gui *app)
 		GTTX_Text, (ULONG)(app->rbStatusText[0] ? app->rbStatusText : "Ready."),
 		GTTX_Border, TRUE, TAG_DONE); if (!gad) goto fail;
 	memset(&nw, 0, sizeof(nw));
-	nw.LeftEdge = app->win->LeftEdge + 30; nw.TopEdge = app->win->TopEdge + 30;
+	nw.LeftEdge = parent->LeftEdge + 30; nw.TopEdge = parent->TopEdge + 30;
 	nw.Width = RB_WIN_W; nw.Height = RB_WIN_H;
 	/* LISTVIEWIDCMP includes the gadget-down, mouse, and IntuiTicks events
 	 * consumed by GadTools' composite scroller and auto-repeat arrow gadgets.
@@ -7717,6 +7771,9 @@ static int PlaylistAddEntry(Playlist *pl, const char *location, const char *titl
 	SafeCopy(pl->names[n], sizeof(pl->names[n]),
 		pl->titles[n][0] ? pl->titles[n] :
 		(is_url_path(location) ? location : PlaylistBaseName(location)));
+#ifdef MINTAMP_SKIN
+    pl->durations[n]=-1;
+#endif
 	pl->count++;
 	return 1;
 }
@@ -7735,6 +7792,10 @@ static void PlaylistRebuildList(Playlist *pl)
 
 static void RefreshPlaylistView(HelixAmp3Gui *gui)
 {
+#if defined(MINTAMP_SKIN) && defined(AMIGA_M68K)
+    if (skin_player_paths(gSkinPlayer,&gui->playlist.paths[0][0],sizeof(gui->playlist.paths[0]),
+        gui->playlist.count,gui->playlist.current,gui->playlist.selected)) gSkinPendingTrack=-1;
+#endif
 	PlaylistRebuildList(&gui->playlist);
 	if (gui->plWin && gui->plGadList) {
 		ULONG sel = (gui->playlist.selected >= 0) ?
@@ -7793,16 +7854,21 @@ free_resources:
 
 static void OpenPlaylistWindow(HelixAmp3Gui *gui)
 {
+	struct Window *parent = gui->win;
+#ifdef MINTAMP_SKIN
+	if (!parent) parent = skin_player_window(gSkinPlayer);
+#endif
+
 	struct NewWindow nw;
 	struct Gadget *gad;
 	struct NewGadget ng;
 	int bw;
 	int bx;
 
-	if (gui->plWin || !gui->win)
+	if (gui->plWin || !parent)
 		return;
 
-	gui->plVisualInfo = GetVisualInfoA(gui->win->WScreen, NULL);
+	gui->plVisualInfo = GetVisualInfoA(parent->WScreen, NULL);
 	if (!gui->plVisualInfo)
 		return;
 	gui->plGadContext = CreateContext(&gui->plGadgets);
@@ -7919,8 +7985,8 @@ static void OpenPlaylistWindow(HelixAmp3Gui *gui)
 	if (!gad) goto fail;
 
 	memset(&nw, 0, sizeof(nw));
-	nw.LeftEdge = gui->win->LeftEdge + 20;
-	nw.TopEdge  = gui->win->TopEdge + 20;
+	nw.LeftEdge = parent->LeftEdge + 20;
+	nw.TopEdge  = parent->TopEdge + 20;
 	nw.Width    = PL_WIN_W;
 	nw.Height   = PL_WIN_H;
 	nw.IDCMPFlags = IDCMP_GADGETUP | IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW;
@@ -7979,6 +8045,9 @@ typedef struct GtPlaylistLoad {
 	const char *drawer;
 	int added;
 	int skipped;
+#ifdef MINTAMP_SKIN
+    int before;
+#endif
 } GtPlaylistLoad;
 
 static int GtPlaylistLoadEntry(void *ctx, const char *location, const char *title)
@@ -7988,6 +8057,9 @@ static int GtPlaylistLoadEntry(void *ctx, const char *location, const char *titl
 	char shown[PLAYLIST_TITLE_MAX];
 	int isAbsolute = 0;
 	int j;
+#ifdef MINTAMP_SKIN
+    load->before=load->pl->count;
+#endif
 	if (load->pl->count >= HELIXAMP3_PLAYLIST_MAX)
 		return 0;
 	/* Downloaded playlists are usually UTF-8; the location stays as is. */
@@ -8013,6 +8085,10 @@ static int GtPlaylistLoadEntry(void *ctx, const char *location, const char *titl
 
 /* Appends the entries of the M3U or PLS playlist at path to the current
  * one; relative entries are taken from drawer. Returns the number added. */
+#ifdef MINTAMP_SKIN
+static void GtPlaylistDuration(void *ctx,int seconds)
+{ GtPlaylistLoad *load=(GtPlaylistLoad *)ctx; if (load->pl->count>load->before) load->pl->durations[load->pl->count-1]=seconds; }
+#endif
 static int PlaylistLoadFromPath(HelixAmp3Gui *gui, const char *path, const char *drawer)
 {
 	BPTR fh;
@@ -8043,7 +8119,11 @@ static int PlaylistLoadFromPath(HelixAmp3Gui *gui, const char *path, const char 
 	load.drawer = drawer ? drawer : "";
 	load.added = 0;
 	load.skipped = 0;
-	playlist_parse(text, (size_t)len, GtPlaylistLoadEntry, &load);
+	#ifdef MINTAMP_SKIN
+    playlist_parse_ex(text,(size_t)len,GtPlaylistLoadEntry,&load,GtPlaylistDuration);
+#else
+    playlist_parse(text, (size_t)len, GtPlaylistLoadEntry, &load);
+#endif
 	free(text);
 	RefreshPlaylistView(gui);
 	if (load.skipped > 0)
@@ -8154,8 +8234,18 @@ static void PlaylistSaveM3U(HelixAmp3Gui *gui)
 	}
 	ok = GtWriteAll(fh, text, playlist_write_header(text, sizeof(text), format));
 	for (i = 0; ok && i < gui->playlist.count; i++)
-		ok = GtWriteAll(fh, text, playlist_write_entry(text, sizeof(text), format, i + 1,
-			gui->playlist.paths[i], gui->playlist.titles[i]));
+		ok = GtWriteAll(fh, text,
+#ifdef MINTAMP_SKIN
+        playlist_write_entry_ex(text,
+#else
+        playlist_write_entry(text,
+#endif
+        sizeof(text), format, i + 1,
+			gui->playlist.paths[i], gui->playlist.titles[i]
+#ifdef MINTAMP_SKIN
+            ,gui->playlist.durations[i]
+#endif
+        ));
 	if (ok)
 		ok = GtWriteAll(fh, text, playlist_write_footer(text, sizeof(text), format, gui->playlist.count));
 	Close(fh);
@@ -8268,39 +8358,9 @@ static void PlaylistStartCurrent(HelixAmp3Gui *gui)
 	}
 }
 
-static void HandlePlaylistPoll(HelixAmp3Gui *gui)
+static void PlaylistAddFiles(HelixAmp3Gui *gui)
 {
-	struct IntuiMessage *msg;
-	ULONG classValue;
-	UWORD code;
-	struct Gadget *gad;
-	UWORD gid;
-
-	if (!gui->plWin)
-		return;
-	while ((msg = GT_GetIMsg(gui->plWin->UserPort)) != NULL) {
-		classValue = msg->Class;
-		code = msg->Code;
-		gad = (struct Gadget *)msg->IAddress;
-		gid = gad ? gad->GadgetID : 0;
-		GT_ReplyIMsg(msg);
-		if (classValue == IDCMP_CLOSEWINDOW) {
-			ClosePlaylistWindow(gui);
-			return;
-		}
-		if (classValue == IDCMP_REFRESHWINDOW) {
-			GT_BeginRefresh(gui->plWin);
-			GT_EndRefresh(gui->plWin, TRUE);
-			continue;
-		}
-		if (classValue != IDCMP_GADGETUP || !gid)
-			continue;
-		switch ((int)gid) {
-		case PL_GID_LIST:
-			gui->playlist.selected = (int)code;
-			break;
-		case PL_GID_ADD: {
-			struct FileRequester *req;
+	struct FileRequester *req;
 			req = (struct FileRequester *)AllocAslRequestTags(ASL_FileRequest,
 				ASLFR_TitleText, (ULONG)"Add to playlist",
 				ASLFR_DoMultiSelect, TRUE,
@@ -8309,7 +8369,7 @@ static void HandlePlaylistPoll(HelixAmp3Gui *gui)
 				ASLFR_InitialDrawer,
 					(ULONG)(gui->lastDrawer[0] ? gui->lastDrawer : NULL),
 				TAG_DONE);
-			if (!req) break;
+			if (!req) return;
 			if (AslRequestTags(req, ASLFR_Window, (ULONG)gui->plWin,
 				ASLFR_SleepWindow, TRUE, TAG_DONE)) {
 				char path[HELIXAMP3_MAX_PATH];
@@ -8345,13 +8405,48 @@ static void HandlePlaylistPoll(HelixAmp3Gui *gui)
 				RefreshPlaylistView(gui);
 			}
 			FreeAslRequest(req);
-			break;
+}
+
+static void HandlePlaylistPoll(HelixAmp3Gui *gui)
+{
+	struct IntuiMessage *msg;
+	ULONG classValue;
+	UWORD code;
+	struct Gadget *gad;
+	UWORD gid;
+
+	if (!gui->plWin)
+		return;
+	while ((msg = GT_GetIMsg(gui->plWin->UserPort)) != NULL) {
+		classValue = msg->Class;
+		code = msg->Code;
+		gad = (struct Gadget *)msg->IAddress;
+		gid = gad ? gad->GadgetID : 0;
+		GT_ReplyIMsg(msg);
+		if (classValue == IDCMP_CLOSEWINDOW) {
+			ClosePlaylistWindow(gui);
+			return;
 		}
+		if (classValue == IDCMP_REFRESHWINDOW) {
+			GT_BeginRefresh(gui->plWin);
+			GT_EndRefresh(gui->plWin, TRUE);
+			continue;
+		}
+		if (classValue != IDCMP_GADGETUP || !gid)
+			continue;
+		switch ((int)gid) {
+		case PL_GID_LIST:
+			gui->playlist.selected = (int)code;
+			break;
+		case PL_GID_ADD: PlaylistAddFiles(gui); break;
 		case PL_GID_REMOVE:
 			if (gui->playlist.selected >= 0 && gui->playlist.selected < gui->playlist.count) {
 				int i;
 				int sel = gui->playlist.selected;
 				for (i = sel; i < gui->playlist.count - 1; i++) {
+#ifdef MINTAMP_SKIN
+                    gui->playlist.durations[i]=gui->playlist.durations[i+1];
+#endif
 					SafeCopy(gui->playlist.paths[i], sizeof(gui->playlist.paths[0]),
 						gui->playlist.paths[i + 1]);
 					SafeCopy(gui->playlist.names[i], sizeof(gui->playlist.names[0]),
@@ -9581,6 +9676,10 @@ static void HandleGuiAction(HelixAmp3Gui *gui, struct Gadget *gad, UWORD code,
 	}
 }
 
+#ifdef MINTAMP_SKIN
+#include "skin_gadtools.inc"
+#endif
+
 static void GuiPoll(HelixAmp3Gui *gui)
 {
 	struct IntuiMessage *msg;
@@ -9593,8 +9692,12 @@ static void GuiPoll(HelixAmp3Gui *gui)
 		code = msg->Code;
 		gad = (struct Gadget *)msg->IAddress;
 		GT_ReplyIMsg(msg);
-		if (classValue == IDCMP_CLOSEWINDOW)
+		if (classValue == IDCMP_CLOSEWINDOW) {
+#ifdef MINTAMP_SKIN
+			if (gSkinPlayer) GuiSkinHideSettings(gui); else
+#endif
 			gui->closeRequested = 1;
+		}
 		else if (classValue == IDCMP_REFRESHWINDOW) {
 			GuiRefresh(gui);
 		} else if (classValue == IDCMP_MENUPICK && gui->menuStrip) {
@@ -9733,8 +9836,13 @@ static void GuiOpenStartupArg(HelixAmp3Gui *gui, int argc, char **argv)
 {
 	char path[HELIXAMP3_MAX_PATH];
 	path[0] = '\0';
+#ifdef MINTAMP_SKIN
+	if (argc > 0 && skin_player_audio_arg(argc, argv)) {
+		SafeCopy(path, sizeof(path), skin_player_audio_arg(argc, argv));
+#else
 	if (argc >= 2 && argv[1] && argv[1][0] && argv[1][0] != '-') {
 		SafeCopy(path, sizeof(path), argv[1]);
+#endif
 	} else if (argc == 0 && argv) {
 		struct WBStartup *wb = (struct WBStartup *)argv;
 		if (wb->sm_NumArgs >= 2 && wb->sm_ArgList[1].wa_Lock &&
@@ -9744,6 +9852,9 @@ static void GuiOpenStartupArg(HelixAmp3Gui *gui, int argc, char **argv)
 	}
 	if (!path[0])
 		return;
+#ifdef MINTAMP_SKIN
+	if (skin_player_is_skin(path)) return;
+#endif
 	if (GuiIsPlaylistFile(path)) {
 		if (GuiOpenPlaylistFile(gui, path) > 0)
 			PlaylistStartCurrent(gui);
@@ -9765,9 +9876,12 @@ static int GuiMainReal(int argc, char **argv)
 	 * recoverable AN_FreeTwice/AN_BadFreeAddr alerts to be pinned on the GUI
 	 * task rather than the net worker or a playback child. */
 	GUI_TASK_IDENTITY("application-startup-main-task");
-	if (GuiOpen(&gui) != 0)
+	if (GuiOpen(&gui,argc,argv) != 0)
 		return 1;
 	GuiOpenStartupArg(&gui, argc, argv);
+#ifdef MINTAMP_SKIN
+	if (gSkinPlayer) GuiSkinUpdate(&gui,0);
+#endif
 	GUI_TASK_IDENTITY("gui-event-loop");
 	while (!gui.closeRequested) {
 		ULONG winMask = (gui.win && gui.win->UserPort) ?
@@ -9777,7 +9891,12 @@ static int GuiMainReal(int argc, char **argv)
 		ULONG doneMask = gui.donePort ? (1UL << gui.donePort->mp_SigBit) : 0;
 		ULONG plMask = gui.plWin ? (1UL << gui.plWin->UserPort->mp_SigBit) : 0;
 		ULONG rbMask = gui.rbWin ? (1UL << gui.rbWin->UserPort->mp_SigBit) : 0;
-		ULONG sigs = Wait(winMask | appMask | timerMask |
+#ifdef MINTAMP_SKIN
+		ULONG skinMask=skin_player_signal(gSkinPlayer);
+#else
+		ULONG skinMask=0;
+#endif
+		ULONG sigs = Wait(skinMask | winMask | appMask | timerMask |
 			doneMask | plMask | rbMask | SIGBREAKF_CTRL_C);
 		if (sigs & SIGBREAKF_CTRL_C)
 			gui.closeRequested = 1;
@@ -9785,12 +9904,18 @@ static int GuiMainReal(int argc, char **argv)
 			HandleDoneSignal(&gui);
 		if (appMask && (sigs & appMask))
 			GuiHandleAppIcon(&gui);
+#ifdef MINTAMP_SKIN
+		GuiSkinPoll(&gui);
+#endif
 		/* React to main-window controls before artwork or browser work. */
 		GuiPoll(&gui);
 		if (timerMask && (sigs & timerMask))
 			HandleTimerSignal(&gui);
 		HandlePlaylistPoll(&gui);
 		HandleRadioWindow(&gui);
+#ifdef MINTAMP_SKIN
+		GuiSkinUpdate(&gui,timerMask && (sigs & timerMask) && !gui.timerIsArt);
+#endif
 	}
 	if (gui.playbackActive)
 		WaitForPlaybackShutdown(&gui);
@@ -9814,6 +9939,9 @@ static int GuiMainReal(int argc, char **argv)
 		RADIO_DBG(printf("app-close: memory corruption detected -- skipping SaveGuiSettings/GuiClose to avoid a corrupting free, exiting directly\n");)
 		return 0;
 	}
+#ifdef MINTAMP_SKIN
+	skin_player_close(gSkinPlayer); gSkinPlayer=NULL;
+#endif
 	SaveGuiSettings(&gui);
 	GuiClose(&gui);
 	return 0;
