@@ -6,7 +6,7 @@
 #define SKIN_VIS_SAMPLES 64
 
 enum { SKIN_REPEAT_OFF, SKIN_REPEAT_LIST, SKIN_REPEAT_TRACK };
-enum { SKIN_SELECT_REPLACE, SKIN_SELECT_TOGGLE, SKIN_SELECT_RANGE };
+enum { SKIN_SELECT_REPLACE, SKIN_SELECT_TOGGLE, SKIN_SELECT_RANGE, SKIN_SELECT_FOCUS };
 typedef struct SkinOrder {
     int shuffle, repeat, count, cursor, used, last;
     int history[SKIN_LIST_MAX];
@@ -48,6 +48,8 @@ SkinListSnapshot *skin_list_snapshot(const SkinList *list);
 void skin_list_restore(SkinList *list,const SkinListSnapshot *snapshot);
 void skin_list_snapshot_free(SkinListSnapshot *snapshot);
 int skin_list_move(SkinList *list, int from, int to);
+int skin_list_move_selected(SkinList *list,int from,int to);
+void skin_visual_peaks(const unsigned char *levels,unsigned char *peaks,unsigned char *hold);
 int skin_list_remove(SkinList *list, int index);
 void skin_list_sort(SkinList *list, int by_path);
 int skin_balance_volume(int volume, int balance, int channel);

@@ -1,3 +1,4 @@
+#include "interface_prefs.h"
 /*
  * MintAMP-GT - Mini Internet Amiga Media Player GadTools frontend for the Helix
  * fixed-point MP3 decoder.  The GUI wraps the existing amiga_mp3dec playback
@@ -269,7 +270,7 @@ static void GuiTaskIdentityLog(const char *phase)
 
 #define HELIXAMP3_MAX_PATH 256
 #define HELIXAMP3_ARGC_MAX 28
-#define MINTAMP_GT_VERSION "1.4.0"
+#define MINTAMP_GT_VERSION "2.0-dev"
 #define HELIXAMP3_SETTINGS_VERSION 2
 #define HELIXAMP3_RADIO_FAV_MAX 50
 #define HELIXAMP3_QUALITY_MIN 0
@@ -1024,6 +1025,8 @@ static struct NewMenu myNewMenus[] = {
 		(APTR)(MENUNUM_PROJECT * 100 + ITEMNUM_QUIT) },
 	{ NM_ITEM,  (STRPTR)"Internet Radio",   0, 0, 0,
 		(APTR)(MENUNUM_PROJECT * 100 + ITEMNUM_RADIO) },
+	{ NM_ITEM, (STRPTR)"Interface preferences...", 0, 0, 0,
+		(APTR)(MENUNUM_PROJECT * 100 + 5) },
 	{ NM_TITLE, (STRPTR)"Playback",         0, 0, 0, 0 },
 	{ NM_ITEM,  (STRPTR)"Decode-then-play", 0, CHECKIT | MENUTOGGLE, 0,
 		(APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_DTP) },
@@ -6345,16 +6348,17 @@ static int GuiOpen(HelixAmp3Gui *gui,int argc,char **argv)
 
 static void GuiClose(HelixAmp3Gui *gui)
 {
-#ifdef MINTAMP_SKIN
-	/* Also handles an initialization failure after the skin opened. */
-	skin_player_close(gSkinPlayer); gSkinPlayer=NULL;
-#endif
 	RADIO_DBG(printf("gui-close: enter win=%p rbWin=%p plWin=%p playbackActive=%d\n",
 		(void *)gui->win, (void *)gui->rbWin, (void *)gui->plWin, gui->playbackActive);)
 	CancelArtDecode(gui);
 	RADIO_DBG(printf("gui-close: after CancelArtDecode\n");)
 	if (gui->playbackActive)
 		WaitForPlaybackShutdown(gui);
+#ifdef MINTAMP_SKIN
+	/* IO/decoder shutdown precedes skin disposal and ENVARC writes. */
+	skin_player_close(gSkinPlayer); gSkinPlayer=NULL;
+#endif
+	mint_interface_flush();
 	RADIO_DBG(printf("gui-close: after WaitForPlaybackShutdown\n");)
 	if (gui->rbWin)
 		CloseRadioWindow(gui);
@@ -9726,6 +9730,8 @@ static void GuiPoll(HelixAmp3Gui *gui)
 						gui->closeRequested = 1;
 					else if (mn == MENUNUM_PROJECT && it == ITEMNUM_ABOUT)
 						ShowAbout(gui);
+					else if (mn == MENUNUM_PROJECT && it == 5)
+						mint_interface_preferences(gui->win);
 					else if (mn == MENUNUM_PROJECT && it == ITEMNUM_STREAM)
 						EnterInternetStream(gui);
 					else if (mn == MENUNUM_PROJECT && it == ITEMNUM_RADIO)

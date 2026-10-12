@@ -56,8 +56,12 @@ int main(int argc,char **argv)
         free(b.rgb); return 0;
     }
     assert(argc>=2);
-    if (!skin_load_file(&skin,argc>2 && !strcmp(argv[1],"--colours") ? argv[2] : argv[1],error,sizeof(error))) {
+    if (!skin_load_file(&skin,argc>2 && (!strcmp(argv[1],"--colours") || !strcmp(argv[1],"--visual-colours")) ? argv[2] : argv[1],error,sizeof(error))) {
         fprintf(stderr,"%s\n",error); return 1;
+    }
+    if (argc>2 && !strcmp(argv[1],"--visual-colours")) {
+        for (i=0;i<24;++i) printf("%06x%s",skin.visual_colors[i],i==23 ? "\n" : " ");
+        skin_free(&skin); return 0;
     }
     if (argc>2 && !strcmp(argv[1],"--colours")) {
         printf("%06x %06x %06x %06x\n",skin.playlist_normal,skin.playlist_current,
@@ -72,6 +76,13 @@ int main(int argc,char **argv)
         for (i=0;i<10;++i) state.bands[i]=i%2 ? -12 : 12;
         skin_eq_render(&skin,&state,&old,blit,fill,c); memcpy(full,c->pixels,sizeof(c->pixels));
         skin_eq_render(&skin,&state,NULL,blit,fill,c); assert(!memcmp(full,c->pixels,sizeof(c->pixels)));
+        old=state; state.shaded=1; state.active=1; c->height=14;
+        skin_eq_render(&skin,&state,&old,blit,fill,c); memcpy(full,c->pixels,275*14*3);
+        skin_eq_render(&skin,&state,NULL,blit,fill,c); assert(!memcmp(full,c->pixels,275*14*3));
+        old=state; draws=c->draws; skin_eq_render(&skin,&state,&old,blit,fill,c); assert(c->draws==draws);
+        state.shaded=0; state.pressed=-4; c->height=116;
+        skin_eq_render(&skin,&state,&old,blit,fill,c); memcpy(full,c->pixels,275*116*3);
+        skin_eq_render(&skin,&state,NULL,blit,fill,c); assert(!memcmp(full,c->pixels,275*116*3));
         free(full); free(c);
     }
     skin_free(&skin); return 0;
@@ -136,6 +147,7 @@ int main(int argc,char **argv)
         state.top=13; state.selected=29; state.current=20; memset(state.selection,0,128); state.selection[29]=1;
         state.total_seconds=800; state.unknown_durations=0;
         for (i=0;i<SKIN_PLAYLIST_ROWS;++i) snprintf(state.rows[i],80,"Track %d",i+14);
+        for (i=0;i<SKIN_PLAYLIST_ROWS;++i) state.durations[i]=i%2 ? -1 : 120+i;
         skin_playlist_render(&skin,&state,&old,blit,fill,label,c);
         memcpy(full,c->pixels,sizeof(c->pixels));
         skin_playlist_render(&skin,&state,NULL,blit,fill,label,c);
@@ -153,6 +165,13 @@ int main(int argc,char **argv)
         assert(skin_playlist_hit_test(230,202)==SKIN_PLAYLIST_OPTIONS);
         assert(skin_playlist_hit_test(265,4)==SKIN_PLAYLIST_CLOSE);
         assert(skin_playlist_hit_test(275,0)==SKIN_NONE);
+        old=state; state.shaded=1; state.active=1; c->height=14;
+        skin_playlist_render(&skin,&state,&old,blit,fill,label,c); memcpy(full,c->pixels,275*14*3);
+        skin_playlist_render(&skin,&state,NULL,blit,fill,label,c); assert(!memcmp(full,c->pixels,275*14*3));
+        old=state; draws=c->draws; skin_playlist_render(&skin,&state,&old,blit,fill,label,c); assert(c->draws==draws);
+        old=state; state.shaded=0; state.pressed=SKIN_PLAYLIST_SCROLL; c->height=232;
+        skin_playlist_render(&skin,&state,&old,blit,fill,label,c); memcpy(full,c->pixels,sizeof(c->pixels));
+        skin_playlist_render(&skin,&state,NULL,blit,fill,label,c); assert(!memcmp(full,c->pixels,sizeof(c->pixels)));
         free(full); free(c);
     }
     skin_free(&skin); return 0;

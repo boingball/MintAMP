@@ -12,7 +12,7 @@
 enum SkinAssetId {
     SKIN_MAIN, SKIN_BUTTONS, SKIN_TITLEBAR, SKIN_NUMBERS, SKIN_TEXT,
     SKIN_VOLUME, SKIN_BALANCE, SKIN_POSITION, SKIN_PLAYPAUS,
-    SKIN_MONOSTER, SKIN_SHUFREP, SKIN_PLEDIT, SKIN_EQMAIN, SKIN_ASSET_COUNT
+    SKIN_MONOSTER, SKIN_SHUFREP, SKIN_PLEDIT, SKIN_EQMAIN, SKIN_EQ_EX, SKIN_VISBAR, SKIN_ASSET_COUNT
 };
 typedef struct SkinBitmap {
     unsigned width, height;
@@ -20,6 +20,7 @@ typedef struct SkinBitmap {
 } SkinBitmap;
 typedef struct WinampSkin {
     SkinBitmap assets[SKIN_ASSET_COUNT];
+    unsigned visual_colors[24];
     unsigned playlist_normal, playlist_current, playlist_background, playlist_selected;
 } WinampSkin;
 
@@ -40,15 +41,15 @@ enum SkinAction {
     SKIN_PAUSE, SKIN_BALANCE_SET, SKIN_SHUFFLE, SKIN_REPEAT, SKIN_TIMER,
     SKIN_VISUAL, SKIN_EQ, SKIN_DEBUG, SKIN_VIS_RATE, SKIN_SHADE,
     SKIN_LIST_ADD, SKIN_LIST_REM, SKIN_LIST_SEL, SKIN_LIST_MISC, SKIN_LIST_FILE,
-    SKIN_TRACK_MOVE, SKIN_TRACK_REMOVE, SKIN_ABOUT
+    SKIN_TRACK_MOVE, SKIN_TRACK_REMOVE, SKIN_ABOUT, SKIN_INTERFACE, SKIN_PLAYLIST_SHADE
 };
 typedef struct SkinState {
     char title[256],debug_text[80];
     int elapsed, total, volume, playing, mono, bitrate, rate;
-    int pressed, scroll, playlist_visible;
+    int pressed, scroll, playlist_visible, active;
     int paused, balance, shuffle, repeat, remaining, shaded, eq_visible;
     int visual_mode;
-    unsigned char levels[16];
+    unsigned char levels[16], peaks[16];
     signed char scope[64];
 } SkinState;
 typedef void (*SkinBlit)(void *ctx, int asset, int sx, int sy,
@@ -59,8 +60,10 @@ typedef void (*SkinFill)(void *ctx, unsigned rgb, int x, int y, int w, int h);
 #define SKIN_PLAYLIST_ROWS 17
 typedef struct SkinPlaylistState {
     int count, selected, current, top, total_seconds, unknown_durations;
+    int shaded, active, pressed;
     unsigned char selection[128];
     char rows[SKIN_PLAYLIST_ROWS][80];
+    int durations[SKIN_PLAYLIST_ROWS];
 } SkinPlaylistState;
 typedef void (*SkinLabel)(void *ctx, const char *text, unsigned rgb,
                          unsigned background, int x, int y, int width);
@@ -71,7 +74,7 @@ void skin_playlist_render(const WinampSkin *skin, const SkinPlaylistState *now,
                           SkinFill fill, SkinLabel label, void *ctx);
 
 typedef struct SkinEqState {
-    int enabled, preamp, bands[10], pressed;
+    int enabled, preamp, bands[10], pressed, shaded, active;
 } SkinEqState;
 void skin_eq_render(const WinampSkin *skin,const SkinEqState *now,
                     const SkinEqState *old,SkinBlit blit,SkinFill fill,void *ctx);

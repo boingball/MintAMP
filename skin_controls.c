@@ -104,6 +104,7 @@ void skin_selection_set(SkinSelection *s,int index,int mode)
 {
     int i,from,to;
     if (index<0 || index>=s->count) return;
+    if (mode==SKIN_SELECT_FOCUS) { s->focus=index; return; }
     if (mode==SKIN_SELECT_RANGE && s->anchor>=0 && s->anchor<s->count) {
         from=index<s->anchor ? index : s->anchor; to=index>s->anchor ? index : s->anchor;
         memset(s->bits,0,sizeof(s->bits));
@@ -157,6 +158,16 @@ static void swap_text(char *base,unsigned width,int a,int b)
     memcpy(temp,base+a*width,width); memcpy(base+a*width,base+b*width,width);
     memcpy(base+b*width,temp,width);
 }
+static void list_swap(SkinList *l,int i,int j)
+{
+    int t; unsigned char bit;
+    swap_text(l->paths,l->path_size,i,j); swap_text(l->titles,l->title_size,i,j);
+    swap_text(l->names,l->name_size,i,j);
+    if (l->durations) { t=l->durations[i]; l->durations[i]=l->durations[j]; l->durations[j]=t; }
+    if (l->selection) { bit=l->selection->bits[i]; l->selection->bits[i]=l->selection->bits[j]; l->selection->bits[j]=bit; }
+    if (*l->current==i) *l->current=j; else if (*l->current==j) *l->current=i;
+    if (*l->selected==i) *l->selected=j; else if (*l->selected==j) *l->selected=i;
+}
 int skin_list_move(SkinList *l,int from,int to)
 {
     int i,step;
@@ -164,16 +175,53 @@ int skin_list_move(SkinList *l,int from,int to)
         l->path_size>512 || l->title_size>512 || l->name_size>512) return 0;
     step=to>from ? 1 : -1;
     for (i=from;i!=to;i+=step) {
-        int j=i+step,t; unsigned char bit;
-        swap_text(l->paths,l->path_size,i,j); swap_text(l->titles,l->title_size,i,j);
-        swap_text(l->names,l->name_size,i,j);
-        if (l->durations) { t=l->durations[i]; l->durations[i]=l->durations[j]; l->durations[j]=t; }
-        if (l->selection) { bit=l->selection->bits[i]; l->selection->bits[i]=l->selection->bits[j]; l->selection->bits[j]=bit; }
-        if (*l->current==i) *l->current=j; else if (*l->current==j) *l->current=i;
-        if (*l->selected==i) *l->selected=j; else if (*l->selected==j) *l->selected=i;
+        list_swap(l,i,i+step);
     }
     if (l->selection) { l->selection->focus=*l->selected; l->selection->anchor=*l->selected; }
     return 1;
+}
+/* Stable selected-block insertion. Permute the borrowed arrays on release,
+ * using bounded index storage, never a second playlist or heap allocation. */
+int skin_list_move_selected(SkinList *l,int from,int to)
+{
+    int order[SKIN_LIST_MAX],positions[SKIN_LIST_MAX];
+    int count,i,n=0,boundary,insert=0,chosen=0,changed=0;
+    if (!l || !l->count || !l->selection) return 0;
+    count=*l->count;
+    if (count<1 || count>SKIN_LIST_MAX || from<0 || from>=count || to<0 || to>=count ||
+        l->path_size>512 || l->title_size>512 || l->name_size>512) return 0;
+    if (from==to) return 0;
+    if (!l->selection->bits[from]) return skin_list_move(l,from,to);
+    boundary=to>from ? to+1 : to;
+    for (i=0;i<count;++i) {
+        chosen+=l->selection->bits[i]!=0;
+        if (i<boundary && !l->selection->bits[i]) ++insert;
+        positions[i]=i;
+    }
+    if (!chosen || chosen==count) return 0;
+    for (i=0;i<count;++i) if (!l->selection->bits[i]) {
+        if (insert--==0) { int j; for (j=0;j<count;++j) if (l->selection->bits[j]) order[n++]=j; }
+        order[n++]=i;
+    }
+    if (n<count) for (i=0;i<count;++i) if (l->selection->bits[i]) order[n++]=i;
+    for (i=0;i<count;++i) {
+        int j=i,identity;
+        while (j<count && positions[j]!=order[i]) ++j;
+        if (j==i) continue;
+        list_swap(l,i,j);
+        identity=positions[j]; positions[j]=positions[i]; positions[i]=identity; changed=1;
+    }
+    l->selection->focus=*l->selected; l->selection->anchor=*l->selected;
+    return changed;
+}
+void skin_visual_peaks(const unsigned char *levels,unsigned char *peaks,unsigned char *hold)
+{
+    int i;
+    for (i=0;i<16;++i) {
+        if (levels[i]>=peaks[i]) { peaks[i]=levels[i]; hold[i]=2; }
+        else if (hold[i]) --hold[i];
+        else if (peaks[i]) --peaks[i];
+    }
 }
 int skin_list_remove(SkinList *l,int index)
 {

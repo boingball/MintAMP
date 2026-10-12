@@ -105,19 +105,19 @@ bad_rle:
     free(indices); free(rgb); return fail(error,en,"Truncated or invalid BMP RLE stream");
 }
 
-static const char * const names[SKIN_ASSET_COUNT+1] = {
+static const char * const names[SKIN_VISBAR+2] = {
     "main.bmp", "cbuttons.bmp", "titlebar.bmp", "numbers.bmp", "text.bmp",
     "volume.bmp", "balance.bmp", "posbar.bmp", "playpaus.bmp", "monoster.bmp", "shufrep.bmp",
-    "pledit.bmp", "eqmain.bmp", "pledit.txt"
+    "pledit.bmp", "eqmain.bmp", "eq_ex.bmp", "pledit.txt", "viscolor.txt"
 };
-static const unsigned min_w[SKIN_ASSET_COUNT]={275,136,302,90,155,68,47,277,27,56,46,276,275};
-static const unsigned min_h[SKIN_ASSET_COUNT]={116,36,29,13,12,433,433,10,9,24,73,110,315};
+static const unsigned min_w[SKIN_VISBAR]={275,136,302,90,155,68,47,277,27,56,46,276,275,275};
+static const unsigned min_h[SKIN_VISBAR]={116,36,29,13,12,433,433,10,9,24,73,110,315,29};
 
 static int asset_id(const unsigned char *name, unsigned len)
 {
     unsigned start=0, k; int i;
     for (k=0;k<len;++k) if (name[k]=='/' || name[k]=='\\') start=k+1;
-    for (i=0;i<=SKIN_ASSET_COUNT;++i) {
+    for (i=0;i<SKIN_VISBAR+2;++i) {
         size_t n=strlen(names[i]);
         if (len-start!=n) continue;
         for (k=0;k<n;++k) if (tolower((unsigned char)name[start+k])!=names[i][k]) break;
@@ -161,14 +161,39 @@ static void playlist_colors(WinampSkin *skin,const unsigned char *data,size_t si
     }
 }
 
+/* Classic 24 RGB rows, optional comments. Malformed palettes keep defaults. */
+static void visual_colors(WinampSkin *skin,const unsigned char *data,size_t size)
+{
+    unsigned colors[24]; size_t at=0; int count=0;
+    while (at<size && count<24) {
+        char line[160],*p,*end; size_t n=0; int i; unsigned rgb=0;
+        while (at<size && data[at]!='\n') { if (n<sizeof(line)-1) line[n++]=(char)data[at]; ++at; }
+        if (at<size) ++at;
+        line[n]=0; p=line;
+        while (isspace((unsigned char)*p)) ++p;
+        if (!*p || *p==';' || *p=='/' || *p=='#') continue;
+        for (i=0;i<3;++i) {
+            long v=strtol(p,&end,10);
+            if (end==p || v<0 || v>255) return;
+            rgb=(rgb<<8)|(unsigned)v; p=end;
+            while (isspace((unsigned char)*p)) ++p;
+            if (i<2) { if (*p++!=',') return; }
+        }
+        colors[count++]=rgb;
+    }
+    if (count==24) memcpy(skin->visual_colors,colors,sizeof(colors));
+}
 int skin_load_memory(WinampSkin *skin, const unsigned char *z, size_t size,
                      char *error, size_t en)
 {
     WinampSkin tmp; size_t eocd, cd, cd_end, at; unsigned entries, i;
-    int found=0, have_colors=0; unsigned long cd_len, total_rgb=0;
+    int found=0, have_colors[2]={0,0}; unsigned long cd_len, total_rgb=0;
     memset(&tmp,0,sizeof(tmp));
     tmp.playlist_normal=0x00ff00; tmp.playlist_current=0xffffff;
     tmp.playlist_selected=0x0000c6;
+    for (i=0;i<16;++i) tmp.visual_colors[i+2]=((unsigned)(i*12)<<16)|((unsigned)(255-i*8)<<8);
+    for (i=18;i<23;++i) tmp.visual_colors[i]=0x00cc00;
+    tmp.visual_colors[23]=0xffffff;
     if (!z || size<22 || size>SKIN_MAX_FILE) return fail(error,en,"Invalid or oversized skin archive");
     eocd=size-22;
     for (;;) {
@@ -192,13 +217,13 @@ int skin_load_memory(WinampSkin *skin, const unsigned char *z, size_t size,
         if (!span(at+46,(size_t)len+extra+comment,cd_end)) goto invalid_zip;
         id=asset_id(z+at+46,len);
         if (id<0) { at+=46+len+extra+comment; continue; }
-        if (id==SKIN_ASSET_COUNT ? have_colors : tmp.assets[id].rgb!=NULL) {
+        if (id>=SKIN_VISBAR ? have_colors[id-SKIN_VISBAR] : tmp.assets[id].rgb!=NULL) {
             fail(error,en,"Duplicate skin asset names"); goto failed;
         }
         flags=u16(z+at+8); method=u16(z+at+10); crc=u32(z+at+16);
         packed=u32(z+at+20); unpacked=u32(z+at+24); local=u32(z+at+42);
         if ((flags&1) || (method!=0 && method!=8) || !unpacked ||
-            unpacked>(id==SKIN_ASSET_COUNT ? 8192UL : SKIN_MAX_BITMAP) || !span(local,30,cd) || u32(z+local)!=0x04034b50UL ||
+            unpacked>(id>=SKIN_VISBAR ? 8192UL : SKIN_MAX_BITMAP) || !span(local,30,cd) || u32(z+local)!=0x04034b50UL ||
             u16(z+local+8)!=method || u16(z+local+6)!=flags) goto invalid_zip;
         payload=local+30+u16(z+local+26)+u16(z+local+28);
         if (!span(payload,packed,cd)) goto invalid_zip;
@@ -218,8 +243,10 @@ int skin_load_memory(WinampSkin *skin, const unsigned char *z, size_t size,
         if (lodepng_crc32(bmp,unpacked)!=crc) {
             free(out); fail(error,en,"Skin bitmap CRC check failed"); goto failed;
         }
-        if (id==SKIN_ASSET_COUNT) {
-            playlist_colors(&tmp,bmp,unpacked); have_colors=1; free(out);
+        if (id>=SKIN_VISBAR) {
+            if (id==SKIN_VISBAR) playlist_colors(&tmp,bmp,unpacked);
+            else visual_colors(&tmp,bmp,unpacked);
+            have_colors[id-SKIN_VISBAR]=1; free(out);
             at+=46+len+extra+comment; continue;
         }
         if (!skin_decode_bmp(&tmp.assets[id],bmp,unpacked,error,en)) { free(out); goto failed; }
@@ -236,6 +263,19 @@ int skin_load_memory(WinampSkin *skin, const unsigned char *z, size_t size,
     }
     if (!tmp.assets[SKIN_MAIN].rgb || !tmp.assets[SKIN_BUTTONS].rgb || !tmp.assets[SKIN_TEXT].rgb) {
         fail(error,en,"Skin needs MAIN.BMP, CBUTTONS.BMP and TEXT.BMP"); goto failed;
+    }
+    /* Cache one three-pixel gradient strip with the other native bitmaps.
+     * Each spectrum bin needs one clipped blit, not sixteen colour fills. */
+    if (total_rgb>SKIN_MAX_TOTAL-144) { fail(error,en,"Skin bitmaps exceed the total memory limit"); goto failed; }
+    tmp.assets[SKIN_VISBAR].rgb=(unsigned char *)malloc(3*16*3);
+    if (!tmp.assets[SKIN_VISBAR].rgb) { fail(error,en,"Not enough memory for visualiser colours"); goto failed; }
+    tmp.assets[SKIN_VISBAR].width=3; tmp.assets[SKIN_VISBAR].height=16;
+    for (i=0;i<16;++i) {
+        int x; unsigned rgb=tmp.visual_colors[2+15-i];
+        for (x=0;x<3;++x) {
+            unsigned char *pixel=tmp.assets[SKIN_VISBAR].rgb+(i*3+x)*3;
+            pixel[0]=(unsigned char)(rgb>>16); pixel[1]=(unsigned char)(rgb>>8); pixel[2]=(unsigned char)rgb;
+        }
     }
     skin_free(skin); *skin=tmp; if (error && en) error[0]=0; return 1;
 invalid_zip:

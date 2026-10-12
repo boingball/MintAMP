@@ -185,10 +185,10 @@ SKINR_TARGET ?= MintAMP-SR
 SKIN ?= 0
 
 RELEASE_ROOT ?= release
-RELEASE_NAME ?= MintAMP
+RELEASE_NAME ?= MintAMP-2.0-dev-680$(CPU)
 RELEASE_DIR := $(RELEASE_ROOT)/$(RELEASE_NAME)
 RELEASE_ICON_SOURCE ?= artassets/MintAMP-v1.1-680$(CPU).info
-RELEASE_README_SOURCE ?= MintAMP.readme
+RELEASE_README_SOURCE ?= MintAMP2.readme
 
 CPPFLAGS_COMMON := -Ipub -Ireal -DAMIGA_M68K
 CFLAGS_COMMON := $(CPU_MFLAG) $(STD) $(OPTFLAGS)
@@ -295,7 +295,7 @@ PNG_CPPFLAGS := -DENABLE_PNG_ARTWORK -DLODEPNG_NO_COMPILE_ENCODER \
 SOURCES := amiga_mp3dec.c miniamp_memguard.c $(TASKSAFE_MALLOC_SOURCE) radio_runtime_flags.c $(RADIO_SOURCES) $(RADIO_CLI_SOURCES) $(DECODER_SOURCES)
 # miniamp_memguard.c compiles to nothing unless HEAPGUARD=1 (see
 # MINIAMP_DEBUG_ALLOC above), so it's harmless to always list it.
-GUI_SOURCES := amiga_mp3gui.c picojpeg.c lodepng.c webpdec.c svgdec.c miniamp_memguard.c $(TASKSAFE_MALLOC_SOURCE) radio_runtime_flags.c $(RADIO_SOURCES) \
+GUI_SOURCES := interface_prefs.c launch_options.c amiga_mp3gui.c picojpeg.c lodepng.c webpdec.c svgdec.c miniamp_memguard.c $(TASKSAFE_MALLOC_SOURCE) radio_runtime_flags.c $(RADIO_SOURCES) \
 	radio_browser_controller.c radio_browser.c radio_browser_url.c \
 	radio_browser_http.c radio_browser_json.c radio_stream_probe.c
 # MintAMP-GT uses gadtools.library via proto/gadtools.h; no linker flag is needed.
@@ -305,7 +305,7 @@ GUI_SOURCES := amiga_mp3gui.c picojpeg.c lodepng.c webpdec.c svgdec.c miniamp_me
 # lodepng.c/webpdec.c/svgdec.c are linked into both frontends now, so the
 # GadTools and ReAction builds decode the same favicon formats (JPEG, PNG,
 # WebP, ICO and SVG).
-GUIR_SOURCES := minimp3r.c picojpeg.c lodepng.c webpdec.c svgdec.c miniamp_memguard.c $(TASKSAFE_MALLOC_SOURCE) radio_runtime_flags.c $(RADIO_SOURCES) \
+GUIR_SOURCES := interface_prefs.c launch_options.c minimp3r.c picojpeg.c lodepng.c webpdec.c svgdec.c miniamp_memguard.c $(TASKSAFE_MALLOC_SOURCE) radio_runtime_flags.c $(RADIO_SOURCES) \
 	radio_browser_controller.c radio_browser.c radio_browser_url.c \
 	radio_browser_http.c radio_browser_json.c radio_stream_probe.c
 
@@ -412,6 +412,12 @@ sgt:
 sr:
 	$(MAKE) -f Makefile.amiga guir SKIN=1 GUIR_TARGET="$(SKINR_TARGET)"
 skins: sgt sr
+
+.PHONY: launcher
+launcher: MintAMP-Launch
+MintAMP-Launch: mintamp_launch.c interface_prefs.c launch_options.c interface_prefs.h launch_options.h
+	$(CC) $(CPU_MFLAG) $(STD) -Os $(EXTRA_CFLAGS) -o $@ mintamp_launch.c interface_prefs.c launch_options.c
+	$(AMIGA_HUNK_FAST_PREFERRED) $@
 sslsgt:
 	$(MAKE) -f Makefile.amiga sgt RADIO=1 SSL=1
 sslsr:
@@ -422,7 +428,7 @@ $(SKINR_TARGET): sr
 endif
 
 skin-format-test:
-	$(HOSTCC) -O2 -std=gnu99 -Wall -Wextra -I. -DLODEPNG_NO_COMPILE_ENCODER \
+	$(HOSTCC) -O2 -std=gnu99 -Wall -Wextra -Werror -I. -DLODEPNG_NO_COMPILE_ENCODER \
 		-DLODEPNG_NO_COMPILE_DISK tests/winamp_skin_test.c winamp_skin.c \
 		winamp_skin_render.c lodepng.c -o skin_format_test
 	python3 tests/winamp_skin_test.py $(SKIN_TEST_FILE)
@@ -439,7 +445,7 @@ fast030-halfasm-test: $(FAST030_HALFASM_TEST_TARGET)
 
 gui-halfasm-test: $(GUI_HALFASM_TEST_TARGET)
 
-$(GUI_TARGET): $(GUI_EXTRA_DEPS) $(GUI_SOURCES) amiga_mp3dec.c integer_stats.h gadtools_radio_layout.h $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(LIBNIX_FREEALL_COMPAT_SOURCES)
+$(GUI_TARGET): interface_prefs.h launch_options.h $(GUI_EXTRA_DEPS) $(GUI_SOURCES) amiga_mp3dec.c integer_stats.h gadtools_radio_layout.h $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(LIBNIX_FREEALL_COMPAT_SOURCES)
 	set -e; \
 	trap 'rm -f $@.freeall-discovery $@.freeall-heads' EXIT; \
 	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(PROBE_CPPFLAGS) $(SSL_CPPFLAGS) $(SSLCERTS_CPPFLAGS) $(PNG_CPPFLAGS) $(DEBUG_CPPFLAGS) $(FREEALL_PROBE_CPPFLAGS) $(EXTRA_CFLAGS) \
@@ -456,7 +462,7 @@ $(GUI_TARGET): $(GUI_EXTRA_DEPS) $(GUI_SOURCES) amiga_mp3dec.c integer_stats.h g
 # MintAMP — ReAction/ClassAct frontend.  Built with the same fast030 ASM path
 # as the GadTools GUI since it targets 030+/3.5/3.9 machines.  minimp3r.c
 # #includes amiga_mp3dec.c, so only the shared decoder modules are linked.
-$(GUIR_TARGET): $(GUI_EXTRA_DEPS) $(GUIR_SOURCES) amiga_mp3dec.c integer_stats.h $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(LIBNIX_FREEALL_COMPAT_SOURCES)
+$(GUIR_TARGET): interface_prefs.h launch_options.h $(GUI_EXTRA_DEPS) $(GUIR_SOURCES) amiga_mp3dec.c integer_stats.h $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(LIBNIX_FREEALL_COMPAT_SOURCES)
 	set -e; \
 	trap 'rm -f $@.freeall-discovery $@.freeall-heads' EXIT; \
 	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(PROBE_CPPFLAGS) $(SSL_CPPFLAGS) $(SSLCERTS_CPPFLAGS) $(PNG_CPPFLAGS) $(DEBUG_CPPFLAGS) $(FREEALL_PROBE_CPPFLAGS) $(EXTRA_CFLAGS) \
@@ -681,20 +687,22 @@ decoder-modules:
 # fallback; amiga_mp3dec.fastexp is the fast command-line edition. The
 # applications create PROGDIR:ArtCache themselves when needed, but the empty
 # drawer is included here for a tidy unpacked layout.
-release: skins $(GUIR_TARGET) $(GUI_TARGET) $(FAST030_TARGET) decoder-modules Skins/MintAMP-mintleaf.wsz
+release: launcher skins $(GUIR_TARGET) $(GUI_TARGET) $(FAST030_TARGET) decoder-modules Skins/MintAMP-mintleaf.wsz
 	rm -rf "$(RELEASE_DIR)"
-	mkdir -p "$(RELEASE_DIR)/decoders" "$(RELEASE_DIR)/ArtCache" "$(RELEASE_DIR)/Skins"
+	mkdir -p "$(RELEASE_DIR)/decoders" "$(RELEASE_DIR)/ArtCache" "$(RELEASE_DIR)/Skins" "$(RELEASE_DIR)/docs"
 	@test -f "$(RELEASE_ICON_SOURCE)" || { echo "ERROR: missing drawer icon $(RELEASE_ICON_SOURCE)"; exit 1; }
 	@test -f "$(RELEASE_README_SOURCE)" || { echo "ERROR: missing release readme $(RELEASE_README_SOURCE)"; exit 1; }
 	cp "$(RELEASE_ICON_SOURCE)" "$(RELEASE_ROOT)/$(RELEASE_NAME).info"
 	cp "$(RELEASE_README_SOURCE)" "$(RELEASE_ROOT)/MintAMP.readme"
 	cp "$(RELEASE_README_SOURCE)" "$(RELEASE_DIR)/ReadMe"
 	@test -f "$(FAST030_TARGET)" || { echo "ERROR: missing $(FAST030_TARGET)"; exit 1; }
-	cp "$(GUIR_TARGET)" "$(GUI_TARGET)" "$(SKINGT_TARGET)" "$(SKINR_TARGET)" "$(FAST030_TARGET)" "$(RELEASE_DIR)/"
+	cp MintAMP-Launch "$(GUIR_TARGET)" "$(GUI_TARGET)" "$(SKINGT_TARGET)" "$(SKINR_TARGET)" "$(FAST030_TARGET)" "$(RELEASE_DIR)/"
 	@test -f "$(GUIR_TARGET).info" || { echo "ERROR: missing $(GUIR_TARGET).info"; exit 1; }
 	@test -f "$(GUI_TARGET).info" || { echo "ERROR: missing $(GUI_TARGET).info"; exit 1; }
-	cp "$(GUIR_TARGET).info" "$(GUI_TARGET).info" "$(SKINGT_TARGET).info" "$(SKINR_TARGET).info" "$(RELEASE_DIR)/"
+	cp MintAMP-Launch.info "$(GUIR_TARGET).info" "$(GUI_TARGET).info" "$(SKINGT_TARGET).info" "$(SKINR_TARGET).info" "$(RELEASE_DIR)/"
 	cp docs/winamp-skins.md "$(RELEASE_DIR)/Skins/ReadMe"
+	cp docs/winamp-skins.md docs/mintamp-2.0-acceptance.md "$(RELEASE_DIR)/docs/"
+	cp BUILD-RELEASE.txt "$(RELEASE_DIR)/docs/"
 	cp Skins/MintAMP-mintleaf.wsz "$(RELEASE_DIR)/Skins/"
 	@set -e; \
 	found=0; \
@@ -720,7 +728,7 @@ release-clean:
 	rm -rf "$(RELEASE_ROOT)"
 
 clean:
-	rm -f $(SKINGT_TARGET) $(SKINR_TARGET) skin_format_test $(TARGET) $(FAST030_TARGET) $(PROF030_TARGET) $(FAST030_HALFASM_TEST_TARGET) $(GUI_TARGET) $(GUIR_TARGET) $(GUI_TARGET).freeall-discovery $(GUIR_TARGET).freeall-discovery $(GUI_TARGET).freeall-heads $(GUIR_TARGET).freeall-heads $(GUI_HALFASM_TEST_TARGET) \
+	rm -f MintAMP-Launch launch_options_test skin_performance_test skin_sprite_test skin_controls_test skin_eq_decode_test integer_stats_test gadtools_radio_layout_test display_text_test radio_favourites_test $(SKINGT_TARGET) $(SKINR_TARGET) skin_format_test $(TARGET) $(FAST030_TARGET) $(PROF030_TARGET) $(FAST030_HALFASM_TEST_TARGET) $(GUI_TARGET) $(GUIR_TARGET) $(GUI_TARGET).freeall-discovery $(GUIR_TARGET).freeall-discovery $(GUI_TARGET).freeall-heads $(GUIR_TARGET).freeall-heads $(GUI_HALFASM_TEST_TARGET) \
 		amissl_https_get amissl_ssl_free_repro amissl_spawn_repro amissl_exec_repro amissl_child_worker_repro rb_stream_probe_test \
 		aac_mulshift60_ref_test ogg_mulshift60_ref_test wma_mulshift030_ref_test wma_mulshift060_ref_test \
 		flac_lpc030_ref_test flac_lpc060_ref_test polyphase60_ref_test radio_metadata_test radio_oggflac_test playlist_format_test \
@@ -742,3 +750,19 @@ skin-controls-test:
 skin-eq-decode-test:
 	$(HOSTCC) -O2 -std=gnu99 -DAMIGA_M68K -DMINTAMP_SKIN -I. -Ipub -Ireal tests/skin_eq_decode_test.c mp3dec.c mp3tabs.c real/*.c skin_controls.c -o skin_eq_decode_test
 	./skin_eq_decode_test
+
+.PHONY: launcher-test
+launcher-test:
+	$(HOSTCC) -O2 -std=gnu89 -Wall -Wextra -Werror -I. tests/launch_options_test.c launch_options.c -o launch_options_test
+	./launch_options_test
+	PYTHONDONTWRITEBYTECODE=1 python3 tests/launcher_icon_test.py
+
+.PHONY: skin-performance-test
+skin-performance-test:
+	$(HOSTCC) -O2 -std=gnu89 -Wall -Wextra -Werror -I. -DLODEPNG_NO_COMPILE_ENCODER -DLODEPNG_NO_COMPILE_DISK tests/skin_performance_test.c skin_controls.c winamp_skin.c winamp_skin_render.c lodepng.c -o skin_performance_test
+	./skin_performance_test
+
+.PHONY: skin-sprite-test
+skin-sprite-test:
+	$(HOSTCC) -O2 -std=gnu89 -Wall -Wextra -Werror -I. tests/skin_sprite_test.c winamp_skin_render.c -o skin_sprite_test
+	./skin_sprite_test

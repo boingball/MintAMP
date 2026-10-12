@@ -1,0 +1,47 @@
+Short:        MintAMP 2.0 development player
+Author:       Darren Banfi (boingball)
+Uploader:     boingball@gmail.com (Darren Banfi)
+Type:         mus/play
+Version:      2.0-dev
+Requires:     68030+; TCP/IP for radio; AmiSSL for HTTPS; ReAction or GadTools
+Architecture: m68k-amigaos >= 3.0.0
+
+MintAMP 2.0 development - PR #521
+================================
+
+Use the MintAMP-2.0-dev-68030 or MintAMP-2.0-dev-68060 drawer appropriate to
+your processor. Keep its decoder modules and Skins drawer with the players.
+This is a development build awaiting real-hardware acceptance.
+
+Double-click MintAMP-Launch for the default native ReAction interface.
+Use Project / Interface preferences to select ReAction or GadTools and
+Native or Classic skin for subsequent launches through MintAMP-Launch.
+The running decoder is left alone; no live frontend switch is required.
+You can also run MintAMP-Launch --prefs from a Shell.
+
+The launcher icon includes disabled examples of these ToolTypes:
+  (GUI=REACTION)
+  (MODE=NATIVE)
+  (SKIN=PROGDIR:Skins/MintAMP-mintleaf.wsz)
+  (DOUBLESIZE=NO)
+
+Remove parentheses to force a setting. Explicit CLI arguments override
+ToolTypes, which override saved preferences, which override defaults.
+Leave examples disabled for the saved GUI/appearance preferences to work.
+
+The bundled mint-leaf skin opens by default when the skinned appearance is
+selected. Load skin from the player's menu to change it. Spectrum and MP3 EQ
+are optional and initially off. Native utility windows remain accessible.
+
+The four original launch methods remain available:
+  MintAMP       Native ReAction       MintAMP-GT   Native GadTools
+  MintAMP-SR    Skinned ReAction      MintAMP-SGT  Skinned GadTools
+  amiga_mp3dec.fastexp                Command-line player
+
+Details: Skins/ReadMe, docs/winamp-skins.md and the hardware acceptance checklist.
+No Winamp Windows DLL plug-ins, modern WAL skins or all-format biquad EQ.
+
+Made by Darren Banfi / boingball, with Helix MP3/AAC, libfoxenflac,
+ESP8266Audio and Tremor. Existing licences and decoder credits apply.
+Support: https://buymeacoffee.com/boingball
+Repository: https://github.com/boingball/MintAMP

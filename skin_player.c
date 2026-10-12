@@ -1,6 +1,7 @@
 /* Shared Intuition window for the SGT and SR editions. Native utility
  * windows remain owned by the respective GadTools/ReAction frontend. */
 #include "skin_player.h"
+#include "interface_prefs.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,7 +36,7 @@ typedef struct SkinResources {
     int owned_count, scale;
 } SkinResources;
 
-#define SKIN_MENU_ITEMS 13
+#define SKIN_MENU_ITEMS 14
 
 struct SkinPlayer {
     struct Screen *screen;
@@ -59,7 +60,9 @@ struct SkinPlayer {
     int eq_have_drawn,eq_pressed,eq_drag_x,eq_drag_y;
     int remaining,shaded,visual_mode,visual_interval,visual_ticks,debug;
     int pl_left,pl_top,eq_left,eq_top,pl_position,eq_position;
-    int move_row,move_target,move_active;
+    int move_row,move_target,move_active,move_edge,collapse_selection;
+    int pl_shaded,eq_shaded,state_dirty,choice_dirty;
+    unsigned char peak_hold[16];
     int saved_left,saved_top,restore_playlist,restore_eq;
     unsigned drag_group;
     unsigned long playlist_identity;
@@ -77,6 +80,8 @@ struct SkinPlayer {
 };
 
 static void save_state(SkinPlayer *p);
+static void playlist_scroll(SkinPlayer *p,int top);
+static void visual_arm(SkinPlayer *p);
 
 static int suffix(const char *path,const char *ext)
 {
@@ -110,9 +115,9 @@ static void env_name(SkinPlayer *p,char *key,const char *option)
 static void save_choice(SkinPlayer *p)
 {
     char key[64], size[2];
-    env_name(p,key,"Skin"); SetVar(key,p->path,-1,GVF_GLOBAL_ONLY|GVF_SAVE_VAR);
+    env_name(p,key,"Skin"); SetVar(key,p->path,-1,GVF_GLOBAL_ONLY);
     size[0]=(char)('0'+p->resources->scale); size[1]=0;
-    env_name(p,key,"Scale"); SetVar(key,size,-1,GVF_GLOBAL_ONLY|GVF_SAVE_VAR);
+    env_name(p,key,"Scale"); SetVar(key,size,-1,GVF_GLOBAL_ONLY); if (!p->choice_dirty) p->choice_dirty=1;
 }
 static LONG color_pen(SkinPlayer *p,SkinResources *r,unsigned rgb)
 {
@@ -261,6 +266,7 @@ static void repaint(SkinPlayer *p,int all)
     if (!p->win || !p->resources) return;
     p->target=p->win;
     p->now.pressed=p->pressed;
+    p->now.active=(p->win->Flags&WFLG_WINDOWACTIVE)!=0;
     p->now.playlist_visible=p->plwin!=NULL;
     p->now.eq_visible=p->eqwin!=NULL;
     display=p->now;
@@ -322,6 +328,8 @@ static void playlist_repaint(SkinPlayer *p,int all)
 {
     if (!p->plwin) return;
     p->target=p->plwin;
+    p->playlist.active=(p->plwin->Flags&WFLG_WINDOWACTIVE)!=0;
+    p->playlist.shaded=p->pl_shaded; p->playlist.pressed=p->playlist_pressed;
     skin_playlist_render(&p->resources->skin,&p->playlist,
         all || !p->playlist_have_drawn ? NULL : &p->playlist_drawn,
         blit,fill,playlist_label,p);
@@ -336,14 +344,16 @@ static void playlist_close(SkinPlayer *p)
     p->pl_left=p->plwin->LeftEdge; p->pl_top=p->plwin->TopEdge; p->pl_position=1;
     CloseWindow(p->plwin); p->plwin=NULL;
     p->playlist_pressed=0; p->click_row=-1; p->playlist_have_drawn=0;
+    p->move_active=p->move_edge=p->pending_double=p->collapse_selection=0; p->move_row=-1;
     repaint(p,0);
 }
 static int playlist_open(SkinPlayer *p)
 {
     struct TextAttr font={(STRPTR)"topaz.font",8,FS_NORMAL,FPF_ROMFONT};
     int scale=p->resources->scale, left,top,i;
+    int height=p->pl_shaded ? 14 : SKIN_PLAYLIST_HEIGHT;
     if (!p->win || !p->resources->skin.assets[SKIN_PLEDIT].rgb ||
-        275*scale>p->screen->Width || SKIN_PLAYLIST_HEIGHT*scale>p->screen->Height) return 0;
+        275*scale>p->screen->Width || height*scale>p->screen->Height) return 0;
     if (!p->playlist_font) p->playlist_font=OpenFont(&font);
     if (!p->text_source) p->text_source=text_bitmap(p,243,8);
     if (!p->text_scaled) p->text_scaled=text_bitmap(p,486,16);
@@ -352,15 +362,15 @@ static int playlist_open(SkinPlayer *p)
     if (left<0) left=0;
     if (top<0) top=0;
     if (left+275*scale>p->screen->Width) left=p->screen->Width-275*scale;
-    if (top+SKIN_PLAYLIST_HEIGHT*scale>p->screen->Height) top=p->screen->Height-SKIN_PLAYLIST_HEIGHT*scale;
+    if (top+height*scale>p->screen->Height) top=p->screen->Height-height*scale;
     p->plwin=OpenWindowTags(NULL,WA_CustomScreen,(ULONG)p->screen,
-        WA_Left,left,WA_Top,top,WA_Width,275*scale,WA_Height,SKIN_PLAYLIST_HEIGHT*scale,
+        WA_Left,left,WA_Top,top,WA_Width,275*scale,WA_Height,height*scale,
         WA_Borderless,TRUE,WA_Activate,TRUE,WA_RMBTrap,FALSE,
         WA_DetailPen,p->win->DetailPen,WA_BlockPen,p->win->BlockPen,
         WA_NewLookMenus,(ULONG)(GfxBase->LibNode.lib_Version>=39),
         WA_ReportMouse,TRUE,WA_SimpleRefresh,TRUE,
         WA_IDCMP,IDCMP_MOUSEBUTTONS|IDCMP_MOUSEMOVE|IDCMP_REFRESHWINDOW|
-                   IDCMP_MENUPICK|IDCMP_VANILLAKEY|IDCMP_RAWKEY|IDCMP_INACTIVEWINDOW,TAG_DONE);
+                   IDCMP_MENUPICK|IDCMP_VANILLAKEY|IDCMP_RAWKEY|IDCMP_INACTIVEWINDOW|IDCMP_ACTIVEWINDOW,TAG_DONE);
     if (!p->plwin) return 0;
     /* Intuition may annotate menu structures. Each window owns its strip. */
     p->playlist_menu=p->menu; p->playlist_menu.FirstItem=p->playlist_items;
@@ -406,10 +416,8 @@ void skin_player_playlist_update(SkinPlayer *p,int count,int selected,int curren
     for (i=0;i<SKIN_PLAYLIST_ROWS;++i) {
         int index=p->playlist.top+i;
         const char *s=index<count && name ? name(ctx,index) : "";
-        if (strncmp(p->playlist.rows[i],s,79)) p->click_row=-1;
-        if (index<count && p->durations && p->durations[index]>=0)
-            snprintf(p->playlist.rows[i],80,"%.60s  %d:%02d",s,p->durations[index]/60,p->durations[index]%60);
-        else { strncpy(p->playlist.rows[i],s,79); p->playlist.rows[i][79]=0; }
+        p->playlist.durations[i]=index<count && p->durations ? p->durations[index] : -1;
+        strncpy(p->playlist.rows[i],s,79); p->playlist.rows[i][79]=0;
     }
     playlist_repaint(p,0);
 }
@@ -423,7 +431,7 @@ static void close_window(SkinPlayer *p)
 }
 static void build_menu(SkinPlayer *p,UWORD text_pen,UWORD background_pen)
 {
-    static const char * const labels[]={"Load skin...","Double size","Settings","Internet Radio","Playlist","Full playlist options...","Open audio...","Quit","Equaliser","Visualisation","Visual rate","Playback statistics","About..."};
+    static const char * const labels[]={"Load skin...","Double size","Settings","Internet Radio","Playlist","Full playlist options...","Open audio...","Quit","Equaliser","Visualisation","Visual rate","Playback statistics","About...","Interface preferences..."};
     int i, h=p->screen->Font->ta_YSize+4, width=0;
     memset(&p->menu,0,sizeof(p->menu));
     p->menu.Flags=MENUENABLED; p->menu.MenuName=(STRPTR)"MintAMP";
@@ -448,13 +456,14 @@ static void build_menu(SkinPlayer *p,UWORD text_pen,UWORD background_pen)
 static int open_window(SkinPlayer *p,WORD left,WORD top)
 {
     int scale=p->resources->scale;
+    int height=p->shaded ? 14 : 116;
     struct DrawInfo *dri;
     UWORD text_pen=p->screen->DetailPen, background_pen=p->screen->BlockPen;
-    if (SKIN_WIDTH*scale>p->screen->Width || SKIN_HEIGHT*scale>p->screen->Height) return 0;
+    if (SKIN_WIDTH*scale>p->screen->Width || height*scale>p->screen->Height) return 0;
     if (left<0) left=0;
     if (top<0) top=0;
     if (left+275*scale>p->screen->Width) left=p->screen->Width-275*scale;
-    if (top+116*scale>p->screen->Height) top=p->screen->Height-116*scale;
+    if (top+height*scale>p->screen->Height) top=p->screen->Height-height*scale;
     /* Menus use window pens even on a borderless window. Zero defaults make
      * the menu title disappear. V39 adds dedicated menu-bar pens; V37/38
      * have the standard text/background pens. Never assume palette indices. */
@@ -466,13 +475,13 @@ static int open_window(SkinPlayer *p,WORD left,WORD top)
     }
     p->win=OpenWindowTags(NULL,WA_CustomScreen,(ULONG)p->screen,
         WA_Left,(ULONG)left,WA_Top,(ULONG)top,
-        WA_Width,SKIN_WIDTH*scale,WA_Height,SKIN_HEIGHT*scale,
+        WA_Width,SKIN_WIDTH*scale,WA_Height,height*scale,
         WA_Borderless,TRUE,WA_Activate,TRUE,WA_RMBTrap,FALSE,
         WA_DetailPen,(ULONG)text_pen,WA_BlockPen,(ULONG)background_pen,
         WA_NewLookMenus,(ULONG)(GfxBase->LibNode.lib_Version>=39),
         WA_ReportMouse,TRUE,WA_SimpleRefresh,TRUE,
         WA_IDCMP,IDCMP_MOUSEBUTTONS|IDCMP_MOUSEMOVE|IDCMP_REFRESHWINDOW|
-                   IDCMP_MENUPICK|IDCMP_VANILLAKEY|IDCMP_INACTIVEWINDOW,
+                   IDCMP_MENUPICK|IDCMP_VANILLAKEY|IDCMP_INACTIVEWINDOW|IDCMP_ACTIVEWINDOW,
         TAG_DONE);
     if (!p->win) return 0;
     build_menu(p,text_pen,background_pen); SetMenuStrip(p->win,&p->menu);
@@ -498,14 +507,14 @@ static void save_state(SkinPlayer *p)
     if (!p->win) return;
     if (p->plwin) { p->pl_left=p->plwin->LeftEdge; p->pl_top=p->plwin->TopEdge; p->pl_position=1; }
     if (p->eqwin) { p->eq_left=p->eqwin->LeftEdge; p->eq_top=p->eqwin->TopEdge; p->eq_position=1; }
-    n=snprintf(text,sizeof(text),"2 %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d",
+    n=snprintf(text,sizeof(text),"3 %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d",
         p->win->LeftEdge,p->win->TopEdge,p->pl_left,p->pl_top,p->eq_left,p->eq_top,
         p->sequence.order.shuffle,p->sequence.order.repeat,gSkinAudio.balance,p->remaining,p->shaded,
         p->visual_mode,p->visual_interval,p->debug,gSkinAudio.eq_enabled,gSkinAudio.eq_preamp);
     for (i=0;i<10 && n>0 && n<(int)sizeof(text)-16;++i)
         n+=snprintf(text+n,sizeof(text)-n," %d",gSkinAudio.eq_bands[i]);
-    n+=snprintf(text+n,sizeof(text)-n," %d %d %d %d",p->plwin!=NULL,p->eqwin!=NULL,p->pl_position,p->eq_position);
-    env_name(p,key,"State"); SetVar(key,text,-1,GVF_GLOBAL_ONLY|GVF_SAVE_VAR);
+    n+=snprintf(text+n,sizeof(text)-n," %d %d %d %d %d %d",p->plwin!=NULL,p->eqwin!=NULL,p->pl_position,p->eq_position,p->pl_shaded,p->eq_shaded);
+    env_name(p,key,"State"); SetVar(key,text,-1,GVF_GLOBAL_ONLY); p->state_dirty=1;
 }
 static void restore_state(SkinPlayer *p)
 {
@@ -515,7 +524,7 @@ static void restore_state(SkinPlayer *p)
     if (GetVar(key,text,sizeof(text),GVF_GLOBAL_ONLY)<=0) return;
     text[sizeof(text)-1]=0; at=text;
     for (i=0;i<27;++i) { v[i]=strtol(at,&end,10); if (end==at || v[i]<-32768 || v[i]>32767) return; at=end; }
-    if ((v[0]!=1 && v[0]!=2) || v[7]<0 || v[7]>1 || v[8]<0 || v[8]>2 || v[9]<-100 || v[9]>100 ||
+    if ((v[0]!=1 && v[0]!=2 && v[0]!=3) || v[7]<0 || v[7]>1 || v[8]<0 || v[8]>2 || v[9]<-100 || v[9]>100 ||
         v[12]<0 || v[12]>2 || v[13]<1 || v[13]>4 || v[16]<-12 || v[16]>12) return;
     for (i=17;i<27;++i) if (v[i]<-12 || v[i]>12) return;
     p->saved_left=(int)v[1]; p->saved_top=(int)v[2];
@@ -525,11 +534,14 @@ static void restore_state(SkinPlayer *p)
     p->visual_mode=(int)v[12]; p->visual_interval=(int)v[13]; p->debug=v[14]!=0;
     gSkinAudio.eq_enabled=v[15]!=0; gSkinAudio.eq_preamp=(int)v[16];
     for (i=0;i<10;++i) gSkinAudio.eq_bands[i]=(int)v[17+i];
-    if (v[0]==2) {
+    if (v[0]>=2) {
         long visible=strtol(at,&end,10);
         if (end!=at) { p->restore_playlist=visible==1; at=end; visible=strtol(at,&end,10); if (end!=at) { p->restore_eq=visible==1; at=end;
             visible=strtol(at,&end,10); if (end!=at) { p->pl_position=visible==1; at=end;
-                visible=strtol(at,&end,10); if (end!=at) p->eq_position=visible==1; }
+                visible=strtol(at,&end,10); if (end!=at) { p->eq_position=visible==1; at=end;
+                    if (v[0]==3) { visible=strtol(at,&end,10); if (end!=at) { p->pl_shaded=visible==1; at=end;
+                        visible=strtol(at,&end,10); if (end!=at) p->eq_shaded=visible==1; } }
+                } }
         } }
     }
     ++gSkinAudio.eq_sequence;
@@ -540,6 +552,7 @@ static void eq_repaint(SkinPlayer *p,int all)
     if (!p->eqwin) return;
     memset(&s,0,sizeof(s)); s.enabled=gSkinAudio.eq_enabled && gSkinAudio.eq_supported;
     s.preamp=gSkinAudio.eq_preamp; s.pressed=p->eq_pressed;
+    s.shaded=p->eq_shaded; s.active=(p->eqwin->Flags&WFLG_WINDOWACTIVE)!=0;
     for (i=0;i<10;++i) s.bands[i]=gSkinAudio.eq_bands[i];
     p->target=p->eqwin;
     skin_eq_render(&p->resources->skin,&s,(all || !p->eq_have_drawn) ? NULL : &p->eq_drawn,blit,fill,p);
@@ -557,6 +570,7 @@ static void eq_close(SkinPlayer *p)
 static void eq_toggle(SkinPlayer *p)
 {
     int scale=p->resources->scale,left,top;
+    int height=p->eq_shaded ? 14 : 116;
     if (p->eqwin) { eq_close(p); return; }
     if (!p->resources->skin.assets[SKIN_EQMAIN].rgb) { skin_player_notice(p,"THIS SKIN HAS NO EQMAIN ARTWORK"); return; }
     left=p->eq_position ? p->eq_left : p->win->LeftEdge;
@@ -564,11 +578,11 @@ static void eq_toggle(SkinPlayer *p)
     if (left<0) left=0;
     if (top<0) top=0;
     if (left+275*scale>p->screen->Width) left=p->screen->Width-275*scale;
-    if (top+116*scale>p->screen->Height) top=p->screen->Height-116*scale;
+    if (top+height*scale>p->screen->Height) top=p->screen->Height-height*scale;
     p->eqwin=OpenWindowTags(NULL,WA_CustomScreen,(ULONG)p->screen,WA_Left,left,WA_Top,top,
-        WA_Width,275*scale,WA_Height,116*scale,WA_Borderless,TRUE,WA_Activate,TRUE,
+        WA_Width,275*scale,WA_Height,height*scale,WA_Borderless,TRUE,WA_Activate,TRUE,
         WA_RMBTrap,TRUE,WA_ReportMouse,TRUE,WA_SimpleRefresh,TRUE,
-        WA_IDCMP,IDCMP_MOUSEBUTTONS|IDCMP_MOUSEMOVE|IDCMP_REFRESHWINDOW|IDCMP_VANILLAKEY|IDCMP_INACTIVEWINDOW,TAG_DONE);
+        WA_IDCMP,IDCMP_MOUSEBUTTONS|IDCMP_MOUSEMOVE|IDCMP_REFRESHWINDOW|IDCMP_VANILLAKEY|IDCMP_INACTIVEWINDOW|IDCMP_ACTIVEWINDOW,TAG_DONE);
     if (!p->eqwin) { skin_player_notice(p,"COULD NOT OPEN EQUALISER"); return; }
     eq_repaint(p,1); repaint(p,0);
 }
@@ -623,16 +637,15 @@ static int eq_poll(SkinPlayer *p)
         int sx=p->screen->MouseX,sy=p->screen->MouseY,i=-1; UWORD qualifier=m->Qualifier;
         ReplyMsg((struct Message *)m);
         if (type==IDCMP_REFRESHWINDOW) { BeginRefresh(p->eqwin); eq_repaint(p,1); EndRefresh(p->eqwin,TRUE); }
-        else if (type==IDCMP_INACTIVEWINDOW) { p->eq_pressed=0; eq_repaint(p,0); }
+        else if (type==IDCMP_INACTIVEWINDOW || type==IDCMP_ACTIVEWINDOW) { p->eq_pressed=0; eq_repaint(p,0); }
         else if (type==IDCMP_VANILLAKEY && (code==27 || code=='e' || code=='E')) { eq_close(p); save_state(p); }
         else if (type==IDCMP_MOUSEBUTTONS && code==SELECTDOWN) {
-            if (x>=264 && y<14) { eq_close(p); save_state(p); continue; }
+            if (x>=264 && x<273 && y>=3 && y<12) { p->eq_pressed=-2; eq_repaint(p,0); continue; }
+            if (x>=254 && x<263 && y>=3 && y<12) { p->eq_pressed=-3; eq_repaint(p,0); continue; }
             if (y<14) { p->eq_pressed=-1; drag_begin(p,2,qualifier); p->eq_drag_x=sx; p->eq_drag_y=sy; continue; }
-            if (x>=14 && x<40 && y>=18 && y<30) {
-                if (!gSkinAudio.eq_supported) skin_player_notice(p,"EQ REQUIRES MP3 PLAYBACK - OTHER DECODERS BYPASS");
-                else { gSkinAudio.eq_enabled=!gSkinAudio.eq_enabled; eq_repaint(p,0); save_state(p); }
-            } else if (x>=40 && x<72 && y>=18 && y<30) skin_player_notice(p,"AUTOMATIC PER-TRACK EQ PRESETS NOT SUPPORTED");
-            else if (x>=224 && x<268 && y>=18 && y<30) eq_presets(p);
+            if (x>=14 && x<40 && y>=18 && y<30) p->eq_pressed=-5;
+            else if (x>=40 && x<72 && y>=18 && y<30) p->eq_pressed=-6;
+            else if (x>=217 && x<261 && y>=18 && y<30) p->eq_pressed=-4;
             else if (y>=38 && y<101) {
                 if (x>=20 && x<35) i=0;
                 else if (x>=77 && x<253 && (x-77)%18<14) i=1+(x-77)/18;
@@ -647,7 +660,26 @@ static int eq_poll(SkinPlayer *p)
             }
         } else if (type==IDCMP_MOUSEMOVE && p->eq_pressed==-1) {
             drag_move(p,sx-p->eq_drag_x,sy-p->eq_drag_y); p->eq_drag_x=sx; p->eq_drag_y=sy;
-        } else if (type==IDCMP_MOUSEBUTTONS && code==SELECTUP) { if (p->eq_pressed==-1) drag_end(p,2); p->eq_pressed=0; eq_repaint(p,0); save_state(p); }
+        } else if (type==IDCMP_MOUSEBUTTONS && code==SELECTUP) {
+            int pressed=p->eq_pressed; p->eq_pressed=0;
+            if (pressed==-1) drag_end(p,2);
+            else if (pressed==-2 && x>=264 && x<273 && y>=3 && y<12) eq_close(p);
+            else if (pressed==-3 && x>=254 && x<263 && y>=3 && y<12) {
+                int height=(p->eq_shaded ? 116 : 14)*p->resources->scale;
+                if (height<=p->screen->Height) {
+                    int top=p->eqwin->TopEdge; if (top+height>p->screen->Height) top=p->screen->Height-height;
+                    p->eq_shaded=!p->eq_shaded; ChangeWindowBox(p->eqwin,p->eqwin->LeftEdge,top,p->eqwin->Width,height); p->eq_have_drawn=0;
+                }
+            } else if (pressed==-4 && x>=217 && x<261 && y>=18 && y<30) eq_presets(p);
+            else if (pressed==-5 && x>=14 && x<40 && y>=18 && y<30) {
+                if (gSkinAudio.eq_enabled) gSkinAudio.eq_enabled=0; /* bypass always accessible */
+                else if (gSkinAudio.eq_supported) gSkinAudio.eq_enabled=1;
+                else skin_player_notice(p,"EQ REQUIRES MP3 PLAYBACK - OTHER DECODERS BYPASS");
+            } else if (pressed==-6 && x>=40 && x<72 && y>=18 && y<30)
+                skin_player_notice(p,"AUTOMATIC PER-TRACK EQ PRESETS NOT SUPPORTED");
+            eq_repaint(p,0); save_state(p);
+        }
+        if (type==IDCMP_MOUSEBUTTONS && code==SELECTDOWN) eq_repaint(p,0);
         if ((type==IDCMP_MOUSEMOVE || (type==IDCMP_MOUSEBUTTONS && code==SELECTDOWN)) && p->eq_pressed>0) {
             int db=12-(y-43)*24/50;
             if (db<-12) db=-12;
@@ -660,8 +692,9 @@ static int eq_poll(SkinPlayer *p)
 }
 static void visual_arm(SkinPlayer *p)
 {
-    if (!p->visual_device || p->visual_pending || p->shaded) return;
-    if (!(strlen(p->now.title)>31 || p->notice_ticks || (p->visual_mode && p->now.playing && !p->now.paused))) return;
+    if (!p->visual_device || p->visual_pending) return;
+    if (p->shaded && !(p->move_active && p->move_edge)) return;
+    if (!(p->move_active && p->move_edge) && !(strlen(p->now.title)>31 || p->notice_ticks || (p->visual_mode && p->now.playing && !p->now.paused))) return;
     p->visual_timer->tr_node.io_Command=TR_ADDREQUEST;
     p->visual_timer->tr_time.tv_secs=0;
     p->visual_timer->tr_time.tv_micro=250000;
@@ -673,19 +706,25 @@ static void visual_arm(SkinPlayer *p)
 static void visual_tick(SkinPlayer *p)
 {
     int n;
+    if (p->plwin && p->move_active && p->move_edge) {
+        playlist_scroll(p,p->playlist.top+p->move_edge);
+        p->move_target=p->playlist.top+(p->move_edge<0 ? 0 : SKIN_PLAYLIST_ROWS-1);
+        if (p->move_target>=p->playlist.count) p->move_target=p->playlist.count-1;
+    }
     if (p->shaded) return;
     if (p->notice_ticks) --p->notice_ticks;
     else if (strlen(p->now.title)>31) p->now.scroll=(p->now.scroll+2)%((strlen(p->now.title)+5)*5);
     repaint(p,0);
     if (!p->visual_mode || ++p->visual_ticks<p->visual_interval) return;
     p->visual_ticks=0;
-    if (!p->now.playing || p->now.paused) { memset(p->now.levels,0,16); memset(p->now.scope,0,64); repaint(p,0); return; }
+    if (!p->now.playing || p->now.paused) { memset(p->now.levels,0,16); memset(p->now.peaks,0,16); memset(p->peak_hold,0,16); memset(p->now.scope,0,64); repaint(p,0); return; }
     if (gSkinAudio.visual_request==gSkinAudio.visual_sequence) {
         for (n=0;n<64;++n) p->now.scope[n]=gSkinAudio.visual_pcm[n];
         if (p->visual_mode==1) skin_visual_analyse(p->now.scope,p->now.levels);
         if (p->now.playing && !p->now.paused) ++gSkinAudio.visual_request;
     }
-    if (!p->now.playing || p->now.paused) { memset(p->now.levels,0,16); memset(p->now.scope,0,64); }
+    if (!p->now.playing || p->now.paused) { memset(p->now.levels,0,16); memset(p->now.peaks,0,16); memset(p->peak_hold,0,16); memset(p->now.scope,0,64); }
+    skin_visual_peaks(p->now.levels,p->now.peaks,p->peak_hold);
     p->now.visual_mode=p->visual_mode; repaint(p,0);
 }
 static int internal_action(SkinPlayer *p,int action)
@@ -717,8 +756,11 @@ static int internal_action(SkinPlayer *p,int action)
         }
     }
     else if (action==SKIN_SHADE) {
+        int height=(p->shaded ? 116 : 14)*p->resources->scale;
+        int top=p->win->TopEdge;
+        if (top+height>p->screen->Height) top=p->screen->Height-height;
         p->shaded=!p->shaded;
-        ChangeWindowBox(p->win,p->win->LeftEdge,p->win->TopEdge,275*p->resources->scale,(p->shaded ? 14 : 116)*p->resources->scale);
+        ChangeWindowBox(p->win,p->win->LeftEdge,top,275*p->resources->scale,height);
         p->have_drawn=0;
     } else return 0;
     p->now.remaining=p->remaining; p->now.shaded=p->shaded;
@@ -782,10 +824,14 @@ static void change_skin(SkinPlayer *p,int choose)
         p->resources=old; free_resources(p,next);
         if (!open_window(p,left,top)) p->win=NULL;
         if (had_playlist && p->win && !playlist_open(p)) p->pending_options=1;
+        if (had_eq && p->win) eq_toggle(p);
         error_request(p,"Could not open the new skin window.");
         return;
     }
     free_resources(p,old); strcpy(p->path,path); save_choice(p);
+    SetVar("MintAMP2/SKIN",p->path,-1,GVF_GLOBAL_ONLY);
+    SetVar("MintAMP2/DOUBLESIZE",scale==2 ? "YES" : "NO",-1,GVF_GLOBAL_ONLY);
+    p->choice_dirty=2;
     if (had_playlist && !playlist_open(p)) p->pending_options=1;
     if (had_eq) eq_toggle(p);
 }
@@ -816,7 +862,8 @@ SkinPlayer *skin_player_open(const char *name,int argc,char **argv)
             STRPTR v=FindToolType(icon->do_ToolTypes,"SKIN");
             if (v) { strncpy(p->path,(const char *)v,sizeof(p->path)-1); p->path[sizeof(p->path)-1]=0; }
             v=FindToolType(icon->do_ToolTypes,"DOUBLESIZE");
-            if (v) scale=(!*v || !strcmp((const char *)v,"1") || !strcmp((const char *)v,"YES") || !strcmp((const char *)v,"TRUE")) ? 2 : 1;
+            if (v) { MintLaunchOptions choice; mint_launch_defaults(&choice);
+                if (mint_launch_option(&choice,"DOUBLESIZE",(const char *)v)) scale=choice.doublesize ? 2 : 1; }
             FreeDiskObject(icon);
         }
         if (wb->sm_NumArgs>1 && skin_player_is_skin((const char *)wb->sm_ArgList[1].wa_Name)) {
@@ -826,6 +873,7 @@ SkinPlayer *skin_player_open(const char *name,int argc,char **argv)
     }
     for (i=1;i<argc;++i) {
         if (!strcmp(argv[i],"--double")) scale=2;
+        else if (!strcmp(argv[i],"--normal")) scale=1;
         else if (!strcmp(argv[i],"--skin") && i+1<argc) {
             strncpy(p->path,argv[++i],sizeof(p->path)-1); p->path[sizeof(p->path)-1]=0;
         } else if (skin_player_is_skin(argv[i])) {
@@ -856,6 +904,19 @@ void skin_player_close(SkinPlayer *p)
 {
     if (!p) return;
     save_state(p);
+    /* Frontends call close only after stopping/retiring audio. Persist disk
+     * choices here, not on every click while a radio decoder needs CPU/IO. */
+    { char key[64],value[512]; int i;
+      static const char * const options[]={"State","Skin","Scale"};
+      for (i=0;i<3;++i) if (i ? p->choice_dirty : p->state_dirty) {
+          env_name(p,key,options[i]);
+          if (GetVar(key,value,sizeof(value),GVF_GLOBAL_ONLY)>0) { value[sizeof(value)-1]=0; SetVar(key,value,-1,GVF_GLOBAL_ONLY|GVF_SAVE_VAR); }
+      }
+      if (p->choice_dirty==2) {
+          SetVar("MintAMP2/SKIN",p->path,-1,GVF_GLOBAL_ONLY|GVF_SAVE_VAR);
+          SetVar("MintAMP2/DOUBLESIZE",p->resources->scale==2 ? "YES" : "NO",-1,GVF_GLOBAL_ONLY|GVF_SAVE_VAR);
+      }
+    }
     if (p->visual_pending) { AbortIO((struct IORequest *)p->visual_timer); WaitIO((struct IORequest *)p->visual_timer); }
     if (p->visual_device) CloseDevice((struct IORequest *)p->visual_timer);
     if (p->visual_timer) DeleteIORequest((struct IORequest *)p->visual_timer);
@@ -884,13 +945,13 @@ void skin_player_update(SkinPlayer *p,const SkinState *s,int tick)
     if (!p || !p->win) return;
     scroll=strcmp(p->now.title,s->title) ? 0 : p->now.scroll;
     if (tick && !p->visual_device && !p->notice_ticks) scroll=(scroll+2)%((strlen(s->title)+5)*5);
-    { unsigned char levels[16]; signed char scope[64];
-        memcpy(levels,p->now.levels,16); memcpy(scope,p->now.scope,64);
-        p->now=*s; memcpy(p->now.levels,levels,16); memcpy(p->now.scope,scope,64);
+    { unsigned char levels[16],peaks[16]; signed char scope[64];
+        memcpy(levels,p->now.levels,16); memcpy(peaks,p->now.peaks,16); memcpy(scope,p->now.scope,64);
+        p->now=*s; memcpy(p->now.levels,levels,16); memcpy(p->now.peaks,peaks,16); memcpy(p->now.scope,scope,64);
         p->now.remaining=p->remaining; p->now.shaded=p->shaded;
         p->now.shuffle=p->sequence.order.shuffle; p->now.repeat=p->sequence.order.repeat; p->now.balance=gSkinAudio.balance;
         p->now.visual_mode=p->shaded ? 0 : p->visual_mode;
-        if (!s->playing || s->paused) { memset(p->now.levels,0,16); memset(p->now.scope,0,64); }
+        if (!s->playing || s->paused) { memset(p->now.levels,0,16); memset(p->now.peaks,0,16); memset(p->peak_hold,0,16); memset(p->now.scope,0,64); }
         eq_repaint(p,0); visual_arm(p);
     }
     p->now.scroll=scroll;
@@ -904,9 +965,10 @@ void skin_player_update(SkinPlayer *p,const SkinState *s,int tick)
 static int menu_action(SkinPlayer *p,UWORD code,SkinEvent *event)
 {
     static const int actions[SKIN_MENU_ITEMS]={SKIN_SELECT,SKIN_SIZE,SKIN_SETTINGS,SKIN_RADIO,
-        SKIN_PLAYLIST,SKIN_PLAYLIST_OPTIONS,SKIN_BROWSE,SKIN_QUIT,SKIN_EQ,SKIN_VISUAL,SKIN_VIS_RATE,SKIN_DEBUG,SKIN_ABOUT};
+        SKIN_PLAYLIST,SKIN_PLAYLIST_OPTIONS,SKIN_BROWSE,SKIN_QUIT,SKIN_EQ,SKIN_VISUAL,SKIN_VIS_RATE,SKIN_DEBUG,SKIN_ABOUT,SKIN_INTERFACE};
     int item=ITEMNUM(code);
     if (code==MENUNULL || MENUNUM(code)!=0 || item>=SKIN_MENU_ITEMS) return 0;
+    if (actions[item]==SKIN_INTERFACE) { mint_interface_preferences(p->win); return 0; }
     if (item<2) { change_skin(p,item==0); return 0; }
     if (internal_action(p,actions[item])) return 0;
     event->action=actions[item]; event->released=1; return 1;
@@ -929,7 +991,10 @@ static int playlist_poll(SkinPlayer *p,SkinEvent *event)
         ReplyMsg((struct Message *)msg); memset(event,0,sizeof(*event));
         if (type==IDCMP_REFRESHWINDOW) {
             BeginRefresh(p->plwin); playlist_repaint(p,1); EndRefresh(p->plwin,TRUE);
-        } else if (type==IDCMP_INACTIVEWINDOW) p->playlist_pressed=0;
+        } else if (type==IDCMP_INACTIVEWINDOW || type==IDCMP_ACTIVEWINDOW) {
+            p->playlist_pressed=0; p->move_active=p->move_edge=p->pending_double=p->collapse_selection=0; p->move_row=-1;
+            playlist_repaint(p,0);
+        }
         else if (type==IDCMP_MENUPICK) {
             if (menu_action(p,code,event)) return 1;
         } else if (type==IDCMP_VANILLAKEY && (code=='\r' || code==' ')) {
@@ -956,7 +1021,9 @@ static int playlist_poll(SkinPlayer *p,SkinEvent *event)
                 event->selection=(qualifier&(IEQUALIFIER_LSHIFT|IEQUALIFIER_RSHIFT)) ? SKIN_SELECT_RANGE : SKIN_SELECT_REPLACE; return 1;
             }
         } else if (type==IDCMP_MOUSEBUTTONS && code==SELECTDOWN) {
-            p->playlist_pressed=skin_playlist_hit_test(x,y);
+            p->playlist_pressed=p->pl_shaded && y>=14 ? SKIN_NONE : skin_playlist_hit_test(x,y);
+            if (p->pl_shaded && p->playlist_pressed==SKIN_TRACK_SELECT) p->playlist_pressed=SKIN_NONE;
+            playlist_repaint(p,0);
             if (p->playlist_pressed==SKIN_DRAG) drag_begin(p,1,qualifier);
             p->playlist_drag_x=sx; p->playlist_drag_y=sy;
             if (p->playlist_pressed==SKIN_TRACK_SELECT) {
@@ -969,8 +1036,9 @@ static int playlist_poll(SkinPlayer *p,SkinEvent *event)
                     p->click_row=twice ? -1 : index;
                     p->click_seconds=seconds; p->click_micros=micros;
                     p->pending_double=twice;
+                    p->collapse_selection=!(qualifier&(IEQUALIFIER_CONTROL|IEQUALIFIER_LSHIFT|IEQUALIFIER_RSHIFT)) && p->selection.bits[index];
                     event->action=SKIN_TRACK_SELECT;
-                    event->value=index; event->selection=(qualifier&IEQUALIFIER_CONTROL) ? SKIN_SELECT_TOGGLE : (qualifier&(IEQUALIFIER_LSHIFT|IEQUALIFIER_RSHIFT)) ? SKIN_SELECT_RANGE : SKIN_SELECT_REPLACE; return 1;
+                    event->value=index; event->selection=(qualifier&IEQUALIFIER_CONTROL) ? SKIN_SELECT_TOGGLE : (qualifier&(IEQUALIFIER_LSHIFT|IEQUALIFIER_RSHIFT)) ? SKIN_SELECT_RANGE : p->collapse_selection ? SKIN_SELECT_FOCUS : SKIN_SELECT_REPLACE; return 1;
                 }
             } else if (p->playlist_pressed==SKIN_PLAYLIST_SCROLL) {
                 int maximum=skin_playlist_top(p->playlist.count,p->playlist.count);
@@ -978,7 +1046,12 @@ static int playlist_poll(SkinPlayer *p,SkinEvent *event)
             }
         } else if (type==IDCMP_MOUSEMOVE && p->playlist_pressed==SKIN_TRACK_SELECT && p->move_row>=0) {
             if (abs(sy-p->playlist_drag_y)>3*p->resources->scale) p->move_active=1;
-            if (p->move_active) { p->move_target=p->playlist.top+(y-22)/10; p->click_row=-1; }
+            if (p->move_active) {
+                p->move_edge=y<22 ? -1 : y>=192 ? 1 : 0;
+                p->move_target=p->playlist.top+(y<22 ? 0 : y>=192 ? 16 : (y-22)/10);
+                if (p->move_target>=p->playlist.count) p->move_target=p->playlist.count-1;
+                p->click_row=-1; visual_arm(p);
+            }
         } else if (type==IDCMP_MOUSEMOVE && p->playlist_pressed==SKIN_DRAG) {
             drag_move(p,sx-p->playlist_drag_x,sy-p->playlist_drag_y);
             p->playlist_drag_x=sx; p->playlist_drag_y=sy;
@@ -990,8 +1063,8 @@ static int playlist_poll(SkinPlayer *p,SkinEvent *event)
             if (action==SKIN_DRAG) drag_end(p,1);
             save_state(p);
             if (action==SKIN_TRACK_SELECT && p->move_active) {
-                event->action=SKIN_TRACK_MOVE; event->value=p->move_row; event->target=p->move_target;
-                p->move_row=-1; p->move_active=0; p->pending_double=0; return 1;
+                event->action=SKIN_TRACK_MOVE; event->value=p->move_row; event->target=p->move_target; event->selection=1;
+                p->move_row=-1; p->move_active=p->move_edge=p->collapse_selection=0; p->pending_double=0; return 1;
             }
             if (action==SKIN_TRACK_SELECT && p->pending_double && !p->move_active) {
                 p->pending_double=0;
@@ -999,8 +1072,21 @@ static int playlist_poll(SkinPlayer *p,SkinEvent *event)
                     event->action=SKIN_TRACK_PLAY; event->value=p->move_row; return 1;
                 }
             }
+            if (action==SKIN_TRACK_SELECT && p->collapse_selection && skin_playlist_hit_test(x,y)==SKIN_TRACK_SELECT) {
+                p->collapse_selection=0; event->action=SKIN_TRACK_SELECT; event->value=p->move_row;
+                event->selection=SKIN_SELECT_REPLACE; return 1;
+            }
+            playlist_repaint(p,0);
             if (action==skin_playlist_hit_test(x,y)) {
                 if (action==SKIN_PLAYLIST_CLOSE) { playlist_close(p); save_state(p); }
+                else if (action==SKIN_PLAYLIST_SHADE) {
+                    int height=(p->pl_shaded ? SKIN_PLAYLIST_HEIGHT : 14)*p->resources->scale;
+                    if (height<=p->screen->Height) {
+                        int top=p->plwin->TopEdge; if (top+height>p->screen->Height) top=p->screen->Height-height;
+                        p->pl_shaded=!p->pl_shaded; ChangeWindowBox(p->plwin,p->plwin->LeftEdge,top,p->plwin->Width,height);
+                        p->playlist_have_drawn=0; playlist_repaint(p,1); save_state(p);
+                    } else skin_player_notice(p,"PLAYLIST DOES NOT FIT THIS SCREEN");
+                }
                 else if (action==SKIN_PLAYLIST_OPTIONS || (action>=SKIN_LIST_ADD && action<=SKIN_LIST_FILE)) { event->action=action; return 1; }
             }
         }
@@ -1030,7 +1116,7 @@ int skin_player_poll(SkinPlayer *p,SkinEvent *event)
         memset(event,0,sizeof(*event));
         if (type==IDCMP_REFRESHWINDOW) {
             BeginRefresh(p->win); repaint(p,1); EndRefresh(p->win,TRUE);
-        } else if (type==IDCMP_INACTIVEWINDOW) { p->pressed=0; repaint(p,0); }
+        } else if (type==IDCMP_INACTIVEWINDOW || type==IDCMP_ACTIVEWINDOW) { p->pressed=0; repaint(p,0); }
         else if (type==IDCMP_MENUPICK && code!=MENUNULL) {
             if (menu_action(p,code,event)) return 1;
         } else if (type==IDCMP_VANILLAKEY) {

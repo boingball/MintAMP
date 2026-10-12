@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the native loader against independently generated BMP/ZIP files."""
 import io
+import os
 from pathlib import Path
 import struct
 import subprocess
@@ -10,7 +11,7 @@ import zlib
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-RUNNER = ROOT / "skin_format_test"
+RUNNER = Path(os.environ.get("SKIN_TEST_RUNNER", str(ROOT / "skin_format_test")))
 
 
 def bmp(w, h, bits=24, *, compressed=False, topdown=False):
@@ -113,6 +114,21 @@ def run_tests(extra_skin=None):
         invoke(archive([('MAIN.BMP',bmp(20,20)[0])]+assets[1:]),good=False)
         eq = ('Theme/EQMAIN.BMP', bmp(275,315,8)[0])
         invoke(archive(assets+[eq]))
+        eqex=('Theme/EQ_EX.BMP',bmp(275,56)[0])
+        invoke(archive(assets+[eq,eqex]))
+        invoke(archive(assets+[eqex,eqex]),good=False)
+        invoke(archive(assets+[('EQ_EX.BMP',bmp(274,29)[0])]),good=False)
+        colors=b'\r\n'.join(f'{i},{i+1},{i+2} ; comment'.encode() for i in range(24))
+        invoke(archive(assets+[('Theme/VISCOLOR.TXT',colors)]))
+        palette_path=tmp/'palette.wsz'
+        palette_path.write_bytes(archive(assets+[('Theme/VISCOLOR.TXT',colors)]))
+        result=subprocess.run([str(RUNNER),'--visual-colours',str(palette_path)],capture_output=True,text=True,check=True)
+        assert result.stdout.split()==[f'{(i<<16)|((i+1)<<8)|(i+2):06x}' for i in range(24)]
+        palette_path.write_bytes(archive(assets+[('VISCOLOR.TXT',b'999,0,0')]))
+        result=subprocess.run([str(RUNNER),'--visual-colours',str(palette_path)],capture_output=True,text=True,check=True)
+        assert result.stdout.split()[0]=='000000' and result.stdout.split()[23]=='ffffff'
+        invoke(archive(assets+[('viscolor.txt',b'invalid'),('VISCOLOR.TXT',colors)]),good=False)
+        invoke(archive(assets+[('VISCOLOR.TXT',b'x'*8193)]),good=False)
         invoke(archive(assets+[('EQMAIN.BMP',bmp(275,314)[0])]),good=False)
         invoke(archive(assets+[eq,eq]),good=False)
         playlist = ('Theme/PLEDIT.BMP', bmp(280,186,8)[0])
@@ -143,7 +159,7 @@ def run_tests(extra_skin=None):
             assert proc.returncode==0,proc.stderr
             # Pillow is an independent decoder for the user's reference skin.
             from PIL import Image
-            names=('main','cbuttons','titlebar','numbers','text','volume','balance','posbar','playpaus','monoster','shufrep','pledit','eqmain')
+            names=('main','cbuttons','titlebar','numbers','text','volume','balance','posbar','playpaus','monoster','shufrep','pledit','eqmain','eq_ex')
             reported={int(line.split()[0]): line.split()[1:] for line in proc.stdout.splitlines()}
             with zipfile.ZipFile(extra_skin) as z:
                 for name in z.namelist():

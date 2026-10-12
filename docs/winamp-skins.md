@@ -4,7 +4,8 @@ MintAMP-SGT uses GadTools utility windows; MintAMP-SR uses ReAction/ClassAct
 utility windows. Both share the skinned Intuition player, playlist and EQ.
 Playback, decoders, Internet radio, favourites, artwork and native settings
 remain owned by the established frontend/backend. MintAMP and MintAMP-GT
-remain separate, supported applications. This is partial classic Winamp 2.x
+remain supported native frontends. MintAMP-Launch provides one installation
+entry point with Native (default) and Classic skin appearance choices. This is partial classic Winamp 2.x
 parity, not a Windows audio engine or plug-in host.
 
 ## Build and install
@@ -50,6 +51,53 @@ MintAMP-SR Music:track.mp3 --skin Work:Skins/another.wsz --double
 Workbench tooltypes are `SKIN=Work:Skins/MintAMP-mintleaf.wsz` and `DOUBLESIZE=YES`.
 Normal/double sizes are 275x116 and 550x232. Scaling covers artwork, hit testing,
 EQ, playlist and text. Oversized windows/scales are refused or fall back.
+
+## Unified next-launch interface
+
+Start `MintAMP-Launch` from Workbench or Shell. It dispatches to the unchanged
+frontend names; those executables and their older icons remain directly usable.
+The launcher loads the selected sibling executable and creates a CLI process
+with copied arguments, inherited installation PROGDIR and owned NIL IO handles.
+It does not evaluate a shell command or stay resident.
+
+| GUI | MODE | Internal frontend |
+| --- | --- | --- |
+| REACTION | NATIVE | MintAMP (default) |
+| GADTOOLS | NATIVE | MintAMP-GT |
+| REACTION | SKINNED | MintAMP-SR |
+| GADTOOLS | SKINNED | MintAMP-SGT |
+
+Workbench ToolTypes: `GUI=REACTION`/`GADTOOLS`, `MODE=NATIVE`/`SKINNED`,
+`SKIN=PROGDIR:Skins/MintAMP-mintleaf.wsz`, `DOUBLESIZE=YES`/`NO`.
+The main launcher icon contains **disabled** examples in parentheses; remove
+parentheses only to force an option. Values are case-insensitive. SKIN sets the
+skin path; MODE selects whether that path is used. A SKIN ToolType alone does
+not force a native launcher into skinned mode.
+
+```text
+MintAMP-Launch --gui GADTOOLS --mode SKINNED --skin "Work:Skins/My skin.wsz" --normal
+MintAMP-Launch Music:track.mp3 GUI=REACTION MODE=SKINNED DOUBLESIZE=YES
+MintAMP-Launch --prefs
+```
+
+Field-by-field precedence is **CLI > launcher ToolTypes > shared MintAMP2
+preferences > defaults**. Defaults are ReAction, Native, normal size and the
+bundled mint-leaf path. Only explicitly supplied/saved skin or scale choices
+are forwarded, letting old skin editions' per-edition Skin/Scale preferences
+remain effective when no shared override exists. On direct skin launches the
+existing CLI > own icon ToolTypes > per-edition Skin/Scale > bundled default
+order is retained; `--normal` explicitly overrides a saved double-size choice.
+Workbench shifted audio/playlist paths resolve from their own directory lock.
+Only one startup file is forwarded, as with the established frontend launch.
+
+Every frontend has **Interface preferences...** in its Project/player menu.
+Choose framework, appearance and size for the next MintAMP-Launch invocation.
+Playback continues; switching the running frontend is not required. `Load skin`
+in a skinned player also updates the shared skin/scale choice for later launcher
+runs. Explicit icon/CLI options still win. ENV RAM preferences change immediately;
+ENVARC disk persistence occurs on clean shutdown after audio retirement. The
+standalone `--prefs` command saves immediately. A forced exit can lose the latest
+disk preferences. Existing native audio/favourite settings are not migrated.
 
 ## Main controls
 
@@ -128,9 +176,13 @@ Double-click plays on release, so beginning a drag does not start playback.
 Return/Space plays; Up/Down navigates; Shift extends selection; Ctrl-Up/Down
 moves the focused row. Keypad 7/1 goes first/last and keypad 9/3 pages up/down;
 Delete removes selected rows, Ctrl-A selects all. Escape/P closes the playlist.
-Drag a row vertically and release over a visible destination to reorder it.
-Reordering currently moves one row, not an entire selected block, and has no
-edge autoscroll. The scrollbar supports clicking and dragging.
+Drag a selected row vertically to move the selected block, preserving its
+order even for noncontiguous selection. Clicking an already selected row keeps
+the block until a plain click is released without dragging. Holding at the
+upper/lower list edge autoscrolls one row per quarter-second, including when
+the pointer is stationary or the main window is shaded. Release commits once;
+losing focus cancels the drag. The scrollbar supports clicking and dragging
+and its pressed artwork is used.
 
 Current, focused and selected entries are remapped with array edits. A native
 list replacement invalidates obsolete shuffle history and pending row starts.
@@ -148,8 +200,9 @@ shown and preserved on save. The bottom total sums known lengths and appends
 to populate durations, and URLs are not contacted for missing-file checks.
 
 The compact playlist remains fixed at 275x232 (17 rows), scaled at double size.
-Its shade button opens full native options; playlist/EQ shade and sprite-based
-resizing are not implemented. Missing artwork, insufficient memory or a small
+Its shade button now toggles a 14-pixel view; the EQ has the same shade toggle.
+EQ_EX.BMP supplies shaded EQ artwork, with a labelled fallback when absent.
+Sprite-based resizing and miniature shade sliders are not implemented. Missing artwork, insufficient memory or a small
 screen uses the native playlist. Native settings/favourites remain accessible.
 
 ## Equaliser
@@ -185,8 +238,12 @@ signed 8-bit samples from the already prepared planar PCM, averaging stereo.
 The request/acknowledgement handshake makes the snapshot stable while GUI code
 reads it. There is no full-buffer copy, allocation, DFT or drawing inside audio
 submission. Spectrum analysis uses a bounded 64-point integer DFT on the GUI
-task; scope uses the same snapshot. Colours are currently fixed green/black;
-VISCOLOR.TXT, logarithmic binning and peak decay are not implemented.
+task; scope uses the same snapshot. VISCOLOR.TXT supplies the classic 24 RGB rows
+(background, gradient, scope colours and peak colour), with bounded parsing and
+defaults for missing/invalid data. A cached three-pixel gradient strip needs
+one clipped blit per spectrum bin. Integer peaks hold for two visual updates,
+then decay one pixel per update; no extra analysis cadence or audio-child
+work is introduced. Logarithmic binning is not implemented.
 
 Analysis is limited to the selected 1/2/4 Hz and stops when disabled, paused,
 stopped or main-shaded. Snapshot freshness is **limited by buffer submissions**:
@@ -220,8 +277,8 @@ positions are clamped when screen/scale changes.
 
 Native refresh handling, pressed playback/shuffle/repeat sprites, optional
 artwork bounds, owned menu structures and cleanup remain shared. Classic skins
-have no general hover sprite set. EQ presets/close controls do not yet animate
-pressed sprites. Shade does not compact the remaining docked windows.
+have no general hover sprite set. EQ on/off, auto, presets and close controls now animate pressed sprites
+and act on release within their original hit rectangle. Shade does not compact the remaining docked windows.
 
 ## Skin compatibility
 
@@ -235,7 +292,7 @@ current resources. No files are extracted to disk.
 
 V39+ uses obtained shared pens with disposal; V37/V38 uses the desktop palette.
 AGA remapping depends on available colours; RTG/P96 improves fidelity.
-REGION.TXT shaped windows, custom cursors, EQ_EX shade, modern `.wal` skins and
+REGION.TXT shaped windows, custom cursors, modern `.wal` skins and
 Winamp DLL plug-ins are not supported.
 
 ## Validation
@@ -246,9 +303,9 @@ make -f Makefile.amiga skin-controls-test skin-eq-decode-test playlist-format-te
 ```
 
 Tests cover generated BMP/ZIP encodings, corrupt/truncated/duplicate/undersized
-assets, optional EQ/playlist sheets, failed replacement preservation, control
+assets, optional EQ/playlist/EQ_EX sheets, VISCOLOR, failed replacement preservation, control
 mapping, full/incremental player/playlist/EQ equality and stationary rendering;
-shuffle cycles/history/repeat, selection/remapping/sorting/rollback, balance,
+shuffle cycles/history/repeat, selection/remapping/sorting/rollback/selected-block moves, balance,
 output-sample clock, pending track-switch transactions, EQ arithmetic/bypass, spectral analysis and docking.
 An actual MPEG-2.5 tone decode verifies disabled/flat EQ sample equality and
 cut/boost output energy. Playlist tests verify timed M3U/PLS round trips.
@@ -265,3 +322,7 @@ validation compiler; a new GCC 13.2.0 run is not yet available here.
 
 Sprite reference: [Webamp](https://github.com/captbaritone/webamp),
 `packages/webamp/js/skinSprites.ts` (MIT). Rendering and integration are native C.
+
+Full remaining-differences table and per-machine release gates:
+[MintAMP 2.0 acceptance](mintamp-2.0-acceptance.md). This includes A1200 68030,
+FPU-less 68060 and PiStorm RTG, with measured underrun/spare-time comparisons.

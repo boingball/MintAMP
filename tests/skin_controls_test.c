@@ -65,6 +65,43 @@ static void list_tests(void)
     CHECK(selected==-1 && current==-1);
     skin_selection_sync(&selection,128,127); CHECK(selection.bits[127]); skin_selection_sync(&selection,0,-1); CHECK(!selection.bits[127]);
 }
+static void block_move_tests(void)
+{
+    int mask,from,to;
+    for (mask=1;mask<256;++mask) for (from=0;from<8;++from) for (to=0;to<8;++to) {
+        char paths[8][16],titles[8][16],names[8][16];
+        int durations[8],count=8,current=3,selected=from,expected[8],i,n=0,insert=0,boundary;
+        SkinList l; SkinSelection s;
+        if (!(mask&(1<<from))) continue;
+        memset(&s,0,sizeof(s)); memset(&l,0,sizeof(l)); s.count=8; s.focus=s.anchor=from;
+        for (i=0;i<8;++i) {
+            sprintf(paths[i],"%d",i); sprintf(titles[i],"title%d",i); sprintf(names[i],"name%d",i);
+            durations[i]=i*10; s.bits[i]=(mask>>i)&1;
+        }
+        boundary=to>from ? to+1 : to;
+        for (i=0;i<boundary;++i) if (!s.bits[i]) ++insert;
+        for (i=0;i<8;++i) if (!s.bits[i]) expected[n++]=i;
+        memmove(expected+insert+8-n,expected+insert,(n-insert)*sizeof(int));
+        n=insert; for (i=0;i<8;++i) if (s.bits[i]) expected[n++]=i;
+        if (from==to) for (i=0;i<8;++i) expected[i]=i;
+        l.paths=&paths[0][0]; l.path_size=16; l.titles=&titles[0][0]; l.title_size=16;
+        l.names=&names[0][0]; l.name_size=16; l.count=&count; l.current=&current; l.selected=&selected; l.durations=durations; l.selection=&s;
+        skin_list_move_selected(&l,from,to);
+        for (i=0;i<8;++i) {
+            CHECK(atoi(paths[i])==expected[i] && durations[i]==expected[i]*10);
+            CHECK(s.bits[i]==((mask>>expected[i])&1));
+            CHECK(atoi(titles[i]+5)==expected[i] && atoi(names[i]+4)==expected[i]);
+            if (expected[i]==3) CHECK(current==i);
+            if (expected[i]==from) CHECK(selected==i && s.focus==i);
+        }
+    }
+    { unsigned char levels[16]={12},peaks[16]={0},hold[16]={0};
+      skin_visual_peaks(levels,peaks,hold); CHECK(peaks[0]==12);
+      levels[0]=0; skin_visual_peaks(levels,peaks,hold); CHECK(peaks[0]==12);
+      skin_visual_peaks(levels,peaks,hold); skin_visual_peaks(levels,peaks,hold); CHECK(peaks[0]==11);
+      for (mask=0;mask<30;++mask) skin_visual_peaks(levels,peaks,hold);
+      CHECK(!peaks[0]); }
+}
 static void audio_tests(void)
 {
     int spectrum[576],copy[576],i; signed char pcm[64]; unsigned char levels[16];
@@ -107,4 +144,4 @@ static void window_tests(void)
     skin_window_snap(r,3,0,1,8,&dx,&dy); CHECK(dx==0 && dy==6);
     r[1].w=0; skin_window_snap(r,3,0,1,8,&dx,&dy); CHECK(dx==0 && dy==0);
 }
-int main(void) { order_tests(); pending_order_tests(); list_tests(); audio_tests(); window_tests(); clock_tests(); puts("Skin controls: order/history, shared list/selection, balance, EQ bypass/headroom, spectrum and mapping passed"); return 0; }
+int main(void) { order_tests(); block_move_tests(); pending_order_tests(); list_tests(); audio_tests(); window_tests(); clock_tests(); puts("Skin controls: order/history, shared list/selection, balance, EQ bypass/headroom, spectrum and mapping passed"); return 0; }

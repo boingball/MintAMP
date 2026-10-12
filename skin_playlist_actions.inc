@@ -95,7 +95,7 @@ static void SkinPlaylistDirectory(SkinPlaylistOps *o)
 static void SkinPlaylistAction(SkinPlaylistOps *o,const SkinEvent *e)
 {
     int choice=0,i,changed=0;
-    if (e->action==SKIN_TRACK_MOVE) { changed=skin_list_move(&o->list,e->value,e->target); }
+    if (e->action==SKIN_TRACK_MOVE) { changed=e->selection ? skin_list_move_selected(&o->list,e->value,e->target) : skin_list_move(&o->list,e->value,e->target); }
     else if (e->action==SKIN_TRACK_REMOVE) choice=1;
     else if (e->action==SKIN_LIST_ADD) {
         choice=skin_player_choice(gSkinPlayer,"Add to playlist","Files|Drawer|List|Cancel");

@@ -1,3 +1,4 @@
+#include "interface_prefs.h"
 /*
  * MintAMP - Mini Internet Amiga Media Player ReAction/ClassAct frontend for the Helix fixed-point
  * MP3 decoder, aimed at AmigaOS 3.3/3.5/3.9 (and 68k boards with ReAction or
@@ -82,7 +83,7 @@ static int gSkinPendingTrack = -1;
  * in here doubled up into a malformed path that silently failed to persist
  * across reboots while the plain ENV: (RAM) write kept working. */
 #define MR_ENV_PREFIX "MintAMP"
-#define MINTAMP_VERSION "1.4.0"
+#define MINTAMP_VERSION "2.0-dev"
 #define MR_SETTINGS_VERSION 1
 #define MR_RADIO_FAV_MAX 50
 
@@ -428,12 +429,12 @@ static const char * const kHttpsWaitDesc[HTTPS_WAIT_COUNT] = {
 };
 
 static struct Menu kMenus[2];
-static struct MenuItem kProjectItems[4];
+static struct MenuItem kProjectItems[5];
 static struct MenuItem kPlaybackItems[PLAYBACK_ITEM_COUNT];
-static struct IntuiText kProjectText[4];
+static struct IntuiText kProjectText[5];
 static struct IntuiText kPlaybackText[PLAYBACK_ITEM_COUNT];
-static const char * const kProjectLabels[4] = {
-	"About MintAMP...", "Internet Radio", "Iconify", "Quit"
+static const char * const kProjectLabels[5] = {
+	"About MintAMP...", "Internet Radio", "Iconify", "Quit", "Interface preferences..."
 };
 static const char * const kPlaybackLabels[PLAYBACK_ITEM_COUNT] = {
 	"Decode-then-play", "Bench mode", "Artwork", "Artwork Cache",
@@ -466,7 +467,7 @@ static void MrInitMenuStrip(void)
 	kMenus[1].Flags = MENUENABLED;
 	kMenus[1].MenuName = (STRPTR)"Playback";
 	kMenus[1].FirstItem = &kPlaybackItems[0];
-	for (i = 0; i < 4; i++) {
+	for (i = 0; i < 5; i++) {
 		/* Pen 0 is the screen's light/background pen, pen 1 is black on
 		 * the standard 4-colour Workbench palette -- these were swapped,
 		 * so JAM1 (which only uses FrontPen) drew the item text in the
@@ -477,10 +478,10 @@ static void MrInitMenuStrip(void)
 		kProjectText[i].LeftEdge = 2;
 		kProjectText[i].TopEdge = 1;
 		kProjectText[i].IText = (STRPTR)kProjectLabels[i];
-		kProjectItems[i].NextItem = (i < 3) ? &kProjectItems[i + 1] : NULL;
+		kProjectItems[i].NextItem = (i < 4) ? &kProjectItems[i + 1] : NULL;
 		kProjectItems[i].LeftEdge = 0;
 		kProjectItems[i].TopEdge = i * 10;
-		kProjectItems[i].Width = 152;
+		kProjectItems[i].Width = 200;
 		kProjectItems[i].Height = 10;
 		kProjectItems[i].Flags = ITEMTEXT | ITEMENABLED | HIGHCOMP;
 		kProjectItems[i].ItemFill = (APTR)&kProjectText[i];
@@ -7272,6 +7273,8 @@ static void HandleMenu(MrApp *app, UWORD code, int *done)
 			else if (mn == MENUNUM_PROJECT && it == ITEMNUM_ABOUT) {
 				ShowAbout(app);
 			}
+			else if (mn == MENUNUM_PROJECT && it == 4)
+				mint_interface_preferences(app->win);
 			else if (mn == MENUNUM_PROJECT && it == ITEMNUM_RADIO)
 				OpenRadioWindow(app);
 			else if (mn == MENUNUM_PROJECT && it == ITEMNUM_ICONIFY)
@@ -7757,6 +7760,7 @@ static int MrMainReal(int argc, char **argv)
 #endif
 	SyncFromGadgets(&app);
 	SaveSettings(&app);
+	mint_interface_flush();
 	RADIO_DBG(printf("app-close: SaveSettings done\n");)
 	DrainGuiPorts(&app, "before dispose");
 	DisposeGuiObjectsBeforeCloseLibs(&app);
