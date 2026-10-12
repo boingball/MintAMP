@@ -728,7 +728,7 @@ release-clean:
 	rm -rf "$(RELEASE_ROOT)"
 
 clean:
-	rm -f MintAMP-Launch launch_options_test skin_performance_test skin_sprite_test skin_controls_test skin_eq_decode_test integer_stats_test gadtools_radio_layout_test display_text_test radio_favourites_test $(SKINGT_TARGET) $(SKINR_TARGET) skin_format_test $(TARGET) $(FAST030_TARGET) $(PROF030_TARGET) $(FAST030_HALFASM_TEST_TARGET) $(GUI_TARGET) $(GUIR_TARGET) $(GUI_TARGET).freeall-discovery $(GUIR_TARGET).freeall-discovery $(GUI_TARGET).freeall-heads $(GUIR_TARGET).freeall-heads $(GUI_HALFASM_TEST_TARGET) \
+	rm -f MintAMP-Launch interface_prefs_test launch_options_test skin_performance_test skin_sprite_test skin_controls_test skin_eq_decode_test integer_stats_test gadtools_radio_layout_test display_text_test radio_favourites_test $(SKINGT_TARGET) $(SKINR_TARGET) skin_format_test $(TARGET) $(FAST030_TARGET) $(PROF030_TARGET) $(FAST030_HALFASM_TEST_TARGET) $(GUI_TARGET) $(GUIR_TARGET) $(GUI_TARGET).freeall-discovery $(GUIR_TARGET).freeall-discovery $(GUI_TARGET).freeall-heads $(GUIR_TARGET).freeall-heads $(GUI_HALFASM_TEST_TARGET) \
 		amissl_https_get amissl_ssl_free_repro amissl_spawn_repro amissl_exec_repro amissl_child_worker_repro rb_stream_probe_test \
 		aac_mulshift60_ref_test ogg_mulshift60_ref_test wma_mulshift030_ref_test wma_mulshift060_ref_test \
 		flac_lpc030_ref_test flac_lpc060_ref_test polyphase60_ref_test radio_metadata_test radio_oggflac_test playlist_format_test \
@@ -766,3 +766,8 @@ skin-performance-test:
 skin-sprite-test:
 	$(HOSTCC) -O2 -std=gnu89 -Wall -Wextra -Werror -I. tests/skin_sprite_test.c winamp_skin_render.c -o skin_sprite_test
 	./skin_sprite_test
+
+.PHONY: interface-prefs-test
+interface-prefs-test:
+	$(HOSTCC) -O2 -std=gnu89 -Wall -Wextra -Werror -DMINTAMP_PREFS_TEST -I. tests/interface_prefs_test.c interface_prefs.c launch_options.c -o interface_prefs_test
+	./interface_prefs_test

@@ -912,10 +912,7 @@ void skin_player_close(SkinPlayer *p)
           env_name(p,key,options[i]);
           if (GetVar(key,value,sizeof(value),GVF_GLOBAL_ONLY)>0) { value[sizeof(value)-1]=0; SetVar(key,value,-1,GVF_GLOBAL_ONLY|GVF_SAVE_VAR); }
       }
-      if (p->choice_dirty==2) {
-          SetVar("MintAMP2/SKIN",p->path,-1,GVF_GLOBAL_ONLY|GVF_SAVE_VAR);
-          SetVar("MintAMP2/DOUBLESIZE",p->resources->scale==2 ? "YES" : "NO",-1,GVF_GLOBAL_ONLY|GVF_SAVE_VAR);
-      }
+      if (p->choice_dirty==2) mint_interface_flush_skin();
     }
     if (p->visual_pending) { AbortIO((struct IORequest *)p->visual_timer); WaitIO((struct IORequest *)p->visual_timer); }
     if (p->visual_device) CloseDevice((struct IORequest *)p->visual_timer);

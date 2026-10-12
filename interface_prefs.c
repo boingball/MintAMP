@@ -1,12 +1,16 @@
 #include "interface_prefs.h"
 #include <string.h>
 #include <stdio.h>
+#ifdef MINTAMP_PREFS_TEST
+#include "tests/amiga_prefs_stubs.h"
+#else
 #include <intuition/intuition.h>
 #include <workbench/startup.h>
 #include <workbench/workbench.h>
 #include <proto/dos.h>
 #include <proto/icon.h>
 #include <proto/intuition.h>
+#endif
 static int preferences_dirty;
 static const char * const keys[]={"GUI","MODE","SKIN","DOUBLESIZE"};
 void mint_interface_load(MintLaunchOptions *o)
@@ -57,16 +61,25 @@ void mint_interface_preferences(struct Window *w)
     choice(w,ok ? "Saved for next MintAMP-Launch.\nActive playback continues.\nExplicit ToolTypes/CLI arguments override saved preferences." : "Could not save all interface preferences.\nCheck ENV: and ENVARC: are writable.","OK");
 }
 
-void mint_interface_flush(void)
+static void persist_options(int first)
 {
     int i; char key[64],value[512];
-    if (!preferences_dirty) return;
-    for (i=0;i<4;++i) {
+    for (i=first;i<4;++i) {
         LONG n; snprintf(key,sizeof(key),"MintAMP2/%s",keys[i]);
         n=GetVar(key,value,sizeof(value),GVF_GLOBAL_ONLY);
         if (n>0 && n<(LONG)sizeof(value)-1) {
             value[n]=0; SetVar(key,value,-1,GVF_GLOBAL_ONLY|GVF_SAVE_VAR);
         }
     }
+}
+void mint_interface_flush(void)
+{
+    if (preferences_dirty) persist_options(0);
     preferences_dirty=0;
+}
+void mint_interface_flush_skin(void)
+{
+    /* Read the current shared ENV values: a newer next-launch preference
+     * must not be overwritten by the running player's older size/path. */
+    persist_options(2);
 }

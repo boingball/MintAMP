@@ -26,3 +26,4 @@ gadtools_radio_layout_test
 /launch_options_test
 /skin_performance_test
 /skin_sprite_test
+/interface_prefs_test

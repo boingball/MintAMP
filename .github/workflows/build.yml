@@ -67,7 +67,7 @@ jobs:
           ./skin_format_test Skins/MintAMP-mintleaf.wsz
 
       - name: Check launcher selection, Workbench icon and bounded visual workload
-        run: make -f Makefile.amiga launcher-test skin-performance-test skin-sprite-test
+        run: make -f Makefile.amiga launcher-test interface-prefs-test skin-performance-test skin-sprite-test
 
       - name: Check shared skin controls and MP3 equaliser bypass
         run: make -f Makefile.amiga skin-controls-test skin-eq-decode-test

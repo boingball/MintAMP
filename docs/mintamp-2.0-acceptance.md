@@ -13,6 +13,9 @@ actual icon launching, installed OS libraries or Paula/RTG timing.
   There is no shell command evaluation or resident launcher task.
 - CLI > launcher ToolTypes > shared `MintAMP2` preferences > native ReAction
   defaults. The skin editions retain legacy Skin/Scale and direct icon syntax.
+- Late skin shutdown persists the newest shared ENV preferences, so an older
+  live size cannot overwrite a newer next-launch choice. A mocked DOS/icon
+  regression exercises this ordering, cancellation and Workbench lock handling.
 - Next-launch interface preferences in all four menus; optional launcher icon
   examples are disabled so they do not defeat saved preferences.
 - Active/inactive titlebars, remaining-time sign artwork, pressed EQ controls,

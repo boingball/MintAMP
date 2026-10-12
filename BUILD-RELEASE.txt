@@ -7,7 +7,7 @@ Run from the repository root with the Amiga cross-compiler tools on PATH.
 
 Run the automated checks first:
 
-make -f Makefile.amiga launcher-test skin-format-test skin-controls-test \
+make -f Makefile.amiga launcher-test interface-prefs-test skin-format-test skin-controls-test \
   skin-eq-decode-test skin-performance-test skin-sprite-test integer-stats-test \
   gadtools-radio-layout-test playlist-format-test radio-metadata-test \
   radio-oggflac-test radio-favourites-test display-text-test freeall-heads-test \

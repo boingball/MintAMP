@@ -7,4 +7,5 @@ void mint_interface_tooltypes(MintLaunchOptions *o,int argc,char **argv);
 /* Shared native requester; saves choices for MintAMP-Launch's next launch. */
 void mint_interface_preferences(struct Window *parent);
 void mint_interface_flush(void);
+void mint_interface_flush_skin(void);
 #endif
