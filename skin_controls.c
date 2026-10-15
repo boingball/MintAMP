@@ -366,7 +366,7 @@ static int docked(const SkinRect *a,const SkinRect *b,int tolerance)
 unsigned skin_window_group(const SkinRect *r,int count,int root,int tolerance)
 {
     unsigned mask,old; int i,j;
-    if (!r || count<1 || count>3 || root<0 || root>=count || !r[root].w) return 0;
+    if (!r || count<1 || count>4 || root<0 || root>=count || !r[root].w) return 0;
     mask=1U<<root;
     do { old=mask;
         for (i=0;i<count;++i) if (mask&(1U<<i))
@@ -378,7 +378,7 @@ void skin_window_snap(const SkinRect *r,int count,int root,unsigned moving,int t
 {
     int i,j,bestx=tolerance+1,besty=tolerance+1;
     *dx=*dy=0;
-    if (!r || root<0 || root>=count || count>3) return;
+    if (!r || root<0 || root>=count || count>4) return;
     for (i=0;i<count;++i) if ((moving&(1U<<i)) && r[i].w)
         for (j=0;j<count;++j) if (!(moving&(1U<<j)) && r[j].w) {
             int delta[4],k;

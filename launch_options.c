@@ -6,8 +6,13 @@ static int equal(const char *a,const char *b)
     while (*a && *b && toupper((unsigned char)*a)==toupper((unsigned char)*b)) { ++a; ++b; }
     return !*a && !*b;
 }
+static int equal_prefix(const char *a,const char *prefix)
+{
+    while (*prefix && toupper((unsigned char)*a)==toupper((unsigned char)*prefix)) { ++a; ++prefix; }
+    return !*prefix;
+}
 void mint_launch_defaults(MintLaunchOptions *o)
-{ memset(o,0,sizeof(*o)); strcpy(o->skin,MINTAMP_DEFAULT_SKIN); }
+{ memset(o,0,sizeof(*o)); o->skinned=1; strcpy(o->skin,MINTAMP_DEFAULT_SKIN); }
 int mint_launch_option(MintLaunchOptions *o,const char *key,const char *v)
 {
     if (!v) return 0;
@@ -15,8 +20,9 @@ int mint_launch_option(MintLaunchOptions *o,const char *key,const char *v)
         if (!equal(v,"REACTION") && !equal(v,"GADTOOLS")) return 0;
         o->gadtools=equal(v,"GADTOOLS");
     } else if (equal(key,"MODE")) {
-        if (!equal(v,"NATIVE") && !equal(v,"SKINNED")) return 0;
-        o->skinned=equal(v,"SKINNED");
+        /* NATIVE is the 2.0-dev spelling of CLASSIC; keep saved values valid. */
+        if (!equal(v,"CLASSIC") && !equal(v,"NATIVE") && !equal(v,"SKINNED") && !equal(v,"SKIN")) return 0;
+        o->skinned=equal(v,"SKINNED") || equal(v,"SKIN");
     } else if (equal(key,"DOUBLESIZE")) {
         if (!equal(v,"YES") && !equal(v,"NO") && !equal(v,"TRUE") && !equal(v,"FALSE") && !equal(v,"1") && !equal(v,"0") && *v) return 0;
         o->doublesize=!*v || equal(v,"YES") || equal(v,"TRUE") || equal(v,"1"); o->size_set=1;
@@ -28,8 +34,10 @@ int mint_launch_option(MintLaunchOptions *o,const char *key,const char *v)
     } else return 0;
     return 1;
 }
+/* Both appearances use the skin-capable edition so the menu tick can switch
+ * live. MintAMP and MintAMP-GT remain directly launchable classic-only builds. */
 const char *mint_launch_binary(const MintLaunchOptions *o)
-{ return o->skinned ? (o->gadtools ? "MintAMP-SGT" : "MintAMP-SR") : (o->gadtools ? "MintAMP-GT" : "MintAMP"); }
+{ return o->gadtools ? "MintAMP-SGT" : "MintAMP-SR"; }
 int mint_launch_args(MintLaunchOptions *o,int argc,char **argv,const char **audio)
 {
     int i; *audio=NULL;
@@ -38,6 +46,9 @@ int mint_launch_args(MintLaunchOptions *o,int argc,char **argv,const char **audi
         char k[16]; const char *eq=strchr(a,'=');
         if (!strcmp(a,"--double") || !strcmp(a,"--normal")) {
             mint_launch_option(o,"DOUBLESIZE",!strcmp(a,"--double") ? "YES" : "NO"); continue;
+        }
+        if (!strcmp(a,"--classic") || !strcmp(a,"--skinned")) {
+            mint_launch_option(o,"MODE",!strcmp(a,"--classic") ? "CLASSIC" : "SKINNED"); continue;
         }
         if (!strcmp(a,"--gui")) key="GUI";
         else if (!strcmp(a,"--mode")) key="MODE";
@@ -64,4 +75,29 @@ int mint_launch_quote(char *out,size_t size,const char *a)
         out[n++]=(char)c;
     }
     out[n++]='"'; out[n]=0; return 1;
+}
+static int mode_value(const char *v)
+{
+    MintLaunchOptions o; mint_launch_defaults(&o);
+    return mint_launch_option(&o,"MODE",v) ? o.skinned : -1;
+}
+int mint_launch_option_span(int argc,char **argv,int i)
+{
+    const char *a=argv[i];
+    if (!strcmp(a,"--classic") || !strcmp(a,"--skinned")) return 1;
+    if (!strcmp(a,"--mode") || !strcmp(a,"--gui")) return i+1<argc ? 2 : 1;
+    if (strlen(a)>5 && equal_prefix(a,"MODE=")) return 1;
+    return 0;
+}
+int mint_launch_mode_arg(int argc,char **argv)
+{
+    int i,mode=-1,v;
+    for (i=1;i<argc;++i) {
+        const char *a=argv[i];
+        if (!strcmp(a,"--classic")) mode=0;
+        else if (!strcmp(a,"--skinned")) mode=1;
+        else if (!strcmp(a,"--mode") && i+1<argc) { if ((v=mode_value(argv[++i]))>=0) mode=v; }
+        else if (strlen(a)>5 && equal_prefix(a,"MODE=")) { if ((v=mode_value(a+5))>=0) mode=v; }
+    }
+    return mode;
 }

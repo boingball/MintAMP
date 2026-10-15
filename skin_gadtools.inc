@@ -22,6 +22,7 @@ static SkinPlaylistOps GuiSkinOps(HelixAmp3Gui *gui)
 static void GuiSkinHideSettings(HelixAmp3Gui *gui)
 {
     if (!gui->win) return;
+    ReleaseArtColorPens(gui);
     gui->iconifyLeft=gui->win->LeftEdge; gui->iconifyTop=gui->win->TopEdge;
     if (gui->menuStrip) ClearMenuStrip(gui->win);
     if (gui->gadgets) RemoveGList(gui->win,gui->gadgets,-1);
@@ -29,6 +30,75 @@ static void GuiSkinHideSettings(HelixAmp3Gui *gui)
     /* Reopening uses the existing AppIcon restore path, without requiring
      * an AppIcon or a standard edition's .info file just to hide settings. */
     gui->iconified=1;
+}
+/* Live switch from the skin to the classic MintAMP-SGT window. Playback,
+ * the playlist and the utility windows continue untouched. */
+static void GuiSkinToClassic(HelixAmp3Gui *gui)
+{
+    if (!gSkinPlayer) return;
+    /* The classic window has no Pause control: never leave audio held. */
+    if (gSkinAudio.pause_requested || gSkinAudio.paused) skin_player_wake("MintAMP-GT playback",0);
+    skin_player_order_cancel(gSkinPlayer); gSkinPendingTrack=-1; gSkinPendingPlay=0;
+    skin_player_suspend(gSkinPlayer); gSkinPlayer=NULL;
+    if (gui->win) SetWindowTitles(gui->win,(UBYTE *)"MintAMP-SGT",(UBYTE *)~0);
+    else GuiRestoreFromAppIcon(gui);
+    if (!gui->win && !gui->appIcon) {
+        /* No way back to a visible interface: return to the skin. */
+        gSkinPlayer=skin_player_open("MintAMP-SGT",gSkinArgc,gSkinArgv);
+        if (gSkinPlayer) { skin_player_notice(gSkinPlayer,"COULD NOT OPEN THE CLASSIC WINDOW"); return; }
+        gui->closeRequested=1; return;
+    }
+    mint_interface_set_mode(0);
+    SyncMenuChecks(gui);
+    if (gui->win) { WindowToFront(gui->win); ActivateWindow(gui->win); SetStatus(gui,"Classic interface. Untick Project/Classic interface for the skin."); }
+}
+static void GuiSkinUpdate(HelixAmp3Gui *gui,int tick);
+static void GuiClassicToSkin(HelixAmp3Gui *gui)
+{
+    if (gSkinPlayer) return;
+    gSkinPlayer=skin_player_open("MintAMP-SGT",gSkinArgc,gSkinArgv);
+    if (!gSkinPlayer) {
+        SyncMenuChecks(gui);
+        SetStatus(gui,"Could not open the skin; staying with the classic interface.");
+        return;
+    }
+    mint_interface_set_mode(1);
+    SyncMenuChecks(gui);
+    if (gui->win) GuiSkinHideSettings(gui);
+    GuiSkinUpdate(gui,0);
+}
+static void GuiSkinInfo(HelixAmp3Gui *gui)
+{
+    char text[640],station[128],stream[128];
+    if (IsRadioInputName(gui->inputName)) {
+        CopyVolatileGuiString(station,sizeof(station),gGuiPlaybackStatus.radioStationName);
+        CopyVolatileGuiString(stream,sizeof(stream),gGuiPlaybackStatus.radioTitle);
+        snprintf(text,sizeof(text),"Station: %s\nNow playing: %s\nBitrate: %d kbit/s\nURL: %.200s",
+            station[0] ? station : "-",stream[0] ? stream : "-",
+            gSkinAudio.bitrate ? gSkinAudio.bitrate : (int)gGuiPlaybackStatus.radioBitrateKbps,gui->inputName);
+    } else if (gui->inputName[0]) {
+        FormatFileInfo(gui);
+        snprintf(text,sizeof(text),"Title: %s\nArtist: %s\nAlbum: %s\nTrack: %s\nGenre: %s\n%s\nFile: %.200s",
+            gui->tags.title[0] ? gui->tags.title : "-",gui->tags.artist[0] ? gui->tags.artist : "-",
+            gui->tags.album[0] ? gui->tags.album : "-",gui->tags.track[0] ? gui->tags.track : "-",
+            gui->tags.genre[0] ? gui->tags.genre : "-",gui->fileInfoText,gui->inputName);
+    } else SafeCopy(text,sizeof(text),"No audio loaded.\nOpen a file (O) or a stream URL (U).");
+    skin_player_choice(gSkinPlayer,text,"OK");
+}
+static void GuiSkinStream(HelixAmp3Gui *gui)
+{
+    char url[HELIXAMP3_MAX_PATH];
+    if (!gui->hasNetwork) { skin_player_notice(gSkinPlayer,"NO TCP/IP STACK AVAILABLE"); return; }
+    SafeCopy(url,sizeof(url),IsRadioInputName(gui->inputName) ? gui->inputName : "http://");
+    if (!skin_player_request_text(gSkinPlayer,"Open HTTP/HTTPS stream (Return plays, close cancels)",url,(int)sizeof(url))) return;
+    if (!is_url_path(url)) { skin_player_notice(gSkinPlayer,"STREAM URL MUST START WITH HTTP:// OR HTTPS://"); return; }
+    skin_player_order_cancel(gSkinPlayer); gSkinPendingTrack=-1;
+    if (gui->playbackActive || gui->playbackDonePending) StopPlayback(gui);
+    gui->queuedInputName[0]=0; gui->queuedPlayPending=gui->playlistNextPending=0;
+    /* Typed URLs have no known station favicon. */
+    gui->currentRadioFavicon[0]=0;
+    SelectInternetStream(gui,url);
+    gSkinPendingPlay=1;
 }
 static const char *GuiSkinPlaylistName(void *ctx,int index)
 {
@@ -143,7 +213,28 @@ static void GuiSkinPoll(HelixAmp3Gui *gui)
             break;
         case SKIN_UNSUPPORTED:
             skin_player_notice(gSkinPlayer,"CONTROL NOT AVAILABLE"); break;
+        case SKIN_CLASSIC:
+            GuiSkinToClassic(gui); return;
+        case SKIN_FILTER:
+            gui->hardwareFilter=!gui->hardwareFilter;
+            ApplyHardwareAudioFilter(gui);
+            if (gui->gadHardwareFilter)
+                GT_SetGadgetAttrs(gui->gadHardwareFilter,gui->win,NULL,GTCB_Checked,(ULONG)gui->hardwareFilter,TAG_DONE);
+            skin_player_notice(gSkinPlayer,gui->hardwareFilter ? "AUDIO FILTER ON" : "AUDIO FILTER OFF");
+            SaveGuiSettings(gui); break;
+        case SKIN_INFO: GuiSkinInfo(gui); break;
+        case SKIN_STREAM: GuiSkinStream(gui); break;
+        case SKIN_SEEK_STEP:
+            if (gSkinAudio.pause_requested || !gSkinAudio.eq_supported || IsRadioInputName(gui->inputName) || gui->totalSecs<=0 || !gui->playbackActive)
+                skin_player_notice(gSkinPlayer,"SEEK REQUIRES AN UNPAUSED LOCAL MP3");
+            else GuiSeekRelative(gui,e.value);
+            break;
         }
+    }
+    if (!gui->closeRequested && gSkinPendingPlay && gSkinPlayer && !gui->playbackActive && !gui->playbackDonePending) {
+        struct Gadget gad;
+        gSkinPendingPlay=0; memset(&gad,0,sizeof(gad));
+        gad.GadgetID=GID_PLAY; HandleGuiAction(gui,&gad,0,IDCMP_GADGETUP,TRUE);
     }
     if (!gui->closeRequested && gSkinPendingTrack>=0 && !gui->playbackActive && !gui->playbackDonePending) {
         int index=gSkinPendingTrack; gSkinPendingTrack=-1;
@@ -153,6 +244,7 @@ static void GuiSkinPoll(HelixAmp3Gui *gui)
 static void GuiSkinUpdate(HelixAmp3Gui *gui,int tick)
 {
     SkinState state;
+    if (!gSkinPlayer) return;
     memset(&state,0,sizeof(state));
     if (IsRadioInputName(gui->inputName))
         CopyVolatileGuiString(state.title,sizeof(state.title),gGuiPlaybackStatus.radioTitle);
@@ -160,8 +252,11 @@ static void GuiSkinUpdate(HelixAmp3Gui *gui,int tick)
         SafeCopy(state.title,sizeof(state.title),gui->statusText);
     if (!state.title[0] && IsRadioInputName(gui->inputName))
         CopyVolatileGuiString(state.title,sizeof(state.title),gGuiPlaybackStatus.radioStationName);
-    if (!state.title[0] && gui->tags.title[0] && strcmp(gui->tags.title,"-"))
-        SafeCopy(state.title,sizeof(state.title),gui->tags.title);
+    if (!state.title[0] && gui->tags.title[0] && strcmp(gui->tags.title,"-")) {
+        if (gui->tags.artist[0] && strcmp(gui->tags.artist,"-"))
+            snprintf(state.title,sizeof(state.title),"%s - %s",gui->tags.artist,gui->tags.title);
+        else SafeCopy(state.title,sizeof(state.title),gui->tags.title);
+    }
     if (!state.title[0]) SafeCopy(state.title,sizeof(state.title),
         gui->inputName[0] ? gui->inputName : "MINTAMP - RIGHT CLICK FOR MENU");
     state.elapsed=gui->elapsedSecs-gui->launchBufferSecs;
@@ -172,7 +267,10 @@ static void GuiSkinUpdate(HelixAmp3Gui *gui,int tick)
     state.paused=gSkinAudio.paused;
     state.mono=gSkinAudio.channels==1; state.rate=gGuiPlaybackStatus.sampleRate;
     state.bitrate=gSkinAudio.bitrate ? gSkinAudio.bitrate : gGuiPlaybackStatus.radioBitrateKbps;
+    state.filter=gui->hardwareFilter;
     snprintf(state.debug_text,sizeof(state.debug_text),"BUF %luMS SPARE %ldMS UNDERRUN %lu",gGuiPlaybackStatus.halfBufferMs,gGuiPlaybackStatus.spareMs,gGuiPlaybackStatus.underruns);
     skin_player_update(gSkinPlayer,&state,tick);
     GuiSkinPlaylistUpdate(gui);
+    skin_player_artwork(gSkinPlayer,gui->artRGBBuf,gui->artEnabled && gui->artValid,
+        gui->artLoading || gui->artDecode.active,IsRadioInputName(gui->inputName));
 }

@@ -41,14 +41,17 @@ enum SkinAction {
     SKIN_PAUSE, SKIN_BALANCE_SET, SKIN_SHUFFLE, SKIN_REPEAT, SKIN_TIMER,
     SKIN_VISUAL, SKIN_EQ, SKIN_DEBUG, SKIN_VIS_RATE, SKIN_SHADE,
     SKIN_LIST_ADD, SKIN_LIST_REM, SKIN_LIST_SEL, SKIN_LIST_MISC, SKIN_LIST_FILE,
-    SKIN_TRACK_MOVE, SKIN_TRACK_REMOVE, SKIN_ABOUT, SKIN_INTERFACE, SKIN_PLAYLIST_SHADE
+    SKIN_TRACK_MOVE, SKIN_TRACK_REMOVE, SKIN_ABOUT, SKIN_INTERFACE, SKIN_PLAYLIST_SHADE,
+    /* 2.0: Classic/skin switching and parity with the classic window. */
+    SKIN_CLASSIC, SKIN_FILTER, SKIN_INFO, SKIN_STREAM, SKIN_SEEK_STEP,
+    SKIN_ICONIFY, SKIN_ART
 };
 typedef struct SkinState {
     char title[256],debug_text[80];
     int elapsed, total, volume, playing, mono, bitrate, rate;
     int pressed, scroll, playlist_visible, active;
     int paused, balance, shuffle, repeat, remaining, shaded, eq_visible;
-    int visual_mode;
+    int visual_mode, filter;
     unsigned char levels[16], peaks[16];
     signed char scope[64];
 } SkinState;

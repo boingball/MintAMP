@@ -14,6 +14,10 @@
 #include "skin_player.h"
 static SkinPlayer *gSkinPlayer;
 static int gSkinPendingTrack = -1;
+/* Startup arguments for the first skin opened, possibly after Classic. */
+static int gSkinArgc;
+static char **gSkinArgv;
+static int gSkinPendingPlay;
 #endif
 #include "amiga_display_text.h"
 #include "radio_runtime_flags.h"
@@ -491,6 +495,7 @@ static const char gMintAmpGtVersionTag[] __attribute__((used)) =
 #define ITEMNUM_ICONIFY   2
 #define ITEMNUM_QUIT      3
 #define ITEMNUM_RADIO     4
+#define ITEMNUM_CLASSIC   6
 #define ITEMNUM_DTP       0
 #define ITEMNUM_BENCH     1
 #define ITEMNUM_ARTWORK   2
@@ -1027,6 +1032,11 @@ static struct NewMenu myNewMenus[] = {
 		(APTR)(MENUNUM_PROJECT * 100 + ITEMNUM_RADIO) },
 	{ NM_ITEM, (STRPTR)"Interface preferences...", 0, 0, 0,
 		(APTR)(MENUNUM_PROJECT * 100 + 5) },
+#ifdef MINTAMP_SKIN
+	/* Ticked while this window is the main interface; untick for the skin. */
+	{ NM_ITEM, (STRPTR)"Classic interface", 0, CHECKIT | MENUTOGGLE, 0,
+		(APTR)(MENUNUM_PROJECT * 100 + ITEMNUM_CLASSIC) },
+#endif
 	{ NM_TITLE, (STRPTR)"Playback",         0, 0, 0, 0 },
 	{ NM_ITEM,  (STRPTR)"Decode-then-play", 0, CHECKIT | MENUTOGGLE, 0,
 		(APTR)(MENUNUM_PLAYBACK * 100 + ITEMNUM_DTP) },
@@ -5790,6 +5800,9 @@ static void SyncMenuChecks(HelixAmp3Gui *gui)
 	for (i = 0; i < HTTPS_WAIT_COUNT; i++)
 		SetMenuItemChecked(gui, MENUNUM_PLAYBACK,
 			ITEMNUM_HTTPSWAIT_BASE + i, gui->httpsWaitIndex == i);
+#ifdef MINTAMP_SKIN
+	SetMenuItemChecked(gui, MENUNUM_PROJECT, ITEMNUM_CLASSIC, gSkinPlayer == NULL);
+#endif
 }
 
 static void StopPlayback(HelixAmp3Gui *gui);
@@ -5840,7 +5853,7 @@ static struct Window *GuiOpenMainWindow(HelixAmp3Gui *gui, WORD left, WORD top)
 		WFLG_SMART_REFRESH;
 	nw.FirstGadget = NULL;
 #ifdef MINTAMP_SKIN
-	nw.Title = (UBYTE *)"MintAMP-SGT Settings";
+	nw.Title = (UBYTE *)(gSkinPlayer ? "MintAMP-SGT Settings" : "MintAMP-SGT");
 #else
 	nw.Title = (UBYTE *)"MintAMP-GT";
 #endif
@@ -5948,6 +5961,10 @@ static void GuiRestoreFromAppIcon(HelixAmp3Gui *gui)
 	UpdateChannelGadgetState(gui);
 	UpdateFastMemGadgetState(gui);
 	ApplyHardwareAudioFilter(gui);
+	/* Metadata and colour pens were not updated while the window was shut. */
+	UpdateTagDisplay(gui);
+	if (gui->artValid && gui->artColorEnabled && !gui->artPensBuilt)
+		BuildArtColorPens(gui);
 	GuiRefresh(gui);
 	DrawTransportIcons(gui);
 	WindowToFront(gui->win);
@@ -5995,6 +6012,8 @@ static void GuiIconify(HelixAmp3Gui *gui)
 
 	CloseRadioWindow(gui);
 	ClosePlaylistWindow(gui);
+	/* Shared pens can only be released while their screen is known. */
+	ReleaseArtColorPens(gui);
 	gui->iconifyLeft = gui->win->LeftEdge;
 	gui->iconifyTop = gui->win->TopEdge;
 	if (gui->menuStrip)
@@ -6257,7 +6276,11 @@ static int GuiOpen(HelixAmp3Gui *gui,int argc,char **argv)
 #ifdef MINTAMP_SKIN
 	/* Open the player first. GadTools gadgets can be built without opening
 	 * their settings window; the restore path attaches them on demand. */
-	gSkinPlayer=skin_player_open("MintAMP-SGT",argc,argv);
+	gSkinArgc=argc; gSkinArgv=argv;
+	if (mint_interface_start_skinned(argc,argv))
+		gSkinPlayer=skin_player_open("MintAMP-SGT",argc,argv);
+	else
+		skin_player_restore_audio("MintAMP-SGT");
 	if (gSkinPlayer) {
 		screen=skin_player_window(gSkinPlayer)->WScreen;
 		gui->iconified=1;
@@ -6357,6 +6380,7 @@ static void GuiClose(HelixAmp3Gui *gui)
 #ifdef MINTAMP_SKIN
 	/* IO/decoder shutdown precedes skin disposal and ENVARC writes. */
 	skin_player_close(gSkinPlayer); gSkinPlayer=NULL;
+	skin_player_shutdown();
 #endif
 	mint_interface_flush();
 	RADIO_DBG(printf("gui-close: after WaitForPlaybackShutdown\n");)
@@ -9732,6 +9756,13 @@ static void GuiPoll(HelixAmp3Gui *gui)
 						ShowAbout(gui);
 					else if (mn == MENUNUM_PROJECT && it == 5)
 						mint_interface_preferences(gui->win);
+#ifdef MINTAMP_SKIN
+					else if (mn == MENUNUM_PROJECT && it == ITEMNUM_CLASSIC) {
+						if (gSkinPlayer) GuiSkinToClassic(gui); else GuiClassicToSkin(gui);
+						/* The window may now be closed: stop walking its menu. */
+						break;
+					}
+#endif
 					else if (mn == MENUNUM_PROJECT && it == ITEMNUM_STREAM)
 						EnterInternetStream(gui);
 					else if (mn == MENUNUM_PROJECT && it == ITEMNUM_RADIO)

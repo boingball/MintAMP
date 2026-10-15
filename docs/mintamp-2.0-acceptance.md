@@ -7,11 +7,23 @@ actual icon launching, installed OS libraries or Paula/RTG timing.
 
 ## Changes reviewed
 
-- A lightweight `MintAMP-Launch` dispatches to the four retained executables.
+- **Skin first, Classic on a tick:** MintAMP-SR/SGT open the skin by default.
+  *Classic interface* (ticked menu item in both interfaces) switches the
+  running player between the skin and the classic MintAMP window without
+  stopping playback, and is remembered for the next launch. A live switch
+  defers ENVARC writes to clean shutdown.
+- Skin parity with the classic window: stream URL requester, file/stream
+  info, artwork window (docking, persisted), Workbench AppIcon iconify from
+  the minimise button, audio filter tick, Left/Right seek and Up/Down volume.
+  Menus are split into MintAMP/Windows/Options with live check marks.
+- Artwork colour pens are now released before the classic window closes
+  (Settings hide/iconify) and rebuilt when it reopens, instead of leaking.
+- A lightweight `MintAMP-Launch` dispatches to MintAMP-SR or MintAMP-SGT
+  for both appearances; MintAMP and MintAMP-GT stay directly launchable.
   It starts a CLI process even from Workbench, copies arguments via DOS, uses
   the installation's PROGDIR, and transfers segment/IO ownership on success.
   There is no shell command evaluation or resident launcher task.
-- CLI > launcher ToolTypes > shared `MintAMP2` preferences > native ReAction
+- CLI > launcher ToolTypes > shared `MintAMP2` preferences > skinned ReAction
   defaults. The skin editions retain legacy Skin/Scale and direct icon syntax.
 - Late skin shutdown persists the newest shared ENV preferences, so an older
   live size cannot overwrite a newer next-launch choice. A mocked DOS/icon
@@ -64,10 +76,10 @@ no claim of testing the entire Internet's classic skin collection.
 | Visualiser | 16 linear bins, 64 sampled PCM points, 1/2/4 Hz, submission-limited freshness. VISCOLOR rows and peak hold/decay are supported, but the high-rate Winamp visualiser response/grid/log bins are not reproduced. |
 | Playlist | Fixed 275x232/17 rows, Topaz rather than Windows font; native requesters for popup actions. No free resizing, embedded transport/visualiser or cross-application drop target. Shade displays the first visible row. |
 | Shaded windows | EQ_EX title artwork supported; its miniature volume/balance sliders and main miniature seek/time controls are not implemented. Shade does not rearrange the docked group. Missing EQ_EX uses a labelled fallback. |
-| Main controls | Classic minimise artwork still selects normal/double size; native iconification remains a native utility action. No pause blink/easter-egg/clutterbar parity. |
+| Main controls | Minimise iconifies to an AppIcon; double size is on D and the Windows menu. The options button opens Settings rather than a popup menu (Intuition menus are right-button). No pause blink/easter-egg/clutterbar parity. |
 | Timing/seeking | Buffer-boundary pause and output clock, 99:59 cap, local MP3 bitrate/VBR approximation; other formats/live radio do not acquire new seek support. |
 | Artwork | Shared screen pen mapping can quantise colours on ECS/AGA/RTG. No REGION.TXT shaped/translucent windows, cursor skins, extended NUMS_EX glyphs, WAL skins or Windows DLL plugins. |
-| Native integration | Settings/radio/artwork remain in the established native utility windows rather than Winamp plugin windows. |
+| Native integration | Settings and the radio browser remain the established native utility windows; artwork has a skin-framed window but its options stay in the classic Playback menu. Star ratings are classic-window only. |
 
 ## Setup and record sheet
 
@@ -110,16 +122,25 @@ For **each** target:
 5. **Utility windows:** open/close radio, artwork, settings, native and skinned
    playlist/EQ repeatedly while playing. Check ICY titles/station fallback and
    artwork arrive and update without silent menu failures or increased underruns.
-6. **Skin/UI:** mint-leaf, 2.91 and at least two independently sourced classic
+6. **Skin/Classic switching:** while playing MP3 and HTTPS radio, switch
+   Skin → Classic → Skin 20 times from both menus, including with the skin
+   shaded, iconified-then-restored, paused (must resume in Classic), with
+   playlist/EQ/artwork open and with Settings already visible. No audio gap
+   beyond the measured baseline, no stale windows/AppIcons, and the next
+   launch opens the last interface. Start with `--classic`, switch to the skin
+   and confirm the CLI `--skin` and saved EQ/balance apply.
+   Iconify from the minimise button and the menu; restore by double-click.
+   Check stream URL entry, file info, artwork updates and arrow keys.
+7. **Skin/UI:** mint-leaf, 2.91 and at least two independently sourced classic
    skins; compare screenshots at normal and double size. Press/release outside
    controls, focus/unfocus each window, shade/unshade near screen bottom,
    grouped dragging/snapping and Ctrl-detach. Refuse 2x on screens too small.
    Confirm playlist/EQ remain visible through skin changes and failed loads.
-7. **Playlist:** Ctrl/Shift selection, double-click rows with known durations,
+8. **Playlist:** Ctrl/Shift selection, double-click rows with known durations,
    contiguous/noncontiguous block drag in both directions, hold at both edges
    with the mouse stationary, scrollbar, Delete, sort, rollback of empty/bad
    imports. Track sound/current identity must stay correct after array edits.
-8. **Cleanup:** alternate skins and scales 20 times, toggle windows 50 times,
+9. **Cleanup:** alternate skins and scales 20 times, toggle windows 50 times,
    quit/relaunch five times. Chip/Fast memory and obtained pens must return to
    the expected baseline with no cumulative loss, stale tasks or stuck IO.
    Save/load presets and verify enabled-flat/disabled MP3 sound is unchanged.

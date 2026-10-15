@@ -20,7 +20,7 @@ def generate():
     assert data[end:end+4] == b'FORM'
     struct.pack_into('>I', data, 54, 1)
     struct.pack_into('>I', data, 74, 32768)
-    types = ['(GUI=REACTION)', '(MODE=NATIVE)',
+    types = ['(GUI=REACTION)', '(MODE=CLASSIC)',
              '(SKIN=PROGDIR:Skins/MintAMP-mintleaf.wsz)', '(DOUBLESIZE=NO)']
     strings = [text.encode('ascii') + b'\0' for text in types]
     table = struct.pack('>I', (len(strings) + 1) * 4)

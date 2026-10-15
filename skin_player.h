@@ -8,6 +8,9 @@ typedef struct SkinPlayer SkinPlayer;
 typedef struct SkinEvent { int action, value, released, target, selection; } SkinEvent;
 SkinPlayer *skin_player_open(const char *name, int argc, char **argv);
 void skin_player_close(SkinPlayer *player);
+/* Close for a live switch to Classic: ENVARC persistence waits for the next
+ * skin_player_close() or skin_player_shutdown() after audio retirement. */
+void skin_player_suspend(SkinPlayer *player);
 ULONG skin_player_signal(SkinPlayer *player);
 struct Window *skin_player_window(SkinPlayer *player);
 int skin_player_poll(SkinPlayer *player, SkinEvent *event);
@@ -30,5 +33,13 @@ void skin_player_debug(SkinPlayer *player,long buffer_ms,long spare_ms,unsigned 
                        unsigned long radio_bytes,const char *station);
 void skin_player_playlist_durations(SkinPlayer *player,const int *durations);
 const char *skin_player_audio_arg(int argc, char **argv);
+/* 64x64 RGB artwork from the frontend; hashed only while the window shows. */
+void skin_player_artwork(SkinPlayer *player,const unsigned char *rgb,int valid,int loading,int radio);
+/* Modal single-line requester on the skin's screen; 1 when accepted. */
+int skin_player_request_text(SkinPlayer *player,const char *title,char *buffer,int size);
+/* Classic start: apply the saved skin balance/EQ without opening a skin. */
+void skin_player_restore_audio(const char *name);
+/* Final exit, after the last skin_player_close(). */
+void skin_player_shutdown(void);
 int skin_player_is_skin(const char *path);
 #endif

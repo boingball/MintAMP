@@ -19,6 +19,6 @@ for _ in range(count):
     n = struct.unpack_from('>I', b, pos)[0]; pos += 4
     assert b[pos+n-1] == 0
     values.append(b[pos:pos+n-1].decode()); pos += n
-assert values == ['(GUI=REACTION)', '(MODE=NATIVE)', '(SKIN=PROGDIR:Skins/MintAMP-mintleaf.wsz)', '(DOUBLESIZE=NO)']
+assert values == ['(GUI=REACTION)', '(MODE=CLASSIC)', '(SKIN=PROGDIR:Skins/MintAMP-mintleaf.wsz)', '(DOUBLESIZE=NO)']
 assert b[pos:] == original[8310:] and b[pos:pos+4] == b'FORM'
 print('Workbench launcher icon: planar/colour artwork preserved, ToolTypes verified')

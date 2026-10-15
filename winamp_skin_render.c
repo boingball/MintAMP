@@ -12,7 +12,7 @@ int skin_hit_test(int x, int y)
     if (x<0 || y<0 || x>=SKIN_WIDTH || y>=SKIN_HEIGHT) return SKIN_NONE;
     if (inside(x,y,264,3,9,9)) return SKIN_QUIT;
     if (inside(x,y,254,3,9,9)) return SKIN_SHADE;
-    if (inside(x,y,244,3,9,9)) return SKIN_SIZE;
+    if (inside(x,y,244,3,9,9)) return SKIN_ICONIFY; /* Winamp minimise */
     if (inside(x,y,6,3,9,9)) return SKIN_SETTINGS;
     if (inside(x,y,16,88,23,18)) return SKIN_PREVIOUS;
     if (inside(x,y,39,88,23,18)) return SKIN_PLAY;
@@ -100,7 +100,7 @@ void skin_render(const WinampSkin *skin,const SkinState *s,const SkinState *old,
     if (all || s->active!=old->active || s->pressed!=old->pressed) {
         sprite(skin,blit,ctx,SKIN_TITLEBAR,27,s->active ? 0 : 15,275,14,0,0);
         sprite(skin,blit,ctx,SKIN_TITLEBAR,0,s->pressed==SKIN_SETTINGS ? 9 : 0,9,9,6,3);
-        sprite(skin,blit,ctx,SKIN_TITLEBAR,9,s->pressed==SKIN_SIZE ? 9 : 0,9,9,244,3);
+        sprite(skin,blit,ctx,SKIN_TITLEBAR,9,s->pressed==SKIN_ICONIFY ? 9 : 0,9,9,244,3);
         sprite(skin,blit,ctx,SKIN_TITLEBAR,s->pressed==SKIN_SHADE ? 9 : 0,18,9,9,254,3);
         sprite(skin,blit,ctx,SKIN_TITLEBAR,18,s->pressed==SKIN_QUIT ? 9 : 0,9,9,264,3);
     }

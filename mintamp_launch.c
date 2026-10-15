@@ -24,7 +24,7 @@ int main(int argc,char **argv)
     mint_launch_defaults(&o); mint_interface_load(&o); mint_interface_tooltypes(&o,argc,argv);
     if (!wb && argc==2 && !strcmp(argv[1],"--prefs")) { mint_interface_preferences(NULL); mint_interface_flush(); return 0; }
     if (!wb && !mint_launch_args(&o,argc,argv,&audio))
-        return message(wb,"Usage: MintAMP-Launch [audio/playlist] [--gui REACTION|GADTOOLS] [--mode NATIVE|SKINNED] [--skin path] [--double|--normal]\nUse --prefs to save the next-launch interface.");
+        return message(wb,"Usage: MintAMP-Launch [audio/playlist] [--gui REACTION|GADTOOLS] [--mode SKINNED|CLASSIC] [--classic] [--skin path] [--double|--normal]\nUse --prefs to save the next-launch interface.");
     if (wb) {
         struct WBStartup *startup=(struct WBStartup *)argv;
         if (startup && startup->sm_NumArgs>1) {
@@ -34,20 +34,20 @@ int main(int argc,char **argv)
         }
     }
     args[0]=0;
-    /* Native frontends expect the file first. Skinned frontends additionally
-     * accept appearance switches; explicit NO must override legacy Scale=2. */
+    /* The file comes first. Both appearances run the skin-capable edition;
+     * the mode is always explicit so a saved per-edition choice cannot
+     * contradict the launcher. Explicit NO must override legacy Scale=2. */
     if (audio) { if (!mint_launch_quote(quoted,sizeof(quoted),audio)) return message(wb,"Invalid or oversized audio path."); strcat(args,quoted); strcat(args," "); }
-    if (o.skinned) {
-        if (o.skin_set) {
-            if (!mint_launch_quote(quoted,sizeof(quoted),o.skin)) return message(wb,"Invalid skin path.");
-            strcat(args,"--skin "); strcat(args,quoted); strcat(args," ");
-        }
-        if (o.size_set) strcat(args,o.doublesize ? "--double " : "--normal ");
+    strcat(args,o.skinned ? "--skinned " : "--classic ");
+    if (o.skin_set) {
+        if (!mint_launch_quote(quoted,sizeof(quoted),o.skin)) return message(wb,"Invalid skin path.");
+        strcat(args,"--skin "); strcat(args,quoted); strcat(args," ");
     }
+    if (o.size_set) strcat(args,o.doublesize ? "--double " : "--normal ");
     strcat(args,"\n");
     if (!NameFromLock(GetProgramDir(),binary,sizeof(binary)) || !AddPart(binary,(STRPTR)mint_launch_binary(&o),sizeof(binary))) return message(wb,"Cannot resolve the MintAMP installation directory.");
     seg=LoadSeg(binary);
-    if (!seg) return message(wb,"Could not load the selected MintAMP frontend.\nKeep MintAMP, MintAMP-GT, MintAMP-SR and MintAMP-SGT beside MintAMP-Launch.");
+    if (!seg) return message(wb,"Could not load the selected MintAMP edition.\nKeep MintAMP-SR and MintAMP-SGT beside MintAMP-Launch.");
     input=Open("NIL:",MODE_OLDFILE); output=Open("NIL:",MODE_NEWFILE);
     if (!input || !output) {
         if (input) Close(input);

@@ -50,8 +50,17 @@ int main(void)
     mint_interface_preferences(NULL);
     assert(!strcmp(env[3],"NO") && !disk[3][0]); /* no live disk IO */
     mint_interface_flush_skin(); assert(!strcmp(disk[3],"NO"));
-    mint_interface_flush(); assert(!strcmp(disk[0],"GADTOOLS") && !strcmp(disk[1],"SKINNED"));
+    mint_interface_flush(); assert(!strcmp(disk[0],"GADTOOLS") && !strcmp(disk[1],"CLASSIC"));
     assert(!strcmp(disk[2],"Work:mintleaf.wsz") && !strcmp(disk[3],"NO"));
+    /* Live menu tick: ENV changes immediately, disk only on clean shutdown. */
+    mint_interface_set_mode(1); assert(!strcmp(env[1],"SKINNED") && !strcmp(disk[1],"CLASSIC"));
+    mint_interface_flush(); assert(!strcmp(disk[1],"SKINNED"));
+    /* Start mode: CLI > own icon > shared ENV > skinned default. */
+    { char *classic[]={"MintAMP-SR","--classic"}; char *plain[]={"MintAMP-SR","a.mp3"};
+      env[1][0]=0; assert(mint_interface_start_skinned(2,plain)==1);
+      SetVar(keys[1],"CLASSIC",-1,GVF_GLOBAL_ONLY); assert(mint_interface_start_skinned(2,plain)==0);
+      SetVar(keys[1],"SKINNED",-1,GVF_GLOBAL_ONLY); assert(mint_interface_start_skinned(2,classic)==0);
+      types[1]="MODE=CLASSIC"; assert(mint_interface_start_skinned(0,(char **)&wb)==0); types[1]="MODE=SKINNED"; }
     /* Cancel performs no edits, including a partially entered choice. */
     answer_index=0; answers[0]=1; answers[1]=0;
     mint_interface_preferences(NULL); assert(!strcmp(env[0],"GADTOOLS"));

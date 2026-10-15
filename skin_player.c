@@ -24,8 +24,16 @@
 #include <proto/asl.h>
 #include <proto/dos.h>
 #include <proto/icon.h>
+/* Private workbench.library base for the skin AppIcon: the GadTools edition
+ * already owns a global WorkbenchBase and ReAction does not open one. */
+#define __NOLIBBASE__
+#define WB_BASE_NAME gSkinWorkbenchBase
+#include <proto/wb.h>
+#undef __NOLIBBASE__
 
 extern struct GfxBase *GfxBase;
+static struct Library *gSkinWorkbenchBase;
+static int gSkinArgsUsed;
 
 typedef struct SkinResources {
     WinampSkin skin;
@@ -36,23 +44,66 @@ typedef struct SkinResources {
     int owned_count, scale;
 } SkinResources;
 
-#define SKIN_MENU_ITEMS 14
+/* Three right-button menus. Checkmarked items mirror live state and are
+ * resynchronised after every action rather than trusting Intuition's toggle. */
+typedef struct SkinMenuDef { unsigned char menu, check; int action; const char *label; } SkinMenuDef;
+static const SkinMenuDef kMenuDefs[]={
+    {0,0,SKIN_BROWSE,"Open audio..."},
+    {0,0,SKIN_STREAM,"Open stream URL..."},
+    {0,0,SKIN_RADIO,"Internet Radio..."},
+    {0,0,SKIN_INFO,"File info..."},
+    {0,0,SKIN_SETTINGS,"Settings..."},
+    {0,0,SKIN_INTERFACE,"Interface preferences..."},
+    {0,1,SKIN_CLASSIC,"Classic interface"},
+    {0,0,SKIN_ICONIFY,"Iconify"},
+    {0,0,SKIN_ABOUT,"About..."},
+    {0,0,SKIN_QUIT,"Quit"},
+    {1,1,SKIN_PLAYLIST,"Playlist"},
+    {1,0,SKIN_PLAYLIST_OPTIONS,"Full playlist options..."},
+    {1,1,SKIN_EQ,"Equaliser"},
+    {1,1,SKIN_ART,"Artwork"},
+    {1,0,SKIN_SELECT,"Load skin..."},
+    {1,1,SKIN_SIZE,"Double size"},
+    {2,0,SKIN_VISUAL,"Visualisation"},
+    {2,0,SKIN_VIS_RATE,"Visual rate..."},
+    {2,1,SKIN_FILTER,"Audio filter"},
+    {2,0,SKIN_DEBUG,"Playback statistics..."}
+};
+#define SKIN_MENU_ITEMS ((int)(sizeof(kMenuDefs)/sizeof(kMenuDefs[0])))
+#define SKIN_MENU_MAX 20
+#define SKIN_MENUS 3
+typedef char SkinMenuFits[SKIN_MENU_ITEMS<=SKIN_MENU_MAX ? 1 : -1];
+static const char * const kMenuTitles[SKIN_MENUS]={"MintAMP","Windows","Options"};
+typedef struct SkinMenuStrip {
+    struct Menu menus[SKIN_MENUS];
+    struct MenuItem items[SKIN_MENU_MAX];
+    struct IntuiText labels[SKIN_MENU_MAX];
+    unsigned long checks;
+} SkinMenuStrip;
+enum { STRIP_TEMPLATE, STRIP_MAIN, STRIP_PLAYLIST, STRIP_ART, STRIP_COUNT };
+
+/* Artwork window: 64x64 frontend artwork inside a skin-coloured frame. */
+#define SKIN_ART_SIZE 64
+#define SKIN_ART_BOX 74
+enum { SKIN_ART_NONE, SKIN_ART_RADIO, SKIN_ART_LOADING, SKIN_ART_IMAGE };
 
 struct SkinPlayer {
     struct Screen *screen;
-    struct Window *win, *plwin, *eqwin, *target;
+    struct Window *win, *plwin, *eqwin, *artwin, *target;
     struct BitMap *text_source, *text_scaled;
     struct TextFont *playlist_font;
     struct MsgPort *visual_port;
     struct timerequest *visual_timer;
     int visual_device,visual_pending;
     SkinResources *resources;
-    struct Menu menu;
-    struct MenuItem items[SKIN_MENU_ITEMS];
-    struct IntuiText labels[SKIN_MENU_ITEMS];
-    struct Menu playlist_menu;
-    struct MenuItem playlist_items[SKIN_MENU_ITEMS];
-    struct IntuiText playlist_labels[SKIN_MENU_ITEMS];
+    SkinMenuStrip strips[STRIP_COUNT];
+    struct MsgPort *app_port;
+    struct AppIcon *app_icon;
+    struct DiskObject *app_object, app_icon_copy;
+    int iconified, art_left, art_top, art_position, restore_art, art_drag_x, art_drag_y, art_dragging;
+    int art_kind, art_drawn_kind, art_have_drawn;
+    unsigned long art_hash;
+    unsigned char art_rgb[SKIN_ART_SIZE*SKIN_ART_SIZE*3];
     SkinState now, drawn;
     SkinOrderQueue sequence;
     SkinSelection selection;
@@ -82,6 +133,9 @@ struct SkinPlayer {
 static void save_state(SkinPlayer *p);
 static void playlist_scroll(SkinPlayer *p,int top);
 static void visual_arm(SkinPlayer *p);
+static void menu_sync(SkinPlayer *p);
+static void art_close(SkinPlayer *p);
+static int art_open(SkinPlayer *p);
 
 static int suffix(const char *path,const char *ext)
 {
@@ -95,6 +149,8 @@ const char *skin_player_audio_arg(int argc,char **argv)
 {
     int i;
     for (i=1;i<argc;++i) {
+        int span=mint_launch_option_span(argc,argv,i);
+        if (span) { i+=span-1; continue; }
         if (!strcmp(argv[i],"--skin")) { ++i; continue; }
         if (argv[i][0]!='-' && !skin_player_is_skin(argv[i])) return argv[i];
     }
@@ -225,39 +281,40 @@ static void fill(void *ctx,unsigned rgb,int x,int y,int w,int h)
     SetAPen(p->target->RPort,(ULONG)color_pen(p,p->resources,rgb));
     RectFill(p->target->RPort,x*s,y*s,(x+w)*s-1,(y+h)*s-1);
 }
+#define SKIN_WINDOWS 4
 static void window_rects(SkinPlayer *p,SkinRect *r,struct Window **windows)
 {
     int i;
-    windows[0]=p->win; windows[1]=p->plwin; windows[2]=p->eqwin;
-    memset(r,0,3*sizeof(*r));
-    for (i=0;i<3;++i) if (windows[i]) {
+    windows[0]=p->win; windows[1]=p->plwin; windows[2]=p->eqwin; windows[3]=p->artwin;
+    memset(r,0,SKIN_WINDOWS*sizeof(*r));
+    for (i=0;i<SKIN_WINDOWS;++i) if (windows[i]) {
         r[i].x=windows[i]->LeftEdge; r[i].y=windows[i]->TopEdge;
         r[i].w=windows[i]->Width; r[i].h=windows[i]->Height;
     }
 }
 static void drag_begin(SkinPlayer *p,int root,UWORD qualifier)
 {
-    SkinRect r[3]; struct Window *windows[3];
+    SkinRect r[SKIN_WINDOWS]; struct Window *windows[SKIN_WINDOWS];
     window_rects(p,r,windows);
-    p->drag_group=(qualifier&IEQUALIFIER_CONTROL) ? 1U<<root : skin_window_group(r,3,root,2*p->resources->scale);
+    p->drag_group=(qualifier&IEQUALIFIER_CONTROL) ? 1U<<root : skin_window_group(r,SKIN_WINDOWS,root,2*p->resources->scale);
 }
 static void drag_move(SkinPlayer *p,int dx,int dy)
 {
-    SkinRect r[3]; struct Window *windows[3]; int i;
+    SkinRect r[SKIN_WINDOWS]; struct Window *windows[SKIN_WINDOWS]; int i;
     window_rects(p,r,windows);
-    for (i=0;i<3;++i) if (p->drag_group&(1U<<i)) {
+    for (i=0;i<SKIN_WINDOWS;++i) if (p->drag_group&(1U<<i)) {
         if (r[i].x+dx<0) dx=-r[i].x;
         if (r[i].y+dy<0) dy=-r[i].y;
         if (r[i].x+r[i].w+dx>p->screen->Width) dx=p->screen->Width-r[i].x-r[i].w;
         if (r[i].y+r[i].h+dy>p->screen->Height) dy=p->screen->Height-r[i].y-r[i].h;
     }
-    for (i=0;i<3;++i) if ((p->drag_group&(1U<<i)) && windows[i]) MoveWindow(windows[i],dx,dy);
+    for (i=0;i<SKIN_WINDOWS;++i) if ((p->drag_group&(1U<<i)) && windows[i]) MoveWindow(windows[i],dx,dy);
 }
 static void drag_end(SkinPlayer *p,int root)
 {
-    SkinRect r[3]; struct Window *windows[3]; int dx,dy;
+    SkinRect r[SKIN_WINDOWS]; struct Window *windows[SKIN_WINDOWS]; int dx,dy;
     window_rects(p,r,windows);
-    skin_window_snap(r,3,root,p->drag_group,8*p->resources->scale,&dx,&dy);
+    skin_window_snap(r,SKIN_WINDOWS,root,p->drag_group,8*p->resources->scale,&dx,&dy);
     drag_move(p,dx,dy); p->drag_group=0;
 }
 static void repaint(SkinPlayer *p,int all)
@@ -320,7 +377,7 @@ static void playlist_label(void *ctx,const char *text,unsigned rgb,unsigned bg,i
         WaitBlit(); BitMapScale(&args);
     }
     BltBitMapRastPort(scale==2 ? p->text_scaled : p->text_source,0,0,
-                     p->plwin->RPort,x*scale,y*scale,width*scale,8*scale,0xc0);
+                     p->target->RPort,x*scale,y*scale,width*scale,8*scale,0xc0);
     /* The next row reuses the source, and must not race a queued blit. */
     WaitBlit();
 }
@@ -347,17 +404,22 @@ static void playlist_close(SkinPlayer *p)
     p->move_active=p->move_edge=p->pending_double=p->collapse_selection=0; p->move_row=-1;
     repaint(p,0);
 }
-static int playlist_open(SkinPlayer *p)
+static int text_ready(SkinPlayer *p)
 {
     struct TextAttr font={(STRPTR)"topaz.font",8,FS_NORMAL,FPF_ROMFONT};
-    int scale=p->resources->scale, left,top,i;
-    int height=p->pl_shaded ? 14 : SKIN_PLAYLIST_HEIGHT;
-    if (!p->win || !p->resources->skin.assets[SKIN_PLEDIT].rgb ||
-        275*scale>p->screen->Width || height*scale>p->screen->Height) return 0;
     if (!p->playlist_font) p->playlist_font=OpenFont(&font);
     if (!p->text_source) p->text_source=text_bitmap(p,243,8);
     if (!p->text_scaled) p->text_scaled=text_bitmap(p,486,16);
-    if (!p->playlist_font || !p->text_source || !p->text_scaled) return 0;
+    return p->playlist_font && p->text_source && p->text_scaled;
+}
+static void strip_attach(SkinPlayer *p,int index,struct Window *w);
+static int playlist_open(SkinPlayer *p)
+{
+    int scale=p->resources->scale, left,top;
+    int height=p->pl_shaded ? 14 : SKIN_PLAYLIST_HEIGHT;
+    if (!p->win || !p->resources->skin.assets[SKIN_PLEDIT].rgb ||
+        275*scale>p->screen->Width || height*scale>p->screen->Height) return 0;
+    if (!text_ready(p)) return 0;
     left=p->pl_position ? p->pl_left : p->win->LeftEdge; top=p->pl_position ? p->pl_top : p->win->TopEdge+p->win->Height;
     if (left<0) left=0;
     if (top<0) top=0;
@@ -372,21 +434,14 @@ static int playlist_open(SkinPlayer *p)
         WA_IDCMP,IDCMP_MOUSEBUTTONS|IDCMP_MOUSEMOVE|IDCMP_REFRESHWINDOW|
                    IDCMP_MENUPICK|IDCMP_VANILLAKEY|IDCMP_RAWKEY|IDCMP_INACTIVEWINDOW|IDCMP_ACTIVEWINDOW,TAG_DONE);
     if (!p->plwin) return 0;
-    /* Intuition may annotate menu structures. Each window owns its strip. */
-    p->playlist_menu=p->menu; p->playlist_menu.FirstItem=p->playlist_items;
-    for (i=0;i<SKIN_MENU_ITEMS;++i) {
-        p->playlist_items[i]=p->items[i]; p->playlist_labels[i]=p->labels[i];
-        p->playlist_items[i].NextItem=i<SKIN_MENU_ITEMS-1 ? &p->playlist_items[i+1] : NULL;
-        p->playlist_items[i].ItemFill=&p->playlist_labels[i];
-    }
-    SetMenuStrip(p->plwin,&p->playlist_menu); p->click_row=-1;
-    playlist_repaint(p,1); repaint(p,0); return 1;
+    strip_attach(p,STRIP_PLAYLIST,p->plwin); p->click_row=-1;
+    playlist_repaint(p,1); repaint(p,0); menu_sync(p); return 1;
 }
 int skin_player_playlist_toggle(SkinPlayer *p)
 {
     if (!p) return 0;
-    if (p->plwin) { playlist_close(p); save_state(p); return 1; }
-    { int ok=playlist_open(p); save_state(p); return ok; }
+    if (p->plwin) { playlist_close(p); save_state(p); menu_sync(p); return 1; }
+    { int ok=playlist_open(p); save_state(p); menu_sync(p); return ok; }
 }
 void skin_player_playlist_durations(SkinPlayer *p,const int *durations)
 { if (p) p->durations=durations; }
@@ -431,26 +486,91 @@ static void close_window(SkinPlayer *p)
 }
 static void build_menu(SkinPlayer *p,UWORD text_pen,UWORD background_pen)
 {
-    static const char * const labels[]={"Load skin...","Double size","Settings","Internet Radio","Playlist","Full playlist options...","Open audio...","Quit","Equaliser","Visualisation","Visual rate","Playback statistics","About...","Interface preferences..."};
-    int i, h=p->screen->Font->ta_YSize+4, width=0;
-    memset(&p->menu,0,sizeof(p->menu));
-    p->menu.Flags=MENUENABLED; p->menu.MenuName=(STRPTR)"MintAMP";
-    p->menu.Width=TextLength(&p->screen->RastPort,p->menu.MenuName,strlen((const char *)p->menu.MenuName))+16;
-    p->menu.Height=h; p->menu.FirstItem=p->items;
-    for (i=0;i<SKIN_MENU_ITEMS;++i) {
-        int w=TextLength(&p->screen->RastPort,(STRPTR)labels[i],strlen(labels[i]))+16;
-        if (w>width) width=w;
+    SkinMenuStrip *t=&p->strips[STRIP_TEMPLATE];
+    int i,m,h=p->screen->Font->ta_YSize+4,left=0;
+    memset(t,0,sizeof(*t));
+    for (m=0;m<SKIN_MENUS;++m) {
+        int width=0,count=0,check=0;
+        struct MenuItem *last=NULL;
+        for (i=0;i<SKIN_MENU_ITEMS;++i) if (kMenuDefs[i].menu==m && kMenuDefs[i].check) check=CHECKWIDTH;
+        for (i=0;i<SKIN_MENU_ITEMS;++i) if (kMenuDefs[i].menu==m) {
+            int w=TextLength(&p->screen->RastPort,(STRPTR)kMenuDefs[i].label,strlen(kMenuDefs[i].label))+check+16;
+            if (w>width) width=w;
+        }
+        t->menus[m].Flags=MENUENABLED; t->menus[m].MenuName=(STRPTR)kMenuTitles[m];
+        t->menus[m].LeftEdge=left;
+        t->menus[m].Width=TextLength(&p->screen->RastPort,(STRPTR)kMenuTitles[m],strlen(kMenuTitles[m]))+16;
+        t->menus[m].Height=h; left+=t->menus[m].Width;
+        t->menus[m].NextMenu=m<SKIN_MENUS-1 ? &t->menus[m+1] : NULL;
+        for (i=0;i<SKIN_MENU_ITEMS;++i) if (kMenuDefs[i].menu==m) {
+            struct MenuItem *item=&t->items[i]; struct IntuiText *label=&t->labels[i];
+            if (last) last->NextItem=item; else t->menus[m].FirstItem=item;
+            last=item;
+            item->TopEdge=count++*h; item->Width=width; item->Height=h;
+            item->Flags=ITEMTEXT|ITEMENABLED|HIGHCOMP|(kMenuDefs[i].check ? CHECKIT|MENUTOGGLE : 0);
+            item->ItemFill=label; item->NextSelect=MENUNULL;
+            label->FrontPen=(UBYTE)text_pen; label->BackPen=(UBYTE)background_pen; label->DrawMode=JAM1;
+            label->ITextFont=p->screen->Font;
+            label->LeftEdge=4+check; label->TopEdge=2; label->IText=(UBYTE *)kMenuDefs[i].label;
+        }
+    }
+    t->checks=~0UL;
+}
+/* Intuition may annotate menu structures, so each window owns a copy. */
+static void strip_copy(SkinMenuStrip *d,const SkinMenuStrip *t)
+{
+    int i,m;
+    *d=*t;
+    for (m=0;m<SKIN_MENUS;++m) {
+        d->menus[m].NextMenu=m<SKIN_MENUS-1 ? &d->menus[m+1] : NULL;
+        d->menus[m].FirstItem=t->menus[m].FirstItem ? &d->items[t->menus[m].FirstItem-t->items] : NULL;
     }
     for (i=0;i<SKIN_MENU_ITEMS;++i) {
-        memset(&p->items[i],0,sizeof(p->items[i])); memset(&p->labels[i],0,sizeof(p->labels[i]));
-        p->items[i].NextItem=i<SKIN_MENU_ITEMS-1 ? &p->items[i+1] : NULL;
-        p->items[i].TopEdge=i*h; p->items[i].Width=width; p->items[i].Height=h;
-        p->items[i].Flags=ITEMTEXT|ITEMENABLED|HIGHCOMP;
-        p->items[i].ItemFill=&p->labels[i]; p->items[i].NextSelect=MENUNULL;
-        p->labels[i].FrontPen=(UBYTE)text_pen;
-        p->labels[i].BackPen=(UBYTE)background_pen; p->labels[i].DrawMode=JAM1;
-        p->labels[i].ITextFont=p->screen->Font;
-        p->labels[i].LeftEdge=4; p->labels[i].TopEdge=2; p->labels[i].IText=(UBYTE *)labels[i];
+        d->items[i].NextItem=t->items[i].NextItem ? &d->items[t->items[i].NextItem-t->items] : NULL;
+        d->items[i].ItemFill=&d->labels[i];
+    }
+}
+static unsigned long menu_checks(SkinPlayer *p)
+{
+    unsigned long bits=0; int i;
+    for (i=0;i<SKIN_MENU_ITEMS;++i) {
+        int on=0;
+        switch (kMenuDefs[i].action) {
+        case SKIN_PLAYLIST: on=p->plwin!=NULL; break;
+        case SKIN_EQ: on=p->eqwin!=NULL; break;
+        case SKIN_ART: on=p->artwin!=NULL; break;
+        case SKIN_SIZE: on=p->resources && p->resources->scale==2; break;
+        case SKIN_FILTER: on=p->now.filter; break;
+        default: break; /* Classic interface is never ticked while skinned. */
+        }
+        if (on) bits|=1UL<<i;
+    }
+    return bits;
+}
+static void strip_checks(SkinMenuStrip *strip,unsigned long bits)
+{
+    int i;
+    for (i=0;i<SKIN_MENU_ITEMS;++i) if (kMenuDefs[i].check) {
+        if (bits&(1UL<<i)) strip->items[i].Flags|=CHECKED; else strip->items[i].Flags&=~CHECKED;
+    }
+    strip->checks=bits;
+}
+static struct Window *strip_window(SkinPlayer *p,int index)
+{ return index==STRIP_MAIN ? p->win : index==STRIP_PLAYLIST ? p->plwin : index==STRIP_ART ? p->artwin : NULL; }
+static void strip_attach(SkinPlayer *p,int index,struct Window *w)
+{
+    strip_copy(&p->strips[index],&p->strips[STRIP_TEMPLATE]);
+    strip_checks(&p->strips[index],menu_checks(p));
+    SetMenuStrip(w,&p->strips[index].menus[0]);
+}
+static void menu_sync(SkinPlayer *p)
+{
+    unsigned long bits=menu_checks(p); int i;
+    for (i=STRIP_MAIN;i<STRIP_COUNT;++i) {
+        struct Window *w=strip_window(p,i);
+        if (!w || p->strips[i].checks==bits) continue;
+        ClearMenuStrip(w); strip_checks(&p->strips[i],bits);
+        ResetMenuStrip(w,&p->strips[i].menus[0]);
     }
 }
 static int open_window(SkinPlayer *p,WORD left,WORD top)
@@ -481,10 +601,10 @@ static int open_window(SkinPlayer *p,WORD left,WORD top)
         WA_NewLookMenus,(ULONG)(GfxBase->LibNode.lib_Version>=39),
         WA_ReportMouse,TRUE,WA_SimpleRefresh,TRUE,
         WA_IDCMP,IDCMP_MOUSEBUTTONS|IDCMP_MOUSEMOVE|IDCMP_REFRESHWINDOW|
-                   IDCMP_MENUPICK|IDCMP_VANILLAKEY|IDCMP_INACTIVEWINDOW|IDCMP_ACTIVEWINDOW,
+                   IDCMP_MENUPICK|IDCMP_VANILLAKEY|IDCMP_RAWKEY|IDCMP_INACTIVEWINDOW|IDCMP_ACTIVEWINDOW,
         TAG_DONE);
     if (!p->win) return 0;
-    build_menu(p,text_pen,background_pen); SetMenuStrip(p->win,&p->menu);
+    build_menu(p,text_pen,background_pen); strip_attach(p,STRIP_MAIN,p->win);
     p->have_drawn=0; repaint(p,1); return 1;
 }
 static int request_path(SkinPlayer *p,char *path)
@@ -504,27 +624,31 @@ static int request_path(SkinPlayer *p,char *path)
 static void save_state(SkinPlayer *p)
 {
     char key[64],text[512]; int i,n;
+    /* While iconified the windows are closed; the state saved on iconify
+     * (including which windows to reopen) remains authoritative. */
     if (!p->win) return;
     if (p->plwin) { p->pl_left=p->plwin->LeftEdge; p->pl_top=p->plwin->TopEdge; p->pl_position=1; }
     if (p->eqwin) { p->eq_left=p->eqwin->LeftEdge; p->eq_top=p->eqwin->TopEdge; p->eq_position=1; }
-    n=snprintf(text,sizeof(text),"3 %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d",
+    if (p->artwin) { p->art_left=p->artwin->LeftEdge; p->art_top=p->artwin->TopEdge; p->art_position=1; }
+    n=snprintf(text,sizeof(text),"4 %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d",
         p->win->LeftEdge,p->win->TopEdge,p->pl_left,p->pl_top,p->eq_left,p->eq_top,
         p->sequence.order.shuffle,p->sequence.order.repeat,gSkinAudio.balance,p->remaining,p->shaded,
         p->visual_mode,p->visual_interval,p->debug,gSkinAudio.eq_enabled,gSkinAudio.eq_preamp);
     for (i=0;i<10 && n>0 && n<(int)sizeof(text)-16;++i)
         n+=snprintf(text+n,sizeof(text)-n," %d",gSkinAudio.eq_bands[i]);
-    n+=snprintf(text+n,sizeof(text)-n," %d %d %d %d %d %d",p->plwin!=NULL,p->eqwin!=NULL,p->pl_position,p->eq_position,p->pl_shaded,p->eq_shaded);
+    n+=snprintf(text+n,sizeof(text)-n," %d %d %d %d %d %d %d %d %d %d",p->plwin!=NULL,p->eqwin!=NULL,p->pl_position,p->eq_position,p->pl_shaded,p->eq_shaded,
+        p->artwin!=NULL,p->art_position,p->art_left,p->art_top);
     env_name(p,key,"State"); SetVar(key,text,-1,GVF_GLOBAL_ONLY); p->state_dirty=1;
 }
 static void restore_state(SkinPlayer *p)
 {
-    char key[64],text[512],*at,*end; long v[27]; int i;
+    char key[64],text[512],*at,*end; long v[27],extra[10]; int i,count;
     p->saved_left=40; p->saved_top=30; p->visual_interval=2;
     env_name(p,key,"State");
     if (GetVar(key,text,sizeof(text),GVF_GLOBAL_ONLY)<=0) return;
     text[sizeof(text)-1]=0; at=text;
     for (i=0;i<27;++i) { v[i]=strtol(at,&end,10); if (end==at || v[i]<-32768 || v[i]>32767) return; at=end; }
-    if ((v[0]!=1 && v[0]!=2 && v[0]!=3) || v[7]<0 || v[7]>1 || v[8]<0 || v[8]>2 || v[9]<-100 || v[9]>100 ||
+    if (v[0]<1 || v[0]>4 || v[7]<0 || v[7]>1 || v[8]<0 || v[8]>2 || v[9]<-100 || v[9]>100 ||
         v[12]<0 || v[12]>2 || v[13]<1 || v[13]>4 || v[16]<-12 || v[16]>12) return;
     for (i=17;i<27;++i) if (v[i]<-12 || v[i]>12) return;
     p->saved_left=(int)v[1]; p->saved_top=(int)v[2];
@@ -534,15 +658,25 @@ static void restore_state(SkinPlayer *p)
     p->visual_mode=(int)v[12]; p->visual_interval=(int)v[13]; p->debug=v[14]!=0;
     gSkinAudio.eq_enabled=v[15]!=0; gSkinAudio.eq_preamp=(int)v[16];
     for (i=0;i<10;++i) gSkinAudio.eq_bands[i]=(int)v[17+i];
+    /* Version 2 adds visibility/positions, 3 shade states, 4 artwork. */
+    for (count=0;count<10;++count) {
+        extra[count]=strtol(at,&end,10);
+        if (end==at || extra[count]<-32768 || extra[count]>32767) break;
+        at=end;
+    }
     if (v[0]>=2) {
-        long visible=strtol(at,&end,10);
-        if (end!=at) { p->restore_playlist=visible==1; at=end; visible=strtol(at,&end,10); if (end!=at) { p->restore_eq=visible==1; at=end;
-            visible=strtol(at,&end,10); if (end!=at) { p->pl_position=visible==1; at=end;
-                visible=strtol(at,&end,10); if (end!=at) { p->eq_position=visible==1; at=end;
-                    if (v[0]==3) { visible=strtol(at,&end,10); if (end!=at) { p->pl_shaded=visible==1; at=end;
-                        visible=strtol(at,&end,10); if (end!=at) p->eq_shaded=visible==1; } }
-                } }
-        } }
+        if (count>0) p->restore_playlist=extra[0]==1;
+        if (count>1) p->restore_eq=extra[1]==1;
+        if (count>2) p->pl_position=extra[2]==1;
+        if (count>3) p->eq_position=extra[3]==1;
+    }
+    if (v[0]>=3) {
+        if (count>4) p->pl_shaded=extra[4]==1;
+        if (count>5) p->eq_shaded=extra[5]==1;
+    }
+    if (v[0]>=4 && count>9) {
+        p->restore_art=extra[6]==1; p->art_position=extra[7]==1;
+        p->art_left=(int)extra[8]; p->art_top=(int)extra[9];
     }
     ++gSkinAudio.eq_sequence;
 }
@@ -565,7 +699,7 @@ static void eq_close(SkinPlayer *p)
     p->eq_left=p->eqwin->LeftEdge; p->eq_top=p->eqwin->TopEdge; p->eq_position=1;
     while ((m=GetMsg(p->eqwin->UserPort))!=NULL) ReplyMsg(m);
     CloseWindow(p->eqwin); p->eqwin=NULL; p->eq_pressed=0; p->eq_have_drawn=0;
-    repaint(p,0);
+    repaint(p,0); menu_sync(p);
 }
 static void eq_toggle(SkinPlayer *p)
 {
@@ -584,7 +718,210 @@ static void eq_toggle(SkinPlayer *p)
         WA_RMBTrap,TRUE,WA_ReportMouse,TRUE,WA_SimpleRefresh,TRUE,
         WA_IDCMP,IDCMP_MOUSEBUTTONS|IDCMP_MOUSEMOVE|IDCMP_REFRESHWINDOW|IDCMP_VANILLAKEY|IDCMP_INACTIVEWINDOW|IDCMP_ACTIVEWINDOW,TAG_DONE);
     if (!p->eqwin) { skin_player_notice(p,"COULD NOT OPEN EQUALISER"); return; }
-    eq_repaint(p,1); repaint(p,0);
+    eq_repaint(p,1); repaint(p,0); menu_sync(p);
+}
+/* ---- Artwork window ---------------------------------------------------- */
+static void art_label(SkinPlayer *p,const char *text,int y)
+{
+    int n=(int)strlen(text),x=(SKIN_ART_BOX-n*8)/2;
+    if (!n) return;
+    playlist_label(p,text,p->resources->skin.playlist_normal,p->resources->skin.playlist_background,x,y,n*8);
+}
+static void art_repaint(SkinPlayer *p,int all)
+{
+    const WinampSkin *k; int x,y;
+    if (!p->artwin || !p->resources) return;
+    if (!all && p->art_have_drawn && p->art_drawn_kind==p->art_kind && p->art_kind!=SKIN_ART_IMAGE) return;
+    k=&p->resources->skin; p->target=p->artwin;
+    fill(p,k->playlist_selected,0,0,SKIN_ART_BOX,SKIN_ART_BOX);
+    fill(p,k->playlist_background,2,2,SKIN_ART_BOX-4,SKIN_ART_BOX-4);
+    if (p->art_kind==SKIN_ART_IMAGE) {
+        for (y=0;y<SKIN_ART_SIZE;++y) {
+            const unsigned char *row=p->art_rgb+(size_t)y*SKIN_ART_SIZE*3;
+            x=0;
+            while (x<SKIN_ART_SIZE) {
+                int start=x; unsigned rgb=((unsigned)row[x*3]<<16)|((unsigned)row[x*3+1]<<8)|row[x*3+2];
+                LONG pen=color_pen(p,p->resources,rgb);
+                for (++x;x<SKIN_ART_SIZE;++x) {
+                    unsigned next=((unsigned)row[x*3]<<16)|((unsigned)row[x*3+1]<<8)|row[x*3+2];
+                    if (next!=rgb && color_pen(p,p->resources,next)!=pen) break;
+                }
+                fill(p,rgb,5+start,5+y,x-start,1);
+            }
+        }
+    } else if (text_ready(p)) {
+        art_label(p,p->art_kind==SKIN_ART_LOADING ? "LOADING" : p->art_kind==SKIN_ART_RADIO ? "RADIO" : "NO ART",28);
+        if (p->art_kind!=SKIN_ART_LOADING) art_label(p,p->art_kind==SKIN_ART_RADIO ? "NO LOGO" : "",40);
+    }
+    p->art_drawn_kind=p->art_kind; p->art_have_drawn=1;
+}
+static void art_close(SkinPlayer *p)
+{
+    struct Message *m;
+    if (!p->artwin) return;
+    ClearMenuStrip(p->artwin);
+    while ((m=GetMsg(p->artwin->UserPort))!=NULL) ReplyMsg(m);
+    p->art_left=p->artwin->LeftEdge; p->art_top=p->artwin->TopEdge; p->art_position=1;
+    CloseWindow(p->artwin); p->artwin=NULL; p->art_have_drawn=0; p->art_dragging=0;
+    menu_sync(p);
+}
+static int art_open(SkinPlayer *p)
+{
+    int scale=p->resources->scale,size=SKIN_ART_BOX*scale,left,top;
+    if (!p->win || size>p->screen->Width || size>p->screen->Height) return 0;
+    left=p->art_position ? p->art_left : p->win->LeftEdge+p->win->Width;
+    top=p->art_position ? p->art_top : p->win->TopEdge;
+    if (left+size>p->screen->Width) left=p->screen->Width-size;
+    if (top+size>p->screen->Height) top=p->screen->Height-size;
+    if (left<0) left=0;
+    if (top<0) top=0;
+    p->artwin=OpenWindowTags(NULL,WA_CustomScreen,(ULONG)p->screen,WA_Left,left,WA_Top,top,
+        WA_Width,size,WA_Height,size,WA_Borderless,TRUE,WA_Activate,FALSE,WA_RMBTrap,FALSE,
+        WA_DetailPen,p->win->DetailPen,WA_BlockPen,p->win->BlockPen,
+        WA_NewLookMenus,(ULONG)(GfxBase->LibNode.lib_Version>=39),
+        WA_ReportMouse,TRUE,WA_SimpleRefresh,TRUE,
+        WA_IDCMP,IDCMP_MOUSEBUTTONS|IDCMP_MOUSEMOVE|IDCMP_REFRESHWINDOW|IDCMP_MENUPICK|IDCMP_VANILLAKEY,TAG_DONE);
+    if (!p->artwin) return 0;
+    strip_attach(p,STRIP_ART,p->artwin);
+    p->art_have_drawn=0; art_repaint(p,1); menu_sync(p); return 1;
+}
+static void art_toggle(SkinPlayer *p)
+{
+    if (p->artwin) art_close(p);
+    else if (!art_open(p)) skin_player_notice(p,"ARTWORK WINDOW DOES NOT FIT THIS SCREEN");
+}
+void skin_player_artwork(SkinPlayer *p,const unsigned char *rgb,int valid,int loading,int radio)
+{
+    int kind; unsigned long hash=2166136261UL; size_t i;
+    if (!p) return;
+    kind=valid && rgb ? SKIN_ART_IMAGE : loading ? SKIN_ART_LOADING : radio ? SKIN_ART_RADIO : SKIN_ART_NONE;
+    /* Hash only while visible: a hidden artwork window costs nothing. */
+    if (!p->artwin) { p->art_kind=-1; return; }
+    if (kind==SKIN_ART_IMAGE) {
+        for (i=0;i<sizeof(p->art_rgb);++i) hash=((hash^rgb[i])*16777619UL)&0xffffffffUL;
+        if (kind==p->art_kind && hash==p->art_hash) return;
+        memcpy(p->art_rgb,rgb,sizeof(p->art_rgb)); p->art_hash=hash;
+    } else if (kind==p->art_kind) return;
+    p->art_kind=kind; art_repaint(p,1);
+}
+static int menu_action(SkinPlayer *p,UWORD code,SkinEvent *event);
+static int key_action(SkinPlayer *p,UWORD code,SkinEvent *event);
+static int art_poll(SkinPlayer *p,SkinEvent *event)
+{
+    struct IntuiMessage *m;
+    while (p->artwin && (m=(struct IntuiMessage *)GetMsg(p->artwin->UserPort))!=NULL) {
+        ULONG type=m->Class; UWORD code=m->Code,qualifier=m->Qualifier;
+        int sx=p->screen->MouseX,sy=p->screen->MouseY;
+        ReplyMsg((struct Message *)m); memset(event,0,sizeof(*event));
+        if (type==IDCMP_REFRESHWINDOW) { BeginRefresh(p->artwin); art_repaint(p,1); EndRefresh(p->artwin,TRUE); }
+        else if (type==IDCMP_MENUPICK) { if (menu_action(p,code,event)) return 1; }
+        else if (type==IDCMP_MOUSEBUTTONS && code==SELECTDOWN) {
+            p->art_dragging=1; p->art_drag_x=sx; p->art_drag_y=sy; drag_begin(p,3,qualifier);
+        } else if (type==IDCMP_MOUSEMOVE && p->art_dragging) {
+            drag_move(p,sx-p->art_drag_x,sy-p->art_drag_y); p->art_drag_x=sx; p->art_drag_y=sy;
+        } else if (type==IDCMP_MOUSEBUTTONS && code==SELECTUP && p->art_dragging) {
+            p->art_dragging=0; drag_end(p,3); save_state(p);
+        } else if (type==IDCMP_VANILLAKEY) {
+            if (code==27 || code=='a' || code=='A') { art_close(p); save_state(p); }
+            else if (key_action(p,code,event)) return 1;
+        }
+    }
+    return 0;
+}
+/* ---- Iconify through a Workbench AppIcon -------------------------------- */
+static void app_icon_remove(SkinPlayer *p)
+{
+    struct Message *m;
+    if (p->app_icon) { RemoveAppIcon(p->app_icon); p->app_icon=NULL; }
+    if (p->app_port) {
+        while ((m=GetMsg(p->app_port))!=NULL) ReplyMsg(m);
+        DeleteMsgPort(p->app_port); p->app_port=NULL;
+    }
+    if (p->app_object) { FreeDiskObject(p->app_object); p->app_object=NULL; }
+}
+static int open_window(SkinPlayer *p,WORD left,WORD top);
+static int internal_action(SkinPlayer *p,int action);
+static void restore_windows(SkinPlayer *p)
+{
+    if (p->shaded) { p->shaded=0; internal_action(p,SKIN_SHADE); }
+    if (p->restore_playlist && !playlist_open(p)) p->pending_options=1;
+    if (p->restore_eq) eq_toggle(p);
+    if (p->restore_art) art_open(p);
+    p->restore_playlist=p->restore_eq=p->restore_art=0;
+}
+static void iconify(SkinPlayer *p)
+{
+    char path[64]; struct DiskObject *icon;
+    if (!IconBase || !gSkinWorkbenchBase) { skin_player_notice(p,"ICONIFY NEEDS WORKBENCH"); return; }
+    snprintf(path,sizeof(path),"PROGDIR:%s",p->name);
+    p->app_object=GetDiskObject((STRPTR)path);
+    if (!p->app_object) p->app_object=GetDefDiskObject(WBTOOL);
+    p->app_port=CreateMsgPort();
+    if (!p->app_object || !p->app_port) { app_icon_remove(p); skin_player_notice(p,"COULD NOT CREATE APPICON"); return; }
+    /* Borrow only the images; sanitise the copy to the AppIcon contract. */
+    p->app_icon_copy=*p->app_object; icon=&p->app_icon_copy;
+    icon->do_Magic=0; icon->do_Version=0; icon->do_Type=0; icon->do_DefaultTool=NULL;
+    icon->do_ToolTypes=NULL; icon->do_CurrentX=icon->do_CurrentY=NO_ICON_POSITION;
+    icon->do_DrawerData=NULL; icon->do_ToolWindow=NULL; icon->do_StackSize=0;
+    icon->do_Gadget.NextGadget=NULL; icon->do_Gadget.LeftEdge=icon->do_Gadget.TopEdge=0;
+    icon->do_Gadget.Flags&=GFLG_GADGHIMAGE; icon->do_Gadget.Activation=0; icon->do_Gadget.GadgetType=0;
+    icon->do_Gadget.GadgetText=NULL; icon->do_Gadget.MutualExclude=0; icon->do_Gadget.SpecialInfo=NULL;
+    icon->do_Gadget.GadgetID=0; icon->do_Gadget.UserData=NULL;
+    p->app_icon=AddAppIconA(0,0,(STRPTR)"MintAMP",p->app_port,(BPTR)0,icon,NULL);
+    if (!p->app_icon) { app_icon_remove(p); skin_player_notice(p,"COULD NOT CREATE APPICON"); return; }
+    save_state(p);
+    p->restore_playlist=p->plwin!=NULL; p->restore_eq=p->eqwin!=NULL; p->restore_art=p->artwin!=NULL;
+    p->saved_left=p->win->LeftEdge; p->saved_top=p->win->TopEdge;
+    eq_close(p); playlist_close(p); art_close(p); close_window(p);
+    p->pressed=0; p->iconified=1;
+}
+static int uniconify(SkinPlayer *p)
+{
+    if (!open_window(p,p->saved_left,p->saved_top)) return 0;
+    app_icon_remove(p); p->iconified=0;
+    restore_windows(p); WindowToFront(p->win); ActivateWindow(p->win); visual_arm(p);
+    return 1;
+}
+/* ---- Small modal text requester (no GadTools/ReAction dependency) -------- */
+int skin_player_request_text(SkinPlayer *p,const char *title,char *buffer,int size)
+{
+    struct Window *w; struct Gadget g; struct StringInfo si; UBYTE undo[512];
+    struct IntuiMessage *m; int done=0,ok=0,fh,width,height,top;
+    if (!p || !buffer || size<2) return 0;
+    if (size>(int)sizeof(undo)) size=sizeof(undo);
+    fh=p->screen->Font->ta_YSize;
+    width=p->screen->Width<480 ? p->screen->Width : 480;
+    height=p->screen->WBorTop+fh+1+fh+14+p->screen->WBorBottom;
+    top=p->win ? p->win->TopEdge : 20;
+    if (top+height>p->screen->Height) top=p->screen->Height-height;
+    if (top<0) top=0;
+    w=OpenWindowTags(NULL,WA_CustomScreen,(ULONG)p->screen,WA_Title,(ULONG)title,
+        WA_Left,(p->screen->Width-width)/2,WA_Top,top,
+        WA_Width,width,WA_Height,height,WA_DragBar,TRUE,WA_DepthGadget,TRUE,WA_CloseGadget,TRUE,
+        WA_Activate,TRUE,WA_RMBTrap,TRUE,WA_SmartRefresh,TRUE,
+        WA_IDCMP,IDCMP_GADGETUP|IDCMP_CLOSEWINDOW|IDCMP_ACTIVEWINDOW|IDCMP_MOUSEBUTTONS,TAG_DONE);
+    if (!w) return 0;
+    memset(&g,0,sizeof(g)); memset(&si,0,sizeof(si)); memset(undo,0,sizeof(undo));
+    si.Buffer=(UBYTE *)buffer; si.UndoBuffer=undo; si.MaxChars=(WORD)size;
+    g.LeftEdge=w->BorderLeft+8; g.TopEdge=w->BorderTop+7;
+    g.Width=w->Width-w->BorderLeft-w->BorderRight-16; g.Height=fh;
+    g.Flags=GFLG_GADGHCOMP; g.Activation=GACT_RELVERIFY|GACT_STRINGLEFT;
+    g.GadgetType=GTYP_STRGADGET; g.SpecialInfo=(APTR)&si;
+    { struct RastPort *rp=w->RPort; int l=g.LeftEdge-3,t=g.TopEdge-3,r=g.LeftEdge+g.Width+2,b=g.TopEdge+g.Height+2;
+      SetAPen(rp,1); Move(rp,l,t); Draw(rp,r,t); Draw(rp,r,b); Draw(rp,l,b); Draw(rp,l,t); }
+    AddGadget(w,&g,0); RefreshGList(&g,w,NULL,1); ActivateGadget(&g,w,NULL);
+    while (!done) {
+        WaitPort(w->UserPort);
+        while ((m=(struct IntuiMessage *)GetMsg(w->UserPort))!=NULL) {
+            ULONG type=m->Class; ReplyMsg((struct Message *)m);
+            if (type==IDCMP_CLOSEWINDOW) done=1;
+            else if (type==IDCMP_GADGETUP) { ok=buffer[0]!=0; done=1; }
+            else ActivateGadget(&g,w,NULL);
+        }
+    }
+    RemoveGadget(w,&g);
+    while ((m=(struct IntuiMessage *)GetMsg(w->UserPort))!=NULL) ReplyMsg((struct Message *)m);
+    CloseWindow(w); buffer[size-1]=0; return ok;
 }
 int skin_player_choice(SkinPlayer *p,const char *text,const char *choices)
 {
@@ -692,7 +1029,7 @@ static int eq_poll(SkinPlayer *p)
 }
 static void visual_arm(SkinPlayer *p)
 {
-    if (!p->visual_device || p->visual_pending) return;
+    if (!p->visual_device || p->visual_pending || !p->win) return;
     if (p->shaded && !(p->move_active && p->move_edge)) return;
     if (!(p->move_active && p->move_edge) && !(strlen(p->now.title)>31 || p->notice_ticks || (p->visual_mode && p->now.playing && !p->now.paused))) return;
     p->visual_timer->tr_node.io_Command=TR_ADDREQUEST;
@@ -729,6 +1066,8 @@ static void visual_tick(SkinPlayer *p)
 }
 static int internal_action(SkinPlayer *p,int action)
 {
+    if (action==SKIN_ICONIFY) { iconify(p); return 1; }
+    if (action==SKIN_ART) { art_toggle(p); save_state(p); return 1; }
     if (action==SKIN_EQ) eq_toggle(p);
     else if (action==SKIN_TIMER) p->remaining=!p->remaining;
     else if (action==SKIN_SHUFFLE) { p->sequence.order.shuffle=!p->sequence.order.shuffle; skin_order_queue_reset(&p->sequence,p->playlist.count,p->playlist.current); skin_player_notice(p,p->sequence.order.shuffle ? "SHUFFLE ON" : "SHUFFLE OFF"); }
@@ -810,7 +1149,7 @@ static void change_skin(SkinPlayer *p,int choose)
 {
     char path[512], error[160]; SkinResources *next, *old; int scale;
     WORD left=p->win->LeftEdge,top=p->win->TopEdge;
-    int had_playlist=p->plwin!=NULL,had_eq=p->eqwin!=NULL;
+    int had_playlist=p->plwin!=NULL,had_eq=p->eqwin!=NULL,had_art=p->artwin!=NULL;
     strcpy(path,p->path); scale=p->resources->scale;
     if (choose) { if (!request_path(p,path)) return; }
     else scale=scale==1 ? 2 : 1;
@@ -819,12 +1158,13 @@ static void change_skin(SkinPlayer *p,int choose)
     }
     next=load_resources(p,path,scale,error);
     if (!next) { error_request(p,error); return; }
-    save_state(p); old=p->resources; eq_close(p); playlist_close(p); close_window(p); p->resources=next;
+    save_state(p); old=p->resources; eq_close(p); playlist_close(p); art_close(p); close_window(p); p->resources=next;
     if (!open_window(p,left,top)) {
         p->resources=old; free_resources(p,next);
         if (!open_window(p,left,top)) p->win=NULL;
         if (had_playlist && p->win && !playlist_open(p)) p->pending_options=1;
         if (had_eq && p->win) eq_toggle(p);
+        if (had_art && p->win) art_open(p);
         error_request(p,"Could not open the new skin window.");
         return;
     }
@@ -834,6 +1174,8 @@ static void change_skin(SkinPlayer *p,int choose)
     p->choice_dirty=2;
     if (had_playlist && !playlist_open(p)) p->pending_options=1;
     if (had_eq) eq_toggle(p);
+    if (had_art) art_open(p);
+    p->art_kind=-1; /* pens changed with the skin: redraw on next update */
 }
 SkinPlayer *skin_player_open(const char *name,int argc,char **argv)
 {
@@ -841,6 +1183,12 @@ SkinPlayer *skin_player_open(const char *name,int argc,char **argv)
     char key[64], value[512], error[160]; int i,scale=1;
     struct DiskObject *icon=NULL;
     if (!p) return NULL;
+    /* CLI/icon skin options apply to the first skin opened in this run. A
+     * later Classic -> skin switch reuses the saved per-edition choice, so a
+     * skin loaded meanwhile is not replaced by the startup argument. */
+    if (gSkinArgsUsed) { argc=1; argv=NULL; }
+    gSkinArgsUsed=1;
+    p->art_kind=-1;
     strncpy(p->name,name,sizeof(p->name)-1);
     { ULONG seconds,micros; CurrentTime(&seconds,&micros); skin_order_queue_init(&p->sequence,seconds^micros); }
     restore_state(p);
@@ -885,49 +1233,81 @@ SkinPlayer *skin_player_open(const char *name,int argc,char **argv)
     if (!p->resources) {
         /* An unavailable saved/custom skin or incomplete installation can
          * still use the existing skin requester and native fallback. */
-        if (!request_path(p,p->path)) { skin_player_close(p); return NULL; }
+        if (!request_path(p,p->path)) { skin_player_suspend(p); return NULL; }
         p->resources=load_resources(p,p->path,scale,error);
-        if (!p->resources) { error_request(p,error); skin_player_close(p); return NULL; }
+        if (!p->resources) { error_request(p,error); skin_player_suspend(p); return NULL; }
     }
     strcpy(p->now.title,"MINTAMP - RIGHT CLICK FOR MENU");
-    if (!open_window(p,p->saved_left,p->saved_top)) { skin_player_close(p); return NULL; }
-    if (p->shaded) { p->shaded=0; internal_action(p,SKIN_SHADE); }
+    if (!open_window(p,p->saved_left,p->saved_top)) { skin_player_suspend(p); return NULL; }
     p->visual_port=CreateMsgPort();
     if (p->visual_port) p->visual_timer=(struct timerequest *)CreateIORequest(p->visual_port,sizeof(struct timerequest));
     if (p->visual_timer && !OpenDevice((STRPTR)TIMERNAME,UNIT_VBLANK,(struct IORequest *)p->visual_timer,0)) p->visual_device=1;
     if (!p->visual_device) p->visual_mode=0;
-    if (p->restore_playlist && !playlist_open(p)) p->pending_options=1;
-    if (p->restore_eq) eq_toggle(p);
+    if (!gSkinWorkbenchBase) gSkinWorkbenchBase=OpenLibrary((STRPTR)"workbench.library",37);
+    restore_windows(p);
     visual_arm(p); save_choice(p); return p;
 }
-void skin_player_close(SkinPlayer *p)
+/* ENVARC writes owed by suspended players, written at the next full close
+ * or shutdown so a live Skin -> Classic switch does no disk IO mid-stream. */
+static int gPendingPersist; static char gPendingName[32];
+static void persist_choices(const char *name,int which)
 {
+    char key[64],value[512]; int i;
+    static const char * const options[]={"State","Skin","Scale"};
+    for (i=0;i<3;++i) if (which&(1<<i)) {
+        snprintf(key,sizeof(key),"%s/%s",name,options[i]);
+        if (GetVar(key,value,sizeof(value),GVF_GLOBAL_ONLY)>0) { value[sizeof(value)-1]=0; SetVar(key,value,-1,GVF_GLOBAL_ONLY|GVF_SAVE_VAR); }
+    }
+    if (which&8) mint_interface_flush_skin();
+}
+static void player_close(SkinPlayer *p,int defer)
+{
+    int which;
     if (!p) return;
     save_state(p);
-    /* Frontends call close only after stopping/retiring audio. Persist disk
-     * choices here, not on every click while a radio decoder needs CPU/IO. */
-    { char key[64],value[512]; int i;
-      static const char * const options[]={"State","Skin","Scale"};
-      for (i=0;i<3;++i) if (i ? p->choice_dirty : p->state_dirty) {
-          env_name(p,key,options[i]);
-          if (GetVar(key,value,sizeof(value),GVF_GLOBAL_ONLY)>0) { value[sizeof(value)-1]=0; SetVar(key,value,-1,GVF_GLOBAL_ONLY|GVF_SAVE_VAR); }
-      }
-      if (p->choice_dirty==2) mint_interface_flush_skin();
+    which=(p->state_dirty ? 1 : 0)|(p->choice_dirty ? 6 : 0)|(p->choice_dirty==2 ? 8 : 0);
+    if (defer) { gPendingPersist|=which; strcpy(gPendingName,p->name); }
+    else {
+        /* Frontends call close only after stopping/retiring audio. Persist disk
+         * choices here, not on every click while a radio decoder needs CPU/IO. */
+        persist_choices(p->name,which|gPendingPersist); gPendingPersist=0;
     }
     if (p->visual_pending) { AbortIO((struct IORequest *)p->visual_timer); WaitIO((struct IORequest *)p->visual_timer); }
     if (p->visual_device) CloseDevice((struct IORequest *)p->visual_timer);
     if (p->visual_timer) DeleteIORequest((struct IORequest *)p->visual_timer);
     if (p->visual_port) DeleteMsgPort(p->visual_port);
-    eq_close(p); playlist_close(p); close_window(p); free_resources(p,p->resources);
+    app_icon_remove(p);
+    eq_close(p); playlist_close(p); art_close(p); close_window(p); free_resources(p,p->resources);
     free_text_bitmap(p->text_source,243,8); free_text_bitmap(p->text_scaled,486,16);
     if (p->playlist_font) CloseFont(p->playlist_font);
     if (p->screen) UnlockPubScreen(NULL,p->screen);
     free(p);
 }
+void skin_player_close(SkinPlayer *p)
+{
+    if (p) player_close(p,0);
+    else if (gPendingPersist) { persist_choices(gPendingName,gPendingPersist); gPendingPersist=0; }
+}
+void skin_player_suspend(SkinPlayer *p) { player_close(p,1); }
+void skin_player_shutdown(void)
+{
+    if (gPendingPersist) { persist_choices(gPendingName,gPendingPersist); gPendingPersist=0; }
+    if (gSkinWorkbenchBase) { CloseLibrary(gSkinWorkbenchBase); gSkinWorkbenchBase=NULL; }
+}
+void skin_player_restore_audio(const char *name)
+{
+    /* Classic start: apply the saved balance/EQ the skin would restore, so
+     * audio does not depend on which interface opened first. */
+    SkinPlayer *p=(SkinPlayer *)calloc(1,sizeof(*p));
+    if (!p) return;
+    strncpy(p->name,name,sizeof(p->name)-1); restore_state(p); free(p);
+}
 ULONG skin_player_signal(SkinPlayer *p)
 { return p ? (p->win ? 1UL<<p->win->UserPort->mp_SigBit : 0) |
             (p->plwin ? 1UL<<p->plwin->UserPort->mp_SigBit : 0) |
             (p->eqwin ? 1UL<<p->eqwin->UserPort->mp_SigBit : 0) |
+            (p->artwin ? 1UL<<p->artwin->UserPort->mp_SigBit : 0) |
+            (p->app_port ? 1UL<<p->app_port->mp_SigBit : 0) |
             (p->visual_port ? 1UL<<p->visual_port->mp_SigBit : 0) : 0; }
 struct Window *skin_player_window(SkinPlayer *p) { return p ? p->win : NULL; }
 void skin_player_notice(SkinPlayer *p,const char *message)
@@ -942,9 +1322,10 @@ void skin_player_update(SkinPlayer *p,const SkinState *s,int tick)
     if (!p || !p->win) return;
     scroll=strcmp(p->now.title,s->title) ? 0 : p->now.scroll;
     if (tick && !p->visual_device && !p->notice_ticks) scroll=(scroll+2)%((strlen(s->title)+5)*5);
-    { unsigned char levels[16],peaks[16]; signed char scope[64];
+    { unsigned char levels[16],peaks[16]; signed char scope[64]; int filter=p->now.filter;
         memcpy(levels,p->now.levels,16); memcpy(peaks,p->now.peaks,16); memcpy(scope,p->now.scope,64);
         p->now=*s; memcpy(p->now.levels,levels,16); memcpy(p->now.peaks,peaks,16); memcpy(p->now.scope,scope,64);
+        if (filter!=s->filter) menu_sync(p);
         p->now.remaining=p->remaining; p->now.shaded=p->shaded;
         p->now.shuffle=p->sequence.order.shuffle; p->now.repeat=p->sequence.order.repeat; p->now.balance=gSkinAudio.balance;
         p->now.visual_mode=p->shaded ? 0 : p->visual_mode;
@@ -961,14 +1342,37 @@ void skin_player_update(SkinPlayer *p,const SkinState *s,int tick)
 }
 static int menu_action(SkinPlayer *p,UWORD code,SkinEvent *event)
 {
-    static const int actions[SKIN_MENU_ITEMS]={SKIN_SELECT,SKIN_SIZE,SKIN_SETTINGS,SKIN_RADIO,
-        SKIN_PLAYLIST,SKIN_PLAYLIST_OPTIONS,SKIN_BROWSE,SKIN_QUIT,SKIN_EQ,SKIN_VISUAL,SKIN_VIS_RATE,SKIN_DEBUG,SKIN_ABOUT,SKIN_INTERFACE};
-    int item=ITEMNUM(code);
-    if (code==MENUNULL || MENUNUM(code)!=0 || item>=SKIN_MENU_ITEMS) return 0;
-    if (actions[item]==SKIN_INTERFACE) { mint_interface_preferences(p->win); return 0; }
-    if (item<2) { change_skin(p,item==0); return 0; }
-    if (internal_action(p,actions[item])) return 0;
-    event->action=actions[item]; event->released=1; return 1;
+    int i,m,item,index=-1,action;
+    if (code==MENUNULL) return 0;
+    m=MENUNUM(code); item=ITEMNUM(code);
+    for (i=0;i<SKIN_MENU_ITEMS;++i) if (kMenuDefs[i].menu==m && item--==0) { index=i; break; }
+    if (index<0) return 0;
+    action=kMenuDefs[index].action;
+    /* Intuition toggled the tick itself; restore it from real state. */
+    if (kMenuDefs[index].check) {
+        unsigned long bits=menu_checks(p); int w;
+        for (w=STRIP_MAIN;w<STRIP_COUNT;++w) p->strips[w].checks=~bits;
+    }
+    menu_sync(p);
+    if (action==SKIN_INTERFACE) { mint_interface_preferences(p->win); return 0; }
+    if (action==SKIN_SELECT || action==SKIN_SIZE) { change_skin(p,action==SKIN_SELECT); menu_sync(p); return 0; }
+    if (internal_action(p,action)) { menu_sync(p); return 0; }
+    event->action=action; event->released=1; return 1;
+}
+/* Keys shared by the main and artwork windows. Winamp-style transport keys,
+ * plus I file info, U stream URL, A artwork, T settings, R radio. */
+static int key_action(SkinPlayer *p,UWORD code,SkinEvent *event)
+{
+    int c=code>='A' && code<='Z' ? code-'A'+'a' : code;
+    if (c=='s') { change_skin(p,1); menu_sync(p); return 0; }
+    if (c=='d') { change_skin(p,0); menu_sync(p); return 0; }
+    event->action=c==' ' || c=='c' ? SKIN_PAUSE : c=='x' ? SKIN_PLAY : c=='z' ? SKIN_PREVIOUS :
+        c=='b' ? SKIN_NEXT : c=='e' ? SKIN_EQ : c=='v' ? SKIN_STOP : c=='j' ? SKIN_SHUFFLE :
+        c=='l' ? SKIN_REPEAT : c=='w' ? SKIN_SHADE : c=='r' ? SKIN_RADIO : c=='o' ? SKIN_BROWSE :
+        c=='p' ? SKIN_PLAYLIST : c=='t' ? SKIN_SETTINGS : c=='i' ? SKIN_INFO : c=='u' ? SKIN_STREAM :
+        c=='a' ? SKIN_ART : SKIN_NONE;
+    if (event->action && !internal_action(p,event->action)) { event->released=1; return 1; }
+    event->action=SKIN_NONE; return 0;
 }
 static void playlist_scroll(SkinPlayer *p,int top)
 {
@@ -1094,6 +1498,12 @@ int skin_player_poll(SkinPlayer *p,SkinEvent *event)
 {
     struct IntuiMessage *msg;
     if (!p) return 0;
+    if (p->iconified) {
+        struct Message *m; int restore=0;
+        while (p->app_port && (m=GetMsg(p->app_port))!=NULL) { ReplyMsg(m); restore=1; }
+        if (restore && !uniconify(p)) skin_player_notice(p,"COULD NOT REOPEN THE SKIN");
+        if (p->iconified) return 0;
+    }
     if (!p->win) { event->action=SKIN_QUIT; return 1; }
     if (p->pending_options) {
         p->pending_options=0; memset(event,0,sizeof(*event));
@@ -1104,7 +1514,9 @@ int skin_player_poll(SkinPlayer *p,SkinEvent *event)
     }
     eq_poll(p);
     if (playlist_poll(p,event)) return 1;
-    while ((msg=(struct IntuiMessage *)GetMsg(p->win->UserPort))!=NULL) {
+    if (art_poll(p,event)) return 1;
+    if (!p->win) return 0; /* iconified from a utility window's menu */
+    while (p->win && (msg=(struct IntuiMessage *)GetMsg(p->win->UserPort))!=NULL) {
         ULONG type=msg->Class; UWORD code=msg->Code;
         int x=msg->MouseX/p->resources->scale,y=msg->MouseY/p->resources->scale;
         int sx=p->screen->MouseX,sy=p->screen->MouseY;
@@ -1117,13 +1529,14 @@ int skin_player_poll(SkinPlayer *p,SkinEvent *event)
         else if (type==IDCMP_MENUPICK && code!=MENUNULL) {
             if (menu_action(p,code,event)) return 1;
         } else if (type==IDCMP_VANILLAKEY) {
-            if (code=='s' || code=='S') change_skin(p,1);
-            else if (code=='d' || code=='D') change_skin(p,0);
-            else {
-                event->action=code==' ' || code=='c' || code=='C' ? SKIN_PAUSE : code=='x' || code=='X' ? SKIN_PLAY : code=='z' || code=='Z' ? SKIN_PREVIOUS : code=='b' || code=='B' ? SKIN_NEXT : code=='e' || code=='E' ? SKIN_EQ : code=='v' || code=='V' ? SKIN_STOP : code=='j' || code=='J' ? SKIN_SHUFFLE : code=='l' || code=='L' ? SKIN_REPEAT : code=='w' || code=='W' ? SKIN_SHADE : code=='r' || code=='R' ? SKIN_RADIO :
-                    code=='o' || code=='O' ? SKIN_BROWSE : code=='p' || code=='P' ? SKIN_PLAYLIST :
-                    code=='t' || code=='T' ? SKIN_SETTINGS : SKIN_NONE;
-                if (event->action && !internal_action(p,event->action)) { event->released=1; return 1; }
+            if (key_action(p,code,event)) return 1;
+            if (!p->win) return 0;
+        } else if (type==IDCMP_RAWKEY && code<0x80) {
+            /* Cursor keys: Left/Right seek 5 s, Up/Down volume 5%. */
+            if (code==0x4f || code==0x4e) { event->action=SKIN_SEEK_STEP; event->value=code==0x4e ? 5 : -5; event->released=1; return 1; }
+            if (code==0x4c || code==0x4d) {
+                int v=p->now.volume+(code==0x4c ? 5 : -5);
+                event->action=SKIN_VOLUME_SET; event->value=v<0 ? 0 : v>100 ? 100 : v; event->released=1; return 1;
             }
         } else if (type==IDCMP_MOUSEBUTTONS && code==SELECTDOWN) {
             p->pressed=p->shaded && y>=14 ? SKIN_NONE : skin_hit_test(x,y); p->drag_x=sx; p->drag_y=sy;
@@ -1148,7 +1561,7 @@ int skin_player_poll(SkinPlayer *p,SkinEvent *event)
             }
             if (action==skin_hit_test(x,y) && action!=SKIN_DRAG && action!=SKIN_NONE) {
                 if (action==SKIN_SIZE) { change_skin(p,0); continue; }
-                if (internal_action(p,action)) continue;
+                if (internal_action(p,action)) { if (!p->win) return 0; menu_sync(p); continue; }
                 event->action=action; event->released=1; return 1;
             }
         }

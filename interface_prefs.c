@@ -50,9 +50,9 @@ void mint_interface_preferences(struct Window *w)
     mint_launch_defaults(&o); mint_interface_load(&o);
     snprintf(text,sizeof(text),"Preferred GUI: %s\nFor subsequent launches through MintAMP-Launch.",o.gadtools ? "GadTools" : "ReAction");
     n=choice(w,text,"ReAction|GadTools|Cancel"); if (!n) return; o.gadtools=n==2;
-    n=choice(w,"Preferred appearance for subsequent launches","Native Amiga|Classic skin|Cancel"); if (!n) return; o.skinned=n==2;
+    n=choice(w,"Preferred appearance for subsequent launches.\nThe menu tick 'Classic interface' also switches live.","Skin|Classic MintAMP|Cancel"); if (!n) return; o.skinned=n==1;
     n=choice(w,"Preferred skin scale (when skinned)","Normal|Double|Cancel"); if (!n) return; o.doublesize=n==2;
-    values[0]=o.gadtools ? "GADTOOLS" : "REACTION"; values[1]=o.skinned ? "SKINNED" : "NATIVE";
+    values[0]=o.gadtools ? "GADTOOLS" : "REACTION"; values[1]=o.skinned ? "SKINNED" : "CLASSIC";
     /* Preserve a custom saved path; Load skin in the skinned edition remains
      * the way to change it. No heavyweight skin loading in this requester. */
     values[2]=o.skin; values[3]=o.doublesize ? "YES" : "NO";
@@ -61,6 +61,17 @@ void mint_interface_preferences(struct Window *w)
     choice(w,ok ? "Saved for next MintAMP-Launch.\nActive playback continues.\nExplicit ToolTypes/CLI arguments override saved preferences." : "Could not save all interface preferences.\nCheck ENV: and ENVARC: are writable.","OK");
 }
 
+int mint_interface_start_skinned(int argc,char **argv)
+{
+    MintLaunchOptions o; int mode;
+    mint_launch_defaults(&o); mint_interface_load(&o); mint_interface_tooltypes(&o,argc,argv);
+    mode=argc>0 && argv ? mint_launch_mode_arg(argc,argv) : -1;
+    return mode>=0 ? mode : o.skinned;
+}
+void mint_interface_set_mode(int skinned)
+{
+    if (SetVar("MintAMP2/MODE",(STRPTR)(skinned ? "SKINNED" : "CLASSIC"),-1,GVF_GLOBAL_ONLY)) preferences_dirty=1;
+}
 static void persist_options(int first)
 {
     int i; char key[64],value[512];

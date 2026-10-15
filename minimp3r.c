@@ -30,6 +30,10 @@
 #include "skin_player.h"
 static SkinPlayer *gSkinPlayer;
 static int gSkinPendingTrack = -1;
+/* Startup arguments for the first skin opened, possibly after Classic. */
+static int gSkinArgc;
+static char **gSkinArgv;
+static char gSkinPendingUrl[512];
 #endif
 
 #if defined(AMIGA_M68K)
@@ -428,13 +432,23 @@ static const char * const kHttpsWaitDesc[HTTPS_WAIT_COUNT] = {
 	"default (~0.1s)", "0.5s", "1s", "2s", "4s"
 };
 
+#ifdef MINTAMP_SKIN
+#define ITEMNUM_CLASSIC   5
+#define PROJECT_ITEM_COUNT 6
+#else
+#define PROJECT_ITEM_COUNT 5
+#endif
 static struct Menu kMenus[2];
-static struct MenuItem kProjectItems[5];
+static struct MenuItem kProjectItems[PROJECT_ITEM_COUNT];
 static struct MenuItem kPlaybackItems[PLAYBACK_ITEM_COUNT];
-static struct IntuiText kProjectText[5];
+static struct IntuiText kProjectText[PROJECT_ITEM_COUNT];
 static struct IntuiText kPlaybackText[PLAYBACK_ITEM_COUNT];
-static const char * const kProjectLabels[5] = {
+static const char * const kProjectLabels[PROJECT_ITEM_COUNT] = {
 	"About MintAMP...", "Internet Radio", "Iconify", "Quit", "Interface preferences..."
+#ifdef MINTAMP_SKIN
+	/* Ticked while this window is the main interface; untick for the skin. */
+	, "Classic interface"
+#endif
 };
 static const char * const kPlaybackLabels[PLAYBACK_ITEM_COUNT] = {
 	"Decode-then-play", "Bench mode", "Artwork", "Artwork Cache",
@@ -467,7 +481,7 @@ static void MrInitMenuStrip(void)
 	kMenus[1].Flags = MENUENABLED;
 	kMenus[1].MenuName = (STRPTR)"Playback";
 	kMenus[1].FirstItem = &kPlaybackItems[0];
-	for (i = 0; i < 5; i++) {
+	for (i = 0; i < PROJECT_ITEM_COUNT; i++) {
 		/* Pen 0 is the screen's light/background pen, pen 1 is black on
 		 * the standard 4-colour Workbench palette -- these were swapped,
 		 * so JAM1 (which only uses FrontPen) drew the item text in the
@@ -478,12 +492,18 @@ static void MrInitMenuStrip(void)
 		kProjectText[i].LeftEdge = 2;
 		kProjectText[i].TopEdge = 1;
 		kProjectText[i].IText = (STRPTR)kProjectLabels[i];
-		kProjectItems[i].NextItem = (i < 4) ? &kProjectItems[i + 1] : NULL;
+		kProjectItems[i].NextItem = (i < PROJECT_ITEM_COUNT - 1) ? &kProjectItems[i + 1] : NULL;
 		kProjectItems[i].LeftEdge = 0;
 		kProjectItems[i].TopEdge = i * 10;
 		kProjectItems[i].Width = 200;
 		kProjectItems[i].Height = 10;
 		kProjectItems[i].Flags = ITEMTEXT | ITEMENABLED | HIGHCOMP;
+#ifdef MINTAMP_SKIN
+		if (i == ITEMNUM_CLASSIC) {
+			kProjectItems[i].Flags |= CHECKIT | MENUTOGGLE;
+			kProjectText[i].LeftEdge = 14;
+		}
+#endif
 		kProjectItems[i].ItemFill = (APTR)&kProjectText[i];
 		kProjectItems[i].NextSelect = MENUNULL;
 	}
@@ -598,7 +618,7 @@ static volatile unsigned long gDoneRunId;
 #define MR_APP_MAGIC 0x4d523047UL
 #define MR_DONE_MAGIC 0x4d52444fUL
 #ifdef MINTAMP_SKIN
-#define MR_WINDOW_TITLE "MintAMP-SR Settings"
+#define MR_WINDOW_TITLE (gSkinPlayer ? "MintAMP-SR Settings" : "MintAMP-SR")
 #else
 #define MR_WINDOW_TITLE "MintAMP"
 #endif
@@ -7197,6 +7217,9 @@ static void SyncMenuChecks(MrApp *app)
 			SetMenuItemChecked(app, MENUNUM_PLAYBACK,
 				ITEMNUM_HTTPSWAIT_BASE + i, app->httpsWaitIndex == i);
 	}
+#ifdef MINTAMP_SKIN
+	SetMenuItemChecked(app, MENUNUM_PROJECT, ITEMNUM_CLASSIC, gSkinPlayer == NULL);
+#endif
 }
 
 static void MrIconify(MrApp *app)
@@ -7207,6 +7230,8 @@ static void MrIconify(MrApp *app)
 	 * AppIcon.  Playback/timer/done ports remain alive and audio continues. */
 	CloseRadioWindow(app);
 	ClosePlaylistWindow(app);
+	/* Shared pens can only be released while their screen is known. */
+	ReleaseArtColorPens(app);
 	if (RA_Iconify(app->winObj))
 		app->win = NULL;
 }
@@ -7228,6 +7253,8 @@ static void MrUniconify(MrApp *app)
 	MrSetGadgetAttr(app->bufferGad,app->win,GA_Disabled,(ULONG)app->decodeThenPlay);
 #endif
 	UpdateFastMemGadgetState(app);
+	if (app->artValid && app->artColorEnabled && !app->artPensBuilt)
+		BuildArtColorPens(app);
 	DrawArtPanel(app);
 	WindowToFront(app->win);
 	ActivateWindow(app->win);
@@ -7263,6 +7290,11 @@ static void ShowAbout(MrApp *app)
 	EasyRequest(parent, &es, NULL, TAG_DONE);
 }
 
+#ifdef MINTAMP_SKIN
+static void MrSkinToClassic(MrApp *app);
+static void MrClassicToSkin(MrApp *app);
+#endif
+
 static void HandleMenu(MrApp *app, UWORD code, int *done)
 {
 	while (code != MENUNULL) {
@@ -7275,6 +7307,13 @@ static void HandleMenu(MrApp *app, UWORD code, int *done)
 			}
 			else if (mn == MENUNUM_PROJECT && it == 4)
 				mint_interface_preferences(app->win);
+#ifdef MINTAMP_SKIN
+			else if (mn == MENUNUM_PROJECT && it == ITEMNUM_CLASSIC) {
+				if (gSkinPlayer) MrSkinToClassic(app); else MrClassicToSkin(app);
+				SyncMenuChecks(app);
+				break;
+			}
+#endif
 			else if (mn == MENUNUM_PROJECT && it == ITEMNUM_RADIO)
 				OpenRadioWindow(app);
 			else if (mn == MENUNUM_PROJECT && it == ITEMNUM_ICONIFY)
@@ -7564,7 +7603,11 @@ static int MrMainReal(int argc, char **argv)
 	}
 
 #ifdef MINTAMP_SKIN
-	gSkinPlayer=skin_player_open("MintAMP-SR",argc,argv);
+	gSkinArgc=argc; gSkinArgv=argv;
+	if (mint_interface_start_skinned(argc,argv))
+		gSkinPlayer=skin_player_open("MintAMP-SR",argc,argv);
+	else
+		skin_player_restore_audio("MintAMP-SR");
 #endif
 	if (!MrOpenWindow(&app)) {
 		SyncFromGadgets(&app);
@@ -7757,6 +7800,7 @@ static int MrMainReal(int argc, char **argv)
 
 #ifdef MINTAMP_SKIN
 	skin_player_close(gSkinPlayer); gSkinPlayer=NULL;
+	skin_player_shutdown();
 #endif
 	SyncFromGadgets(&app);
 	SaveSettings(&app);

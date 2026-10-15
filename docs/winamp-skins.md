@@ -1,12 +1,15 @@
 # MintAMP classic Winamp skin editions
 
-MintAMP-SGT uses GadTools utility windows; MintAMP-SR uses ReAction/ClassAct
-utility windows. Both share the skinned Intuition player, playlist and EQ.
-Playback, decoders, Internet radio, favourites, artwork and native settings
-remain owned by the established frontend/backend. MintAMP and MintAMP-GT
-remain supported native frontends. MintAMP-Launch provides one installation
-entry point with Native (default) and Classic skin appearance choices. This is partial classic Winamp 2.x
-parity, not a Windows audio engine or plug-in host.
+MintAMP 2.0 opens **skinned first**. A ticked menu item, **Classic interface**,
+switches the running player to the classic MintAMP window and back again,
+without stopping playback. MintAMP-SGT uses GadTools utility windows;
+MintAMP-SR uses ReAction/ClassAct utility windows. Both contain the skinned
+Intuition player, playlist, EQ and artwork windows *and* the complete classic
+MintAMP window. Playback, decoders, Internet radio, favourites, artwork and
+settings remain owned by the established frontend/backend. MintAMP and
+MintAMP-GT remain supported classic-only builds (smaller, no skin code).
+This is partial classic Winamp 2.x parity, not a Windows audio engine or
+plug-in host.
 
 ## Build and install
 
@@ -52,52 +55,73 @@ Workbench tooltypes are `SKIN=Work:Skins/MintAMP-mintleaf.wsz` and `DOUBLESIZE=Y
 Normal/double sizes are 275x116 and 550x232. Scaling covers artwork, hit testing,
 EQ, playlist and text. Oversized windows/scales are refused or fall back.
 
-## Unified next-launch interface
+## Skin or Classic: one player, a tick in the menu
 
-Start `MintAMP-Launch` from Workbench or Shell. It dispatches to the unchanged
-frontend names; those executables and their older icons remain directly usable.
-The launcher loads the selected sibling executable and creates a CLI process
-with copied arguments, inherited installation PROGDIR and owned NIL IO handles.
-It does not evaluate a shell command or stay resident.
+Start `MintAMP-Launch` (or the MintAMP-SR / MintAMP-SGT icon). The skin opens
+first by default. To use the classic MintAMP window instead:
 
-| GUI | MODE | Internal frontend |
-| --- | --- | --- |
-| REACTION | NATIVE | MintAMP (default) |
-| GADTOOLS | NATIVE | MintAMP-GT |
-| REACTION | SKINNED | MintAMP-SR |
-| GADTOOLS | SKINNED | MintAMP-SGT |
+- **Skin → Classic:** right-click the skin, *MintAMP ▸ Classic interface*.
+  The skin windows close and the classic MintAMP window becomes the main
+  interface (its close gadget now quits).
+- **Classic → Skin:** untick *Project ▸ Classic interface* in the classic
+  window. The skin reopens with its saved skin, size, positions, playlist,
+  EQ and artwork windows, and the classic window hides.
+- The skinned *Settings...* item still shows the same classic window as a
+  settings window; ticking *Classic interface* there keeps it open as the
+  main interface.
 
-Workbench ToolTypes: `GUI=REACTION`/`GADTOOLS`, `MODE=NATIVE`/`SKINNED`,
+Playback, the playlist, the radio browser and native playlist windows carry
+on across a switch. Pending pause is released when moving to Classic, which
+has no pause control. Balance and MP3 EQ chosen in the skin stay in effect in
+Classic (and are restored at a Classic start), matching Winamp's behaviour of
+keeping DSP independent of the skin. The choice is remembered for the next
+launch (ENV immediately, ENVARC on clean exit after audio retirement), and a
+failed skin load or window open keeps the interface that is already visible.
+
+### Launcher, ToolTypes and precedence
+
+`MintAMP-Launch` dispatches to MintAMP-SR (ReAction) or MintAMP-SGT (GadTools)
+for both appearances, always passing `--skinned` or `--classic`. It loads the
+sibling executable and creates a CLI process with copied arguments, inherited
+installation PROGDIR and owned NIL IO handles. It does not evaluate a shell
+command or stay resident.
+
+| GUI | MODE | Edition | Opens with |
+| --- | --- | --- | --- |
+| REACTION | SKINNED | MintAMP-SR | Skin (default) |
+| REACTION | CLASSIC | MintAMP-SR | Classic MintAMP window |
+| GADTOOLS | SKINNED | MintAMP-SGT | Skin |
+| GADTOOLS | CLASSIC | MintAMP-SGT | Classic MintAMP window |
+
+`MODE=NATIVE`, the 2.0-dev spelling, is accepted as `CLASSIC`. MintAMP and
+MintAMP-GT are not launched by MintAMP-Launch; start them directly for the
+smallest classic-only footprint.
+
+Workbench ToolTypes: `GUI=REACTION`/`GADTOOLS`, `MODE=SKINNED`/`CLASSIC`,
 `SKIN=PROGDIR:Skins/MintAMP-mintleaf.wsz`, `DOUBLESIZE=YES`/`NO`.
 The main launcher icon contains **disabled** examples in parentheses; remove
-parentheses only to force an option. Values are case-insensitive. SKIN sets the
-skin path; MODE selects whether that path is used. A SKIN ToolType alone does
-not force a native launcher into skinned mode.
+parentheses only to force an option. Values are case-insensitive.
 
 ```text
-MintAMP-Launch --gui GADTOOLS --mode SKINNED --skin "Work:Skins/My skin.wsz" --normal
+MintAMP-Launch --gui GADTOOLS --classic
 MintAMP-Launch Music:track.mp3 GUI=REACTION MODE=SKINNED DOUBLESIZE=YES
+MintAMP-SR Music:track.mp3 --classic
 MintAMP-Launch --prefs
 ```
 
-Field-by-field precedence is **CLI > launcher ToolTypes > shared MintAMP2
-preferences > defaults**. Defaults are ReAction, Native, normal size and the
-bundled mint-leaf path. Only explicitly supplied/saved skin or scale choices
-are forwarded, letting old skin editions' per-edition Skin/Scale preferences
-remain effective when no shared override exists. On direct skin launches the
-existing CLI > own icon ToolTypes > per-edition Skin/Scale > bundled default
-order is retained; `--normal` explicitly overrides a saved double-size choice.
-Workbench shifted audio/playlist paths resolve from their own directory lock.
-Only one startup file is forwarded, as with the established frontend launch.
+Field-by-field precedence is **CLI > ToolTypes > shared MintAMP2 preferences >
+defaults** (ReAction, skinned, normal size, bundled mint-leaf). A direct
+MintAMP-SR/SGT start reads its own icon's `MODE` ToolType and accepts
+`--skinned`, `--classic`, `--mode VALUE` or `MODE=VALUE`. Skin/scale options
+apply to the first skin opened in a run, even after a Classic start; later
+Classic → Skin switches reuse the per-edition saved skin so a skin loaded in
+the meantime is kept. Workbench shifted audio/playlist paths resolve from
+their own directory lock. Only one startup file is forwarded.
 
-Every frontend has **Interface preferences...** in its Project/player menu.
-Choose framework, appearance and size for the next MintAMP-Launch invocation.
-Playback continues; switching the running frontend is not required. `Load skin`
-in a skinned player also updates the shared skin/scale choice for later launcher
-runs. Explicit icon/CLI options still win. ENV RAM preferences change immediately;
-ENVARC disk persistence occurs on clean shutdown after audio retirement. The
-standalone `--prefs` command saves immediately. A forced exit can lose the latest
-disk preferences. Existing native audio/favourite settings are not migrated.
+Every frontend has **Interface preferences...** in its Project/player menu to
+choose the framework, appearance and size for the next launch. Explicit
+icon/CLI options still win. The standalone `--prefs` command saves
+immediately. A forced exit can lose the latest disk preferences.
 
 ## Main controls
 
@@ -114,6 +138,14 @@ disk preferences. Existing native audio/favourite settings are not migrated.
 | Position | Drag a preview, seek on release; only an unpaused local MP3 with known duration |
 | Timer | Click to toggle elapsed/remaining; remaining requires a known duration |
 | Eject / O | Existing native audio/playlist requester |
+| U / menu Open stream URL | HTTP/HTTPS URL requester; stops the current input, then plays the stream |
+| I / menu File info | Title, artist, album, track, genre and format; station, ICY title, bitrate and URL for radio |
+| Left / Right | Seek 5 s (same unpaused local MP3 rule as the position bar) |
+| Up / Down | Volume up/down 5% |
+| A / menu Artwork | Toggle the artwork window |
+| Menu Audio filter | Tick toggles the Amiga low-pass filter/power LED, shared with the classic FLT control |
+| Minimise button / menu Iconify | Close all skin windows to a Workbench AppIcon; double-click it to restore them. Playback continues |
+| Menu Classic interface | Switch live to the classic MintAMP window (see above) |
 | EQ / E | Toggle the skinned equaliser |
 | PL / P | Toggle the compact playlist, with native fallback |
 | T / menu Settings | Existing native settings and utility window |
@@ -123,9 +155,17 @@ disk preferences. Existing native audio/favourite settings are not migrated.
 | Menu Visual rate | 1, 2 or 4 analysis updates per second |
 | Menu Playback statistics | Buffer length, spare time, underruns, radio buffered bytes and source/output details; optional title-line overlay |
 | S / menu Load skin | Transactional skin replacement |
-| D / upper-right size button | Normal/double size |
+| D / menu Double size | Normal/double size (ticked while doubled) |
 | W / shade button | Main windowshade; graphics and visual analysis stop while shaded |
 | Close / menu Quit / Ctrl-C | Stop and quit |
+
+Right-click any skin window except the EQ for three menus: **MintAMP**
+(open audio/stream, radio, file info, settings, interface preferences,
+Classic interface, iconify, about, quit), **Windows** (playlist, full
+playlist options, equaliser, artwork, load skin, double size; visible windows
+are ticked) and **Options** (visualisation, visual rate, audio filter,
+playback statistics). The main title shows `Artist - Title` when both tags
+are known.
 
 The GadTools radio browser opens on the player's public screen and shortens
 its results list to fit 256-line screens. It requires at least 548x200; screen
@@ -265,11 +305,23 @@ on an Amiga: leave EQ/visualisation off until measured on the target system.
 No claim of stutter-free enabled DSP/visualisation on a 68060 is made from host
 tests alone. Native editions do not compile these new audio hooks.
 
+## Artwork window
+
+Album art and radio station logos decoded by the frontend appear in a 74x74
+(148x148 doubled) borderless window framed with the playlist's PLEDIT.TXT
+colours. It docks and snaps with the main, playlist and EQ windows, drags from
+anywhere, and has the same right-button menus. Missing art shows `NO ART`, a
+station without a usable logo `RADIO / NO LOGO`, and a decode in progress
+`LOADING` (GadTools). The frontend's 64x64 RGB buffer is only hashed while
+the window is open, at the GUI tick rate; pens come from the skin's shared
+pen cache and are released with the skin. Artwork/colour artwork options and
+cache controls remain in the classic window's Playback menu.
+
 ## Windows and persistence
 
-Nearby main/EQ/playlist edges snap on release (eight scaled pixels). Docked
+Nearby main/EQ/playlist/artwork edges snap on release (eight scaled pixels). Docked
 windows move together; Ctrl-drag moves one window to detach it. Moves are
-bounded to the screen. Positions, visibility, main shade, shuffle/repeat,
+bounded to the screen. Positions, visibility (including artwork), main shade, shuffle/repeat,
 balance, time mode, EQ, visual rate/mode and debug overlay persist in each
 edition's separate `ENV:/ENVARC:` State variable, alongside Skin/Scale. Native
 audio settings and favourites keep their established storage. Restored

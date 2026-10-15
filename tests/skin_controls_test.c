@@ -143,5 +143,11 @@ static void window_tests(void)
     CHECK(skin_window_group(r,3,0,2)==1);
     skin_window_snap(r,3,0,1,8,&dx,&dy); CHECK(dx==0 && dy==6);
     r[1].w=0; skin_window_snap(r,3,0,1,8,&dx,&dy); CHECK(dx==0 && dy==0);
+    { /* Artwork docks beside the main window as the fourth group member. */
+      SkinRect a[4]={{20,20,275,116},{20,136,275,232},{0,0,0,0},{295,20,74,74}};
+      CHECK(skin_window_group(a,4,0,2)==11); CHECK(skin_window_group(a,4,3,2)==11);
+      a[3].x=301; CHECK(skin_window_group(a,4,0,2)==3);
+      skin_window_snap(a,4,3,8,8,&dx,&dy); CHECK(dx==-6 && dy==0);
+      CHECK(skin_window_group(a,5,0,2)==0); }
 }
 int main(void) { order_tests(); block_move_tests(); pending_order_tests(); list_tests(); audio_tests(); window_tests(); clock_tests(); puts("Skin controls: order/history, shared list/selection, balance, EQ bypass/headroom, spectrum and mapping passed"); return 0; }

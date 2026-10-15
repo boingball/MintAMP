@@ -13,15 +13,19 @@ Use the MintAMP-2.0-dev-68030 or MintAMP-2.0-dev-68060 drawer appropriate to
 your processor. Keep its decoder modules and Skins drawer with the players.
 This is a development build awaiting real-hardware acceptance.
 
-Double-click MintAMP-Launch for the default native ReAction interface.
-Use Project / Interface preferences to select ReAction or GadTools and
-Native or Classic skin for subsequent launches through MintAMP-Launch.
-The running decoder is left alone; no live frontend switch is required.
-You can also run MintAMP-Launch --prefs from a Shell.
+Double-click MintAMP-Launch: the bundled mint-leaf skin opens first.
+Right-click the skin and tick MintAMP / Classic interface to switch the
+running player to the classic MintAMP window; untick Project / Classic
+interface there to return to the skin. Playback continues either way and
+the choice is remembered for the next launch.
+
+Use Interface preferences in either interface to choose ReAction or
+GadTools and Skin or Classic for subsequent launches, or run
+MintAMP-Launch --prefs from a Shell.
 
 The launcher icon includes disabled examples of these ToolTypes:
   (GUI=REACTION)
-  (MODE=NATIVE)
+  (MODE=CLASSIC)
   (SKIN=PROGDIR:Skins/MintAMP-mintleaf.wsz)
   (DOUBLESIZE=NO)
 
@@ -29,14 +33,16 @@ Remove parentheses to force a setting. Explicit CLI arguments override
 ToolTypes, which override saved preferences, which override defaults.
 Leave examples disabled for the saved GUI/appearance preferences to work.
 
-The bundled mint-leaf skin opens by default when the skinned appearance is
-selected. Load skin from the player's menu to change it. Spectrum and MP3 EQ
-are optional and initially off. Native utility windows remain accessible.
+The skin covers MintAMP's features: files, playlists, stream URLs, Internet
+radio and favourites, file/stream info, artwork window, seek and volume keys,
+audio filter, iconify, MP3 EQ, balance and spectrum (EQ/spectrum start off).
+Settings opens the same classic settings window in both interfaces.
 
-The four original launch methods remain available:
-  MintAMP       Native ReAction       MintAMP-GT   Native GadTools
-  MintAMP-SR    Skinned ReAction      MintAMP-SGT  Skinned GadTools
-  amiga_mp3dec.fastexp                Command-line player
+Launch methods:
+  MintAMP-Launch  Skin first, Classic on a tick (ReAction or GadTools)
+  MintAMP-SR      Skin/Classic ReAction    MintAMP-SGT  Skin/Classic GadTools
+  MintAMP         Classic-only ReAction    MintAMP-GT   Classic-only GadTools
+  amiga_mp3dec.fastexp                     Command-line player
 
 Details: Skins/ReadMe, docs/winamp-skins.md and the hardware acceptance checklist.
 No Winamp Windows DLL plug-ins, modern WAL skins or all-format biquad EQ.
