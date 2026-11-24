@@ -302,7 +302,13 @@ static void MrSkinPoll(MrApp *app,int *done)
         case SKIN_SETTING_CHANGE: MrSkinSettingChange(app,e.value,e.target); break;
         case SKIN_BROWSE:
             skin_player_order_cancel(gSkinPlayer);
-            gSkinPendingTrack=-1; BrowseForFile(app); break;
+            gSkinPendingTrack=-1;
+            /* As in Winamp, Eject plays the chosen file (a playlist only loads). */
+            if (BrowseForFile(app) && app->inputName[0] && !app->playbackActive && !app->playbackDonePending) {
+                if (app->win) SyncFromGadgets(app);
+                StartPlayback(app);
+            }
+            break;
         case SKIN_PLAY:
             if (gSkinAudio.pause_requested || gSkinAudio.paused) { skin_player_wake("MintAMP playback",0); break; }
             if (app->playbackActive) break;

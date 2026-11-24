@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
+#include <math.h>
 #define CHECK(x) do { if (!(x)) { fprintf(stderr,"line %d: %s\n",__LINE__,#x); exit(1); } } while (0)
 static void order_tests(void)
 {
@@ -95,16 +96,36 @@ static void block_move_tests(void)
             if (expected[i]==from) CHECK(selected==i && s.focus==i);
         }
     }
-    { unsigned char levels[16]={12},peaks[16]={0},hold[16]={0};
-      skin_visual_peaks(levels,peaks,hold); CHECK(peaks[0]==12);
-      levels[0]=0; skin_visual_peaks(levels,peaks,hold); CHECK(peaks[0]==12);
-      skin_visual_peaks(levels,peaks,hold); skin_visual_peaks(levels,peaks,hold); CHECK(peaks[0]==11);
-      for (mask=0;mask<30;++mask) skin_visual_peaks(levels,peaks,hold);
-      CHECK(!peaks[0]); }
+    { SkinVisualDecay d; unsigned char target[SKIN_VIS_BARS]={12},levels[SKIN_VIS_BARS],peaks[SKIN_VIS_BARS];
+      memset(&d,0,sizeof(d));
+      skin_visual_decay(&d,target,levels,peaks,50); CHECK(levels[0]==12 && peaks[0]==12);
+      target[0]=0; skin_visual_decay(&d,target,levels,peaks,100); CHECK(levels[0]<12 && levels[0]>=7 && peaks[0]==12);
+      skin_visual_decay(&d,target,levels,peaks,400); CHECK(levels[0]==0 && peaks[0]==12);
+      skin_visual_decay(&d,target,levels,peaks,200); CHECK(peaks[0]<12 && peaks[0]>0);
+      for (mask=0;mask<30;++mask) skin_visual_decay(&d,target,levels,peaks,100);
+      CHECK(!peaks[0] && !levels[0]);
+      /* Frame-rate independence: 4 x 50 ms falls as far as 1 x 200 ms. */
+      { SkinVisualDecay a,b; unsigned char full[SKIN_VIS_BARS],zero[SKIN_VIS_BARS],la[SKIN_VIS_BARS],lb[SKIN_VIS_BARS];
+        memset(&a,0,sizeof(a)); memset(full,16,sizeof(full)); memset(zero,0,sizeof(zero));
+        skin_visual_decay(&a,full,la,peaks,50); b=a;
+        for (mask=0;mask<4;++mask) skin_visual_decay(&a,zero,la,peaks,50);
+        skin_visual_decay(&b,zero,lb,peaks,200); CHECK(la[0]>=lb[0]-1 && la[0]<=lb[0]+1); } }
+    { SkinVisualSlot slots[3]; unsigned long off=0; static const signed char pcm[4];
+      memset(slots,0,sizeof(slots));
+      CHECK(skin_visual_pick(slots,3,1000,&off)<0);
+      slots[1].left=slots[1].right=pcm; slots[1].bytes=22050; slots[1].start_ms=1000; slots[1].length_ms=1000;
+      slots[2].left=slots[2].right=pcm; slots[2].bytes=22050; slots[2].start_ms=2000; slots[2].length_ms=1000;
+      CHECK(skin_visual_pick(slots,3,999,&off)<0);
+      CHECK(skin_visual_pick(slots,3,1500,&off)==1 && off==11025);
+      CHECK(skin_visual_pick(slots,3,2000,&off)==2 && off==0);
+      CHECK(skin_visual_pick(slots,3,3000,&off)<0);
+      /* The shared clock wraps. */
+      slots[0].left=slots[0].right=pcm; slots[0].bytes=1000; slots[0].start_ms=0xffffff00UL; slots[0].length_ms=1000;
+      CHECK(skin_visual_pick(slots,1,0x100UL,&off)==0 && off==512); }
 }
 static void audio_tests(void)
 {
-    int spectrum[576],copy[576],i; signed char pcm[64]; unsigned char levels[16];
+    int spectrum[576],copy[576],i; signed char pcm[256]; unsigned char levels[SKIN_VIS_BARS];
     CHECK(skin_balance_volume(100,100,0)==0 && skin_balance_volume(100,100,1)==100);
     CHECK(skin_balance_volume(100,-100,0)==100 && skin_balance_volume(100,-100,1)==0);
     CHECK(skin_balance_volume(50,50,0)==25 && skin_balance_volume(50,50,1)==50);
@@ -115,10 +136,22 @@ static void audio_tests(void)
     gSkinAudio.eq_bands[3]=-12; ++gSkinAudio.eq_sequence; CHECK(skin_eq_apply(spectrum,576,44100));
     CHECK(abs(spectrum[12])<abs(copy[12])/2 && spectrum[200]==copy[200]);
     CHECK(!skin_eq_apply(spectrum,577,44100));
-    memset(pcm,0,64); skin_visual_analyse(pcm,levels); for (i=0;i<16;++i) CHECK(levels[i]==0);
-    for (i=0;i<64;++i) pcm[i]=(signed char)((i/4)%2 ? -127 : 127);
-    skin_visual_analyse(pcm,levels); CHECK(levels[7]>levels[0] && levels[7]>0);
-    for (i=0;i<16;++i) CHECK(levels[i]<=15);
+    memset(pcm,0,sizeof(pcm)); skin_visual_spectrum(pcm,levels); for (i=0;i<SKIN_VIS_BARS;++i) CHECK(levels[i]==0);
+    /* A sine lights the bar that holds its bin and leaves distant bars dark. */
+    { static const int bin[]={1,5,12,40,110}; static const int bar[]={0,4,9,14,18}; int t2;
+      for (t2=0;t2<5;++t2) {
+        int best=0;
+        for (i=0;i<256;++i) pcm[i]=(signed char)(100.0*sin(2.0*3.14159265358979*bin[t2]*i/256.0));
+        skin_visual_spectrum(pcm,levels);
+        for (i=1;i<SKIN_VIS_BARS;++i) if (levels[i]>levels[best]) best=i;
+        CHECK(levels[bar[t2]]==levels[best] && levels[best]>=12); best=bar[t2];
+        for (i=0;i<SKIN_VIS_BARS;++i) CHECK(levels[i]<=SKIN_VIS_HEIGHT && ((i>best-3 && i<best+3) || levels[i]+6<=levels[best])); } }
+    for (i=0;i<256;++i) pcm[i]=(signed char)(i&1 ? -128 : 127);
+    skin_visual_spectrum(pcm,levels); for (i=0;i<SKIN_VIS_BARS;++i) CHECK(levels[i]<=SKIN_VIS_HEIGHT);
+    { unsigned char rows[SKIN_VIS_WIDTH];
+      memset(pcm,0,sizeof(pcm)); skin_visual_scope(pcm,rows); for (i=0;i<SKIN_VIS_WIDTH;++i) CHECK(rows[i]==7);
+      memset(pcm,127,sizeof(pcm)); skin_visual_scope(pcm,rows); CHECK(rows[0]==0);
+      memset(pcm,-128,sizeof(pcm)); skin_visual_scope(pcm,rows); CHECK(rows[75]==15); }
     CHECK(skin_hit_test(65,90)==SKIN_PAUSE && skin_hit_test(190,60)==SKIN_BALANCE_SET);
     CHECK(skin_hit_test(170,95)==SKIN_SHUFFLE && skin_hit_test(215,95)==SKIN_REPEAT);
     CHECK(skin_hit_test(55,30)==SKIN_TIMER && skin_hit_test(50,50)==SKIN_VISUAL);

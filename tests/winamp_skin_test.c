@@ -110,12 +110,12 @@ int main(int argc,char **argv)
         state.elapsed=5999; state.total=6000; state.volume=0; state.scroll=7;
         state.pressed=SKIN_VOLUME_SET; state.playing=0; state.mono=1;
         state.balance=-100; state.shuffle=1; state.repeat=2; state.remaining=1; state.paused=1;
-        state.visual_mode=1; for (i=0;i<16;++i) state.levels[i]=i;
+        state.visual_mode=1; for (i=0;i<19;++i) { state.levels[i]=(unsigned char)(i%17); state.peaks[i]=(unsigned char)(i%17+(i&1)); }
         skin_render(&skin,&state,&old,blit,fill,c);
         memcpy(full,c->pixels,sizeof(c->pixels));
         skin_render(&skin,&state,NULL,blit,fill,c);
         assert(!memcmp(full,c->pixels,sizeof(c->pixels)));
-        old=state; state.visual_mode=2; for (i=0;i<64;++i) state.scope[i]=(signed char)(i*4-128);
+        old=state; state.visual_mode=2; for (i=0;i<76;++i) state.scope[i]=(unsigned char)((i*5)%16);
         skin_render(&skin,&state,&old,blit,fill,c); memcpy(full,c->pixels,sizeof(c->pixels));
         skin_render(&skin,&state,NULL,blit,fill,c); assert(!memcmp(full,c->pixels,sizeof(c->pixels)));
         assert(skin_hit_test(39,88)==SKIN_PLAY);

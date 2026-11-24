@@ -125,7 +125,12 @@ struct SkinPlayer {
     int pl_left,pl_top,eq_left,eq_top,pl_position,eq_position;
     int move_row,move_target,move_active,move_edge,collapse_selection;
     int pl_shaded,eq_shaded,state_dirty,choice_dirty;
-    unsigned char peak_hold[16];
+    /* Visualiser: decay state, off-screen 76x16 area (one blit per frame),
+     * tick length and the 250 ms clock for scrolling and notices. */
+    SkinVisualDecay vis_decay;
+    struct BitMap *vis_bm; struct RastPort vis_rp;
+    int vis_scale,vis_modern,vis_drawing,tick_ms,slow_ms;
+    unsigned long vis_last_ms;
     int saved_left,saved_top,restore_playlist,restore_eq;
     unsigned drag_group;
     /* Coalesced group drag: expected window positions and the not yet
@@ -220,6 +225,57 @@ static LONG color_pen(SkinPlayer *p,SkinResources *r,unsigned rgb)
     if (pen<0) pen=0;
     r->pens[key]=pen; return pen;
 }
+static unsigned rgb_luma(unsigned rgb)
+{ return (((rgb>>16)&255)*299U+((rgb>>8)&255)*587U+(rgb&255)*114U)/1000U; }
+static unsigned pen_rgb(SkinPlayer *p,LONG pen)
+{
+    struct ColorMap *cm=p->screen->ViewPort.ColorMap;
+    if (GfxBase->LibNode.lib_Version>=39) {
+        ULONG c[3]; GetRGB32(cm,(ULONG)pen,1,c);
+        return (unsigned)(((c[0]>>24)<<16)|((c[1]>>24)<<8)|(c[2]>>24));
+    } else {
+        ULONG c=GetRGB4(cm,pen);
+        return (unsigned)((((c>>8)&15)*17)<<16|(((c>>4)&15)*17)<<8|(c&15)*17);
+    }
+}
+/* On a low-colour screen two skin colours of clearly different brightness
+ * can land on one pen: mintleaf's green text and its black backdrop both
+ * become black on a 4-colour Workbench, and the display goes blank. Such a
+ * foreground takes the nearest other pen instead. Deep screens obtain
+ * distinct pens, so this never triggers there. */
+static unsigned last_rgb=~0U,last_bg=~0U; static LONG last_pen=-1; static SkinResources *last_r;
+static LONG contrast_pen(SkinPlayer *p,SkinResources *r,unsigned rgb,unsigned bg)
+{
+    LONG pen=color_pen(p,r,rgb),back,best; unsigned long best_distance=~0UL;
+    int luma=(int)rgb_luma(rgb)-(int)rgb_luma(bg); unsigned count,i;
+    if (luma<48 && luma>-48) return pen;
+    back=color_pen(p,r,bg);
+    if (pen!=back) return pen;
+    if (last_r==r && last_rgb==rgb && last_bg==bg) return last_pen;
+    count=1U<<(p->screen->RastPort.BitMap->Depth>8 ? 8 : p->screen->RastPort.BitMap->Depth);
+    if (count>(unsigned)p->screen->ViewPort.ColorMap->Count) count=p->screen->ViewPort.ColorMap->Count;
+    best=pen;
+    for (i=0;i<count;++i) if ((LONG)i!=back) {
+        unsigned c=pen_rgb(p,(LONG)i);
+        long dr=(long)((rgb>>16)&255)-(long)((c>>16)&255), dg=(long)((rgb>>8)&255)-(long)((c>>8)&255), db=(long)(rgb&255)-(long)(c&255);
+        unsigned long distance=(unsigned long)(dr*dr+dg*dg+db*db);
+        if (distance<best_distance) { best_distance=distance; best=(LONG)i; }
+    }
+    last_r=r; last_rgb=rgb; last_bg=bg; last_pen=best;
+    return best;
+}
+/* The colour most pixels of an asset share: its backdrop. */
+static unsigned asset_background(const SkinBitmap *b)
+{
+    static unsigned long counts[4096]; unsigned long n=(unsigned long)b->width*b->height,i,best=0;
+    unsigned key,best_key=0; const unsigned char *px=b->rgb;
+    memset(counts,0,sizeof(counts));
+    for (i=0;i<n;++i,px+=3) {
+        key=((unsigned)(px[0]>>4)<<8)|((unsigned)(px[1]>>4)<<4)|(px[2]>>4);
+        if (++counts[key]>best) { best=counts[key]; best_key=key; }
+    }
+    return ((best_key>>8)*17U)<<16|(((best_key>>4)&15)*17U)<<8|(best_key&15)*17U;
+}
 static void free_resources(SkinPlayer *p,SkinResources *r)
 {
     int i,j;
@@ -240,9 +296,9 @@ static void free_resources(SkinPlayer *p,SkinResources *r)
 static SkinResources *load_resources(SkinPlayer *p,const char *path,int scale,char *error)
 {
     SkinResources *r=(SkinResources *)calloc(1,sizeof(*r));
-    int i,j; unsigned x,y,depth=p->screen->RastPort.BitMap->Depth;
+    int i,j; unsigned x,y,bg,depth=p->screen->RastPort.BitMap->Depth;
     if (!r) { strcpy(error,"Not enough memory for skin"); return NULL; }
-    r->scale=scale;
+    r->scale=scale; last_r=NULL;
     for (i=0;i<4096;++i) r->pens[i]=-1;
     if (!skin_load_file(&r->skin,path,error,160)) { free(r); return NULL; }
     for (i=0;i<SKIN_ASSET_COUNT;++i) if (r->skin.assets[i].rgb) {
@@ -265,6 +321,7 @@ static SkinResources *load_resources(SkinPlayer *p,const char *path,int scale,ch
         }
         if (!r->bitmaps[i]) goto no_memory;
         InitRastPort(&rp); rp.BitMap=r->bitmaps[i]; SetDrMd(&rp,JAM1);
+        bg=i==SKIN_VISBAR ? r->skin.visual_colors[0] : asset_background(b);
         /* Paint equal-colour runs once, rather than decoding/converting any
          * images in the playback loop. Blits later copy tiny changed areas. */
         for (y=0;y<b->height;++y) {
@@ -273,11 +330,11 @@ static SkinResources *load_resources(SkinPlayer *p,const char *path,int scale,ch
                 unsigned start=x, rgb; LONG pen;
                 const unsigned char *pixel=b->rgb+((size_t)y*b->width+x)*3;
                 rgb=((unsigned)pixel[0]<<16)|((unsigned)pixel[1]<<8)|pixel[2];
-                pen=color_pen(p,r,rgb); ++x;
+                pen=contrast_pen(p,r,rgb,bg); ++x;
                 while (x<b->width) {
                     pixel=b->rgb+((size_t)y*b->width+x)*3;
                     rgb=((unsigned)pixel[0]<<16)|((unsigned)pixel[1]<<8)|pixel[2];
-                    if (color_pen(p,r,rgb)!=pen) break;
+                    if (contrast_pen(p,r,rgb,bg)!=pen) break;
                     ++x;
                 }
                 SetAPen(&rp,(ULONG)pen);
@@ -292,14 +349,23 @@ no_memory:
 static void blit(void *ctx,int id,int sx,int sy,int w,int h,int x,int y)
 {
     SkinPlayer *p=(SkinPlayer *)ctx; int s=p->resources->scale;
+    if (p->vis_drawing) {
+        if (p->resources->bitmaps[id])
+            BltBitMapRastPort(p->resources->bitmaps[id],sx*s,sy*s,&p->vis_rp,(x-24)*s,(y-43)*s,w*s,h*s,0xc0);
+        return;
+    }
     if (p->target && p->resources->bitmaps[id])
         BltBitMapRastPort(p->resources->bitmaps[id],sx*s,sy*s,p->target->RPort,x*s,y*s,w*s,h*s,0xc0);
 }
 static void fill(void *ctx,unsigned rgb,int x,int y,int w,int h)
 {
     SkinPlayer *p=(SkinPlayer *)ctx; int s=p->resources->scale;
-    SetAPen(p->target->RPort,(ULONG)color_pen(p,p->resources,rgb));
-    RectFill(p->target->RPort,x*s,y*s,(x+w)*s-1,(y+h)*s-1);
+    struct RastPort *rp=p->vis_drawing ? &p->vis_rp : p->target->RPort;
+    if (p->vis_drawing) { x-=24; y-=43; }
+    /* Peaks and scope traces stay visible against the visualiser backdrop. */
+    SetAPen(rp,(ULONG)(p->vis_drawing ? contrast_pen(p,p->resources,rgb,p->resources->skin.visual_colors[0])
+                                      : color_pen(p,p->resources,rgb)));
+    RectFill(rp,x*s,y*s,(x+w)*s-1,(y+h)*s-1);
 }
 #define SKIN_WINDOWS SKIN_WINDOW_MAX
 static void window_list(SkinPlayer *p,struct Window **windows)
@@ -464,7 +530,7 @@ static void playlist_label(void *ctx,const char *text,unsigned rgb,unsigned bg,i
     for (i=0;i<n;++i) line[i]=(unsigned char)text[i]<32 ? ' ' : text[i];
     InitRastPort(&rp); rp.BitMap=p->text_source; SetFont(&rp,p->playlist_font);
     SetAPen(&rp,(ULONG)color_pen(p,p->resources,bg)); RectFill(&rp,0,0,242,7);
-    SetDrMd(&rp,JAM1); SetAPen(&rp,(ULONG)color_pen(p,p->resources,rgb));
+    SetDrMd(&rp,JAM1); SetAPen(&rp,(ULONG)contrast_pen(p,p->resources,rgb,bg));
     Move(&rp,0,p->playlist_font->tf_Baseline); Text(&rp,line,n);
     if (scale==2) {
         memset(&args,0,sizeof(args));
@@ -730,7 +796,7 @@ static void save_state(SkinPlayer *p)
     if (p->plwin) { p->pl_left=p->plwin->LeftEdge; p->pl_top=p->plwin->TopEdge; p->pl_position=1; }
     if (p->eqwin) { p->eq_left=p->eqwin->LeftEdge; p->eq_top=p->eqwin->TopEdge; p->eq_position=1; }
     if (p->artwin) { p->art_left=p->artwin->LeftEdge; p->art_top=p->artwin->TopEdge; p->art_position=1; }
-    n=snprintf(text,sizeof(text),"4 %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d",
+    n=snprintf(text,sizeof(text),"5 %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d",
         p->win->LeftEdge,p->win->TopEdge,p->pl_left,p->pl_top,p->eq_left,p->eq_top,
         p->sequence.order.shuffle,p->sequence.order.repeat,gSkinAudio.balance,p->remaining,p->shaded,
         p->visual_mode,p->visual_interval,p->debug,gSkinAudio.eq_enabled,gSkinAudio.eq_preamp);
@@ -743,19 +809,24 @@ static void save_state(SkinPlayer *p)
 static void restore_state(SkinPlayer *p)
 {
     char key[64],text[512],*at,*end; long v[27],extra[10]; int i,count;
-    p->saved_left=40; p->saved_top=30; p->visual_interval=2;
+    /* Spectrum on by default where the CPU has room for it (68040/060). */
+    int fast=(SysBase->AttnFlags&(AFF_68040|AFF_68060))!=0;
+    p->saved_left=40; p->saved_top=30; p->visual_interval=fast ? 3 : 2; p->visual_mode=fast ? 1 : 0;
     env_name(p,key,"State");
     if (GetVar(key,text,sizeof(text),GVF_GLOBAL_ONLY)<=0) return;
     text[sizeof(text)-1]=0; at=text;
     for (i=0;i<27;++i) { v[i]=strtol(at,&end,10); if (end==at || v[i]<-32768 || v[i]>32767) return; at=end; }
-    if (v[0]<1 || v[0]>4 || v[7]<0 || v[7]>1 || v[8]<0 || v[8]>2 || v[9]<-100 || v[9]>100 ||
+    if (v[0]<1 || v[0]>5 || v[7]<0 || v[7]>1 || v[8]<0 || v[8]>2 || v[9]<-100 || v[9]>100 ||
         v[12]<0 || v[12]>2 || v[13]<1 || v[13]>4 || v[16]<-12 || v[16]>12) return;
     for (i=17;i<27;++i) if (v[i]<-12 || v[i]>12) return;
     p->saved_left=(int)v[1]; p->saved_top=(int)v[2];
     p->pl_left=(int)v[3]; p->pl_top=(int)v[4]; p->eq_left=(int)v[5]; p->eq_top=(int)v[6];
     p->pl_position=p->eq_position=1; p->sequence.order.shuffle=(int)v[7]; p->sequence.order.repeat=(int)v[8];
     gSkinAudio.balance=(int)v[9]; p->remaining=v[10]!=0; p->shaded=v[11]!=0;
-    p->visual_mode=(int)v[12]; p->visual_interval=(int)v[13]; p->debug=0; /* former title overlay; the song title always stays */
+    p->visual_mode=(int)v[12]; p->debug=0;
+    /* Version 5 stores a rate code (5/10/20/25 Hz); older states held the
+     * former 1-4 Hz divider, so they keep the CPU default. */
+    if (v[0]>=5) p->visual_interval=(int)v[13]; /* former title overlay; the song title always stays */
     gSkinAudio.eq_enabled=v[15]!=0; gSkinAudio.eq_preamp=(int)v[16];
     for (i=0;i<10;++i) gSkinAudio.eq_bands[i]=(int)v[17+i];
     /* Version 2 adds visibility/positions, 3 shade states, 4 artwork. */
@@ -1494,42 +1565,161 @@ static int eq_poll(SkinPlayer *p)
     if (pending) eq_drag_to(p,pending_y);
     return 0;
 }
+static const int kVisualHz[5]={0,5,10,20,25};
+static int visual_hz(SkinPlayer *p) { return kVisualHz[p->visual_interval>=1 && p->visual_interval<=4 ? p->visual_interval : 2]; }
+static int visual_live(SkinPlayer *p) { return p->visual_mode && p->now.playing && !p->now.paused && !p->shaded; }
+/* Bars and peaks still falling after a pause or between tracks. */
+static int visual_settling(SkinPlayer *p)
+{
+    int i;
+    if (!p->visual_mode || p->shaded) return 0;
+    for (i=0;i<SKIN_VIS_BARS;++i) if (p->now.levels[i] || p->now.peaks[i]) return 1;
+    return 0;
+}
 static void visual_arm(SkinPlayer *p)
 {
+    int vis;
     if (!p->visual_device || p->visual_pending || !p->win) return;
     if (p->shaded && !(p->move_active && p->move_edge)) return;
-    if (!(p->move_active && p->move_edge) && !(strlen(p->now.title)>31 || p->notice_ticks || (p->visual_mode && p->now.playing && !p->now.paused))) return;
+    vis=visual_live(p) || visual_settling(p);
+    if (!(p->move_active && p->move_edge) && !(strlen(p->now.title)>31 || p->notice_ticks || vis ||
+          (p->now.playing && !p->now.paused))) return;
+    /* Scrolling and notices step every 250 ms; the visualiser ticks at its
+     * own rate and carries that 250 ms clock along. */
+    p->tick_ms=vis ? 1000/visual_hz(p) : 250;
     p->visual_timer->tr_node.io_Command=TR_ADDREQUEST;
     p->visual_timer->tr_time.tv_secs=0;
-    p->visual_timer->tr_time.tv_micro=250000;
-    if (p->visual_timer->tr_time.tv_micro>=1000000) {
-        p->visual_timer->tr_time.tv_secs=1; p->visual_timer->tr_time.tv_micro=0;
-    }
+    p->visual_timer->tr_time.tv_micro=(ULONG)p->tick_ms*1000UL;
     SendIO((struct IORequest *)p->visual_timer); p->visual_pending=1;
+}
+static void visual_clear(SkinPlayer *p)
+{
+    memset(p->now.levels,0,sizeof(p->now.levels)); memset(p->now.peaks,0,sizeof(p->now.peaks));
+    memset(p->now.scope,7,sizeof(p->now.scope)); memset(&p->vis_decay,0,sizeof(p->vis_decay));
+}
+/* Copy the samples audible right now out of the playing buffer. The
+ * playback child withdraws buffers under Forbid() before freeing them, so
+ * the copy (512 byte reads) is made under Forbid() too. */
+static int visual_capture(signed char *pcm)
+{
+    unsigned long now=skin_now_ms(), offset=0; int slot,i;
+    Forbid();
+    slot=skin_visual_pick(gSkinAudio.visual_slot,3,now,&offset);
+    if (slot>=0 && gSkinAudio.visual_slot[slot].bytes>=SKIN_VIS_SAMPLES) {
+        const SkinVisualSlot *v=&gSkinAudio.visual_slot[slot];
+        unsigned long first=offset>SKIN_VIS_SAMPLES/2 ? offset-SKIN_VIS_SAMPLES/2 : 0;
+        const signed char *l,*r;
+        if (first+SKIN_VIS_SAMPLES>v->bytes) first=v->bytes-SKIN_VIS_SAMPLES;
+        l=v->left+first; r=v->right+first;
+        for (i=0;i<SKIN_VIS_SAMPLES;++i) pcm[i]=(signed char)(((int)l[i]+r[i])>>1);
+    } else slot=-1;
+    Permit();
+    return slot>=0;
+}
+/* Track position of what is audible now, to the timer tick; -1 when no
+ * published buffer covers this moment. position_ms alone moves only when a
+ * whole multi-second buffer completes. */
+long skin_audible_ms(void)
+{
+    unsigned long now=skin_now_ms(), offset=0; long ms=-1; int slot;
+    Forbid();
+    slot=skin_visual_pick(gSkinAudio.visual_slot,3,now,&offset);
+    if (slot>=0) {
+        const SkinVisualSlot *v=&gSkinAudio.visual_slot[slot];
+        unsigned long into=(now-v->start_ms)&0xffffffffUL;
+        ms=(long)(v->position_ms+into);
+    }
+    Permit();
+    return ms;
+}
+static void refine_elapsed(SkinPlayer *p)
+{
+    long ms;
+    if (!p->now.playing || p->now.paused || p->pressed==SKIN_SEEK) return;
+    ms=skin_audible_ms();
+    if (ms>=0 && (p->now.total<=0 || ms/1000<=p->now.total)) p->now.elapsed=(int)(ms/1000);
+}
+static void visual_free(SkinPlayer *p)
+{
+    if (!p->vis_bm) return;
+    WaitBlit();
+    if (p->vis_modern) FreeBitMap(p->vis_bm);
+    else {
+        int j;
+        for (j=0;j<p->vis_bm->Depth;++j) if (p->vis_bm->Planes[j]) FreeRaster(p->vis_bm->Planes[j],76*p->vis_scale,16*p->vis_scale);
+        free(p->vis_bm);
+    }
+    p->vis_bm=NULL;
+}
+static int visual_bitmap(SkinPlayer *p)
+{
+    int s=p->resources->scale,depth=p->screen->RastPort.BitMap->Depth,j;
+    if (p->vis_bm && p->vis_scale==s) return 1;
+    visual_free(p); p->vis_scale=s;
+    if (GfxBase->LibNode.lib_Version>=39) {
+        p->vis_modern=1;
+        p->vis_bm=AllocBitMap(76*s,16*s,depth,BMF_CLEAR,p->screen->RastPort.BitMap);
+    } else {
+        p->vis_modern=0;
+        p->vis_bm=(struct BitMap *)calloc(1,sizeof(struct BitMap));
+        if (p->vis_bm) {
+            InitBitMap(p->vis_bm,depth,76*s,16*s);
+            for (j=0;j<depth;++j) if (!(p->vis_bm->Planes[j]=AllocRaster(76*s,16*s))) { visual_free(p); break; }
+        }
+    }
+    if (!p->vis_bm) return 0;
+    InitRastPort(&p->vis_rp); p->vis_rp.BitMap=p->vis_bm;
+    return 1;
+}
+/* Draw the area off screen and copy it in with one blit: no flicker, and
+ * one layer-locked call per frame instead of up to 77. */
+static void visual_paint(SkinPlayer *p)
+{
+    SkinState display=p->now;
+    display.visual_mode=p->shaded ? 0 : p->visual_mode;
+    if (!p->have_drawn || p->shaded || !visual_bitmap(p)) { repaint(p,0); return; }
+    p->target=p->win; p->vis_drawing=1;
+    skin_visual_render(&p->resources->skin,&display,blit,fill,p,24,43);
+    p->vis_drawing=0;
+    BltBitMapRastPort(p->vis_bm,0,0,p->win->RPort,24*p->vis_scale,43*p->vis_scale,76*p->vis_scale,16*p->vis_scale,0xc0);
+    p->drawn.visual_mode=display.visual_mode;
+    memcpy(p->drawn.levels,display.levels,sizeof(display.levels));
+    memcpy(p->drawn.peaks,display.peaks,sizeof(display.peaks));
+    memcpy(p->drawn.scope,display.scope,sizeof(display.scope));
+}
+static void visual_frame(SkinPlayer *p)
+{
+    signed char pcm[SKIN_VIS_SAMPLES]; unsigned char target[SKIN_VIS_BARS];
+    unsigned long now=skin_now_ms(); int ms=(int)(now-p->vis_last_ms);
+    p->vis_last_ms=now;
+    if (ms<=0 || ms>1000) ms=p->tick_ms;
+    memset(target,0,sizeof(target));
+    if (!visual_live(p) || !visual_capture(pcm)) memset(p->now.scope,7,sizeof(p->now.scope));
+    else if (p->visual_mode==1) skin_visual_spectrum(pcm,target);
+    else skin_visual_scope(pcm,p->now.scope);
+    if (p->visual_mode==1) skin_visual_decay(&p->vis_decay,target,p->now.levels,p->now.peaks,ms);
+    else { memset(p->now.levels,0,sizeof(p->now.levels)); memset(p->now.peaks,0,sizeof(p->now.peaks)); }
+    p->now.visual_mode=p->visual_mode;
+    if (memcmp(p->now.levels,p->drawn.levels,sizeof(p->now.levels)) || memcmp(p->now.peaks,p->drawn.peaks,sizeof(p->now.peaks)) ||
+        memcmp(p->now.scope,p->drawn.scope,sizeof(p->now.scope)) || p->drawn.visual_mode!=p->visual_mode)
+        visual_paint(p);
 }
 static void visual_tick(SkinPlayer *p)
 {
-    int n;
-    if (p->plwin && p->move_active && p->move_edge) {
-        playlist_scroll(p,p->playlist.top+p->move_edge);
-        p->move_target=p->playlist.top+(p->move_edge<0 ? 0 : SKIN_PLAYLIST_ROWS-1);
-        if (p->move_target>=p->playlist.count) p->move_target=p->playlist.count-1;
+    p->slow_ms+=p->tick_ms>0 ? p->tick_ms : 250;
+    if (p->slow_ms>=250) {
+        p->slow_ms=p->slow_ms>=500 ? 0 : p->slow_ms-250;
+        if (p->plwin && p->move_active && p->move_edge) {
+            playlist_scroll(p,p->playlist.top+p->move_edge);
+            p->move_target=p->playlist.top+(p->move_edge<0 ? 0 : SKIN_PLAYLIST_ROWS-1);
+            if (p->move_target>=p->playlist.count) p->move_target=p->playlist.count-1;
+        }
+        if (p->shaded) return;
+        if (p->notice_ticks) --p->notice_ticks;
+        else if (strlen(p->now.title)>31) p->now.scroll=(p->now.scroll+2)%((strlen(p->now.title)+5)*5);
+        refine_elapsed(p); repaint(p,0);
     }
-    if (p->shaded) return;
-    if (p->notice_ticks) --p->notice_ticks;
-    else if (strlen(p->now.title)>31) p->now.scroll=(p->now.scroll+2)%((strlen(p->now.title)+5)*5);
-    repaint(p,0);
-    if (!p->visual_mode || ++p->visual_ticks<p->visual_interval) return;
-    p->visual_ticks=0;
-    if (!p->now.playing || p->now.paused) { memset(p->now.levels,0,16); memset(p->now.peaks,0,16); memset(p->peak_hold,0,16); memset(p->now.scope,0,64); repaint(p,0); return; }
-    if (gSkinAudio.visual_request==gSkinAudio.visual_sequence) {
-        for (n=0;n<64;++n) p->now.scope[n]=gSkinAudio.visual_pcm[n];
-        if (p->visual_mode==1) skin_visual_analyse(p->now.scope,p->now.levels);
-        if (p->now.playing && !p->now.paused) ++gSkinAudio.visual_request;
-    }
-    if (!p->now.playing || p->now.paused) { memset(p->now.levels,0,16); memset(p->now.peaks,0,16); memset(p->peak_hold,0,16); memset(p->now.scope,0,64); }
-    skin_visual_peaks(p->now.levels,p->now.peaks,p->peak_hold);
-    p->now.visual_mode=p->visual_mode; repaint(p,0);
+    if (!p->shaded && p->visual_mode) visual_frame(p);
 }
 static int internal_action(SkinPlayer *p,int action)
 {
@@ -1543,21 +1733,19 @@ static int internal_action(SkinPlayer *p,int action)
         if (!p->visual_device) skin_player_notice(p,"VISUALISATION TIMER UNAVAILABLE");
         else {
             char notice[80];
-            p->visual_mode=(p->visual_mode+1)%3; p->visual_ticks=0;
-            if (p->visual_mode && p->now.playing && !p->now.paused &&
-                gSkinAudio.visual_request==gSkinAudio.visual_sequence) ++gSkinAudio.visual_request;
+            p->visual_mode=(p->visual_mode+1)%3; p->visual_ticks=0; visual_clear(p);
             snprintf(notice,sizeof(notice),"VISUAL: %s - %d HZ",
                 p->visual_mode==1 ? "SPECTRUM" : p->visual_mode==2 ? "OSCILLOSCOPE" : "OFF",
-                4/p->visual_interval);
+                visual_hz(p));
             skin_player_notice(p,notice);
         }
     }
     else if (action==SKIN_VIS_RATE) {
-        int n=skin_player_choice(p,"Visualisation rate (GUI timer)","1 Hz|2 Hz|4 Hz|Cancel");
-        if (n>=1 && n<=3) {
+        int n=skin_player_choice(p,"Visualisation frame rate\n(lower rates leave more CPU for decoding)","5 Hz|10 Hz|20 Hz|25 Hz|Cancel");
+        if (n>=1 && n<=4) {
             char notice[80];
-            p->visual_interval=n==1 ? 4 : n==2 ? 2 : 1; p->visual_ticks=0;
-            snprintf(notice,sizeof(notice),"VISUAL RATE: %d HZ - AUDIO BUFFER LIMITED",4/p->visual_interval);
+            p->visual_interval=n; p->visual_ticks=0;
+            snprintf(notice,sizeof(notice),"VISUAL RATE: %d HZ",visual_hz(p));
             skin_player_notice(p,notice);
         }
     }
@@ -1743,6 +1931,7 @@ static void player_close(SkinPlayer *p,int defer)
     }
     if (p->visual_pending) { AbortIO((struct IORequest *)p->visual_timer); WaitIO((struct IORequest *)p->visual_timer); }
     if (p->visual_device) CloseDevice((struct IORequest *)p->visual_timer);
+    visual_free(p);
     if (p->visual_timer) DeleteIORequest((struct IORequest *)p->visual_timer);
     if (p->visual_port) DeleteMsgPort(p->visual_port);
     app_icon_remove(p);
@@ -1792,14 +1981,15 @@ void skin_player_update(SkinPlayer *p,const SkinState *s,int tick)
     if (!p || !p->win) return;
     scroll=strcmp(p->now.title,s->title) ? 0 : p->now.scroll;
     if (tick && !p->visual_device && !p->notice_ticks) scroll=(scroll+2)%((strlen(s->title)+5)*5);
-    { unsigned char levels[16],peaks[16]; signed char scope[64]; int filter=p->now.filter;
-        memcpy(levels,p->now.levels,16); memcpy(peaks,p->now.peaks,16); memcpy(scope,p->now.scope,64);
-        p->now=*s; memcpy(p->now.levels,levels,16); memcpy(p->now.peaks,peaks,16); memcpy(p->now.scope,scope,64);
+    { unsigned char levels[SKIN_VIS_BARS],peaks[SKIN_VIS_BARS],scope[SKIN_VIS_WIDTH]; int filter=p->now.filter;
+        memcpy(levels,p->now.levels,sizeof(levels)); memcpy(peaks,p->now.peaks,sizeof(peaks)); memcpy(scope,p->now.scope,sizeof(scope));
+        p->now=*s; memcpy(p->now.levels,levels,sizeof(levels)); memcpy(p->now.peaks,peaks,sizeof(peaks)); memcpy(p->now.scope,scope,sizeof(scope));
         if (filter!=s->filter) menu_sync(p);
         p->now.remaining=p->remaining; p->now.shaded=p->shaded;
         p->now.shuffle=p->sequence.order.shuffle; p->now.repeat=p->sequence.order.repeat; p->now.balance=gSkinAudio.balance;
         p->now.visual_mode=p->shaded ? 0 : p->visual_mode;
-        if (!s->playing || s->paused) { memset(p->now.levels,0,16); memset(p->now.peaks,0,16); memset(p->peak_hold,0,16); memset(p->now.scope,0,64); }
+        if (!s->playing) visual_clear(p); /* a pause lets the bars fall away */
+        refine_elapsed(p);
         eq_repaint(p,0); visual_arm(p);
     }
     p->now.scroll=scroll;

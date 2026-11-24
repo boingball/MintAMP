@@ -271,7 +271,11 @@ static void GuiSkinPoll(HelixAmp3Gui *gui)
         case SKIN_SETTING_CHANGE: GuiSkinSettingChange(gui,e.value,e.target); break;
         case SKIN_BROWSE:
             skin_player_order_cancel(gSkinPlayer);
-            gSkinPendingTrack=-1; ChooseMp3(gui); break;
+            gSkinPendingTrack=-1;
+            /* As in Winamp, Eject plays the chosen file (a playlist only loads). */
+            if (ChooseMp3(gui) && gui->inputName[0] && !gui->playbackActive && !gui->playbackDonePending)
+                gSkinPendingPlay=1;
+            break;
         case SKIN_PLAY:
             if (gSkinAudio.pause_requested || gSkinAudio.paused) { skin_player_wake("MintAMP-GT playback",0); break; }
             if (gui->playbackActive) break;

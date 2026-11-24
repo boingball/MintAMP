@@ -72,6 +72,30 @@ static void text(const WinampSkin *skin,SkinBlit blit,void *ctx,
     }
 }
 
+void skin_visual_render(const WinampSkin *skin,const SkinState *s,
+                        SkinBlit blit,SkinFill fill,void *ctx,int x,int y)
+{
+    int i;
+    fill(ctx,skin->visual_colors[0],x,y,76,16);
+    if (s->visual_mode==1) {
+        for (i=0;i<19;++i) {
+            int h=s->levels[i]>16 ? 16 : s->levels[i], peak=s->peaks[i]>16 ? 16 : s->peaks[i];
+            if (h) sprite(skin,blit,ctx,SKIN_VISBAR,0,16-h,3,h,x+i*4,y+16-h);
+            if (peak) fill(ctx,skin->visual_colors[23],x+i*4,y+16-peak,3,1);
+        }
+    } else if (s->visual_mode==2) {
+        /* Connected trace: each column spans from just past the previous
+         * sample to this one; the brightest colours mark large swings. */
+        for (i=0;i<76;++i) {
+            int row=s->scope[i]>15 ? 15 : s->scope[i], prev=i ? (s->scope[i-1]>15 ? 15 : s->scope[i-1]) : row;
+            int top=row, bottom=row, swing=row*2-15;
+            if (prev<row) top=prev+1; else if (prev>row) bottom=prev-1;
+            if (swing<0) swing=-swing;
+            fill(ctx,skin->visual_colors[18+4-swing*5/16],x+i,y+top,1,bottom-top+1);
+        }
+    }
+}
+
 void skin_render(const WinampSkin *skin,const SkinState *s,const SkinState *old,
                  SkinBlit blit,SkinFill fill,void *ctx)
 {
@@ -163,16 +187,9 @@ void skin_render(const WinampSkin *skin,const SkinState *s,const SkinState *old,
         sprite(skin,blit,ctx,SKIN_MAIN,240,89,7,15,240,89);
         if (s->repeat==2) text(skin,blit,ctx,"1",240,94,5,0);
     }
-    if (all || s->visual_mode!=old->visual_mode || memcmp(s->levels,old->levels,16) || memcmp(s->scope,old->scope,64) || memcmp(s->peaks,old->peaks,16)) {
-        fill(ctx,skin->visual_colors[0],24,43,76,16);
-        if (s->visual_mode==1) {
-            for (i=0;i<16;++i) { int h=s->levels[i]>15 ? 15 : s->levels[i];
-                if (h) sprite(skin,blit,ctx,SKIN_VISBAR,0,16-h,3,h,24+i*4,59-h);
-                if (s->peaks[i]) fill(ctx,skin->visual_colors[23],24+i*4,59-(s->peaks[i]>15 ? 15 : s->peaks[i]),3,1); }
-        } else if (s->visual_mode==2) {
-            for (i=0;i<64;++i) fill(ctx,skin->visual_colors[18+(i%5)],24+i,51+s->scope[i]/16,1,1);
-        }
-    }
+    if (all || s->visual_mode!=old->visual_mode || memcmp(s->levels,old->levels,sizeof(s->levels)) ||
+        memcmp(s->scope,old->scope,sizeof(s->scope)) || memcmp(s->peaks,old->peaks,sizeof(s->peaks)))
+        skin_visual_render(skin,s,blit,fill,ctx,24,43);
     if (all || s->playing!=old->playing || s->mono!=old->mono || s->paused!=old->paused) {
         sprite(skin,blit,ctx,SKIN_PLAYPAUS,s->paused ? 9 : s->playing ? 0 : 18,0,9,9,24,28);
         sprite(skin,blit,ctx,SKIN_MONOSTER,29,s->mono ? 0 : 12,27,12,212,41);
@@ -180,7 +197,9 @@ void skin_render(const WinampSkin *skin,const SkinState *s,const SkinState *old,
     }
     if (all || s->bitrate!=old->bitrate || s->rate!=old->rate) {
         char number[16];
-        snprintf(number,sizeof(number),"%3d",s->bitrate>999 ? 999 : s->bitrate);
+        /* Decoders that report no bitrate (FLAC, Ogg, WAV, ...) leave it blank, not "0". */
+        if (s->bitrate>0) snprintf(number,sizeof(number),"%3d",s->bitrate>999 ? 999 : s->bitrate);
+        else strcpy(number,"   ");
         text(skin,blit,ctx,number,111,43,15,0);
         snprintf(number,sizeof(number),"%2d",s->rate/1000);
         text(skin,blit,ctx,number,156,43,10,0);
