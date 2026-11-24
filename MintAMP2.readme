@@ -1,55 +1,411 @@
-Short:        MintAMP 2.0 development player
+Short:        Skinned multiformat player and net radio
 Author:       Darren Banfi (boingball)
 Uploader:     boingball@gmail.com (Darren Banfi)
 Type:         mus/play
-Version:      2.0-dev
-Requires:     68030+; TCP/IP for radio; AmiSSL for HTTPS; ReAction or GadTools
+Version:      2.0
+Requires:     68030+; TCP/IP stack for radio; util/libs/AmiSSL-v5-OS3.lha for HTTPS
 Architecture: m68k-amigaos >= 3.0.0
 
-MintAMP 2.0 development - PR #521
-================================
 
-Use the MintAMP-2.0-dev-68030 or MintAMP-2.0-dev-68060 drawer appropriate to
-your processor. Keep its decoder modules and Skins drawer with the players.
-This is a development build awaiting real-hardware acceptance.
+MintAMP - Mini Internet Amiga Media Player
+==========================================
 
-Double-click MintAMP-Launch: the bundled mint-leaf skin opens first.
-Right-click the skin and tick MintAMP / Classic interface to switch the
-running player to the classic MintAMP window; untick Project / Classic
-interface there to return to the skin. Playback continues either way and
-the choice is remembered for the next launch.
+MintAMP is a lightweight multiformat audio player and internet radio client
+for classic Amiga computers. It uses fixed-point decoders designed for m68k
+systems and outputs directly through Paula using audio.device, so AHI and a
+sound card are not required.
 
-Use Interface preferences in either interface to choose ReAction or
-GadTools and Skin or Classic for subsequent launches, or run
-MintAMP-Launch --prefs from a Shell.
+MintAMP 2.0 opens wearing a classic Winamp 2.x skin (.wsz), with a skinned
+playlist, equaliser, artwork and settings windows, a spectrum analyser and
+oscilloscope, and keyboard shortcuts you may already know. One menu tick
+switches the running player to the classic MintAMP window and back again,
+without stopping the music.
 
-The launcher icon includes disabled examples of these ToolTypes:
+This archive contains two complete MintAMP drawers:
+
+  MintAMP-v2.0-68030  For 68030 and 68040 systems
+  MintAMP-v2.0-68060  Dedicated build for 68060 systems
+
+Open or copy the drawer which matches the processor installed in your Amiga.
+The 68060 edition contains dedicated 68060-safe and 68060-optimised decoder
+paths. It is not intended for 68030 or 68040 processors.
+
+What's New in 2.0
+-----------------
+
+  - Classic Winamp 2.x skin support, with the bundled mint-leaf skin
+  - Skinned main, playlist, equaliser, artwork and settings windows
+  - Live switch between the skin and the classic MintAMP window
+  - Spectrum analyser and oscilloscope, synced to what you hear
+  - MP3 equaliser, balance, shuffle/repeat and windowshade mode
+  - MintAMP-Launch: one icon starting your preferred interface
+  - Search and change radio stations while a stream is playing
+  - Unplayable files now say why, in the status line and skin title
+  - FLAC, Ogg, WMA, WAV and AAC files now play right to the end
+  - WMA files with a video stream now play their audio
+  - Faster 68060 MP3 and AAC decoding
+
+See History at the end for the full list.
+
+Which Program to Start
+----------------------
+
+Each drawer contains six programs:
+
+  MintAMP-Launch        Start here. Opens the skin (or the classic
+                        window) using the ReAction or GadTools edition
+                        you have chosen in Interface preferences
+  MintAMP-SR            Skin + classic window, ReAction utility windows
+  MintAMP-SGT           Skin + classic window, GadTools utility windows
+  MintAMP               Classic-only ReAction edition (no skin code)
+  MintAMP-GT            Classic-only GadTools edition (no skin code)
+  amiga_mp3dec.fastexp  Command-line edition
+
+MintAMP-SR and MintAMP-SGT are the full 2.0 players. MintAMP and MintAMP-GT
+are the smaller classic-only players, as in 1.4. Use a GadTools edition if
+ReAction/ClassAct is not installed.
+
+Skins
+-----
+
+Double-click MintAMP-Launch: the mint-leaf skin opens first. Right-click any
+skin window (except the equaliser) for the MintAMP, Windows and Options
+menus.
+
+  - MintAMP > Classic interface switches to the classic MintAMP window.
+    Untick Project > Classic interface there to return to the skin.
+    Playback, the playlist and the radio browser carry on across the
+    switch, and the choice is remembered for the next launch.
+  - Windows > Load skin (S) loads any classic Winamp 2.x .wsz skin.
+    Windows > Double size (D) doubles the skin.
+  - Settings (T) opens a skinned settings window. Artwork (A) shows the
+    album or station artwork in the skin's frame.
+  - The minimise button iconifies all skin windows to a Workbench AppIcon;
+    playback continues.
+
+Main keys, as in Winamp:
+
+  X play   C pause   V stop   Z previous   B next   O open file
+  U open stream URL   R internet radio   I file info   E equaliser
+  P playlist   J shuffle   L repeat   W windowshade
+  Left/Right seek 5 s (local MP3)   Up/Down volume
+
+The visualisation area cycles off, spectrum and oscilloscope when clicked.
+Skins/ReadMe in each drawer describes every control and the limits of the
+skin support.
+
+Interface Preferences and ToolTypes
+-----------------------------------
+
+Use Interface preferences in any edition's menu to choose ReAction or
+GadTools, Skin or Classic, and normal or double size for the next launch.
+MintAMP-Launch --prefs opens the same choice from a Shell.
+
+The MintAMP-Launch icon includes disabled examples of these ToolTypes:
+
   (GUI=REACTION)
   (MODE=CLASSIC)
   (SKIN=PROGDIR:Skins/MintAMP-mintleaf.wsz)
   (DOUBLESIZE=NO)
 
-Remove parentheses to force a setting. Explicit CLI arguments override
-ToolTypes, which override saved preferences, which override defaults.
-Leave examples disabled for the saved GUI/appearance preferences to work.
+Remove the parentheses to force a setting. Command-line arguments override
+ToolTypes, which override saved preferences, which override defaults. Leave
+the examples disabled for your saved preferences to work.
 
-The skin covers MintAMP's features: files, playlists, stream URLs, Internet
-radio and favourites, file/stream info, artwork window, seek and volume keys,
-audio filter, iconify, MP3 EQ, balance and spectrum (EQ/spectrum start off).
-Settings (T) opens a skinned settings window holding only the settings;
-its Classic mode row switches to the classic interface. Artwork (A) uses the
-skin's MB.BMP frame with 128x128 art and the track title.
+Features
+--------
 
-Launch methods:
-  MintAMP-Launch  Skin first, Classic on a tick (ReAction or GadTools)
-  MintAMP-SR      Skin/Classic ReAction    MintAMP-SGT  Skin/Classic GadTools
-  MintAMP         Classic-only ReAction    MintAMP-GT   Classic-only GadTools
-  amiga_mp3dec.fastexp                     Command-line player
+  - Local MP3 playback using the Helix fixed-point decoder
+  - Dedicated 68060 MP3 build with optimised synthesis, DCT, Huffman,
+    mid/side stereo and planar sample conversion paths
+  - Local and streamed AAC-LC ADTS/AAC+ playback
+  - Local FLAC playback
+  - Local Ogg Vorbis playback using the fixed-point Tremor decoder
+  - Classic WMA playback (WMAv1/WMAv2 in ASF containers)
+  - Uncompressed PCM WAV playback (8/16/24/32-bit, mono or stereo)
+  - Amiga IFF-8SVX playback, including Fibonacci-delta compression
+  - Bundled modular AAC, FLAC, Ogg, WMA, WAV and IFF decoders
+  - Classic Winamp 2.x skins with playlist, equaliser, artwork and
+    settings windows, visualisation and double size
+  - HTTP and HTTPS internet radio: MP3, AAC/AAC+, Ogg Vorbis and lossless
+    FLAC, with .pls/.m3u station links followed to the stream
+  - Radio Browser station search and editable favourites, usable while a
+    station is playing
+  - Live ICY station, artist and title information
+  - Station names and titles in any language shown in the Amiga's Latin-1
+    fonts
+  - Station artwork using JPEG, PNG, WebP, ICO and a subset of SVG
+  - M3U and PLS playlists of files and radio stations
+  - Iconify to a Workbench AppIcon while playback continues
+  - ID3 tag display and track ratings
+  - Configurable output rate, quality, channel mode and buffering
+  - Reduced-rate and reduced-subband modes for slower systems
+  - Direct Paula audio output; no AHI installation required
 
-Details: Skins/ReadMe, docs/winamp-skins.md and the hardware acceptance checklist.
-No Winamp Windows DLL plug-ins, modern WAL skins or all-format biquad EQ.
+Requirements
+------------
 
-Made by Darren Banfi / boingball, with Helix MP3/AAC, libfoxenflac,
-ESP8266Audio and Tremor. Existing licences and decoder credits apply.
+  - AmigaOS 3.0 or later
+  - Motorola 68030 or better
+  - Fast RAM is strongly recommended
+  - A running TCP/IP stack providing bsdsocket.library for internet radio
+  - AmiSSL v5 for HTTPS streams
+  - ReAction/ClassAct v44 classes for MintAMP-SR and MintAMP
+
+Local playback does not need a TCP/IP stack or AmiSSL.
+
+Installation
+------------
+
+Extract the complete archive. Its root contains:
+
+  MintAMP-v2.0-68030/
+  MintAMP-v2.0-68060/
+  MintAMP-v2.0-68030.info
+  MintAMP-v2.0-68060.info
+
+Choose the drawer matching your processor:
+
+  68030 or 68040:
+    Use MintAMP-v2.0-68030
+
+  68060:
+    Use MintAMP-v2.0-68060
+
+You may leave both drawers together or copy only the required drawer to your
+preferred location. Settings and favourites saved by MintAMP 1.x are kept.
+
+Keep every file inside the selected drawer together. Its layout is:
+
+  MintAMP-v2.0-68xxx/
+    MintAMP-Launch
+    MintAMP-SR
+    MintAMP-SGT
+    MintAMP
+    MintAMP-GT
+    amiga_mp3dec.fastexp
+    (and their icons)
+    ArtCache/
+    Skins/
+      MintAMP-mintleaf.wsz
+      ReadMe
+    decoders/
+      aac.decoder
+      flac.decoder
+      ogg.decoder
+      wma.decoder
+      wav.decoder
+      iff.decoder
+    docs/
+
+Start MintAMP-Launch from Workbench. For internet radio, start the TCP/IP
+stack first. Install AmiSSL from util/libs/AmiSSL-v5-OS3.lha to play HTTPS
+stations.
+
+Command-Line Edition
+--------------------
+
+amiga_mp3dec.fastexp is the command-line edition. Open a Shell, change to the
+selected MintAMP drawer and use --play followed by a local filename or direct
+stream URL.
+
+Examples:
+
+  amiga_mp3dec.fastexp --play "Work:Music/example.mp3"
+  amiga_mp3dec.fastexp --play "Work:Music/example.flac"
+  amiga_mp3dec.fastexp --play "Work:Music/example.wma"
+  amiga_mp3dec.fastexp --play "https://example.com/direct-stream"
+  amiga_mp3dec.fastexp --play "http://example.com:8000/listen.pls?sid=1"
+
+Useful options include:
+
+  --rate 22050
+  --mono
+  --stereo
+  --fast-lowrate
+  --fast-mem
+  --quality 0
+  --subband-cap 16
+  --buffer-seconds 4
+  --volume 80
+
+Run amiga_mp3dec.fastexp without arguments to display the complete option
+list.
+
+68060 Edition
+-------------
+
+The 68060 drawer is built for real 68060 hardware. It avoids instructions
+which the 68060 must emulate in software and adds selected 68060-clean
+assembly optimisations: polyphase synthesis and DCT, reduced-rate playback
+paths, Huffman decoding, mid/side stereo and planar sample conversion, plus
+hardware-only multiplies in the AAC, FLAC, Ogg and WMA decoders. It also
+runs on FPU-less 68060 boards.
+
+Do not use the 68030 decoder modules on a 68060: their full-result MULS.L
+instructions are emulated and can be dramatically slower.
+
+Internet Radio Notes
+--------------------
+
+MintAMP plays HTTP and HTTPS MP3, ADTS AAC/AAC+, Ogg Vorbis and FLAC
+streams, and follows .pls/.m3u station links and redirects to the stream.
+Press R in the skin (or Radio in the classic window) for the Internet Radio
+browser. You can search, browse favourites and start another station while
+one is playing; the status line shows Buffering, Streaming, Stopped or why
+a stream failed.
+
+Lossless FLAC stations play too, whether they send FLAC inside Ogg or plain
+FLAC. Pick "FLAC" as the codec in the radio search to find them. A 16-bit
+44.1 kHz FLAC station needs roughly 1 Mbit/s; a 68060 with a fast network
+card is recommended.
+
+A 128 kbit MP3 station is the safest choice for uninterrupted playback on
+classic hardware. Streams at 192, 256 or 320 kbit may need a lower output
+rate or may occasionally rebuffer.
+
+HLS/M3U8 streams are not supported. Internet stations must provide a direct
+MP3, ADTS AAC/AAC+, Ogg Vorbis or FLAC stream URL, or a .pls/.m3u playlist
+naming one.
+
+Playlists and Favourites
+------------------------
+
+The playlist (P in the skin, Playlist in the classic window) holds local
+files and radio streams together and loads and saves .m3u, .m3u8 and .pls
+files. From Favs and To Favs copy radio favourites to and from the list.
+
+A playlist file can also be opened straight away: pick it in the file
+requester, give it on the command line, or set its icon's Default Tool to
+MintAMP-Launch. Started that way, it begins playing at once.
+
+In the Internet Radio window, Favourites shows your saved stations. Add Fav
+saves the selected or playing station; Rename, Remove and Move Up/Dn edit
+the list. Up to 50 favourites are kept.
+
+Format Notes
+------------
+
+AAC support is for ADTS files and direct ADTS/AAC+ streams. MP4/M4A files
+are not supported.
+
+FLAC decoding is considerably more demanding than MP3. Usable settings depend
+on the processor, file complexity and selected output rate.
+
+WMA support covers the classic WMAv1 and WMAv2 codecs in ASF containers,
+including the audio of WMV/ASF files with video. WMA Pro, Lossless and Voice
+are not supported; MintAMP says so when you try to play one.
+
+Seeking works for local MP3 files. The equaliser applies to MP3 playback;
+other formats bypass it.
+
+Known Limitations
+-----------------
+
+  - Classic Winamp 2.x skins only: no modern WAL skins, Windows DLL
+    plug-ins or Winamp visualisation plug-ins.
+  - The classic-only MintAMP-GT window may not fit very small Workbench
+    screens; the skinned editions and MintAMP do.
+  - The GadTools radio browser needs a screen of at least 548x200.
+
+Source Code
+-----------
+
+Source code, build instructions and development information:
+
+  https://github.com/boingball/MintAMP
+
+Credits
+-------
+
+Amiga port, GUI front-ends, skin engine, decoder integration, internet
+radio, artwork and m68k/68060 optimisation by Darren Banfi (boingball).
+
+Audio decoder components:
+
+  - MP3: Helix fixed-point decoder from RealNetworks
+  - AAC: Helix AAC through ESP8266Audio by Earle F. Philhower III
+  - FLAC: libfoxenflac by Alexander Stoeckel
+  - Ogg Vorbis: Xiph.Org Tremor via Phil Schatzmann's Arduino port,
+    together with Xiph.Org libogg
+  - WMA: Rockbox fixed-point libwma, derived from FFmpeg's WMA decoder
+
+Artwork decoder components:
+
+  - JPEG: picojpeg-compatible decoder; picojpeg was created by Rich Geldreich
+  - PNG: LodePNG by Lode Vandevenne
+  - WebP: compact implementation using parts of Google's libwebp reference
+    decoder under its BSD licence
+
+Winamp is a trademark of its respective owner. MintAMP reads the classic
+.wsz skin format; it contains no Winamp code. The bundled mint-leaf skin
+was made for MintAMP.
+
+The MintAMP-specific skin engine, ASF/WMA integration, WAV/PCM and IFF-8SVX
+decoders, and ICO, SVG and compact WebP artwork handlers were developed with
+assistance from Anthropic Claude and OpenAI Codex.
+
+These components remain under their respective licences, including the Helix
+RPSL, LGPL, BSD-style and LodePNG terms. See the licence files and source
+repository for the complete terms and source code.
+
 Support: https://buymeacoffee.com/boingball
-Repository: https://github.com/boingball/MintAMP
+
+History
+-------
+
+2.0    Classic Winamp 2.x skin support. MintAMP-SR (ReAction) and
+       MintAMP-SGT (GadTools) open with the bundled mint-leaf skin and
+       load any classic .wsz skin, at normal or double size, with skinned
+       playlist, equaliser, artwork and settings windows, windowshade
+       mode and Winamp-style keys.
+       A Classic interface menu tick switches the running player between
+       the skin and the classic MintAMP window without stopping playback,
+       and is remembered for the next launch.
+       New MintAMP-Launch starts the chosen edition and appearance, set
+       by Interface preferences, ToolTypes or the command line.
+       Spectrum analyser and oscilloscope, timed to the audio you hear.
+       MP3 equaliser, balance, shuffle and repeat. Play, Eject and the
+       playlist work as in Winamp.
+       Internet radio: you can now search, browse favourites and change
+       station while a stream is playing, and the radio window's status
+       line shows Buffering, Streaming, Stopped or the reason a stream
+       failed, instead of staying on Buffering.
+       A file that cannot be played now says why ("Can't play: ...") in
+       the status line and skin title: video-only files, WMA Pro,
+       Lossless and Voice, MP4/M4A AAC, a missing decoder or a missing
+       file.
+       Faster 68060 MP3 (hardware multiplies in IMDCT, anti-alias,
+       stereo and dequantisation; DCT and low-band paths) and AAC
+       transforms, making 14700 Hz output affordable on a 68060.
+       Playback timing and statistics use integer maths throughout.
+       Fixed: FLAC, Ogg, WMA, WAV and AAC files lost their last 8-10
+       seconds; WMA decoded only part of each packet, and WMA files
+       with video failed at the end of the audio; about 36 KB of memory
+       was lost every time a GUI edition was started.
+
+1.4.0  Lossless FLAC internet radio, including FLAC inside Ogg. Station
+       links that point at a .pls or .m3u playlist now play, with
+       fallback to the next server. Playlists can hold radio stations as
+       well as files and load and save .pls as well as .m3u. Radio
+       favourites can be bookmarked from the playing stream, renamed,
+       removed, reordered, exported and imported; up to 50 are kept.
+       Station names and titles are converted for Latin-1 fonts.
+       Numerous radio, FLAC and AAC fixes.
+
+1.3.2  Builds again with the GCC 13 Amiga toolchain as well as GCC 16.
+
+1.3.1  MPEG-2.5 MP3 files (8, 11.025 and 12 kHz) now play. Faster 68060
+       AAC noise substitution and TNS. RadioInfo XML song titles.
+       Double-click a station in the radio browser to play it.
+
+1.3.0  CPU-specific AAC, FLAC, Ogg Vorbis and WMA math helpers, with
+       hardware-only multiplies in the 68060 edition.
+
+1.2.0  Workbench AppIcon iconification. Expanded GadTools radio browser.
+       Refined GadTools layouts. Fast RAM preload for all local formats.
+
+1.1.0  Dedicated 68060 drawer. Improved HTTP/HTTPS radio throughput and
+       buffering. Station artwork improvements.
+
+1.0.0  Initial Aminet release.

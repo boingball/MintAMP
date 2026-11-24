@@ -186,7 +186,7 @@ SKINR_TARGET ?= MintAMP-SR
 SKIN ?= 0
 
 RELEASE_ROOT ?= release
-RELEASE_NAME ?= MintAMP-2.0-dev-680$(CPU)
+RELEASE_NAME ?= MintAMP-v2.0-680$(CPU)
 RELEASE_DIR := $(RELEASE_ROOT)/$(RELEASE_NAME)
 RELEASE_ICON_SOURCE ?= artassets/MintAMP-v1.1-680$(CPU).info
 RELEASE_README_SOURCE ?= MintAMP2.readme
@@ -696,6 +696,10 @@ release: launcher skins $(GUIR_TARGET) $(GUI_TARGET) $(FAST030_TARGET) decoder-m
 	@test -f "$(RELEASE_ICON_SOURCE)" || { echo "ERROR: missing drawer icon $(RELEASE_ICON_SOURCE)"; exit 1; }
 	@test -f "$(RELEASE_README_SOURCE)" || { echo "ERROR: missing release readme $(RELEASE_README_SOURCE)"; exit 1; }
 	cp "$(RELEASE_ICON_SOURCE)" "$(RELEASE_ROOT)/$(RELEASE_NAME).info"
+	@# Drawer icons store the NewWindow height as a big-endian WORD at byte
+	@# offset 84; the shared artwork is snapped at 64 px, too short to show
+	@# the drawer's icons.  Open the packaged drawer 120 px high.
+	printf '\000\170' | dd of="$(RELEASE_ROOT)/$(RELEASE_NAME).info" bs=1 seek=84 conv=notrunc 2>/dev/null
 	cp "$(RELEASE_README_SOURCE)" "$(RELEASE_ROOT)/MintAMP.readme"
 	cp "$(RELEASE_README_SOURCE)" "$(RELEASE_DIR)/ReadMe"
 	@test -f "$(FAST030_TARGET)" || { echo "ERROR: missing $(FAST030_TARGET)"; exit 1; }
@@ -707,6 +711,9 @@ release: launcher skins $(GUIR_TARGET) $(GUI_TARGET) $(FAST030_TARGET) decoder-m
 	cp docs/winamp-skins.md docs/mintamp-2.0-acceptance.md "$(RELEASE_DIR)/docs/"
 	cp BUILD-RELEASE.txt "$(RELEASE_DIR)/docs/"
 	cp Skins/MintAMP-mintleaf.wsz "$(RELEASE_DIR)/Skins/"
+	@# Refuse modules whose cross-section branches the hunk linker mis-resolved
+	@# (see -fno-optimize-sibling-calls in decoders/Makefile).
+	python3 tools/check_module_branches.py decoders/*.decoder
 	@set -e; \
 	found=0; \
 	for decoder in decoders/*.decoder; do \

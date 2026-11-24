@@ -1,9 +1,11 @@
-# MintAMP 2.0 acceptance: PR #521
+# MintAMP 2.0 hardware acceptance
 
-This checklist is an **unexecuted hardware release gate**. No Amiga emulator,
-Workbench session or physical audio.device target is available in the current
-workspace. Cross-compilation and host tests cannot verify uninterrupted sound,
-actual icon launching, installed OS libraries or Paula/RTG timing.
+This checklist is the **hardware release gate** for 2.0. The release candidate
+has been exercised in WinUAE (68060, AmiSSL, ReAction and GadTools skinned
+editions: playback to end of file, radio search/switch while streaming, launch
+memory); emulation and host tests cannot verify uninterrupted sound on real
+Paula timing, installed OS libraries or RTG. Run it on a real 68030 and 68060
+before the Aminet upload.
 
 ## Changes reviewed
 
@@ -43,8 +45,9 @@ actual icon launching, installed OS libraries or Paula/RTG timing.
 - Ordinary skin mouse releases write ENV (RAM); ENVARC persistence and shared
   interface preferences flush at clean shutdown after the decoder is retired.
   Forced termination may lose the latest disk preferences.
-- Application version is 2.0-dev on this development branch; CPU drawers carry
-  the launcher, mint-leaf skin, legacy methods, matched modules and documentation.
+- Application version is 2.0 (`Version MintAMP-SR` etc. report it); CPU drawers
+  carry the launcher, mint-leaf skin, legacy methods, matched modules and
+  documentation.
 
 ## Automated evidence
 
@@ -150,5 +153,5 @@ For **each** target:
    the expected baseline with no cumulative loss, stale tasks or stuck IO.
    Save/load presets and verify enabled-flat/disabled MP3 sound is unchanged.
 
-Record results and any failing reproducer on PR #521. Keep it unmerged until
-these hardware gates have an owner and recorded outcomes.
+Record results and any failing reproducer as a GitHub issue. Upload to Aminet
+once both CPU drawers pass on real hardware.

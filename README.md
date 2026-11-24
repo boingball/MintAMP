@@ -1,7 +1,7 @@
 # MintAMP — Mini Internet Amiga Media Player
 
 [![Build](https://github.com/boingball/MintAMP/actions/workflows/build.yml/badge.svg)](https://github.com/boingball/MintAMP/actions/workflows/build.yml)
-![Version](https://img.shields.io/badge/version-1.4.0-brightgreen)
+![Version](https://img.shields.io/badge/version-2.0-brightgreen)
 ![Status](https://img.shields.io/badge/status-stable-brightgreen)
 ![AmigaOS](https://img.shields.io/badge/AmigaOS-3.0%2B-F28C28)
 ![CPU](https://img.shields.io/badge/CPU-68030%20%7C%2068040%20%7C%2068060-2F74C0)
@@ -9,7 +9,7 @@
 ![Formats](https://img.shields.io/badge/audio-MP3%20%7C%20AAC%20%7C%20FLAC%20%7C%20Ogg%20%7C%20WMA%20%7C%20WAV%20%7C%20IFF-7B68EE)
 ![Streaming](https://img.shields.io/badge/radio-HTTP%20%7C%20HTTPS-22A699)
 ![Output](https://img.shields.io/badge/output-Paula%20audio.device-CB4B16)
-![GUI](https://img.shields.io/badge/GUI-ReAction%20%7C%20GadTools-8A2BE2)
+![GUI](https://img.shields.io/badge/GUI-Winamp%20skins%20%7C%20ReAction%20%7C%20GadTools-8A2BE2)
 [![GitHub stars](https://img.shields.io/github/stars/boingball/MintAMP)](https://github.com/boingball/MintAMP/stargazers)
 [![GitHub last commit](https://img.shields.io/github/last-commit/boingball/MintAMP/master)](https://github.com/boingball/MintAMP/commits/master)
 [![Support](https://img.shields.io/badge/Support-Buy%20Me%20a%20Coffee-FFDD00?logo=buymeacoffee&logoColor=000000)](https://buymeacoffee.com/boingball)
@@ -17,7 +17,7 @@
 
 **A complete multiformat player and internet-radio client for classic AmigaOS.** MintAMP plays local audio, searches and streams internet radio, displays live metadata and station artwork, and outputs directly through Paula using `audio.device` — no AHI or sound card required.
 
-MintAMP ships with ReAction/ClassAct, GadTools and command-line editions. Its fixed-point playback engine and modular decoders have separate 68030/68040 and dedicated 68060 builds for real classic hardware and emulators.
+MintAMP 2.0 opens wearing a classic Winamp 2.x skin and switches live to its classic ReAction/ClassAct or GadTools window; a command-line edition is included too. Its fixed-point playback engine and modular decoders have separate 68030/68040 and dedicated 68060 builds for real classic hardware and emulators.
 
 [Build guide](docs/building-amiga.md) · [Optimization status](docs/optimization-status.md) · [Release recipe](BUILD-RELEASE.txt) · [CI builds](https://github.com/boingball/MintAMP/actions/workflows/build.yml) · [Decoder details](#decoder-modules)
 
@@ -43,15 +43,18 @@ compatibility limits.
 
 | Installed CPU | Release drawer | Notes |
 |---|---|---|
-| 68030 or 68040 | `MintAMP-v1.4.0-68030` | Established full-result m68k assembly paths. |
-| 68060 | `MintAMP-v1.4.0-68060` | Dedicated 68060-safe and 68060-optimised player and decoder paths. |
+| 68030 or 68040 | `MintAMP-v2.0-68030` | Established full-result m68k assembly paths. |
+| 68060 | `MintAMP-v2.0-68060` | Dedicated 68060-safe and 68060-optimised player and decoder paths. |
 
-Each drawer contains all three front ends:
+Each drawer contains every front end:
 
 | Program | Interface | Best for |
 |---|---|---|
-| `MintAMP` | ReAction/ClassAct | The full Workbench experience. |
-| `MintAMP-GT` | GadTools | Systems without ReAction/ClassAct. |
+| `MintAMP-Launch` | Skin or classic | Start here: opens your chosen edition and appearance. |
+| `MintAMP-SR` | Winamp skin + classic ReAction/ClassAct | The full 2.0 experience. |
+| `MintAMP-SGT` | Winamp skin + classic GadTools | The full 2.0 experience without ReAction/ClassAct. |
+| `MintAMP` | Classic ReAction/ClassAct only | Smallest classic Workbench player. |
+| `MintAMP-GT` | Classic GadTools only | Smallest player for systems without ReAction/ClassAct. |
 | `amiga_mp3dec.fastexp` | Shell | Scripts, direct playback, testing and lower overhead. |
 
 Keep the player and the decoder modules from the same CPU drawer together. In particular, do not use the 68030 decoder set on a real 68060: its full-result `MULS.L` instructions are software-emulated and can be dramatically slower.
@@ -59,19 +62,20 @@ Keep the player and the decoder modules from the same CPU drawer together. In pa
 ## Project status
 
 > [!IMPORTANT]
-> **MintAMP 1.4 is a stable, complete application.** It is no longer just a Helix MP3 port or decoder demonstration: local playback, both GUI editions, the CLI, modular codecs and direct internet radio are integrated release features.
+> **MintAMP 2.0 is a stable, complete application.** Local playback, classic Winamp skins, the ReAction and GadTools editions, the CLI, modular codecs and direct internet radio are integrated release features.
 
 > [!NOTE]
 > Some compatibility/debug names still contain `exp` or `Experimental` because they were named during development, including `--exp-huff`, `--exp-poly`, `MP3SetExperimentalHuffman()` and `MP3SetExperimentalPolyphase()`. Those names are retained to avoid breaking callers; they do **not** mean the release-enabled paths are untested. See [Optimization and feature status](docs/optimization-status.md).
 
 | Area | Status | Notes |
 |---|---:|---|
+| Winamp-skinned editions (SR/SGT) | Stable | Classic Winamp 2.x `.wsz` skins, playlist, EQ, artwork and settings windows, live switch to the classic window. |
 | ReAction and GadTools applications | Stable | Local playback, playlists, radio search, metadata, artwork and iconification. |
 | MP3, AAC, FLAC, Ogg, WAV and IFF | Stable | CPU-matched modules are included with the application. |
 | HTTP/HTTPS internet radio | Stable | HTTPS requires AmiSSL; certificate verification is optional at build time. |
 | 68030/68040 edition | Stable | Uses the established m68k assembly path. |
 | 68060 edition | Stable, hardware tested | Dedicated MP3 and decoder optimisations tested on a real 68060 Amiga. |
-| Classic WMA | Compatibility-limited | WMAv1/WMAv2 only; WMA Pro, Lossless and Voice are not supported. |
+| Classic WMA | Compatibility-limited | WMAv1/WMAv2 only, including the audio of WMV/ASF files with video; WMA Pro, Lossless and Voice are reported as unsupported. |
 | HLS/M3U8 | Out of scope | MintAMP plays direct stream URLs and `.pls`/`.m3u` station links. |
 
 Development continues around performance, codec compatibility and UI polish, but those are improvements to a functioning player rather than missing foundations. Older development builds were named MiniAMP3/minimp3r; compatibility make targets remain where practical.
@@ -91,7 +95,7 @@ make -f Makefile.amiga release \
   RADIO=1 \
   SSL=1 \
   SSLCERTS=1 \
-  RELEASE_NAME=MintAMP-v1.4.0-68030
+  RELEASE_NAME=MintAMP-v2.0-68030
 
 # Keep the first release drawer, but remove CPU-specific objects.
 make -f Makefile.amiga clean
@@ -102,7 +106,7 @@ make -f Makefile.amiga release \
   RADIO=1 \
   SSL=1 \
   SSLCERTS=1 \
-  RELEASE_NAME=MintAMP-v1.4.0-68060
+  RELEASE_NAME=MintAMP-v2.0-68060
 ```
 
 The clean between builds is required so 68030 objects are not reused in the
@@ -150,7 +154,7 @@ amiga_mp3dec.fastexp --play "https://example.com/direct-stream"
 
 Useful playback controls include `--rate`, `--quality`, `--subband-cap`, `--mono`, `--stereo`, `--fake-stereo`, `--buffer-seconds`, `--volume` and `--fast-mem`. Run the binary without arguments to display the complete option list.
 
-The `fast030` target name is retained for compatibility. The actual target CPU is selected with `CPU=00`, `20`, `30`, `40` or `60`. MintAMP v1.4.0 release drawers are produced for the established 68030 path and a separately tuned 68060 path.
+The `fast030` target name is retained for compatibility. The actual target CPU is selected with `CPU=00`, `20`, `30`, `40` or `60`. MintAMP v2.0 release drawers are produced for the established 68030 path and a separately tuned 68060 path.
 
 ## Supported formats
 

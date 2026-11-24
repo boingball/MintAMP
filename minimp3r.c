@@ -88,16 +88,16 @@ static char gSkinPendingUrl[512];
  * in here doubled up into a malformed path that silently failed to persist
  * across reboots while the plain ENV: (RAM) write kept working. */
 #define MR_ENV_PREFIX "MintAMP"
-#define MINTAMP_VERSION "2.0-dev"
+#define MINTAMP_VERSION "2.0"
 #define MR_SETTINGS_VERSION 1
 #define MR_RADIO_FAV_MAX 50
 
 /* AmigaOS Version command metadata; unrelated to MR_SETTINGS_VERSION. */
 static const char gMintAmpVersionTag[] __attribute__((used)) =
 #ifdef MINTAMP_SKIN
-	"\0$VER: MintAMP-SR " MINTAMP_VERSION " (10.10.2026)";
+	"\0$VER: MintAMP-SR " MINTAMP_VERSION " (24.11.2026)";
 #else
-	"\0$VER: MintAMP " MINTAMP_VERSION " (08.10.2026)";
+	"\0$VER: MintAMP " MINTAMP_VERSION " (24.11.2026)";
 #endif
 #if !defined(__AROS__) && !defined(MR_DISABLE_CIA_FILTER)
 #define MR_ENABLE_CIA_FILTER 1
