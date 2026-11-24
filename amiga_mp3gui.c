@@ -1,4 +1,5 @@
 #include "interface_prefs.h"
+#include "mint_args.h"
 /*
  * MintAMP-GT - Mini Internet Amiga Media Player GadTools frontend for the Helix
  * fixed-point MP3 decoder.  The GUI wraps the existing amiga_mp3dec playback
@@ -3153,7 +3154,12 @@ static void SaveArtworkCache(HelixAmp3Gui *gui)
 	if (!gui->artCacheEnabled || !gui->inputName[0] || !gui->artValid)
 		return;
 	SafeCopy(dir, sizeof(dir), "PROGDIR:ArtCache");
-	CreateDir((STRPTR)dir);
+	{
+		/* CreateDir() returns an exclusive lock on success; keep none. */
+		BPTR created = CreateDir((STRPTR)dir);
+		if (created)
+			UnLock(created);
+	}
 	ArtworkCacheName(gui, path, sizeof(path));
 	f = fopen(path, "wb");
 	if (!f)
@@ -6963,11 +6969,19 @@ static void RadioDoSearch(HelixAmp3Gui *app)
 		RadioSetStatus(app, "Search already running.");
 		return;
 	}
+	/* Searching while a stream plays is allowed: every socket call, the
+	 * stream's own and the Radio Browser HTTP fetch alike, runs as a job on
+	 * the single net worker task, so the two can only interleave there, never
+	 * run at once. Starting a different station still stops the current one
+	 * first (RadioDoProbeAndPlay's queue). */
+#if !defined(HAVE_AMISSL)
+	/* Plain-bsdsocket builds have no net worker: socket calls run on the
+	 * calling task, so a search must not overlap the stream's own I/O. */
 	if (Radio_PlaybackOwnsNetwork()) {
-		RADIO_DBG(printf("radio-browser: search skipped while radio playback child owns networking\n");)
-		RadioSetStatus(app, "Radio playback owns networking; search after stopping.");
+		RadioSetStatus(app, "Stop the stream to search (this build has no AmiSSL).");
 		return;
 	}
+#endif
 	RadioSetSearchBusy(app, TRUE);
 	RadioSetStatus(app, "Searching Radio Browser...");
 	text = NULL;
@@ -8627,9 +8641,11 @@ static int GuiOpenPlaylistFile(HelixAmp3Gui *gui, const char *path)
 	return added;
 }
 
-static void ChooseMp3(HelixAmp3Gui *gui)
+/* Returns 1 when an audio file (not a playlist) was chosen. */
+static int ChooseMp3(HelixAmp3Gui *gui)
 {
 	struct FileRequester *req;
+	int chosen = 0;
 	char path[HELIXAMP3_MAX_PATH];
 	char pattern[sizeof(gSupportedExtPattern) + 16];
 
@@ -8650,7 +8666,7 @@ static void ChooseMp3(HelixAmp3Gui *gui)
 		TAG_DONE);
 	if (!req) {
 		SetStatus(gui, "Cannot allocate ASL file requester.");
-		return;
+		return 0;
 	}
 	if (AslRequestTags(req, ASLFR_Window, (ULONG)gui->win,
 		ASLFR_SleepWindow, TRUE, TAG_DONE)) {
@@ -8665,10 +8681,13 @@ static void ChooseMp3(HelixAmp3Gui *gui)
 		}
 		if (GuiIsPlaylistFile(path))
 			GuiOpenPlaylistFile(gui, path);
-		else
+		else {
 			GuiSelectFile(gui, path);
+			chosen = 1;
+		}
 	}
 	FreeAslRequest(req);
+	return chosen;
 }
 
 static void SelectInternetStream(HelixAmp3Gui *gui, const char *url)
@@ -10042,6 +10061,10 @@ int main(int argc, char **argv)
 {
 	struct Task *task = FindTask(NULL);
 	int rc;
+
+	/* Shell arguments and the WBStartup in the form the code below expects,
+	 * independent of the C runtime's own argument handling. */
+	mint_args_normalise(&argc, &argv);
 
 	/* One-time init of the cross-task stdout lock shared with amiga_mp3dec.c,
 	 * radio_stream.c and the Radio Browser modules.  Must run before the radio

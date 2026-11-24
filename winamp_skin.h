@@ -57,8 +57,8 @@ typedef struct SkinState {
     int pressed, scroll, playlist_visible, active;
     int paused, balance, shuffle, repeat, remaining, shaded, eq_visible;
     int visual_mode, filter;
-    unsigned char levels[16], peaks[16];
-    signed char scope[64];
+    /* Visualiser: bar heights and peaks 0..16, scope pixel rows 0..15. */
+    unsigned char levels[19], peaks[19], scope[76];
 } SkinState;
 typedef void (*SkinBlit)(void *ctx, int asset, int sx, int sy,
                           int width, int height, int x, int y);
@@ -106,6 +106,11 @@ void skin_eq_render(const WinampSkin *skin,const SkinEqState *now,
  * use neutral controls; missing mandatory background/buttons/text fail load. */
 int skin_hit_test(int x, int y);
 int skin_slider_value(int action, int x);
+/* The 76x16 visualiser at (x,y): whole area, background first. The player
+ * draws it off screen and copies it in one blit; skin_render() uses it
+ * for full and mode-change repaints. */
+void skin_visual_render(const WinampSkin *skin, const SkinState *s,
+                        SkinBlit blit, SkinFill fill, void *ctx, int x, int y);
 void skin_render(const WinampSkin *skin, const SkinState *now,
                  const SkinState *old, SkinBlit blit, SkinFill fill, void *ctx);
 #endif

@@ -291,6 +291,27 @@ failed:
     skin_free(&tmp); return 0;
 }
 
+#if defined(AMIGA_M68K)
+/* AmigaDOS I/O, not stdio: the first fopen() of a run makes the C runtime
+ * allocate stream tables from its private heap, which is never handed back
+ * to Exec at exit. In the skinned editions that cost ~35 KB of Fast RAM on
+ * every launch, since loading the skin was the only stdio file access. */
+#include <dos/dos.h>
+#include <proto/dos.h>
+int skin_load_file(WinampSkin *skin, const char *path, char *error, size_t en)
+{
+    BPTR f=Open((STRPTR)path,MODE_OLDFILE); LONG length; unsigned char *data; int ok;
+    if (!f) return fail(error,en,"Cannot open skin file");
+    if (Seek(f,0,OFFSET_END)<0 || (length=Seek(f,0,OFFSET_BEGINNING))<22 ||
+        (unsigned long)length>SKIN_MAX_FILE) { Close(f); return fail(error,en,"Invalid or oversized skin file"); }
+    data=(unsigned char *)malloc((size_t)length);
+    if (!data) { Close(f); return fail(error,en,"Not enough memory for skin archive"); }
+    if (Read(f,data,length)!=length) {
+        free(data); Close(f); return fail(error,en,"Could not read skin archive");
+    }
+    Close(f); ok=skin_load_memory(skin,data,(size_t)length,error,en); free(data); return ok;
+}
+#else
 int skin_load_file(WinampSkin *skin, const char *path, char *error, size_t en)
 {
     FILE *f=fopen(path,"rb"); long length; unsigned char *data; int ok;
@@ -304,3 +325,4 @@ int skin_load_file(WinampSkin *skin, const char *path, char *error, size_t en)
     }
     fclose(f); ok=skin_load_memory(skin,data,(size_t)length,error,en); free(data); return ok;
 }
+#endif

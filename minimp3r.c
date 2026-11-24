@@ -1,4 +1,5 @@
 #include "interface_prefs.h"
+#include "mint_args.h"
 /*
  * MintAMP - Mini Internet Amiga Media Player ReAction/ClassAct frontend for the Helix fixed-point
  * MP3 decoder, aimed at AmigaOS 3.3/3.5/3.9 (and 68k boards with ReAction or
@@ -4175,7 +4176,12 @@ static void SaveArtworkCache(MrApp *app)
 	if (!app->artCacheEnabled || !app->inputName[0] || !app->artValid)
 		return;
 	SafeCopy(dir, sizeof(dir), "PROGDIR:ArtCache");
-	CreateDir((STRPTR)dir);
+	{
+		/* CreateDir() returns an exclusive lock on success; keep none. */
+		BPTR created = CreateDir((STRPTR)dir);
+		if (created)
+			UnLock(created);
+	}
 	ArtworkCacheName(app, path, sizeof(path));
 	f = fopen(path, "wb");
 	if (!f)
@@ -5286,10 +5292,12 @@ static void ApplyHardwareAudioFilter(MrApp *app)
 /* ------------------------------------------------------------------------- */
 
 
-static void BrowseForFile(MrApp *app)
+/* Returns 1 when an audio file (not a playlist) was chosen. */
+static int BrowseForFile(MrApp *app)
 {
 struct FileRequester *fr;
 char path[MR_MAX_PATH];
+int chosen = 0;
 
 fr = (struct FileRequester *)AllocAslRequestTags(ASL_FileRequest,
 ASLFR_TitleText, (ULONG)"Choose an audio file or playlist",
@@ -5300,7 +5308,7 @@ TAG_DONE);
 
 if (!fr) {
 SetStatus(app, "Could not allocate file requester.");
-return;
+return 0;
 }
 
 if (AslRequestTags(fr,
@@ -5316,7 +5324,7 @@ if (fr->fr_File && fr->fr_File[0]) {
 if (!AddPart((STRPTR)path, fr->fr_File, sizeof(path))) {
 SetStatus(app, "Selected path is too long.");
 FreeAslRequest(fr);
-return;
+return 0;
 }
 
 /* A playlist opens in the playlist, with its first entry selected. */
@@ -5325,7 +5333,7 @@ CopyDrawerFromPath(app->lastDrawer, sizeof(app->lastDrawer), path);
 SaveSettings(app);
 LoadPlaylistPath(app, path, (const char *)fr->fr_Drawer);
 FreeAslRequest(fr);
-return;
+return 0;
 }
 
 SafeCopy(app->inputName, sizeof(app->inputName), path);
@@ -5339,10 +5347,12 @@ app->playlistCurrent = -1;
 RefreshPlaylistView(app);
 UpdateNextButtonState(app);
 RefreshFileInfoAndTags(app);
+chosen = 1;
 }
 }
 
 FreeAslRequest(fr);
+return chosen;
 }
 
 
@@ -5917,11 +5927,19 @@ static void RadioDoSearch(MrApp *app)
 	int rc;
 	char filterMsg[192];
 	if (app->rbSearchInProgress) { RadioSetStatus(app, "Search already running."); return; }
+	/* Searching while a stream plays is allowed: every socket call, the
+	 * stream's own and the Radio Browser HTTP fetch alike, runs as a job on
+	 * the single net worker task, so the two can only interleave there, never
+	 * run at once. Starting a different station still stops the current one
+	 * first (RadioDoProbeAndPlay's queue). */
+#if !defined(HAVE_AMISSL)
+	/* Plain-bsdsocket builds have no net worker: socket calls run on the
+	 * calling task, so a search must not overlap the stream's own I/O. */
 	if (Radio_PlaybackOwnsNetwork()) {
-		RADIO_DBG(printf("radio-browser: search skipped while radio playback child owns networking\n");)
-		RadioSetStatus(app, "Radio playback owns networking; search after stopping.");
+		RadioSetStatus(app, "Stop the stream to search (this build has no AmiSSL).");
 		return;
 	}
+#endif
 	app->rbSearchInProgress = 1;
 	RadioSetStatus(app, "Searching Radio Browser...");
 	if (app->rbSearchGad) GetAttr(STRINGA_TextVal, app->rbSearchGad, (ULONG *)(void *)&text);
@@ -7887,6 +7905,10 @@ int main(int argc, char **argv)
 {
 	struct Task *task = FindTask(NULL);
 	int rc;
+
+	/* Shell arguments and the WBStartup in the form the code below expects,
+	 * independent of the C runtime's own argument handling. */
+	mint_args_normalise(&argc, &argv);
 
 	/*
 	 * Workbench launches have no normal Shell console. Route incidental

@@ -214,15 +214,6 @@ int skin_list_move_selected(SkinList *l,int from,int to)
     l->selection->focus=*l->selected; l->selection->anchor=*l->selected;
     return changed;
 }
-void skin_visual_peaks(const unsigned char *levels,unsigned char *peaks,unsigned char *hold)
-{
-    int i;
-    for (i=0;i<16;++i) {
-        if (levels[i]>=peaks[i]) { peaks[i]=levels[i]; hold[i]=2; }
-        else if (hold[i]) --hold[i];
-        else if (peaks[i]) --peaks[i];
-    }
-}
 int skin_list_remove(SkinList *l,int index)
 {
     int i,current,selected;
@@ -327,28 +318,133 @@ int skin_eq_apply(int *spectrum,int count,int rate)
     }
     return 1;
 }
-/* 64-point DFT, 16 linear-frequency bars, on the GUI task. Q7 sine table;
- * bounded 8-bit samples make every accumulator fit 32 bits. No FFT/float
- * code or buffer allocations run in the decoder/audio submission loop. */
-void skin_visual_analyse(const signed char *pcm,unsigned char *levels)
+/* Visualiser analysis runs on the GUI task, never in the decoder/audio
+ * submission loop. 256 windowed 8-bit samples are packed as 128 complex
+ * points, so one 128-point fixed-point FFT (448 butterflies, 16x16 multiplies)
+ * yields 127 real-spectrum bins. Every stage halves its outputs: magnitudes
+ * never leave 16 bits, so 68020/030 MULS.W suffices and nothing overflows. */
+static const short skin_vis_sin[65]={0,402,804,1205,1606,2006,2404,2801,3196,3590,3981,4370,4756,5139,5520,5897,
+    6270,6639,7005,7366,7723,8076,8423,8765,9102,9434,9760,10080,10394,10702,11003,11297,
+    11585,11866,12140,12406,12665,12916,13160,13395,13623,13842,14053,14256,14449,14635,14811,14978,
+    15137,15286,15426,15557,15679,15791,15893,15986,16069,16143,16207,16261,16305,16340,16364,16379,16384};
+static const short skin_vis_hann[128]={1,11,31,60,100,149,208,277,355,443,541,648,765,891,1027,1171,
+    1325,1488,1660,1841,2030,2229,2435,2650,2874,3105,3345,3592,3847,4110,4380,4657,
+    4942,5233,5531,5835,6146,6463,6786,7115,7449,7789,8134,8484,8838,9197,9561,9929,
+    10300,10675,11054,11436,11820,12208,12598,12990,13385,13781,14179,14578,14978,15379,15780,16182,
+    16585,16987,17388,17789,18189,18588,18986,19382,19777,20169,20559,20947,21331,21713,22092,22467,
+    22838,23206,23570,23929,24283,24633,24978,25318,25652,25981,26304,26621,26932,27236,27534,27825,
+    28110,28387,28657,28920,29175,29422,29662,29893,30117,30332,30538,30737,30926,31107,31279,31442,
+    31596,31740,31876,32002,32119,32226,32324,32412,32490,32559,32618,32667,32707,32736,32756,32766};
+/* Bin edges of the 19 bars: one bin each at the bottom, then log-spaced to
+ * Nyquist, so bass and treble share the 76-pixel window as in Winamp. */
+static const unsigned char skin_vis_edges[SKIN_VIS_BARS+1]={1,2,3,4,5,6,7,8,9,10,13,17,21,28,36,46,59,77,99,128};
+/* Q14 e^(-2 pi i k/256) parts for k = 0..255. */
+static int skin_vis_cos(int k) { k&=255; return k<=64 ? skin_vis_sin[64-k] : k<=128 ? -skin_vis_sin[k-64] : k<=192 ? -skin_vis_sin[192-k] : skin_vis_sin[k-192]; }
+static int skin_vis_sine(int k) { k&=255; return k<=64 ? skin_vis_sin[k] : k<=128 ? skin_vis_sin[128-k] : k<=192 ? -skin_vis_sin[k-128] : -skin_vis_sin[256-k]; }
+#define SKIN_VIS_MUL(a,b) ((int)(short)(a)*(int)(short)(b))
+static unsigned skin_vis_magnitude(int re,int im)
 {
-    static const signed char sine[64]={0,12,25,37,49,60,71,81,90,98,106,112,117,122,125,126,
-        127,126,125,122,117,112,106,98,90,81,71,60,49,37,25,12,
-        0,-12,-25,-37,-49,-60,-71,-81,-90,-98,-106,-112,-117,-122,-125,-126,
-        -127,-126,-125,-122,-117,-112,-106,-98,-90,-81,-71,-60,-49,-37,-25,-12};
-    int k,n;
-    for (k=1;k<=16;++k) {
-        long re=0,im=0,level; int phase=0;
-        for (n=0;n<64;++n) {
-            re+=(long)pcm[n]*sine[(phase+16)&63]; im+=(long)pcm[n]*sine[phase];
-            phase=(phase+k)&63;
-        }
-        if (re<0) re=-re;
-    if (im<0) im=-im;
-        level=(re+im)/16384;
-    if (level>15) level=15;
-        levels[k-1]=(unsigned char)level;
+    unsigned a=(unsigned)(re<0 ? -re : re), b=(unsigned)(im<0 ? -im : im);
+    return a>b ? a+(b>>1)-(b>>3) : b+(a>>1)-(a>>3); /* within 4% of hypot */
+}
+void skin_visual_spectrum(const signed char *pcm,unsigned char *levels)
+{
+    short re[128],im[128]; unsigned bins[128];
+    int i,j,k,len,step;
+    /* Hann window; even samples real, odd samples imaginary, bit-reversed. */
+    for (i=0;i<128;++i) {
+        int r=0,b=i;
+        for (j=0;j<7;++j) { r=(r<<1)|(b&1); b>>=1; }
+        re[r]=(short)(SKIN_VIS_MUL(pcm[2*i],skin_vis_hann[i<64 ? 2*i : 255-2*i])>>9);
+        im[r]=(short)(SKIN_VIS_MUL(pcm[2*i+1],skin_vis_hann[i<64 ? 2*i+1 : 254-2*i])>>9);
     }
+    for (len=2,step=64;len<=128;len<<=1,step>>=1) {
+        int half=len>>1;
+        for (j=0;j<half;++j) {
+            int c=skin_vis_cos(2*j*step), s=-skin_vis_sine(2*j*step);
+            for (i=j;i<128;i+=len) {
+                int tr=(SKIN_VIS_MUL(re[i+half],c)-SKIN_VIS_MUL(im[i+half],s))>>14;
+                int ti=(SKIN_VIS_MUL(re[i+half],s)+SKIN_VIS_MUL(im[i+half],c))>>14;
+                int ar=re[i], ai=im[i];
+                re[i]=(short)((ar+tr)>>1); im[i]=(short)((ai+ti)>>1);
+                re[i+half]=(short)((ar-tr)>>1); im[i+half]=(short)((ai-ti)>>1);
+            }
+        }
+    }
+    /* Split the packed transform: X[k]=E+W^k O with E=(A+B)/2,
+     * O=-i(A-B)/2, A=Z[k], B=conj(Z[128-k]). */
+    for (k=1;k<128;++k) {
+        int ar=re[k], ai=im[k], br=re[128-k], bi=-im[128-k];
+        int er=(ar+br)>>1, ei=(ai+bi)>>1, or_=(ai-bi)>>1, oi=(br-ar)>>1;
+        int c=skin_vis_cos(k), s=-skin_vis_sine(k);
+        int xr=er+((SKIN_VIS_MUL(or_,c)-SKIN_VIS_MUL(oi,s))>>14);
+        int xi=ei+((SKIN_VIS_MUL(or_,s)+SKIN_VIS_MUL(oi,c))>>14);
+        bins[k]=skin_vis_magnitude(xr,xi);
+    }
+    /* Strongest bin per bar, 3 dB per pixel row. A full-scale sine is about
+     * 2^12 and tops out 12 dB early, as music sits well below full scale;
+     * the lowest row is near -36 dBFS. High bars get a gentle lift so
+     * typical music, whose energy falls with frequency, fills the window. */
+    for (i=0;i<SKIN_VIS_BARS;++i) {
+        unsigned peak=0,m; int level=0;
+        for (k=skin_vis_edges[i];k<skin_vis_edges[i+1];++k) if (bins[k]>peak) peak=bins[k];
+        peak+=peak*(unsigned)i/12U;
+        if (peak) {
+            int e=0;
+            for (m=peak;m>1;m>>=1) ++e;
+            level=2*e+(peak*peak>=(1UL<<(2*e+1)) ? 1 : 0)-4;
+        }
+        levels[i]=(unsigned char)(level<0 ? 0 : level>SKIN_VIS_HEIGHT ? SKIN_VIS_HEIGHT : level);
+    }
+}
+/* 76 columns from the 152 samples around the play position, as pixel rows
+ * 0 (top) .. 15 (bottom), centre between rows 7 and 8, at twice full scale. */
+void skin_visual_scope(const signed char *pcm,unsigned char *rows)
+{
+    int x;
+    for (x=0;x<SKIN_VIS_WIDTH;++x) {
+        const signed char *s=pcm+52+2*x;
+        int v=(int)s[0]+s[1], row=7-(v>>4); /* x2: music sits well below full scale */
+        rows[x]=(unsigned char)(row<0 ? 0 : row>15 ? 15 : row);
+    }
+}
+/* Bars rise at once and fall at about 40 rows a second; peaks hold for
+ * half a second then fall at about 16 rows a second, whatever the frame
+ * rate. State is in 1/16 rows. */
+void skin_visual_decay(SkinVisualDecay *d,const unsigned char *target,unsigned char *levels,
+                       unsigned char *peaks,int ms)
+{
+    int i;
+    if (ms<1) ms=1;
+    if (ms>1000) ms=1000;
+    for (i=0;i<SKIN_VIS_BARS;++i) {
+        unsigned want=(unsigned)target[i]<<4, fall=(unsigned)ms*2U/3U+1U;
+        d->bar[i]=want>=d->bar[i] ? want : d->bar[i]-want>fall ? d->bar[i]-fall : want;
+        if (d->bar[i]>=d->peak[i]) { d->peak[i]=d->bar[i]; d->hold[i]=500; }
+        else if (d->hold[i]>ms) d->hold[i]-=(unsigned short)ms;
+        else {
+            unsigned drop=(unsigned)(ms-d->hold[i])/4U+1U;
+            d->hold[i]=0;
+            d->peak[i]=d->peak[i]>d->bar[i]+drop ? d->peak[i]-drop : d->bar[i];
+        }
+        levels[i]=(unsigned char)((d->bar[i]+8)>>4);
+        peaks[i]=(unsigned char)((d->peak[i]+8)>>4);
+        if (peaks[i]<=levels[i]) peaks[i]=levels[i] ? levels[i] : 0;
+    }
+}
+/* Which published playback buffer is audible at now_ms, and how far into it. */
+int skin_visual_pick(const SkinVisualSlot *slots,int count,unsigned long now_ms,unsigned long *offset)
+{
+    int i;
+    for (i=0;i<count;++i) {
+        unsigned long into=(now_ms-slots[i].start_ms)&0xffffffffUL; /* 32-bit clock */
+        if (!slots[i].left || !slots[i].length_ms || !slots[i].bytes) continue;
+        if ((into&0x80000000UL) || into>=slots[i].length_ms) continue;
+        if (offset) *offset=slots[i].length_ms<65536UL ? into*slots[i].bytes/slots[i].length_ms
+                                                     : into/(slots[i].length_ms/slots[i].bytes+1);
+        return i;
+    }
+    return -1;
 }
 
 static int near_edge(int a,int b,int tolerance)

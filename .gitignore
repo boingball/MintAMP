@@ -44,3 +44,19 @@ decoders/.aac-build-config
 decoders/.aac-build-config.tmp
 
 /aac_mulshift60_ref_test
+
+# Host test and reference binaries
+/display_text_test
+/flac_lpc030_ref_test
+/flac_lpc060_ref_test
+/mint_args_test
+/ogg_mulshift60_ref_test
+/polyphase60_ref_test
+/radio_favourites_test
+/radio_metadata_test
+/radio_oggflac_test
+/wma_mulshift030_ref_test
+/wma_mulshift060_ref_test
+
+# Local decoder variant builds kept for A/B comparisons
+/amiga_mp3dec.cpu*

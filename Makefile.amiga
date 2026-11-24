@@ -293,10 +293,10 @@ PNG_CPPFLAGS := -DENABLE_PNG_ARTWORK -DLODEPNG_NO_COMPILE_ENCODER \
 # drop webpdec.c from the *_SOURCES below; the C-level guard alone only skips
 # the decode calls.  WebP is the second most common real-world favicon format.
 
-SOURCES := amiga_mp3dec.c miniamp_memguard.c $(TASKSAFE_MALLOC_SOURCE) radio_runtime_flags.c $(RADIO_SOURCES) $(RADIO_CLI_SOURCES) $(DECODER_SOURCES)
+SOURCES := amiga_mp3dec.c mint_args.c miniamp_memguard.c $(TASKSAFE_MALLOC_SOURCE) radio_runtime_flags.c $(RADIO_SOURCES) $(RADIO_CLI_SOURCES) $(DECODER_SOURCES)
 # miniamp_memguard.c compiles to nothing unless HEAPGUARD=1 (see
 # MINIAMP_DEBUG_ALLOC above), so it's harmless to always list it.
-GUI_SOURCES := interface_prefs.c launch_options.c amiga_mp3gui.c picojpeg.c lodepng.c webpdec.c svgdec.c miniamp_memguard.c $(TASKSAFE_MALLOC_SOURCE) radio_runtime_flags.c $(RADIO_SOURCES) \
+GUI_SOURCES := interface_prefs.c launch_options.c mint_args.c amiga_mp3gui.c picojpeg.c lodepng.c webpdec.c svgdec.c miniamp_memguard.c $(TASKSAFE_MALLOC_SOURCE) radio_runtime_flags.c $(RADIO_SOURCES) \
 	radio_browser_controller.c radio_browser.c radio_browser_url.c \
 	radio_browser_http.c radio_browser_json.c radio_stream_probe.c
 # MintAMP-GT uses gadtools.library via proto/gadtools.h; no linker flag is needed.
@@ -306,7 +306,7 @@ GUI_SOURCES := interface_prefs.c launch_options.c amiga_mp3gui.c picojpeg.c lode
 # lodepng.c/webpdec.c/svgdec.c are linked into both frontends now, so the
 # GadTools and ReAction builds decode the same favicon formats (JPEG, PNG,
 # WebP, ICO and SVG).
-GUIR_SOURCES := interface_prefs.c launch_options.c minimp3r.c picojpeg.c lodepng.c webpdec.c svgdec.c miniamp_memguard.c $(TASKSAFE_MALLOC_SOURCE) radio_runtime_flags.c $(RADIO_SOURCES) \
+GUIR_SOURCES := interface_prefs.c launch_options.c mint_args.c minimp3r.c picojpeg.c lodepng.c webpdec.c svgdec.c miniamp_memguard.c $(TASKSAFE_MALLOC_SOURCE) radio_runtime_flags.c $(RADIO_SOURCES) \
 	radio_browser_controller.c radio_browser.c radio_browser_url.c \
 	radio_browser_http.c radio_browser_json.c radio_stream_probe.c
 
@@ -416,8 +416,8 @@ skins: sgt sr
 
 .PHONY: launcher
 launcher: MintAMP-Launch
-MintAMP-Launch: mintamp_launch.c interface_prefs.c launch_options.c interface_prefs.h launch_options.h
-	$(CC) $(CPU_MFLAG) $(STD) -Os $(EXTRA_CFLAGS) -o $@ mintamp_launch.c interface_prefs.c launch_options.c
+MintAMP-Launch: mintamp_launch.c interface_prefs.c launch_options.c mint_args.c interface_prefs.h launch_options.h mint_args.h
+	$(CC) $(CPU_MFLAG) $(STD) -Os $(EXTRA_CFLAGS) -DAMIGA_M68K -o $@ mintamp_launch.c interface_prefs.c launch_options.c mint_args.c
 	$(AMIGA_HUNK_FAST_PREFERRED) $@
 sslsgt:
 	$(MAKE) -f Makefile.amiga sgt RADIO=1 SSL=1
@@ -774,7 +774,7 @@ integer-stats-test:
 	./integer_stats_test
 	PYTHONDONTWRITEBYTECODE=1 python3 tests/integer_source_test.py
 skin-controls-test:
-	$(HOSTCC) -O2 -std=gnu89 -Wall -Wextra -Werror -I. tests/skin_controls_test.c skin_controls.c winamp_skin_render.c -o skin_controls_test
+	$(HOSTCC) -O2 -std=gnu89 -Wall -Wextra -Werror -I. tests/skin_controls_test.c skin_controls.c winamp_skin_render.c -lm -o skin_controls_test
 	./skin_controls_test
 skin-eq-decode-test:
 	$(HOSTCC) -O2 -std=gnu99 -DAMIGA_M68K -DMINTAMP_SKIN -I. -Ipub -Ireal tests/skin_eq_decode_test.c mp3dec.c mp3tabs.c real/*.c skin_controls.c -o skin_eq_decode_test
@@ -784,6 +784,8 @@ skin-eq-decode-test:
 launcher-test:
 	$(HOSTCC) -O2 -std=gnu89 -Wall -Wextra -Werror -I. tests/launch_options_test.c launch_options.c -o launch_options_test
 	./launch_options_test
+	$(HOSTCC) -O2 -std=gnu89 -Wall -Wextra -Werror -I. tests/mint_args_test.c mint_args.c -o mint_args_test
+	./mint_args_test
 	PYTHONDONTWRITEBYTECODE=1 python3 tests/launcher_icon_test.py
 
 .PHONY: skin-performance-test

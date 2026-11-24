@@ -1,6 +1,7 @@
 /* Lightweight dispatcher: no shell, decoder or resident launcher task.
  * A CLI process is necessary even when the dispatcher starts in Workbench. */
 #include "interface_prefs.h"
+#include "mint_args.h"
 #include <stdio.h>
 #include <string.h>
 #include <workbench/startup.h>
@@ -20,7 +21,8 @@ static int message(int wb,const char *text)
 int main(int argc,char **argv)
 {
     MintLaunchOptions o; const char *audio=NULL; char binary[1024],args[3072],quoted[1100],path[1024];
-    BPTR seg,input,output; struct Process *child; int wb=argc==0;
+    BPTR seg,input,output; struct Process *child; int wb;
+    mint_args_normalise(&argc,&argv); wb=argc==0;
     mint_launch_defaults(&o); mint_interface_load(&o); mint_interface_tooltypes(&o,argc,argv);
     if (!wb && argc==2 && !strcmp(argv[1],"--prefs")) { mint_interface_preferences(NULL); mint_interface_flush(); return 0; }
     if (!wb && !mint_launch_args(&o,argc,argv,&audio))
