@@ -28,8 +28,12 @@ typedef struct WmaState {
     WmaAsfDemux       *asf;
     WMADecodeContext  *wmadec; /* heap-allocated: too large for the stack */
 
-    const unsigned char *audiobuf;
+    const unsigned char *audiobuf;     /* current superframe */
     unsigned long         audiobufsize;
+    const unsigned char *packet;       /* audio payload of the current packet */
+    unsigned long         packetLen;
+    unsigned long         packetPos;   /* start of the next superframe in it */
+    unsigned long         blockalign;  /* bytes per superframe, 0 = whole packet */
     int                    frameIdx;
     int                    errorCount;
 
@@ -93,6 +97,7 @@ static DecHandle WmaOpen(DecoderReadCb readFn, DecoderSeekCb seekFn,
     }
 
     st->channels = (int)wfx.channels;
+    st->blockalign = (unsigned long)wfx.blockalign;
     st->frameIdx = 0;
 
     infoOut->sampleRate    = (DecULong)wfx.rate;
@@ -135,21 +140,37 @@ static DecLong WmaDecode(DecHandle handle, short *outBuf, DecULong maxSamplesPer
         }
 
         if (st->frameIdx >= st->wmadec->nb_frames) {
-            const unsigned char *buf;
-            unsigned long         len;
-            int                   rc = WmaAsfReadPacket(st->asf, &buf, &len);
+            unsigned long chunk;
 
-            if (rc == 0) {
-                st->eof = 1;
-                break;
-            }
-            if (rc < 0) {
-                st->error = 1;
-                return -1;
+            /* A packet usually carries several superframes of blockalign
+             * bytes each (e.g. 4 x 743 in a 3200-byte packet). Rockbox's
+             * demuxer hands its decoder one at a time; ours hands over the
+             * whole packet, so step through it here. Decoding only the first
+             * superframe played about a quarter of the audio, then stopped. */
+            if (st->packetPos >= st->packetLen) {
+                const unsigned char *buf;
+                unsigned long         len;
+                int                   rc = WmaAsfReadPacket(st->asf, &buf, &len);
+
+                if (rc == 0) {
+                    st->eof = 1;
+                    break;
+                }
+                if (rc < 0) {
+                    st->error = 1;
+                    return -1;
+                }
+                st->packet    = buf;
+                st->packetLen = len;
+                st->packetPos = 0;
             }
 
-            st->audiobuf     = buf;
-            st->audiobufsize = len;
+            chunk = st->packetLen - st->packetPos;
+            if (st->blockalign && chunk > st->blockalign)
+                chunk = st->blockalign;
+            st->audiobuf     = st->packet + st->packetPos;
+            st->audiobufsize = chunk;
+            st->packetPos   += chunk;
             st->frameIdx     = 0;
 
             if (!wma_decode_superframe_init(st->wmadec, st->audiobuf,
