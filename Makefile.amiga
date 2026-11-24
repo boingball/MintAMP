@@ -661,6 +661,9 @@ release: $(GUIR_TARGET) $(GUI_TARGET) $(FAST030_TARGET) decoder-modules
 	@test -f "$(GUIR_TARGET).info" || { echo "ERROR: missing $(GUIR_TARGET).info"; exit 1; }
 	@test -f "$(GUI_TARGET).info" || { echo "ERROR: missing $(GUI_TARGET).info"; exit 1; }
 	cp "$(GUIR_TARGET).info" "$(GUI_TARGET).info" "$(RELEASE_DIR)/"
+	@# Refuse modules whose cross-section branches the hunk linker mis-resolved
+	@# (see -fno-optimize-sibling-calls in decoders/Makefile).
+	python3 tools/check_module_branches.py decoders/*.decoder
 	@set -e; \
 	found=0; \
 	for decoder in decoders/*.decoder; do \

@@ -2,7 +2,7 @@ Short:        Multiformat player and net radio
 Author:       Darren Banfi (boingball)
 Uploader:     boingball@gmail.com (Darren Banfi)
 Type:         mus/play
-Version:      1.4.0
+Version:      1.4.1
 Requires:     68030+; TCP/IP stack for radio; util/libs/AmiSSL-v5-OS3.lha for HTTPS
 Architecture: m68k-amigaos >= 3.0.0
 
@@ -17,8 +17,8 @@ sound card are not required.
 
 This archive contains two complete MintAMP drawers:
 
-  MintAMP-v1.4.0-68030  For 68030 and 68040 systems
-  MintAMP-v1.4.0-68060  Dedicated build for 68060 systems
+  MintAMP-v1.4.1-68030  For 68030 and 68040 systems
+  MintAMP-v1.4.1-68060  Dedicated build for 68060 systems
 
 Open or copy the drawer which matches the processor installed in your Amiga.
 The 68060 edition contains a dedicated 68060-safe and 68060-optimised MP3
@@ -77,25 +77,25 @@ Installation
 
 Extract the complete archive. Its root contains:
 
-  MintAMP-v1.4.0-68030/
-  MintAMP-v1.4.0-68060/
-  MintAMP-v1.4.0-68030.info
-  MintAMP-v1.4.0-68060.info
+  MintAMP-v1.4.1-68030/
+  MintAMP-v1.4.1-68060/
+  MintAMP-v1.4.1-68030.info
+  MintAMP-v1.4.1-68060.info
 
 Choose the drawer matching your processor:
 
   68030 or 68040:
-    Use MintAMP-v1.4.0-68030
+    Use MintAMP-v1.4.1-68030
 
   68060:
-    Use MintAMP-v1.4.0-68060
+    Use MintAMP-v1.4.1-68060
 
 You may leave both drawers together or copy only the required drawer to your
 preferred location.
 
 Keep every file inside the selected drawer together. Its layout is:
 
-  MintAMP-v1.4.0-68xxx/
+  MintAMP-v1.4.1-68xxx/
     MintAMP
     MintAMP.info
     MintAMP-GT
@@ -295,6 +295,18 @@ repository for the complete terms and source code.
 
 History
 -------
+
+1.4.1  Internet radio: search, browse favourites and change station while
+       a stream is playing, instead of having to stop it first. The radio
+       window's status line now follows the stream (Buffering, Streaming,
+       Stopped or why it failed) instead of staying on Buffering.
+       A file that cannot be played now says why ("Can't play: ...")
+       instead of sitting silently at 00:00: video-only files, WMA Pro,
+       Lossless and Voice, MP4/M4A AAC, a missing decoder or file.
+       Fixed: FLAC, Ogg, WMA, WAV and AAC files lost their last 8-10
+       seconds; WMA decoded only part of each packet, and WMA files with
+       video failed at the end of the audio; about 36 KB of memory was
+       lost every time MintAMP or MintAMP-GT was started.
 
 1.4.0  Lossless FLAC internet radio, including FLAC inside Ogg, the form
        most Icecast stations use; "FLAC" is a codec choice in the radio
