@@ -173,6 +173,7 @@ struct WmaAsfDemux {
     unsigned long  audioBufCap;  /* logical bound = wfx.packet_size, used to
                                    * reject malformed/oversized packets */
     unsigned long  audioBufAlloc;/* real allocation size, >= audioBufCap */
+    unsigned long long packetsRead; /* Data Packets consumed so far */
 };
 
 /*
@@ -400,9 +401,10 @@ WmaAsfDemux *WmaAsfOpen(DecoderReadCb readFn, DecoderSeekCb seekFn,
         return NULL;
     }
 
-    dx->audioBufAlloc = dx->wfx.packet_size;
-    if (dx->audioBufAlloc < WMA_ASF_AUDIOBUF_SAFETY_PAD)
-        dx->audioBufAlloc = WMA_ASF_AUDIOBUF_SAFETY_PAD;
+    /* wma_module.c decodes each blockalign-sized superframe of a packet in
+     * turn, handing the decoder a pointer up to a packet's length into
+     * audioBuf, so the read-ahead headroom has to follow a whole packet. */
+    dx->audioBufAlloc = dx->wfx.packet_size + WMA_ASF_AUDIOBUF_SAFETY_PAD;
 
     dx->packetBuf = (unsigned char *)WmaModuleCalloc(1, dx->wfx.packet_size);
     dx->audioBuf  = (unsigned char *)WmaModuleCalloc(1, dx->audioBufAlloc);
@@ -464,6 +466,12 @@ static int ReadOnePacket(WmaAsfDemux *dx, const unsigned char **bufOut, unsigned
 
     *bufOut = NULL;
     *lenOut = 0;
+
+    /* The File Properties packet count marks the end of the Data Object.
+     * Files with video usually carry an Index Object straight after it;
+     * reading on would parse its GUID as a packet header and fail. */
+    if (dx->wfx.numpackets && dx->packetsRead >= dx->wfx.numpackets)
+        return -2;
 
     if (!ReadExactRaw(dx->readFn, dx->userData, &hdr8, 1))
         return -2; /* clean EOF between packets */
@@ -530,6 +538,7 @@ static int ReadOnePacket(WmaAsfDemux *dx, const unsigned char **bufOut, unsigned
         return -1; /* packet_size guard sized packetBuf; shouldn't happen */
     if (!ReadExactRaw(dx->readFn, dx->userData, dx->packetBuf, packetDataLen))
         return -1;
+    dx->packetsRead++;
 
     p = dx->packetBuf;
     pEnd = dx->packetBuf + packetDataLen;
