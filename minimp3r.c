@@ -5809,11 +5809,19 @@ static void RadioDoSearch(MrApp *app)
 	int rc;
 	char filterMsg[192];
 	if (app->rbSearchInProgress) { RadioSetStatus(app, "Search already running."); return; }
+	/* Searching while a stream plays is allowed: every socket call, the
+	 * stream's own and the Radio Browser HTTP fetch alike, runs as a job on
+	 * the single net worker task, so the two can only interleave there, never
+	 * run at once. Starting a different station still stops the current one
+	 * first (RadioDoProbeAndPlay's queue). */
+#if !defined(HAVE_AMISSL)
+	/* Plain-bsdsocket builds have no net worker: socket calls run on the
+	 * calling task, so a search must not overlap the stream's own I/O. */
 	if (Radio_PlaybackOwnsNetwork()) {
-		RADIO_DBG(printf("radio-browser: search skipped while radio playback child owns networking\n");)
-		RadioSetStatus(app, "Radio playback owns networking; search after stopping.");
+		RadioSetStatus(app, "Stop the stream to search (this build has no AmiSSL).");
 		return;
 	}
+#endif
 	app->rbSearchInProgress = 1;
 	RadioSetStatus(app, "Searching Radio Browser...");
 	if (app->rbSearchGad) GetAttr(STRINGA_TextVal, app->rbSearchGad, (ULONG *)(void *)&text);
