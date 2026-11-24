@@ -144,6 +144,25 @@ def heads(binary):
     return vals
 
 
+def nm_symbols(binary):
+    """name -> (value, type) from m68k-amigaos-nm."""
+    out = subprocess.check_output(['m68k-amigaos-nm', binary], text=True, errors='replace')
+    syms = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 3:
+            syms[parts[2]] = (int(parts[0], 16), parts[1])
+    return syms
+
+
+def errno_address(binary):
+    syms = nm_symbols(binary)
+    if '_errno' not in syms:
+        sys.stderr.write('no _errno symbol in %s\n' % binary)
+        sys.exit(1)
+    return syms['_errno'][0]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('binary')
@@ -151,20 +170,28 @@ def main():
     ap.add_argument('--shell', action='store_true')
     ns = ap.parse_args()
     vals = heads(ns.binary)
+    if ns.verify or ns.shell:
+        base = errno_address(ns.binary)
+        offs = [v - base for v in vals]
+        if any(o < 0 or o > 0x1000 for o in offs):
+            sys.stderr.write('___free_all heads not just after _errno: heads %s _errno 0x%x\n' %
+                             ([hex(x) for x in vals], base))
+            sys.exit(1)
     if ns.verify:
         want = [int(x, 0) for x in ns.verify]
-        if vals != want:
-            sys.stderr.write('___free_all head mismatch: found %s expected %s\n' %
-                             ([hex(x) for x in vals], [hex(x) for x in want]))
+        if offs != want:
+            sys.stderr.write('___free_all head offset mismatch: found %s expected %s\n' %
+                             ([hex(x) for x in offs], [hex(x) for x in want]))
             sys.exit(1)
     if ns.shell:
-        print('FREEALL_HEAD0=0x%08x' % vals[0])
-        print('FREEALL_HEAD1=0x%08x' % vals[1])
-        print('FREEALL_HEAD2=0x%08x' % vals[2])
-        print('FREEALL_LDFLAGS="-Wl,--defsym,___freeall_head0=0x%08x -Wl,--defsym,___freeall_head1=0x%08x -Wl,--defsym,___freeall_head2=0x%08x"' % tuple(vals))
+        # Offsets from _errno, compiled into crt_freeall_probe.c. Not absolute
+        # --defsym symbols: AmigaOS does not relocate those at load time.
+        print('FREEALL_HEAD0=0x%x' % offs[0])
+        print('FREEALL_HEAD1=0x%x' % offs[1])
+        print('FREEALL_HEAD2=0x%x' % offs[2])
+        print('FREEALL_FLAGS="-DLIBNIX_FREEALL_HEAD0_OFFSET=0x%xUL -DLIBNIX_FREEALL_HEAD1_OFFSET=0x%xUL -DLIBNIX_FREEALL_HEAD2_OFFSET=0x%xUL"' % tuple(offs))
     else:
         print(' '.join('0x%08x' % x for x in vals))
-
 
 if __name__ == '__main__':
     main()
