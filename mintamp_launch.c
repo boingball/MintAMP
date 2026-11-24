@@ -9,6 +9,10 @@
 #include <intuition/intuition.h>
 #include <proto/dos.h>
 #include <proto/intuition.h>
+
+/* AmigaOS Version command metadata. */
+static const char gMintAmpLaunchVersionTag[] __attribute__((used)) =
+	"\0$VER: MintAMP-Launch 2.0 (24.11.2026)";
 static int message(int wb,const char *text)
 {
     if (wb) {

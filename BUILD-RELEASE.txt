@@ -1,8 +1,8 @@
-MintAMP 2.0 development build recipe (PR #521)
-=============================================
+MintAMP 2.0 release build recipe
+================================
 
-Build from the 2.0 branch (or a working branch based on it). These commands create
-local development drawers. They do not publish, tag, merge or update 1.4.0.
+Build from the 2.0 branch. These commands create the two release drawers and
+the Aminet readme in release/. They do not publish, tag or merge anything.
 Run from the repository root with the Amiga cross-compiler tools on PATH.
 
 Run the automated checks first:
@@ -20,7 +20,7 @@ make -f Makefile.amiga launcher-test interface-prefs-test skin-format-test skin-
 
 make -f Makefile.amiga clean
 make -f Makefile.amiga release CPU=30 RADIO=1 SSL=1 SSLCERTS=1 \
-  RELEASE_NAME=MintAMP-2.0-dev-68030
+  RELEASE_NAME=MintAMP-v2.0-68030
 
 68060 drawer (including FPU-less 68060)
 ------------------------------------
@@ -28,7 +28,7 @@ make -f Makefile.amiga release CPU=30 RADIO=1 SSL=1 SSLCERTS=1 \
 make -f Makefile.amiga clean
 make -f Makefile.amiga release CPU=60 \
   ASM60_GROUPS="lowrate060 huffman midside planars8" \
-  RADIO=1 SSL=1 SSLCERTS=1 RELEASE_NAME=MintAMP-2.0-dev-68060
+  RADIO=1 SSL=1 SSLCERTS=1 RELEASE_NAME=MintAMP-v2.0-68060
 
 Always clean when changing CPU, compiler or optimisation options. The second
 clean leaves the first packaged drawer intact. Do not mix decoder modules
@@ -55,6 +55,10 @@ checks. The application integer-source guard does not prove that all external
 libraries are FPU-free. Test the installed OS libraries and CPU-matched decoder
 modules on the actual FPU-less board. See docs/mintamp-2.0-acceptance.md.
 
-GitHub Actions compiles both CPUs and uploads development drawers. Host CPU
+GitHub Actions compiles both CPUs and uploads the drawers as artifacts. Host CPU
 measurements and successful cross-compilation do not establish Amiga playback
-headroom. Real audio.device/Intuition tests are required before a 2.0 release.
+headroom: test each drawer on a real 68030 and 68060 (audio.device playback,
+skin and Classic windows, radio over HTTPS) before uploading to Aminet.
+
+Aminet upload: archive release/MintAMP-v2.0-68030, release/MintAMP-v2.0-68060
+and their .info files together, and upload release/MintAMP.readme beside it.
