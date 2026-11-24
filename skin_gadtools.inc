@@ -392,6 +392,8 @@ static void GuiSkinUpdate(HelixAmp3Gui *gui,int tick)
         CopyVolatileGuiString(state.title,sizeof(state.title),gGuiPlaybackStatus.radioTitle);
     if (gGuiPlaybackStatus.phase==GUIPLAY_PHASE_ERROR)
         SafeCopy(state.title,sizeof(state.title),gui->statusText);
+    if (!gui->playbackActive && gGuiPlaybackStatus.playError[0])  /* stays until the next play */
+        CopyVolatileGuiString(state.title,sizeof(state.title),gGuiPlaybackStatus.playError);
     if (!state.title[0] && IsRadioInputName(gui->inputName))
         CopyVolatileGuiString(state.title,sizeof(state.title),gGuiPlaybackStatus.radioStationName);
     if (!state.title[0] && gui->tags.title[0] && strcmp(gui->tags.title,"-")) {

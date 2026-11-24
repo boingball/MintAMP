@@ -431,6 +431,8 @@ static void MrSkinUpdate(MrApp *app,int tick)
         MrCopyVolatileString(state.title,sizeof(state.title),gGuiPlaybackStatus.radioTitle);
     if (gGuiPlaybackStatus.phase==GUIPLAY_PHASE_ERROR)
         SafeCopy(state.title,sizeof(state.title),app->shownStatus);
+    if (!app->playbackActive && gGuiPlaybackStatus.playError[0])  /* stays until the next play */
+        MrCopyVolatileString(state.title,sizeof(state.title),gGuiPlaybackStatus.playError);
     if (!state.title[0] && MrIsRadioInput(app->inputName))
         MrCopyVolatileString(state.title,sizeof(state.title),gGuiPlaybackStatus.radioStationName);
     if (!state.title[0] && app->shownTitle[0] && strcmp(app->shownTitle,"-")) {
