@@ -60,7 +60,17 @@ override CFLAGS := $(CPU_MFLAG) -O2 -fomit-frame-pointer -std=gnu89 -Wall -I. \
           -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc \
           -fno-builtin-free -fno-builtin-exit -fno-builtin-memset \
           -fno-tree-loop-distribute-patterns \
+          -fno-optimize-sibling-calls \
           -ffunction-sections -fdata-sections -DNDEBUG
+
+# -fno-optimize-sibling-calls: with -ffunction-sections, GCC turns a tail call
+# to a *static* function into a PC-relative bra.l into another section, and
+# the Amiga hunk linker resolves that relocation short of the target (6 to 56
+# bytes in practice).  FlacClose landed on the rts of a neighbouring function,
+# so every FLAC play leaked its ~137 KB decoder state, and Tremor's
+# res0/res1_inverse jumped into the middle of res0_look.  Plain jsr calls use
+# absolute relocations and link correctly.  Re-check linked modules with
+# tools/check_module_branches.py.
 
 # Post-link: mark hunks as "any RAM, prefer Fast" (same as main binary)
 FIXHUNKS := python3 ../tools/amiga_fast_preferred_hunks.py
