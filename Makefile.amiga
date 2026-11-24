@@ -231,17 +231,18 @@ endif
 
 # libnix ___free_all compatibility replacement (crt_freeall_probe.c).
 # The GUI rules build a temporary discovery binary, extract the three list-head
-# addresses from that exact binary's stock ___free_all disassembly, then relink
-# the final binary with those addresses supplied as absolute --defsym symbols.
+# addresses from that exact binary's stock ___free_all disassembly, then rebuild
+# the final binary with their offsets from _errno compiled in (-D values), and
+# verify the final binary's ___free_all still uses those offsets.
 # FREEALL_PROBE=1 enables verbose raw diagnostics in the same replacement.
 LIBNIX_FREEALL_COMPAT_SOURCES := crt_freeall_probe.c
 FREEALL_PROBE_CPPFLAGS :=
 ifneq ($(filter 1 yes true on,$(FREEALL_PROBE)),)
 FREEALL_PROBE_CPPFLAGS := -DFREEALL_PROBE
 endif
-FREEALL_DISCOVERY_LDFLAGS := -Wl,--defsym,___freeall_head0=0 \
-	-Wl,--defsym,___freeall_head1=0 \
-	-Wl,--defsym,___freeall_head2=0
+# The discovery link uses the compat file's built-in head offsets; the real
+# offsets are then read back from its ___free_all and compiled in.
+FREEALL_DISCOVERY_LDFLAGS :=
 FREEALL_HEAD_EXTRACT := python3 tools/libnix_freeall_heads.py
 
 # Debug-only heap guard for MintAMP's own allocations (front/rear guard
@@ -454,7 +455,7 @@ $(GUI_TARGET): interface_prefs.h launch_options.h $(GUI_EXTRA_DEPS) $(GUI_SOURCE
 	$(FREEALL_HEAD_EXTRACT) --shell $@.freeall-discovery > $@.freeall-heads; \
 	. ./$@.freeall-heads; \
 	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(PROBE_CPPFLAGS) $(SSL_CPPFLAGS) $(SSLCERTS_CPPFLAGS) $(PNG_CPPFLAGS) $(DEBUG_CPPFLAGS) $(FREEALL_PROBE_CPPFLAGS) $(EXTRA_CFLAGS) \
-		-o $@ $(GUI_SOURCES) $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(LIBNIX_FREEALL_COMPAT_SOURCES) $$FREEALL_LDFLAGS; \
+		-o $@ $(GUI_SOURCES) $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(LIBNIX_FREEALL_COMPAT_SOURCES) $$FREEALL_FLAGS; \
 	$(FREEALL_HEAD_EXTRACT) $@ --verify $$FREEALL_HEAD0 $$FREEALL_HEAD1 $$FREEALL_HEAD2; \
 	rm -f $@.freeall-discovery $@.freeall-heads; \
 	trap - EXIT
@@ -471,7 +472,7 @@ $(GUIR_TARGET): interface_prefs.h launch_options.h $(GUI_EXTRA_DEPS) $(GUIR_SOUR
 	$(FREEALL_HEAD_EXTRACT) --shell $@.freeall-discovery > $@.freeall-heads; \
 	. ./$@.freeall-heads; \
 	$(CC) $(FAST030_CFLAGS) $(CPPFLAGS_COMMON) $(RADIO_CPPFLAGS) $(FAST030_CPPFLAGS) $(PROBE_CPPFLAGS) $(SSL_CPPFLAGS) $(SSLCERTS_CPPFLAGS) $(PNG_CPPFLAGS) $(DEBUG_CPPFLAGS) $(FREEALL_PROBE_CPPFLAGS) $(EXTRA_CFLAGS) \
-		-o $@ $(GUIR_SOURCES) $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(LIBNIX_FREEALL_COMPAT_SOURCES) $$FREEALL_LDFLAGS; \
+		-o $@ $(GUIR_SOURCES) $(DECODER_SOURCES) $(FAST030_ASM_SOURCES) $(LIBNIX_FREEALL_COMPAT_SOURCES) $$FREEALL_FLAGS; \
 	$(FREEALL_HEAD_EXTRACT) $@ --verify $$FREEALL_HEAD0 $$FREEALL_HEAD1 $$FREEALL_HEAD2; \
 	rm -f $@.freeall-discovery $@.freeall-heads; \
 	trap - EXIT

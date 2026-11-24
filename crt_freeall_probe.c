@@ -108,16 +108,30 @@ typedef int crt_freeall_probe_unit;
 extern void LibnixFreeAll(void) __asm__("___free_all");
 extern void *LibnixExitList[] __asm__("___EXIT_LIST__");
 extern char LibnixErrno[] __asm__("_errno");
-extern char __freeall_head0[] __asm__("___freeall_head0");
-extern char __freeall_head1[] __asm__("___freeall_head1");
-extern char __freeall_head2[] __asm__("___freeall_head2");
 
 void LibnixFreeAllCompat_Install(void);
 void LibnixFreeAllCompat_Run(void);
 
+/* The three list heads ___free_all walks, as byte offsets from _errno in the
+ * runtime's data. The Makefile measures them from a discovery link of the same
+ * sources (tools/libnix_freeall_heads.py) and passes them as -D values; these
+ * defaults match the GCC 13 runtime.
+ *
+ * They are offsets on purpose. An earlier revision used absolute
+ * --defsym ___freeall_headN=0x... symbols, but AmigaOS never relocates an
+ * absolute symbol when it loads the hunks: the walk read low memory instead of
+ * the real heads, found "empty" lists and freed nothing, so every run that
+ * touched stdio leaked the runtime's whole private heap (~35 KB). _errno is an
+ * ordinary data symbol, so _errno + offset is relocated like any other. */
+#ifndef LIBNIX_FREEALL_HEAD0_OFFSET
 #define LIBNIX_FREEALL_HEAD0_OFFSET 0x0cUL
+#endif
+#ifndef LIBNIX_FREEALL_HEAD1_OFFSET
 #define LIBNIX_FREEALL_HEAD1_OFFSET 0x10UL
+#endif
+#ifndef LIBNIX_FREEALL_HEAD2_OFFSET
 #define LIBNIX_FREEALL_HEAD2_OFFSET 0x20UL
+#endif
 
 #if defined(FREEALL_DANGEROUS_LEAK_CRT_ON_EXIT)
 /* Deliberately dangerous proof-only mode: never enable in production. */
@@ -342,9 +356,9 @@ void LibnixFreeAllCompat_Install(void)
 		ULONG errnoHead0 = (ULONG)(LibnixErrno + LIBNIX_FREEALL_HEAD0_OFFSET);
 		ULONG errnoHead1 = (ULONG)(LibnixErrno + LIBNIX_FREEALL_HEAD1_OFFSET);
 		ULONG errnoHead2 = (ULONG)(LibnixErrno + LIBNIX_FREEALL_HEAD2_OFFSET);
-		ULONG linkedHead0 = (ULONG)&__freeall_head0;
-		ULONG linkedHead1 = (ULONG)&__freeall_head1;
-		ULONG linkedHead2 = (ULONG)&__freeall_head2;
+		ULONG linkedHead0 = errnoHead0;
+		ULONG linkedHead1 = errnoHead1;
+		ULONG linkedHead2 = errnoHead2;
 		probe_str("FREEALL-ADDRESS errnoSymbol=");
 		probe_hex32(errnoSymbol);
 		probe_str(" head0Address=");
@@ -475,9 +489,9 @@ void LibnixFreeAllCompat_Run(void)
 	struct Task *task;
 	unsigned long li;
 
-	headAddr[0] = (unsigned long)&__freeall_head0;
-	headAddr[1] = (unsigned long)&__freeall_head1;
-	headAddr[2] = (unsigned long)&__freeall_head2;
+	headAddr[0] = (unsigned long)(LibnixErrno + LIBNIX_FREEALL_HEAD0_OFFSET);
+	headAddr[1] = (unsigned long)(LibnixErrno + LIBNIX_FREEALL_HEAD1_OFFSET);
+	headAddr[2] = (unsigned long)(LibnixErrno + LIBNIX_FREEALL_HEAD2_OFFSET);
 
 	probe_str("FREEALL-RUN-PHASE crt-exit\n");
 	probe_str("FREEALL-WRAPPER-ENTER\n");

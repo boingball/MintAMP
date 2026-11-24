@@ -6734,6 +6734,7 @@ typedef struct GuiPlaybackStatus {
 	volatile char          radioStreamUrl[128];
 	volatile char          radioContentType[64];
 	volatile char          radioError[128];
+	volatile char          playError[128];   /* why a local file could not play; "" = no error */
 } GuiPlaybackStatus;
 
 GuiPlaybackStatus gGuiPlaybackStatus;
@@ -6792,6 +6793,16 @@ static void GuiMarkRadioErrorText(const char *message)
 	GuiMarkRadioError();
 	GuiCopyVolatileString(gGuiPlaybackStatus.radioError, sizeof(gGuiPlaybackStatus.radioError),
 		message && message[0] ? message : "radio stream failed");
+}
+
+/* Plain-language reason a local file could not be played, shown by the
+ * front-ends in the status line (and as the skin's title) instead of a bare
+ * "Finished." -- the launcher memsets the status block per run, so this
+ * clears itself on the next play. */
+static void GuiSetPlayError(const char *message)
+{
+	GuiCopyVolatileString(gGuiPlaybackStatus.playError, sizeof(gGuiPlaybackStatus.playError),
+		message && message[0] ? message : "Cannot play this file");
 }
 
 static void GuiMarkRadioStopped(void)
@@ -9607,20 +9618,6 @@ static int GenericDecodeStreamFillS8(GenericDecodeStream *gs,
 			GenericDecodeChunkForRateConvert(gs, opt, 1));
 		if (!GenericDecodeStreamGuardOk(gs, "after mono decode"))
 			break;
-		/* Temporary diagnostic for the new WMA module -- unconditional
-		 * (not gated behind opt->debugDecoder, which the ReAction GUI
-		 * never sets) so the first several decode() calls are visible
-		 * from a Shell window regardless. Safe to remove once WMA
-		 * playback is confirmed working. */
-		if (gs->ops && gs->ops->info && gs->ops->info->extensions &&
-			StrCaseCmp(gs->ops->info->extensions, "wma") == 0) {
-			static unsigned long wmaMonoDebugCount = 0;
-			if (wmaMonoDebugCount < 20) {
-				fprintf(stderr, "wma-debug: mono decode() call #%lu rc=%ld\n",
-					wmaMonoDebugCount, (long)nDecoded);
-				wmaMonoDebugCount++;
-			}
-		}
 		if (opt->debugDecoder && !gs->firstDecodeDebugPrinted && gs->ops && gs->ops->info &&
 			gs->ops->info->extensions && StrCaseCmp(gs->ops->info->extensions, "aac") == 0)
 			fprintf(stderr, "AAC: after first decode rc=%ld\n", (long)nDecoded);
@@ -9830,20 +9827,6 @@ static int GenericDecodeStreamFillPlanarS8(GenericDecodeStream *gs,
 			GenericDecodeChunkForRateConvert(gs, opt, 2));
 		if (!GenericDecodeStreamGuardOk(gs, "after stereo decode"))
 			break;
-		/* Temporary diagnostic for the new WMA module -- unconditional
-		 * (not gated behind opt->debugDecoder, which the ReAction GUI
-		 * never sets) so the first several decode() calls are visible
-		 * from a Shell window regardless. Safe to remove once WMA
-		 * playback is confirmed working. */
-		if (gs->ops && gs->ops->info && gs->ops->info->extensions &&
-			StrCaseCmp(gs->ops->info->extensions, "wma") == 0) {
-			static unsigned long wmaStereoDebugCount = 0;
-			if (wmaStereoDebugCount < 20) {
-				fprintf(stderr, "wma-debug: stereo decode() call #%lu rc=%ld\n",
-					wmaStereoDebugCount, (long)nDecoded);
-				wmaStereoDebugCount++;
-			}
-		}
 		if (opt->debugDecoder && !gs->firstDecodeDebugPrinted && gs->ops && gs->ops->info &&
 			gs->ops->info->extensions && StrCaseCmp(gs->ops->info->extensions, "aac") == 0)
 			fprintf(stderr, "AAC: after first decode rc=%ld\n", (long)nDecoded);
@@ -10516,11 +10499,13 @@ static int ValidateAacAdtsInput(InputSource *input, int debugDecoder)
 	if (nRead >= 8 && probe[4] == 'f' && probe[5] == 't' &&
 		probe[6] == 'y' && probe[7] == 'p') {
 		fprintf(stderr, "Unsupported AAC container - ADTS .aac only\n");
+		GuiSetPlayError("MP4/M4A AAC is not supported - ADTS .aac only");
 		return 0;
 	}
 	if (sync != 0 || nRead < 7 || profile != 1 || sfIndex == 0x0f ||
 		chanCfg < 1 || chanCfg > 2 || frameLen < 7) {
 		fprintf(stderr, "Unsupported AAC stream - expected ADTS AAC LC mono/stereo\n");
+		GuiSetPlayError("Unsupported AAC - only AAC LC mono/stereo");
 		return 0;
 	}
 	return 1;
@@ -10646,6 +10631,10 @@ static int AmigaPlayStreamingGeneric(InputSource *input,
 		sinfo->bitsPerSample == 0 || sinfo->bitsPerSample > 32) {
 		fprintf(stderr, "generic decoder: invalid stream format %lu Hz %u ch %u-bit\n",
 			sinfo->sampleRate, sinfo->channels, sinfo->bitsPerSample);
+		if (sinfo->channels > 2)
+			GuiSetPlayError("Multichannel audio is not supported (mono/stereo only)");
+		else
+			GuiSetPlayError("Unsupported audio format");
 		GuiSetPlaybackPhase(GUIPLAY_PHASE_ERROR);
 		gGuiPlaybackStatus.startupStage = GUISTART_FAILED;
 		return -1;
@@ -10970,6 +10959,25 @@ static int AmigaPlayStreamingGeneric(InputSource *input,
 			GuiSetPlaybackPhase(GUIPLAY_PHASE_PLAYING);
 	}
 
+	/* End of stream: let the buffers still queued on audio.device play out,
+	 * in queue order from the next slot, before cleanup closes the device.
+	 * The loop above breaks as soon as the decoder has nothing left, and
+	 * AmigaAudioClose() aborts whatever is still queued -- that cut the
+	 * last several seconds off every FLAC/Ogg/WMA/WAV/AAC file. The MP3
+	 * path has always drained here. */
+	if (err == 0 && !gPlaybackInterrupted) {
+		int drain;
+		for (drain = 0; drain < liveSlots; drain++) {
+			int slot = (active + drain) % liveSlots;
+			if (player.sent[slot][0] && AmigaAudioWait(&player, slot) != 0) {
+				err = -1;
+				break;
+			}
+			if (gPlaybackInterrupted)
+				break;
+		}
+	}
+
 cleanup:
 #ifdef MINTAMP_SKIN
     gSkinAudio.paused=0; gSkinAudio.pause_requested=0;
@@ -10993,6 +11001,68 @@ cleanup:
  * probes the stream, runs AmigaPlayStreamingGeneric(), then cleans up.
  * Called from HelixAmp3CliMain() when the input extension is not ".mp3".
  */
+/* Explain why the WMA module refused a file.  The decoder module API has no
+ * error channel, so walk the ASF Header Object here and look at the stream
+ * types and the audio codec id: a video-only .wmv/.asf, WMA Pro/Lossless and
+ * WMA Voice all fail open() the same way but need different messages. */
+static const char *AsfExplainOpenFailure(InputSource *input)
+{
+	static const unsigned char kHeader[16] = {0x30,0x26,0xB2,0x75,0x8E,0x66,0xCF,0x11,0xA6,0xD9,0x00,0xAA,0x00,0x62,0xCE,0x6C};
+	static const unsigned char kStreamProps[16] = {0x91,0x07,0xDC,0xB7,0xB7,0xA9,0xCF,0x11,0x8E,0xE6,0x00,0xC0,0x0C,0x20,0x53,0x65};
+	static const unsigned char kAudio[16] = {0x40,0x9E,0x69,0xF8,0x4D,0x5B,0xCF,0x11,0xA8,0xFD,0x00,0x80,0x5F,0x5C,0x44,0x2B};
+	static const unsigned char kVideo[16] = {0xC0,0xEF,0x19,0xBC,0x4D,0x5B,0xCF,0x11,0xA8,0xFD,0x00,0x80,0x5F,0x5C,0x44,0x2B};
+	unsigned char buf[80];
+	unsigned long pos, headerEnd, objCount, i;
+	int haveVideo = 0, haveAudio = 0;
+	unsigned int codec = 0;
+
+	if (!input || input->radio)
+		return "Unsupported or damaged WMA file";
+	InputSourceSeek(input, 0);
+	if (InputSourceRead(input, buf, 30) != 30 || memcmp(buf, kHeader, 16) != 0)
+		return "Not a Windows Media (ASF) file";
+	headerEnd = (unsigned long)buf[16] | ((unsigned long)buf[17] << 8) |
+		((unsigned long)buf[18] << 16) | ((unsigned long)buf[19] << 24);
+	objCount = (unsigned long)buf[24] | ((unsigned long)buf[25] << 8) |
+		((unsigned long)buf[26] << 16) | ((unsigned long)buf[27] << 24);
+	pos = 30;
+	for (i = 0; i < objCount && i < 256 && pos + 24 <= headerEnd; i++) {
+		unsigned long objSize;
+		InputSourceSeek(input, pos);
+		if (InputSourceRead(input, buf, 24) != 24)
+			break;
+		objSize = (unsigned long)buf[16] | ((unsigned long)buf[17] << 8) |
+			((unsigned long)buf[18] << 16) | ((unsigned long)buf[19] << 24);
+		if (buf[20] | buf[21] | buf[22] | buf[23] || objSize < 24)
+			break;
+		if (memcmp(buf, kStreamProps, 16) == 0 && objSize >= 80) {
+			if (InputSourceRead(input, buf, 56) != 56)
+				break;
+			/* buf[0..15] = stream type; type-specific data starts 54 bytes
+			 * after the object header, WAVEFORMATEX.wFormatTag first. */
+			if (memcmp(buf, kVideo, 16) == 0)
+				haveVideo = 1;
+			else if (memcmp(buf, kAudio, 16) == 0 && !haveAudio) {
+				haveAudio = 1;
+				codec = (unsigned int)buf[54] | ((unsigned int)buf[55] << 8);
+			}
+		}
+		pos += objSize;
+	}
+	if (!haveAudio)
+		return haveVideo ? "Video-only file - no audio track to play"
+			: "No audio track found in this file";
+	switch (codec) {
+	case 0x160: case 0x161:
+		return haveVideo ? "Damaged WMA audio in video file" : "Damaged or unsupported WMA file";
+	case 0x162: return "WMA Pro audio is not supported (WMA 1/2 only)";
+	case 0x163: return "WMA Lossless is not supported (WMA 1/2 only)";
+	case 0x00A: return "WMA Voice is not supported (WMA 1/2 only)";
+	case 0x055: return "MP3-in-ASF is not supported - rename/convert to .mp3";
+	default:    return "Unsupported audio codec in this file (WMA 1/2 only)";
+	}
+}
+
 static int AmigaGenericInputPlay(const char *sourceName, InputSource *input, const char *ext,
 	const DecodeOptions *opt, DecodeStats *stats, int closeInput)
 {
@@ -11046,6 +11116,11 @@ static int AmigaGenericInputPlay(const char *sourceName, InputSource *input, con
 
 	if (!LoadDecoderModuleForExt(ext, &mod, opt->debugDecoder)) {
 		fprintf(stderr, "no decoder module found for .%s streams/files\n", ext ? ext : "(unknown)");
+		if (!input->radio) {
+			char why[96];
+			sprintf(why, "No .%.16s decoder in MintAMP/decoders", ext ? ext : "?");
+			GuiSetPlayError(why);
+		}
 		if (input->radio) {
 			char failMsg[96];
 			sprintf(failMsg, "no .%s decoder module in decoders/", ext ? ext : "?");
@@ -11097,6 +11172,15 @@ static int AmigaGenericInputPlay(const char *sourceName, InputSource *input, con
 			(void *)handle, sinfo.sampleRate, sinfo.channels, sinfo.bitsPerSample);
 	if (!handle) {
 		fprintf(stderr, "decoder module failed to open: %s\n", sourceName ? sourceName : "(unknown)");
+		if (!input->radio) {
+			char why[128];
+			if (ext && (StrCaseCmp(ext, "wma") == 0 || StrCaseCmp(ext, "asf") == 0 || StrCaseCmp(ext, "wmv") == 0))
+				sprintf(why, "%.127s", AsfExplainOpenFailure(input));
+			else
+				sprintf(why, "Unsupported or damaged .%.16s file", ext ? ext : "?");
+			fprintf(stderr, "%s\n", why);
+			GuiSetPlayError(why);
+		}
 		GuiSetPlaybackPhase(GUIPLAY_PHASE_ERROR);
 		gGuiPlaybackStatus.startupStage = GUISTART_FAILED;
 		if (input->radio && ext && StrCaseCmp(ext, "aac") == 0) {
@@ -11152,6 +11236,7 @@ static int AmigaGenericFormatPlay(const char *filename, const char *ext,
 	GuiPublishStartupStage(GUISTART_INPUT_FOPEN_AFTER);
 	if (!amigaFile) {
 		fprintf(stderr, "cannot open input: %s\n", filename);
+		GuiSetPlayError("File not found or cannot be opened");
 		return 1;
 	}
 	InputSourceInitAmigaDos(&input, amigaFile);
@@ -12175,6 +12260,7 @@ int main(int argc, char **argv)
 		GuiPublishStartupStage(GUISTART_INPUT_FOPEN_AFTER);
 		if (!amigaInputFile) {
 			fprintf(stderr, "cannot open input: %s\n", opt.inName);
+			GuiSetPlayError("File not found or cannot be opened");
 			free(resolvedOutName);
 			AmigaFreeNormalizedArgs(&normalized);
 			return 1;

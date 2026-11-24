@@ -85,6 +85,7 @@ typedef struct GuiPlaybackStatus {
 	volatile char          radioStreamUrl[128];
 	volatile char          radioContentType[64];
 	volatile char          radioError[128];
+	volatile char          playError[128];   /* why a local file could not play; "" = no error */
 } GuiPlaybackStatus;
 #define GUIPLAY_PHASE_IDLE      0
 #define GUIPLAY_PHASE_BUFFERING 1
@@ -736,6 +737,7 @@ typedef struct HelixAmp3Gui {
 	char            rbFavouriteNames[HELIXAMP3_RADIO_FAV_MAX][RB_MAX_NAME];
 	char            rbFavouriteUrls[HELIXAMP3_RADIO_FAV_MAX][RB_MAX_URL];
 	char            rbStatusText[128];
+	char            rbPlaybackStatus[160]; /* last playback state mirrored into the Radio Browser */
 	char            currentRadioStationName[RB_MAX_NAME];
 	/* URL the current stream was started from, before redirects or a
 	 * .pls/.m3u were followed: what Add Fav bookmarks. */
@@ -856,6 +858,7 @@ static void UpdateTagDisplay(HelixAmp3Gui *gui);
 static void UpdateFastMemGadgetState(HelixAmp3Gui *gui);
 static void SelectInternetStream(HelixAmp3Gui *gui, const char *url);
 static void RadioSetStatus(HelixAmp3Gui *app, const char *text);
+static void RadioMirrorPlaybackStatus(HelixAmp3Gui *gui, const char *status);
 static void CloseRadioWindow(HelixAmp3Gui *gui);
 static void OpenRadioWindow(HelixAmp3Gui *gui);
 static void HandleRadioWindow(HelixAmp3Gui *gui);
@@ -2301,7 +2304,7 @@ static void SetRadioFailureStatus(HelixAmp3Gui *gui, const char *fallback)
 	CopyVolatileGuiString(radioError, sizeof(radioError), gGuiPlaybackStatus.radioError);
 	sprintf(status, "Stream failed: %s", radioError[0] ? radioError : fallback);
 	SetStatus(gui, status);
-	RadioSetStatus(gui, status);
+	RadioMirrorPlaybackStatus(gui, status);
 }
 
 static void UpdateRadioTextIfChanged(HelixAmp3Gui *gui, struct Gadget *gad,
@@ -2355,12 +2358,12 @@ static void UpdateRadioTagDisplay(HelixAmp3Gui *gui)
 		sprintf(status, "Buffering - %.140s", station[0] ? station :
 			(gui->currentRadioStationName[0] ? gui->currentRadioStationName : "Internet Radio"));
 		SetStatus(gui, status);
-		RadioSetStatus(gui, status);
+		RadioMirrorPlaybackStatus(gui, status);
 	} else if (gGuiPlaybackStatus.radioStatus == RADIO_STATUS_PLAYING ||
 		(gGuiPlaybackStatus.radioStatus == RADIO_STATUS_BUFFERING && RadioPlaybackHasStarted())) {
 		FormatRadioStreamingStatus(gui, station, status, sizeof(status));
 		SetStatus(gui, status);
-		RadioSetStatus(gui, status);
+		RadioMirrorPlaybackStatus(gui, status);
 	}
 }
 
@@ -4924,8 +4927,15 @@ static void FinalizePlayback(HelixAmp3Gui *gui)
 #else
 	if (failedRadioStart) {
 		SetRadioFailureStatus(gui, "radio stream failed");
+	} else if (!stoppedByUser && gGuiPlaybackStatus.playError[0]) {
+		char playError[128], status[160];
+		CopyVolatileGuiString(playError, sizeof(playError), gGuiPlaybackStatus.playError);
+		sprintf(status, "Can't play: %.120s", playError);
+		SetStatus(gui, status);
 	} else {
 		SetStatus(gui, stoppedByUser ? "Stopped - ready." : "Playback finished - ready.");
+		if (IsRadioInputName(gui->inputName))
+			RadioMirrorPlaybackStatus(gui, stoppedByUser ? "Stopped." : "Stream ended.");
 	}
 #endif
 	if (gui->closeRequested) {
@@ -6713,6 +6723,17 @@ static const char *ProbeCodecName(RbStreamCodec codec)
 	if (codec == RB_STREAM_CODEC_OGG) return "OGG";
 	if (codec == RB_STREAM_CODEC_FLAC) return "FLAC";
 	return "unknown";
+}
+
+/* Mirror the stream's playback state into the Radio Browser status line,
+ * but only when that state changes, so a search run while the stream plays
+ * ("Found 25 stations") is not overwritten by the once-a-second poll. */
+static void RadioMirrorPlaybackStatus(HelixAmp3Gui *gui, const char *status)
+{
+	if (!gui || !status || !strcmp(gui->rbPlaybackStatus, status))
+		return;
+	RadioSetStatus(gui, status);
+	SafeCopy(gui->rbPlaybackStatus, sizeof(gui->rbPlaybackStatus), status);
 }
 
 static void RadioSetStatus(HelixAmp3Gui *app, const char *text)
@@ -9241,6 +9262,7 @@ static void StartPlayback(HelixAmp3Gui *gui)
 	/* Zero the IPC block so stale data from a previous run is not visible
 	 * before the new subprocess writes its first update. */
 	memset((void *)&gGuiPlaybackStatus, 0, sizeof(gGuiPlaybackStatus));
+	gui->rbPlaybackStatus[0] = '\0'; /* new run: mirror its first state into the Radio Browser */
 	gui->playbackRunId = ++gPlaybackRunCounter;
 	gui->playbackDoneRunId = 0;
 	gui->lastCleanupStage = GUIPLAY_CLEANUP_NONE;

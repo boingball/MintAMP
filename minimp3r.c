@@ -815,6 +815,7 @@ typedef struct MrApp {
 	char  lastChildExitReason[32];
 	char  lastChildError[128];
 	char  lastRadioError[256];
+	char  rbPlaybackStatus[160];  /* last playback state mirrored into the Radio Browser */
 	int   parentDoneHandled;
 	int   lastChildEverPlayed;
 	int   lastChildFirstData;
@@ -862,6 +863,7 @@ static void HandleRadioWindow(MrApp *app);
 static void HandleDoneSignal(MrApp *app);
 static void FinalizePlayback(MrApp *app);
 static void RadioSetStatus(MrApp *app, const char *text);
+static void MrMirrorRadioBrowserStatus(MrApp *app, const char *status);
 static int SetStatusIfChanged(MrApp *app, const char *text);
 static void SetStatus(MrApp *app, const char *text);
 static void RadioDoProbeAndPlay(MrApp *app);
@@ -1583,6 +1585,7 @@ static int MrSetRadioMetadata(MrApp *app, int updateStatus)
 			sprintf(status, "Connecting stream...");
 		updates += SetReadonlyString(app->statusGad, app->win, app->shownStatus,
 			sizeof(app->shownStatus), status);
+		MrMirrorRadioBrowserStatus(app, status);
 	}
 	return updates;
 }
@@ -1947,6 +1950,7 @@ static void StartPlayback(MrApp *app)
 	gDoneMsg.magic = MR_DONE_MAGIC;
 
 	memset((void *)&gGuiPlaybackStatus, 0, sizeof(gGuiPlaybackStatus));
+	app->rbPlaybackStatus[0] = '\0'; /* new run: mirror its first state into the Radio Browser */
 	app->streamState = MR_STREAM_STARTING;
 	app->playbackRunId = ++gRunCounter;
 	gGuiPlaybackStatus.runId = app->playbackRunId;
@@ -2219,11 +2223,21 @@ static void FinalizePlayback(MrApp *app)
 		SafeCopy(app->lastRadioError, sizeof(app->lastRadioError), status);
 		finalStatus = app->lastRadioError;
 		SetStatus(app, app->lastRadioError);
+	} else if (!stoppedByUser && gGuiPlaybackStatus.playError[0]) {
+		char playError[128], status[160];
+		MrCopyVolatileString(playError, sizeof(playError), gGuiPlaybackStatus.playError);
+		sprintf(status, "Can't play: %.120s", playError);
+		SetStatus(app, status);
+		finalStatus = app->shownStatus;
+		app->streamState = MR_STREAM_IDLE;
 	} else {
 		finalStatus = stoppedByUser ? "Stopped." : "Finished.";
 		SetStatus(app, finalStatus);
 		app->streamState = MR_STREAM_IDLE;
 	}
+	if (MrIsRadioInput(gPlayer.url))
+		MrMirrorRadioBrowserStatus(app, failedStart ? finalStatus :
+			(stoppedByUser ? "Stopped." : "Stream ended."));
 	RADIO_DBG(printf("radio-done: streamStateAfterFinalize=%s guiStatus=\"%s\"\n",
 		MrStreamStateName(app->streamState), finalStatus);)
 	RADIO_DBG(printf("radio-guard: after FinalizePlayback\n");)
@@ -2388,7 +2402,7 @@ static void PollPlaybackStatus(MrApp *app)
 			sprintf(status, "Stream failed: %s", radioError[0] ? radioError : "radio error");
 			SafeCopy(app->lastRadioError, sizeof(app->lastRadioError), status);
 			updates += SetStatusIfChanged(app, app->lastRadioError);
-			RadioSetStatus(app, app->lastRadioError);
+			MrMirrorRadioBrowserStatus(app, status);
 		} else if (radioActive &&
 			radioStatus != RADIO_STATUS_STOPPING &&
 			radioStatus != RADIO_STATUS_CLOSED) {
@@ -5637,6 +5651,22 @@ static const char *ProbeCodecName(RbStreamCodec codec)
 	if (codec == RB_STREAM_CODEC_OGG) return "OGG";
 	if (codec == RB_STREAM_CODEC_FLAC) return "FLAC";
 	return "unknown";
+}
+
+/* The Radio Browser's status line used to be written once ("Buffering -
+ * <station>") when Play was pressed and then never touched, so it read
+ * "Buffering" for the whole stream.  Mirror the main window's playback state
+ * into it, but only when that state changes: a search run while the stream
+ * plays ("Found 25 stations") then stays readable until the stream does
+ * something new (reconnect, fail, stop). */
+static void MrMirrorRadioBrowserStatus(MrApp *app, const char *status)
+{
+	if (!app || !status || !strcmp(app->rbPlaybackStatus, status))
+		return;
+	SafeCopy(app->rbPlaybackStatus, sizeof(app->rbPlaybackStatus), status);
+	if (app->rbWin && app->rbStatusGad)
+		SetGadgetAttrs((struct Gadget *)app->rbStatusGad, app->rbWin, NULL,
+			STRINGA_TextVal, (ULONG)app->rbPlaybackStatus, TAG_DONE);
 }
 
 static void RadioSetStatus(MrApp *app, const char *text)
